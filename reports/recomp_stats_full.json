@@ -1,0 +1,121 @@
+{
+  "arm_functions": 10215,
+  "thumb_functions": 40,
+  "blocks": 83085,
+  "arm_instructions": 720643,
+  "thumb_instructions": 1628,
+  "instructions": 722271,
+  "unsupported_total": 11024,
+  "unsupported_pct": 1.53,
+  "unsupported_by_mnemonic": {
+    "uqsub8": 3174,
+    "sel": 2724,
+    "uhadd8": 1326,
+    "uadd8": 1068,
+    "usub8": 735,
+    "uqadd8": 516,
+    "uxtb16": 492,
+    "ssub8": 333,
+    "smlabb": 184,
+    "pkhbt": 153,
+    "pkhtb": 150,
+    "smulbb": 93,
+    "vnmls": 17,
+    "smulbt": 14,
+    "vnmla": 10,
+    "stmdb": 5,
+    "smlatb": 4,
+    "ldrexd": 4,
+    "strexd": 4,
+    "add": 4,
+    "cdplo": 2,
+    "uqsub8ls": 2,
+    "smulbbgt": 2,
+    "smultt": 2,
+    "ldmdb": 2,
+    "stmibhi": 1,
+    "andeq": 1,
+    "ldcl": 1,
+    "stmibeq": 1
+  },
+  "visited_bytes": 2187094,
+  "text_bytes": 3059712,
+  "coverage_pct": 71.48,
+  "largest_functions": [
+    {
+      "addr": 1085296,
+      "insns": 8198,
+      "unsupported": 0
+    },
+    {
+      "addr": 3686208,
+      "insns": 4130,
+      "unsupported": 0
+    },
+    {
+      "addr": 3096724,
+      "insns": 3567,
+      "unsupported": 0
+    },
+    {
+      "addr": 3560396,
+      "insns": 3434,
+      "unsupported": 0
+    },
+    {
+      "addr": 3535796,
+      "insns": 3158,
+      "unsupported": 0
+    },
+    {
+      "addr": 2063988,
+      "insns": 3153,
+      "unsupported": 0
+    },
+    {
+      "addr": 1966196,
+      "insns": 3085,
+      "unsupported": 0
+    },
+    {
+      "addr": 2330456,
+      "insns": 2885,
+      "unsupported": 0
+    },
+    {
+      "addr": 2036864,
+      "insns": 2551,
+      "unsupported": 0
+    },
+    {
+      "addr": 2929592,
+      "insns": 2106,
+      "unsupported": 2
+    },
+    {
+      "addr": 2028068,
+      "insns": 1949,
+      "unsupported": 0
+    },
+    {
+      "addr": 2684860,
+      "insns": 1919,
+      "unsupported": 0
+    },
+    {
+      "addr": 2100964,
+      "insns": 1846,
+      "unsupported": 0
+    },
+    {
+      "addr": 1523848,
+      "insns": 1749,
+      "unsupported": 25
+    },
+    {
+      "addr": 2495424,
+      "insns": 1648,
+      "unsupported": 12
+    }
+  ]
+}

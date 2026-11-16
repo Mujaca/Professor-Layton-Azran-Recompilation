@@ -29,13 +29,39 @@ python tools\exheader.py       # CodeSetInfo + Service-Access-Liste
 python tools\assetfmt.py       # Asset-Header (ARC0 / CSAR / CSTM / MOFLEX)
 ```
 
+## Recompiler-MVP (Phase 1)
+
+`tools/recomp/` übersetzt das ARM11-`code.bin` statisch nach C; `runtime/arm_cpu.c`
+liefert CPU-Zustand, Speicher und Instruktionssemantik.
+
+| Kennzahl | Wert |
+|---|---|
+| ARM-Funktionen | 10.215 |
+| ARM-Instruktionen | 720.643 |
+| Text-Abdeckung | 71,48 % |
+| nicht unterstützt | 1,53 % (nur ARMv6-SIMD) |
+| generiertes C | 46,4 MB, kompiliert mit `zig cc` |
+| Selbsttests | 7/7 |
+
+```powershell
+$env:PYTHONPATH = "tools"
+python -m recomp.cli scan --in out\exefs\code_decomp.bin --prologues --json reports\recomp_stats_full.json
+python -m recomp.cli gen  --in out\exefs\code_decomp.bin --out build\generated_all.c --prologues
+
+python tests\mvp_selftest.py     # assembliert Snippets, recompiliert, prueft Semantik
+```
+
+Details: [`reports/RECOMPILER_MVP.md`](reports/RECOMPILER_MVP.md)
+
 ## Struktur
 
 ```
-tools/          Analyse- und Extraktionsskripte (Python)
-reports/        Machbarkeitsbericht, RomFS-Listing, Code-Strings
-out/            extrahierte Daten (nicht versioniert)
-runtime/        (geplant) Recompiler-Output, HLE, GPU-Shim, Plattform
+tools/          Analyse, Extraktion, Recompiler (Python)
+runtime/        ARM11-CPU-Runtime fuer den generierten C-Code
+tests/          Semantik-Selbsttests (keystone + zig cc)
+reports/        Machbarkeitsbericht, MVP-Bericht, Statistiken
+out/            extrahierte Daten / Testartefakte (nicht versioniert)
+build/          generierter C-Code, Objektdateien (nicht versioniert)
 ```
 
 ## Nächste Schritte

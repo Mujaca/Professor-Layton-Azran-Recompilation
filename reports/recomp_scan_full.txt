@@ -1,0 +1,52 @@
+﻿{
+  "arm_functions": 10215,
+  "thumb_functions": 40,
+  "blocks": 83085,
+  "arm_instructions": 720643,
+  "thumb_instructions": 1628,
+  "instructions": 722271,
+  "unsupported_total": 11024,
+  "unsupported_pct": 1.53,
+  "visited_bytes": 2187094,
+  "text_bytes": 3059712,
+  "coverage_pct": 71.48
+}
+
+Nicht unterstuetzt (Top 20):
+  uqsub8         3174
+  sel            2724
+  uhadd8         1326
+  uadd8          1068
+  usub8           735
+  uqadd8          516
+  uxtb16          492
+  ssub8           333
+  smlabb          184
+  pkhbt           153
+  pkhtb           150
+  smulbb           93
+  vnmls            17
+  smulbt           14
+  vnmla            10
+  stmdb             5
+  smlatb            4
+  ldrexd            4
+  strexd            4
+  add               4
+
+Groesste ARM-Funktionen:
+  0x00108F70:  8198 Instruktionen (0 nicht unterstuetzt)
+  0x00383F40:  4130 Instruktionen (0 nicht unterstuetzt)
+  0x002F4094:  3567 Instruktionen (0 nicht unterstuetzt)
+  0x003653CC:  3434 Instruktionen (0 nicht unterstuetzt)
+  0x0035F3B4:  3158 Instruktionen (0 nicht unterstuetzt)
+  0x001F7E74:  3153 Instruktionen (0 nicht unterstuetzt)
+  0x001E0074:  3085 Instruktionen (0 nicht unterstuetzt)
+  0x00238F58:  2885 Instruktionen (0 nicht unterstuetzt)
+  0x001F1480:  2551 Instruktionen (0 nicht unterstuetzt)
+  0x002CB3B8:  2106 Instruktionen (2 nicht unterstuetzt)
+  0x001EF224:  1949 Instruktionen (0 nicht unterstuetzt)
+  0x0028F7BC:  1919 Instruktionen (0 nicht unterstuetzt)
+  0x00200EE4:  1846 Instruktionen (0 nicht unterstuetzt)
+  0x00174088:  1749 Instruktionen (25 nicht unterstuetzt)
+  0x002613C0:  1648 Instruktionen (12 nicht unterstuetzt)

@@ -1,0 +1,94 @@
+{
+  "arm_functions": 922,
+  "thumb_functions": 27,
+  "blocks": 7884,
+  "arm_instructions": 62701,
+  "thumb_instructions": 1183,
+  "instructions": 63884,
+  "unsupported_total": 4,
+  "unsupported_pct": 0.01,
+  "unsupported_by_mnemonic": {
+    "uqsub8": 3,
+    "cdplo": 1
+  },
+  "visited_bytes": 190074,
+  "text_bytes": 3059712,
+  "coverage_pct": 6.21,
+  "largest_functions": [
+    {
+      "addr": 1085296,
+      "insns": 8198,
+      "unsupported": 0
+    },
+    {
+      "addr": 2684860,
+      "insns": 1919,
+      "unsupported": 0
+    },
+    {
+      "addr": 1248132,
+      "insns": 1205,
+      "unsupported": 0
+    },
+    {
+      "addr": 2665232,
+      "insns": 784,
+      "unsupported": 0
+    },
+    {
+      "addr": 1054556,
+      "insns": 599,
+      "unsupported": 0
+    },
+    {
+      "addr": 1266904,
+      "insns": 599,
+      "unsupported": 0
+    },
+    {
+      "addr": 1060156,
+      "insns": 588,
+      "unsupported": 0
+    },
+    {
+      "addr": 2533384,
+      "insns": 575,
+      "unsupported": 0
+    },
+    {
+      "addr": 1269008,
+      "insns": 555,
+      "unsupported": 0
+    },
+    {
+      "addr": 1145912,
+      "insns": 551,
+      "unsupported": 0
+    },
+    {
+      "addr": 2562472,
+      "insns": 549,
+      "unsupported": 0
+    },
+    {
+      "addr": 1052568,
+      "insns": 544,
+      "unsupported": 0
+    },
+    {
+      "addr": 1231400,
+      "insns": 477,
+      "unsupported": 0
+    },
+    {
+      "addr": 2565540,
+      "insns": 429,
+      "unsupported": 0
+    },
+    {
+      "addr": 1297600,
+      "insns": 413,
+      "unsupported": 0
+    }
+  ]
+}
