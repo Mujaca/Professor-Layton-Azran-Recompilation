@@ -1,0 +1,6 @@
+*.3ds
+*.cia
+*.cci
+out/
+__pycache__/
+*.pyc
