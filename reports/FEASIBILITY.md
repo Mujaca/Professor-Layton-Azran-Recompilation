@@ -14,7 +14,7 @@
 |---|---|
 | Spielcode-Größe | **2,92 MiB / 755.611 ARM-Instruktionen** (≈ 7.000–8.000 Funktionen) |
 | Asset-Dateien | nur **610 Dateien** in 8 Verzeichnissen |
-| 3D-Anteil | gering (2D-Visual-Novel-Engine, 3D nur punktuell) |
+| 3D-Anteil | gering — 2D-lastige Engine; ob/wie viel 3D gerendert wird, bestätigt der Trace |
 | Online-Zwang im Gameplay | keiner (nur DLC/StreetPass) |
 | Timing-Kritikalität | niedrig (Rätselspiel, keine Physik) |
 | Kopierschutz-Sonderfälle | keine (Standard-NCCH, keine Seed-Verschlüsselung, kein Fixed-Key) |
@@ -119,7 +119,7 @@ Nur optional: `soc/ssl/http` (DLC/Update), `boss`, `cecd`, `news`, `nwm` (Street
 | `.bcsar` | 1 | 15,2 MiB | `CSAR` – Soundarchiv (SFX/Stimmen) |
 | `.cfa` | 1 | 4,0 MiB | elektronisches Manual (enthält eigene NCCH) |
 | `.ctpk` | 2 | 4,7 KiB | Textur-/Icon-Pakete |
-| Rest | 4 | – | `banner.bnr`, `banner.icn` Entity, `version.cfg` |
+| Rest | 4 | – | `banner.bnr`, `banner.icn`, `version.cfg` |
 
 Struktur: `lt6/arc/*`, `lt6/ctr/uk/*`, `lt6/mov/*.moflex`, `lt6/snd/uk/{product.bcsar,stream/*}`.
 
@@ -153,7 +153,7 @@ Statisch *nicht* ermittelbar, weil die `.fa`-Daten komprimiert sind:
 | DSP/ADPCM-Audio | niedrig–mittel | BCSTM → Host-Audiopfad oder DSP-Interpreter aus Azahar |
 | 2D-Renderer | **niedrig** – texturierte Quads, wenig TEV | Batch-Renderer (Vulkan/SDL3) in Tagen |
 | Content-Testing (viele Rätsel) | mittel (Fleißarbeit) | Input-Replays + Frame-Hashes |
-| DLC (365 Tagesrätsel) | Scope-Frage | DLC-`\.cia\ (0004008C000F3000) optional mounten |
+| DLC (365 Tagesrätsel) | Scope-Frage | DLC-`.cia` (0004008C000F3000) optional mounten |
 
 ---
 
