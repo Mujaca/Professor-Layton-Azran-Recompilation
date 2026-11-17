@@ -338,8 +338,9 @@ static void srv_command(Ipc *r, uint32_t *p) {
             if (name_len < 8) name[name_len] = 0;
             int svc = service_from_name(name);
             int h = alloc_handle(svc, name);
-            if (g_log) {
-                printf("[srv] GetServiceHandle \"%s\" -> %d (%s)\n", name, h, SERVICE_NAMES[svc]);
+            if (g_log || getenv("HLE_SRV_NAMES")) {
+                printf("[srvname] \"%s\" blk=%08X lr=%08X -> %d (%s)\n",
+                       name, arm_last_block, g_cpu ? g_cpu->r[14] : 0u, h, SERVICE_NAMES[svc]);
             }
             if (g_srv_layout == 1) {
                 ipc_begin(r, 5, 2, 0);
