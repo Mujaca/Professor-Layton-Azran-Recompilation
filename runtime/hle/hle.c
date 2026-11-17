@@ -23,6 +23,30 @@ static int g_guest_lock_init = 0;
 static ArmCpu *g_main_cpu = NULL;
 
 static int g_no_lock = 0;
+
+/* Deterministischer Round-Robin-Scheduler: nur der Thread mit "g_turn"
+ * darf laufen (haelt den Guest-Lock). */
+static int g_det_sched = 0;   /* HLE_DET_SCHED=1: festes Round-Robin */
+static int g_turn = 0;
+static int g_thread_alive[16];
+static volatile int g_thread_started[16];
+static _Thread_local int t_tid = -1;
+
+static int sched_next(int from) {
+    for (int i = 1; i <= 16; i++) {
+        int k = (from + i) & 15;
+        if (g_thread_alive[k]) return k;
+    }
+    return from;
+}
+
+static void sched_wait_turn(void) {
+    if (t_tid < 0 || !g_det_sched) return;
+    for (unsigned spin = 0; g_turn != t_tid; spin++) {
+        if (spin > 200000000u) { g_turn = t_tid; break; }
+        Sleep(0);
+    }
+}
 static void guest_lock_enter(void) {
     if (g_guest_lock_init && !g_no_lock) EnterCriticalSection(&g_guest_lock);
 }
@@ -33,7 +57,12 @@ static void guest_yield(void) {
     if (!g_guest_lock_init) return;
     if (g_no_lock) { Sleep(0); return; }
     LeaveCriticalSection(&g_guest_lock);
-    Sleep(0);
+    if (g_det_sched && t_tid >= 0) {
+        g_turn = sched_next(t_tid);
+        sched_wait_turn();
+    } else {
+        Sleep(0);
+    }
     EnterCriticalSection(&g_guest_lock);
 }
 
@@ -43,15 +72,26 @@ typedef struct {
     int used;
     ArmCpu *cpu;
     uint32_t entry;
+    int id;
 } GuestThread;
 static GuestThread g_threads[32];
 static int g_thread_count = 0;
 
 static DWORD WINAPI guest_thread_main(LPVOID p) {
     GuestThread *t = (GuestThread *)p;
-    if (!g_no_lock) EnterCriticalSection(&g_guest_lock);
+    t_tid = (int)t->id;
+    g_thread_alive[t_tid] = 1;
+    g_thread_started[t_tid] = 1;
+    if (!g_no_lock) {
+        sched_wait_turn();
+        EnterCriticalSection(&g_guest_lock);
+    }
     arm_call_guest_pub(t->cpu, t->entry);
-    if (!g_no_lock) LeaveCriticalSection(&g_guest_lock);
+    if (!g_no_lock) {
+        g_thread_alive[t_tid] = 0;
+        if (g_turn == t_tid) g_turn = sched_next(t_tid);
+        LeaveCriticalSection(&g_guest_lock);
+    }
     return 0;
 }
 
@@ -1202,8 +1242,17 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                     t->used = 1;
                     t->cpu = tc;
                     t->entry = entry;
+                    t->id = ((g_thread_count + 1) & 15);
                     g_thread_count++;
                     CreateThread(NULL, 0, guest_thread_main, t, 0, NULL);
+                    if (g_det_sched && t->id >= 0 && t->id < 16) {
+                        /* Handshake: warten, bis der neue Thread registriert ist
+                           (deterministische Startreihenfolge). */
+                        for (unsigned spin = 0; !g_thread_started[t->id]; spin++) {
+                            if (spin > 2000000u) break;
+                            Sleep(0);
+                        }
+                    }
                 }
             }
             if (out) write_u32(c, out, h);
