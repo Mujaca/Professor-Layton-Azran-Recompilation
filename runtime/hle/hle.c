@@ -517,36 +517,53 @@ static void fs_command(Ipc *r, uint32_t *p) {
         }
         case 0x0802: case 0x0803: { /* OpenFile / OpenFileDirectly */
             char path[256];
-            int ok = 0;
-            /* Mapped Buffers: Deskriptor/Adresse-Paare ab p[normal] */
-            uint32_t addr = 0, len = 0;
-            if (r->translate >= 4) {
-                addr = p[r->normal + 3];
-                len = p[5];
-            } else if (r->translate >= 2) {
-                addr = p[r->normal + 1];
-                len = p[1];
+            path[0] = 0;
+            /* Translate-Bereich: pro Puffer {size_flags, adresse}, Groesse = flags >> 4. */
+            uint32_t ftype, fsize;
+            if (r->cmd == 0x0802) {
+                ftype = (r->normal >= 5) ? p[3] : 3;
+                fsize = (r->normal >= 5) ? p[4] : 0;
+            } else {
+                ftype = (r->normal >= 6) ? p[4] : 3;
+                fsize = (r->normal >= 6) ? p[5] : 0;
             }
-            if (addr >= 0x08000000u && addr < 0x20000000u && len > 0 && len < 250) {
+            uint32_t addr = 0, len = 0;
+            if (r->normal >= 5 && r->translate >= 2) {
+                int idx = (r->cmd == 0x0803 && r->translate >= 4) ? 2 : 0;
+                uint32_t flags = p[r->normal + idx];
+                addr = p[r->normal + idx + 1];
+                len = flags >> 4;
+            }
+            if (g_log) {
+                printf("[fsdbg] cmd=%04X n=%d t=%d type=%u size=%u addr=%08X len=%u",
+                       r->cmd, r->normal, r->translate, ftype, fsize, addr, len);
+                if (addr) {
+                    const uint8_t *dbg = g_cur_mem + (addr & 0x1FFFFFFFu);
+                    printf(" bytes:");
+                    for (int i = 0; i < 16; i++) printf(" %02X", dbg[i]);
+                }
+                printf("\n");
+            }
+            if (addr >= 0x08000000u && addr < 0x20000000u) {
                 const uint8_t *src = g_cur_mem + (addr & 0x1FFFFFFFu);
+                uint32_t limit = len ? len : fsize;
+                if (limit > 250) limit = 250;
                 int n = 0;
-                if (len >= 2 && src[1] == 0 && src[0] != 0) {          /* UTF-16LE */
-                    for (uint32_t i = 0; i + 1 < len && n < 250; i += 2) {
+                if (ftype == 4 || (ftype == 0 && limit >= 4 && src[1] == 0)) {
+                    for (uint32_t i = 0; i + 1 < limit && n < 250; i += 2) {
                         if (src[i] == 0) break;
                         path[n++] = (char)src[i];
                     }
                 } else {
-                    for (uint32_t i = 0; i < len && n < 250; i++) {
+                    for (uint32_t i = 0; i < limit && n < 250; i++) {
                         if (src[i] == 0) break;
                         path[n++] = (char)src[i];
                     }
                 }
                 path[n] = 0;
-                ok = n > 0;
             }
-            if (!ok) ok = find_path(p, path, sizeof(path)) > 0;
             FileSlot *slot = NULL;
-            int opened = ok ? open_guest_file(path, &slot) : 0;
+            int opened = path[0] ? open_guest_file(path, &slot) : 0;
             if (!opened) {
                 /* Fallback: leere Datei, damit die SDK weiterlaeuft */
                 for (int i = 0; i < MAX_FILES; i++) {

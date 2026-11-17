@@ -40,38 +40,57 @@ Menü rendert daher noch nicht.
 
 ## Aktueller Stand
 
-Der Konstruktor-Init laeuft durch, das Spiel startet seine Worker-Threads
-(im Trace bis zu 11 Gast-Threads, jeder mit eigenem TLS-Fenster) und
-initialisiert `fs`, `cfg`, `ptm`, `hid`, `ndm`, `dsp`, `y2r`, `APT`.
-Der DSP-Retry-Loop ist beseitigt; anschliessend laeuft das Spiel in seiner
-Frame-/Notification-Schleife (ClearEvent/SignalEvent/WaitSynchronizationN)
-und oeffnet dabei laufend Dateien (`fs:USER 0x0802`).
+Der Konstruktor-Init laeuft durch; das Spiel startet seine Worker-Threads
+(bis zu 11 Gast-Threads mit eigenem TLS-Fenster) und initialisiert
+`fs`, `cfg`, `ptm`, `hid`, `ndm`, `dsp`, `y2r`, `APT`. Danach laeuft es in
+einer Frame-/Notification-Schleife und oeffnet Dateien (`fs:USER 0x0802`,
+u. a. `/gamecoin.dat`).
 
-**`gsp::Gpu` wird weiterhin nicht geoeffnet** -> kein Frame. Die Threads
-stehen zum grossen Teil in SDK-Mutex-Warteschleifen (`0x287B90`,
-`0x288B80`).
+**`gsp::Gpu` wird weiterhin nicht geoeffnet** -> kein Frame. Der Haupt-Thread
+haengt in einer SDK-Mutex-/Futex-Schleife (`0x287B90`, `0x288B80`).
+
+### Beobachtete IPC-Verteilung (20 s Lauf)
+
+```
+450 x srv:  0x000B   (ReceiveNotification)
+226 x srv:  0x0050
+ 75 x ?     0x0001   (Handle-Query)
+ 26 x srv:  0x0000
+  9 x srv:  0x0005
+  3 x cfg:u 0x0001
+  3 x ptm:u 0x000C / 0x000B
+```
+
+### FS-Parameter (aus `[fsdbg]`)
+
+- `0x0803 OpenFileDirectly`: `n=8 t=4`, Binary-Pfad (12 Byte) im ersten
+  Translate-Puffer -> funktioniert.
+- `0x0802 OpenFile`: zwei Varianten beobachtet (`n=7` mit Wchar16-Pfad
+  `/gamecoin.dat`, und `n=3` ohne Pfad). Die `n=3`-Variante liefert noch
+  keinen Pfad -> leere Dateien.
 
 ### Fixes dieser Runde
 
 | Fix | Wirkung |
 |---|---|
-| `vldr`/`vstr`/`ldrd`/`strd` mit `[pc,#imm]` nutzten `c->r[15]` statt `pc+8` | Float-Konvertierung las Muell -> Endlosschleife `0x24B2DC` behoben |
+| `vldr`/`vstr`/`ldrd`/`strd` mit `[pc,#imm]`: `pc+8` statt `c->r[15]` | Float-Konvertierungs-Endlosschleife `0x24B2DC` behoben |
 | Seed `0x0010009D` (Thumb-`main`) | `_start` rief ins Leere |
-| Kooperative Gast-Threads (Host-Thread + eigener `ArmCpu`, TLS-Fenster `0x1FF82000+n*0x1000`) | Worker-Threads laufen jetzt wirklich |
-| `svcGetSystemTick` 64 Bit (r0:r1) | Timeout-Vergleiche laufen ab |
+| Kooperative Gast-Threads | Worker-Threads laufen wirklich |
+| `svcGetSystemTick` 64 Bit | Timeout-Vergleiche laufen ab |
 | `svcArbitrateAddress` dekrementiert | Futex-Zaehler bewegt sich |
-| `dsp::DSP 0x0011 LoadComponent` antwortet mit `(Result, true, MappedBuffer)` | Retry-Loop beendet |
-| `APT:U 0x0050 GetAppCpuTimeLimit` antwortet mit 2 Normal-Woertern | APT-Loop entschaerft |
-| Speicher-Alias `0x8xxxxxxx`/`0xBxxxxxxx` wird auf `0x1xxxxxxx` maskiert | haeufige Gast-Fehlzugriffe beseitigt |
+| `dsp::DSP 0x0011` mit `(Result, true, MappedBuffer)` | DSP-Retry-Loop beendet |
+| `APT:U 0x0050` mit 2 Normal-Woertern | APT-Loop entschaerft |
+| Bus-Alias `0x8xxxxxxx`/`0xBxxxxxxx` maskiert | Gast-Fehlzugriffe beseitigt |
+| FS-Pfad aus Translate-Deskriptor `{flags,addr}` | Wchar16-Pfade werden gelesen |
 
 ### Naechster Schritt
 
-1. Die SDK-Mutex-Warteschleife (`0x287B90` / `0x288B80`) korrekt bedienen,
-   damit der Haupt-Thread die Grafik-Initialisierung erreicht.
-2. `gsp::Gpu` implementieren (WriteHWRegs, SetCommandList, RegisterInterrupt-
-   RelayQueue, SetBufferSwap) und einen PICA-2D-Renderer auf den Framebuffer
-   `0x1F000000` legen.
-3. Danach Menue-Frame per `out\port.exe out\romfs --shot out\shot.bmp` belegen.
+1. SDK-Mutex-Warteschleife (`0x287B90` / `0x288B80`) korrekt bedienen, damit
+   der Haupt-Thread die Grafik-Initialisierung erreicht.
+2. `gsp::Gpu` implementieren (WriteHWRegs, SetCommandList,
+   RegisterInterruptRelayQueue, SetBufferSwap) + PICA-2D-Renderer auf
+   `0x1F000000`.
+3. Menue-Frame per `out\port.exe out\romfs --shot out\shot.bmp` belegen.
 
 ## Umgesetzte HLE-Bausteine
 
