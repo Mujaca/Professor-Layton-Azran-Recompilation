@@ -1271,6 +1271,11 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     const char *lim = getenv("HLE_IPC_LOG");
     if (lim) g_ipc_log_limit = atoi(lim);
     setup_config_mem(c);
+    if (getenv("HLE_GSP_STATE")) {
+        uint32_t st = 6;
+        memcpy(c->mem + 0x3D9200u, &st, 4);
+        printf("[hle] GSP-State 0x3D9200 = 6 gesetzt\n");
+    }
     /* TODO: folgt aus der Analyse des Mutex-Spinlocks (Wert 1 = frei). */
     if (getenv("HLE_MUTEX_HACK")) {
         uint32_t v = 1;
