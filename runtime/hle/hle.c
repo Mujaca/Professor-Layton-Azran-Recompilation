@@ -1173,6 +1173,17 @@ static DWORD WINAPI vblank_thread(LPVOID p) {
         for (int k = 1; k < MAX_HANDLES; k++) {
             if (g_handles[k].used) g_handles[k].signaled = 1;
         }
+        /* Bekannte Arbitrate-Objekte ebenfalls "posten". */
+        if (g_cpu != NULL) {
+            static const uint32_t arbs[] = { 0x090001D4u, 0x0042BD54u, 0x0042B864u };
+            for (unsigned a = 0; a < sizeof(arbs) / sizeof(arbs[0]); a++) {
+                uint32_t off = arbs[a] & 0x1FFFFFFFu;
+                if (off + 4 <= g_cpu->mem_size) {
+                    int32_t *w = (int32_t *)(g_cpu->mem + off);
+                    if (*w <= 0) *w = 1;
+                }
+            }
+        }
     }
     return 0;
 }
@@ -1438,7 +1449,7 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             uint32_t out = c->r[0], hlist = c->r[1], cnt = c->r[2];
             static unsigned vb2 = 0;
             int idx = 0;
-            for (int i = 0; i < 8; i++) {
+            for (int i = 0; i < 64; i++) {
                 int hit = -1;
                 for (uint32_t k = 0; k < cnt && k < 16; k++) {
                     uint32_t hv = (hlist ? arm_mem_read(c, hlist + k * 4, 4) : 0);
