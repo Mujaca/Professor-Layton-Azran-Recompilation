@@ -822,9 +822,12 @@ static void file_command(Ipc *r, uint32_t *p) {
             }
             if (g_log) printf("[file] Read %s off=0x%llX len=0x%X size=0x%X -> %u\n",
                               f->path, (unsigned long long)offset, length, f->size, done);
-            ipc_begin(r, 0x0801, 2, 0);
+            /* Azahar: MakeBuilder(2,2) + PushMappedBuffer -> Descriptor-Echo */
+            ipc_begin(r, 0x0801, 2, 2);
             ipc_put(r, 0);
             ipc_put(r, done);
+            ipc_put(r, p[r->normal]);
+            ipc_put(r, p[r->normal + 1]);
             break;
         }
         case 0x0802: { /* Write: SDK sendet (offset low, offset high, size) */
@@ -855,9 +858,12 @@ static void file_command(Ipc *r, uint32_t *p) {
             }
             if (g_log) printf("[file] Write off=0x%llX len=0x%X addr=%08X -> %u\n",
                               (unsigned long long)offset, length, addr, done);
-            ipc_begin(r, 0x0802, 2, 0);
+            /* Azahar: MakeBuilder(2,2) + PushMappedBuffer -> Descriptor-Echo */
+            ipc_begin(r, 0x0802, 2, 2);
             ipc_put(r, 0);
             ipc_put(r, done);
+            ipc_put(r, p[r->normal]);
+            ipc_put(r, p[r->normal + 1]);
             break;
         }
         case 0x0803: { /* GetSize -> Result + u64 */
