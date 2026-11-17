@@ -1163,6 +1163,20 @@ static void setup_config_mem(ArmCpu *c) {
     printf("[hle] config-memory initialisiert (app_mem_alloc=128MiB)\n");
 }
 
+static volatile int g_vblank_run = 0;
+
+/* Simulierter VBlank: signalisiert periodisch alle Event-Handles. */
+static DWORD WINAPI vblank_thread(LPVOID p) {
+    (void)p;
+    while (g_vblank_run) {
+        Sleep(16);
+        for (int k = 1; k < MAX_HANDLES; k++) {
+            if (g_handles[k].used) g_handles[k].signaled = 1;
+        }
+    }
+    return 0;
+}
+
 void hle_init(ArmCpu *c, const char *romfs_dir) {
     ensure_savedata();
     g_cpu = c;
@@ -1328,9 +1342,17 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                 if (g_guest_lock_init) ExitThread(0);
             }
             return 0;
-        case 0x0A: /* SleepThread */
-            guest_yield();
+        case 0x0A: { /* SleepThread(ns) */
+            uint64_t ns = (uint64_t)c->r[0] | ((uint64_t)c->r[1] << 32);
+            uint32_t ms = (uint32_t)(ns / 1000000ull);
+            if (ms > 5) ms = 5;
+            if (g_no_lock) {
+                Sleep(ms ? ms : 0);
+            } else {
+                guest_yield();
+            }
             return 0;
+        }
         case 0x13: /* CreateMutex */
         case 0x15: /* CreateSemaphore */
         case 0x17: { /* CreateEvent */
