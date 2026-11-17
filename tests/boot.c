@@ -69,6 +69,9 @@ static void load_code(ArmCpu *c) {
     if (0x212CC0u + 4 <= 0x300000u) {
         *(uint32_t *)(g_mem + 0x212CC0) = 0xE1A00000u;
         *(uint32_t *)(g_mem + 0x212FCC) = 0xE1A00000u;
+        /* 0x33E1B0: "str r0,[r4]" im Session-Destruktor -> NOP,
+           damit das statische Session-Objekt nie Handle 0 bekommt. */
+        *(uint32_t *)(g_mem + 0x33E1B0) = 0xE1A00000u;
     }
 }
 
