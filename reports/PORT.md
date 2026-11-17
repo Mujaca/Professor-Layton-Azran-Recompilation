@@ -1,78 +1,74 @@
 # Port-Status
 
-Letzte Aktualisierung: 2026-11-17 (abends)
+Letzte Aktualisierung: 2026-11-18
 
 ## Kurzfassung
 
-Der recompilierte Code bootet jetzt durch die **SDK-Initialisierung** (Heap, Ressourcen,
-`srv`-Verbindung, APT-Handle) bis in die Applet-Initialisierung. Der Menü-Screen ist noch
-nicht erreicht; aktueller Blocker ist ein **Mutex-Spinlock in der APT-Phase**.
+Der recompilierte Code läuft inzwischen durch **Heap-Setup, `srv`, APT-Initialisierung
+(GetLockHandle, Initialize, Enable, SetAppCpuTimeLimit)** bis zu `hid:USER` und `ndm:u`.
+Der Menü-Screen ist noch nicht erreicht; der aktuelle Blocker liegt in der
+APT-/Fehlerbehandlung (zwei `err:f`-Aufrufe, danach Stillstand).
 
 ```powershell
 python tools\build_port.py
 .\out\port.exe out\romfs
 ```
 
-## Was in dieser Runde gefixt wurde (Recompiler)
+## Recompiler-Fixes dieser Runde
 
 | Bug | Wirkung |
 |---|---|
-| **Fehlender Fallthrough** zwischen Blöcken | Blöcke wurden in Fundreihenfolge ausgegeben; ohne explizites `goto` sprang der Code in den falschen Block (Ursache für viele „seltsame" Sprünge) |
-| **`lsls/lsrs/asrs` ohne Flag-Update** | SDK prüfte Ausrichtung über `lsls …; bne` → Heap-Allokation schlug fehl |
-| **Post-Index-Writeback** (`ldr/str rX, [rY], #imm`) | BSS-Nullschleife lief endlos |
-| **`push`/`stmdb`-Writeback** (DB/DA) | Stackpointer wurde nicht dekrementiert → SDK las ihre Argumente vom falschen Stack-Slot |
+| **Bedingte Terminatoren ohne Fallthrough** (`bxeq lr`, `popne {pc}`) | Code sprang nach nicht ausgeführtem Rücksprung in den falschen Block → korrupte Zeiger |
+| `lsls/lsrs/asrs` ohne Flag-Update | Heap-Ausrichtungsprüfung der SDK schlug fehl |
+| Post-Index-Writeback | BSS-Nullschleife lief endlos |
+| `push`/`stmdb`-Writeback (DB/DA) | Stackpointer blieb stehen → SDK las SVC-Argumente falsch |
 
-Alle 13 Semantik-Tests laufen weiterhin (`python tests\mvp_selftest.py`).
+## HLE-Stand
 
-## Was in dieser Runde dazukam (HLE)
+- **Config-Memory** `0x1FF80000` (Kernel-/Firmware-Version, `app_mem_alloc = 128 MiB`)
+- **Kernel-SVCs**: ControlMemory (Bump-Allocator, korrekte SDK-Konvention), ResourceLimits,
+  QueryMemory, CreateAddressArbiter, CreateThread (echte **Fibers**), Wait/Sleep (kooperativ),
+  GetProcessId, IDs, Handles
+- **Mutex-Bootstrap**: null-initialisierte BSS-Semaphore werden beim ersten Warten als frei behandelt
+  (`arm_mutex_bootstrap`, Hook im SDK-Lock-Slowpath)
+- **Services**: `srv:` (vollständig), `APT:U` (1, 2, 3, 4, 5, 0x4F, 0x28), `hid:USER` (0x0A GetIPCHandles),
+  generische Antworten für alle anderen
+- **Diagnose**: `HLE_LOG`, `HLE_TRACE=1` (`out/hle_trace.txt`), `ARM_WATCH=0x…`,
+  `HLE_SRV_LAYOUT=1|2|3` (Handle-Übergabe-Varianten)
 
-- **Config-Memory** (`0x1FF80000`) initialisiert: Kernel-/Firmware-Version, `ns_tid`,
-  `app_mem_alloc = 128 MiB`, `sys_mem_alloc`, `base_mem_alloc`
-- **`svcControlMemory`** korrekt: Op/Flags aus `r0`, Permissions aus `r4`, Out-Pointer vom
-  Stack; Ergebnis in `r1` (SDK-Wrapper-Konvention); Bump-Allocator für App-/Linear-Heap
-- **`svcGetResourceLimit*`**, `QueryMemory`, `CreateAddressArbiter` mit Werten/Handles
-- **`srv:`** vollständig genug: RegisterClient, EnableNotification, RegisterService,
-  GetServiceHandle — inkl. Handle-Übergabe in **beiden** Layouts (normale Parameter und
-  Translate-Deskriptor), weil die Nintendo-SDK das Handle als normalen Parameter liest
-- **`APT:U`**: GetLockHandle, Initialize, Enable, Finalize, NotifyToWait, GetAppletManInfo
-- **Watchpoint-Diagnose**: `ARM_WATCH=0x…` loggt Register + Speicher an beliebigen Blöcken
-- **SVC-/IPC-Trace**: `HLE_TRACE=1` schreibt `out/hle_trace.txt`
-
-## Aktueller Boot-Verlauf (Log)
+## Boot-Verlauf
 
 ```
-svc 0x21 CreateAddressArbiter
-svc 0x38 GetResourceLimit / 0x3A CurrentValues / 0x23 CloseHandle
-svc 0x01 ControlMemory (ALLOC 87 MiB @0x08000000, ALLOC_LINEAR 41 MiB @0x14000000)
-svc 0x2D ConnectToPort("srv:")
-ipc srv cmd 0x1 (RegisterClient)
-ipc srv cmd 0x2 (EnableNotification)
-ipc srv cmd 0x5 ("APT:U") -> Handle
-ipc APT:U cmd 0x1 (GetLockHandle)
--> danach Spinlock (nn::os-Mutex) bei 0x12E1F0
+CreateAddressArbiter → ResourceLimits → ControlMemory (87 MiB @0x08000000,
+41 MiB linear @0x14000000) → ConnectToPort("srv:")
+srv: RegisterClient, EnableNotification, GetServiceHandle("APT:U")
+APT:U: cmd 1 (GetLockHandle), 2 (Initialize), 3 (Enable), 0x4F (SetAppCpuTimeLimit)
+err:f: 2× ThrowFatalError  (Ergebniscode 0xF96047A2)
+srv: GetServiceHandle("hid:USER") → hid:USER cmd 0x0A (GetIPCHandles)
+srv: GetServiceHandle("ndm:u")    → ndm:u cmd 6
+→ Stillstand
 ```
 
 ## Nächster Blocker
 
-Der Mutex bei `0x12E1F0` wartet auf einen **positiven** Wert (Konvention: >0 = frei,
-<0 = belegt). Die Objekte liegen in `.bss` (0x3EB000–0x456168) und sind nach dem
-BSS-Nullen 0 — die C++-Statik-Initialisierer (`__libc_init_array`) setzen sie offenbar
-nicht (oder werden von uns noch nicht korrekt ausgeführt).
+Zwei `err:f`-Aufrufe (ThrowFatalError) deuten auf einen Fehler in der APT-Phase hin;
+zusätzlich werden zwei **virtuelle Methoden über `vtable+0x2C`** aufgerufen, deren
+Eintrag 0 ist (Blöcke `0x10799C` und `0x107A4C`; das Ziel wird als „unbekanntes
+call-Ziel 0" geloggt). Das Objekt stammt aus der SDK-Initialisierung und wird
+offenbar nicht vollständig aufgebaut.
 
-Nächste Schritte:
-1. `__libc_init_array` verifizieren (Init-Array-Tabelle ablaufen, Konstruktoren aufrufen)
-   — damit werden alle globalen Mutexe/Objekte korrekt initialisiert.
-2. Danach APT-Initialisierung fortsetzen (`Initialize`, `Enable`, `GetSharedFont`).
-3. `fs:USER` (RomFS auf `out/romfs`, Datei-Handles, `ReadFile`).
-4. `hid:USER`, `gsp::Gpu` (Register/Command-Listen, Swap) und der PICA-2D-Renderer.
+Konkrete nächste Schritte:
+1. Ergebniscode `0xF96047A2` dekodieren und die zugehörige APT-Antwort korrigieren.
+2. Das Objekt mit `vtable+0x2C == 0` identifizieren (Rückverfolgung von `r7`/Vtable).
+3. Danach `fs:USER` (RomFS auf `out/romfs`) und `gsp::Gpu` (Command-Listen/Swap).
+4. PICA-2D-Renderer (TEV-Subset) → Menü-Screen im Fenster.
 
-## Werkzeuge für die Weiterarbeit
+## Werkzeuge
 
 ```powershell
 $env:PYTHONPATH = "tools"
-$env:HLE_LOG = "1"           # IPC/SVC-Log
-$env:HLE_TRACE = "1"         # out/hle_trace.txt
-$env:ARM_WATCH = "12E1F0"    # Register+Speicher an diesem Block
-$env:HLE_MUTEX_HACK = "1"    # Workaround: erster Mutex auf 1 setzen
+$env:HLE_LOG = "1"; $env:HLE_TRACE = "1"; $env:HLE_IPC_LOG = "400"
+$env:ARM_WATCH = "12E1F0"
 python tools\build_port.py
+.\out\port.exe out\romfs --shot out\shot.bmp
 ```
