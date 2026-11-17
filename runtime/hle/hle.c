@@ -328,6 +328,7 @@ static void fs_command(Ipc *r, uint32_t *p);
 static void file_command(Ipc *r, uint32_t *p);
 static void cfg_command(Ipc *r, uint32_t *p);
 static void dsp_command(Ipc *r, uint32_t *p);
+static void gsp_command(Ipc *r, uint32_t *p);
 
 static void put_result(Ipc *r) {
     ipc_put(r, 0);
@@ -811,6 +812,61 @@ static void dsp_command(Ipc *r, uint32_t *p) {
     }
 }
 
+/* GSP-Service: minimal, damit ein Aufruf des Spiels nicht scheitert.
+ * WriteHWRegs (0x0001), SetBufferSwap (0x0004), RegisterInterruptRelayQueue
+ * (0x0006), TriggerCmdReqQueue (0x0008), ImportDisplayCaptureInfo (0x0009). */
+static uint32_t g_gsp_fb_addr[3] = {0x1F000000u, 0x1F000000u, 0x1F000000u};
+static int g_gsp_last_screen = 0;
+
+static void gsp_command(Ipc *r, uint32_t *p) {
+    switch (r->cmd) {
+        case 0x0001: { /* WriteHWRegs(addr, size, data...) */
+            if (g_log) printf("[gsp] WriteHWRegs addr=0x%X size=%u\n", p[0], p[1]);
+            ipc_begin(r, 0x0001, 1, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x0004: { /* SetBufferSwap(screen, framebuffer_info) */
+            uint32_t screen = p[0];
+            uint32_t fb = p[1];
+            if (screen < 3) g_gsp_fb_addr[screen] = fb;
+            g_gsp_last_screen = (int)(screen & 1);
+            if (g_log) printf("[gsp] SetBufferSwap screen=%u fb=0x%08X\n", screen, fb);
+            ipc_begin(r, 0x0004, 1, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x0006: { /* RegisterInterruptRelayQueue -> Event + SharedMem */
+            uint32_t ev = (uint32_t)alloc_handle(SVC_OTHER, "gsp-ev");
+            ipc_begin(r, 0x0006, 1, 2);
+            ipc_put(r, 0);
+            ipc_put_handle_copy(r, ev);
+            break;
+        }
+        case 0x0008: { /* TriggerCmdReqQueue */
+            ipc_begin(r, 0x0008, 1, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x0009: { /* ImportDisplayCaptureInfo -> 2x Framebuffer-Info */
+            ipc_begin(r, 0x0009, 6, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 0x1F000000u); ipc_put(r, 0);
+            ipc_put(r, 0x1F000000u); ipc_put(r, 0);
+            ipc_put(r, 0); ipc_put(r, 0);
+            break;
+        }
+        case 0x000B: { /* SetLcdForceBlack */
+            ipc_begin(r, 0x000B, 1, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        default:
+            generic_command(r, SVC_GSP_GPU);
+            break;
+    }
+}
+
 static void generic_command(Ipc *r, int service) {
     if (g_log) {
         printf("[%s] cmd 0x%04X normal=%d -> 0\n",
@@ -894,6 +950,9 @@ static void dispatch_ipc(uint32_t handle) {
             break;
         case SVC_DSP:
             dsp_command(&r, params);
+            break;
+        case SVC_GSP_GPU:
+            gsp_command(&r, params);
             break;
         default:
             generic_command(&r, service);
