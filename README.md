@@ -86,9 +86,11 @@ build/          generierter C-Code, Objektdateien (nicht versioniert)
 
 ## Nächste Schritte
 
-1. Trace-Harness auf Basis von Azahar (Block-, SVC-, IPC-, `fs`-, GPUREG-, Swap-Trace).
-2. Recompiler (ARMv6K + VFPv2 → C) mit Differenztests gegen den Emulator.
-3. Runtime-Skeleton → Boot bis Hauptmenü, dann 2D-Renderer, Audio, Saves.
+1. **Azahar bauen + Patch anwenden**, einmal durchspielen → Trace → `scan --trace`
+   (hebt die Coverage von 71,5 % auf >95 %).
+2. **Dispatcher + Speicher-Map** (Adresstabelle, FCRAM/VRAM, SVC-/Service-Shims)
+   → Boot bis Hauptmenü.
+3. **GPU-Shim** (2D-first), Audio (BCSTM), Saves; danach Differenztests pro Funktion.
 
 ## Rechtliches
 
