@@ -30,6 +30,7 @@ static void guest_lock_leave(void) {
 }
 static void guest_yield(void) {
     if (!g_guest_lock_init) return;
+    if (g_no_lock) { Sleep(0); return; }
     LeaveCriticalSection(&g_guest_lock);
     Sleep(0);
     EnterCriticalSection(&g_guest_lock);

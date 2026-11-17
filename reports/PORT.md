@@ -41,42 +41,46 @@ Menü rendert daher noch nicht.
 ## Aktueller Stand
 
 Konstruktor-Init laeuft, bis zu 11 Gast-Threads, Services `fs/cfg/ptm/hid/
-ndm/dsp/y2r/APT` initialisiert. Der Haupt-Thread (TLS-Index 2) haengt danach
-in einer **Semaphor-Warteschleife**:
+ndm/dsp/y2r/APT` initialisiert. Das Spiel laeuft danach in seiner Poll-/Frame-
+Schleife (in 8 s ca. **233.000 IPCs**), aber **`gsp::Gpu` wird nie geoeffnet**
+(0 Treffer) -> kein Frame.
 
-```
-0x141EA4  ldrex r2,[r4]      ; r4 = 0x090001C8 (App-Heap)
-0x141EB8  cmp   r2,#0
-0x141EBC  ble   0x141ED8      ; -> svc 0x22 ArbitrateAddress
-0x141EC0  sub   r1,r2,#1
-0x141EC4  strex r2,r1,[r4]
-```
-Der Zaehler wird **nie gepostet** (kein anderer Thread erhoeht ihn), daher
-pollt der Thread endlos. Zusaetzlich pollt Thread 3 `srv: 0x000B`
-(ReceiveNotification).
+### Thread-Diagnose
 
-`gsp::Gpu` wird weiterhin **nicht** geoeffnet -> kein Frame.
+`arm_trace_thread_dump(idx, n)` (Ringpuffer pro Gast-Thread, vom Watchdog
+zweimal ausgegeben) zeigt: der Haupt-Thread (TLS-Index 2) wechselt zwischen
 
-### Neue Diagnose
+- `0x141EA4` — Semaphor-Wait (`ldrex/strex` auf `[r4]`, `svcArbitrateAddress`)
+- `0x288B80` / `0x288BC4` — SDK-Critical-Section
+- `0x11A818` — Spin-Delay-Schleife (`subs r0,#2; bgt`)
 
-`arm_trace_thread_dump(idx, n)` fuehrt pro Gast-Thread einen Ringpuffer der
-letzten 64 Bloecke und wird vom Watchdog ausgegeben. Damit ist der Aufenthalts-
-ort jedes Threads exakt bestimmbar (Thread 2 = Haupt-Thread).
+und kommt nicht zur Grafik-Initialisierung. Die beiden Watchdog-Dumps
+(Tick 4 und Tick 14) sind identisch -> der Thread haengt an derselben Stelle.
 
 ### Fixes dieser Runde
 
 | Fix | Wirkung |
 |---|---|
-| Thread-Block-Ring + `arm_trace_thread_dump` | Haupt-Thread exakt lokalisiert |
-| `svcArbitrateAddress` Typ 0/2 postet einmalig, wenn Zaehler <= 0 | Semaphor-Warteschleife kann theoretisch terminieren |
+| `guest_yield()` beachtet `HLE_NO_THREAD_LOCK` (kein `LeaveCriticalSection` auf nicht gehaltenem Lock) | IPC-Durchsatz von ~1.000 auf ~233.000 pro 8 s |
+| `ARM_MEMWATCH`-Watchpoint in `arm_mem_write` | zeigt Schreibzugriffe auf verdaechtige Variablen |
+| Zwei Thread-Dumps (Tick 4/14) im Watchdog | Stillstand vs. Fortschritt unterscheidbar |
+
+### Beobachtung zu `0x090001C8`
+
+Die Adresse ist ein **Critical-Section-Wort** (Wechsel `FFFFFFFF` <-> `1`),
+kein Semaphor:
+
+```
+[mw] 090001C8 <- 00000001 size=4 pc=002658F8 lr=00289E50
+[mw] 090001C8 <- FFFFFFFF size=4 pc=0012E1C4 lr=00287A48
+```
 
 ### Naechster Schritt
 
-1. Den Poster des Semaphors `0x090001C8` identifizieren (wer ruft die
-   Inkrement-Routine?) und im HLE ausloesen.
-2. `gsp::Gpu` implementieren (WriteHWRegs, SetCommandList,
-   RegisterInterruptRelayQueue, SetBufferSwap) + PICA-2D-Renderer auf
-   `0x1F000000`.
+1. Die Blockade des Haupt-Threads im Semaphor `0x141EA4` aufloesen (Poster
+   identifizieren; ggf. `svcArbitrateAddress` typkorrekt blockieren).
+2. `gsp::Gpu` (WriteHWRegs, SetCommandList, RegisterInterruptRelayQueue,
+   SetBufferSwap) + PICA-2D-Renderer auf `0x1F000000`.
 3. Menue-Frame per `out\port.exe out\romfs --shot out\shot.bmp` belegen.
 
 ## Umgesetzte HLE-Bausteine

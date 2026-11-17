@@ -5,6 +5,9 @@
 #include <string.h>
 #include <math.h>
 
+static uint32_t g_memwatch = 0;
+static int g_memwatch_prints = 0;
+
 static ArmCpu *g_pool_cpu = NULL;
 
 void arm_cpu_init(ArmCpu *c, void *mem, uint32_t size) {
@@ -12,6 +15,10 @@ void arm_cpu_init(ArmCpu *c, void *mem, uint32_t size) {
     c->mem = (uint8_t *)mem;
     c->mem_size = size;
     g_pool_cpu = c;
+    {
+        const char *mw = getenv("ARM_MEMWATCH");
+        if (mw) g_memwatch = (uint32_t)strtoul(mw, NULL, 16);
+    }
 }
 
 /* ---------------- memory ---------------- */
@@ -49,6 +56,11 @@ uint32_t arm_mem_read(ArmCpu *c, uint32_t addr, int size) {
 
 void arm_mem_write(ArmCpu *c, uint32_t addr, int size, uint32_t val) {
     if (addr >= 0x20000000u) addr &= 0x1FFFFFFFu;
+    if (g_memwatch != 0 && (addr & ~3u) == g_memwatch && g_memwatch_prints < 40) {
+        g_memwatch_prints++;
+        fprintf(stderr, "[mw] %08X <- %08X size=%d pc=%08X lr=%08X\n",
+                addr, val, size, arm_last_block, c->r[14]);
+    }
     if ((uint64_t)addr + (uint64_t)size > c->mem_size) {
         mem_fault(c, addr, size);
         return;
