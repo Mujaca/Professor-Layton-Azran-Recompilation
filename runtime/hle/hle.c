@@ -558,7 +558,7 @@ static int open_guest_file(const char *guest_path, FileSlot **slot_out) {
     for (int i = 0; i < MAX_FILES; i++) {
         if (!g_files[i].used) {
             g_files[i].used = 1;
-            snprintf(g_files[i].path, sizeof(g_files[i].path), "%s", path);
+            snprintf(g_files[i].path, sizeof(g_files[i].path), "out/savedata/save_%d.sav", i);
             g_files[i].fp = fp;
             g_files[i].size = (uint32_t)sz;
             *slot_out = &g_files[i];
@@ -632,7 +632,7 @@ static void fs_command(Ipc *r, uint32_t *p) {
                         g_files[i].used = 1;
                         g_files[i].fp = NULL;
                         g_files[i].size = 0;
-                        snprintf(g_files[i].path, sizeof(g_files[i].path), "%s", path);
+                        snprintf(g_files[i].path, sizeof(g_files[i].path), "out/savedata/save_%d.sav", i);
                         slot = &g_files[i];
                         opened = 1;
                         break;
@@ -723,6 +723,14 @@ static void fs_command(Ipc *r, uint32_t *p) {
     }
 }
 
+static uint32_t ipc_out_buffer(uint32_t *p, int normal, int translate) {
+    for (int i = 0; i < translate; i++) {
+        uint32_t w = p[normal + i];
+        if (w >= 0x08000000u && w < 0x20000000u) return w;
+    }
+    return 0;
+}
+
 static void file_command(Ipc *r, uint32_t *p) {
     Handle *h = get_handle(g_cur_handle);
     if (h == NULL || h->file < 0) {
@@ -732,60 +740,105 @@ static void file_command(Ipc *r, uint32_t *p) {
     }
     FileSlot *f = &g_files[h->file];
     switch (r->cmd) {
-        case 0x0804: { /* GetSize */
-            ipc_begin(r, 0x0804, 3, 0);
-            ipc_put(r, 0);
-            ipc_put(r, f->size);
-            ipc_put(r, 0);
-            break;
-        }
-        case 0x0808: { /* Close */
-            if (f->fp) fclose(f->fp);
-            f->used = 0;
-            f->fp = NULL;
-            h->file = -1;
-            ipc_begin(r, 0x0808, 1, 0);
-            ipc_put(r, 0);
-            break;
-        }
-        case 0x0802: { /* Read(offset u64, length u32, buffer) */
-            uint64_t offset = (uint64_t)p[0] | ((uint64_t)p[1] << 32);
-            uint32_t length = p[2];
+        case 0x0801: { /* Read: SDK sendet (offset low, offset high, size) */
+            uint64_t offset;
+            uint32_t length;
+            if (!(p[0] == 0 && p[1] == 0 && p[2] != 0)) {
+                length = p[0];
+                offset = (uint64_t)p[1] | ((uint64_t)p[2] << 32);
+            } else {
+                offset = (uint64_t)p[0] | ((uint64_t)p[1] << 32);
+                length = p[2];
+            }
             uint32_t addr = 0;
             int nn = r->normal;
             for (int i = 0; i < 8; i++) {
                 uint32_t w = p[nn + i];
-                if (w >= 0x08000000u && w < 0x20000000u) { addr = w; break; }
+                if (w >= 0x00001000u && w < 0x30000000u) { addr = w; break; }
             }
             uint32_t done = 0;
             if (addr && length && f->fp) {
                 fseek(f->fp, (long)offset, SEEK_SET);
                 done = (uint32_t)fread(g_cur_mem + (addr & 0x1FFFFFFFu), 1, length, f->fp);
             }
-            if (g_log) {
-                printf("[fs] Read off=0x%llX len=0x%X -> %u Bytes\n",
-                       (unsigned long long)offset, length, done);
-            }
-            ipc_begin(r, 0x0802, 3, 0);
+            if (g_log) printf("[file] Read off=0x%llX len=0x%X -> %u\n",
+                              (unsigned long long)offset, length, done);
+            ipc_begin(r, 0x0801, 2, 0);
             ipc_put(r, 0);
             ipc_put(r, done);
+            break;
+        }
+        case 0x0802: { /* Write: SDK sendet (offset low, offset high, size) */
+            uint64_t offset;
+            uint32_t length;
+            if (!(p[0] == 0 && p[1] == 0 && p[2] != 0)) {
+                length = p[0];
+                offset = (uint64_t)p[1] | ((uint64_t)p[2] << 32);
+            } else {
+                offset = (uint64_t)p[0] | ((uint64_t)p[1] << 32);
+                length = p[2];
+            }
+            uint32_t addr = 0;
+            int nn = r->normal;
+            for (int i = 0; i < 8; i++) {
+                uint32_t w = p[nn + i];
+                if (w >= 0x00001000u && w < 0x30000000u) { addr = w; break; }
+            }
+            uint32_t done = 0;
+            if (addr && length) {
+                if (f->fp == NULL) f->fp = fopen(f->path, "wb");
+                if (f->fp) {
+                    fseek(f->fp, (long)offset, SEEK_SET);
+                    done = (uint32_t)fwrite(g_cur_mem + (addr & 0x1FFFFFFFu), 1, length, f->fp);
+                    fflush(f->fp);
+                    if (offset + done > f->size) f->size = (uint32_t)(offset + done);
+                }
+            }
+            if (g_log) printf("[file] Write off=0x%llX len=0x%X addr=%08X -> %u\n",
+                              (unsigned long long)offset, length, addr, done);
+            ipc_begin(r, 0x0802, 2, 0);
+            ipc_put(r, 0);
+            ipc_put(r, done);
+            break;
+        }
+        case 0x0803: { /* GetSize -> Result + u64 */
+            ipc_begin(r, 0x0803, 3, 0);
+            ipc_put(r, 0);
+            ipc_put(r, f->size);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x0804: { /* SetSize(size u64) */
+            uint32_t lo = p[0], hi = p[1];
+            f->size = lo;
+            (void)hi;
+            ipc_begin(r, 0x0804, 1, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x0805: { /* Close */
+            if (f->fp) fclose(f->fp);
+            f->used = 0;
+            f->fp = NULL;
+            h->file = -1;
+            ipc_begin(r, 0x0805, 1, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x0806: { /* Flush */
+            if (f->fp) fflush(f->fp);
+            ipc_begin(r, 0x0806, 1, 0);
             ipc_put(r, 0);
             break;
         }
         default:
-            generic_command(r, SVC_FILE);
+            if (g_log) printf("[file] cmd 0x%04X -> 0\n", r->cmd);
+            ipc_begin(r, r->cmd, 1, 0);
+            ipc_put(r, 0);
             break;
     }
 }
 
-/* Schreibt Daten in den Antwort-Puffer eines IPC-Requests (Buffer-Scan). */
-static uint32_t ipc_out_buffer(uint32_t *p, int normal, int translate) {
-    for (int i = 0; i < translate; i++) {
-        uint32_t w = p[normal + i];
-        if (w >= 0x08000000u && w < 0x20000000u) return w;
-    }
-    return 0;
-}
 
 static void cfg_command(Ipc *r, uint32_t *p) {
     switch (r->cmd) {
