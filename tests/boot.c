@@ -82,6 +82,10 @@ static void load_code(ArmCpu *c) {
         *(uint32_t *)(g_mem + 0x107B34) = 0xE1A00000u;
         /* 0x28F45C = SDK-Fehlerwerfer: komplett entschaerfen (bx lr). */
         *(uint32_t *)(g_mem + 0x28F45C) = 0xE12FFF1Eu;
+        /* 0x11A818: kalibrierte Busy-Wait-Delay -> sofort zurueck,
+           sonst blockiert der Delay den kooperativen Scheduler. */
+        *(uint32_t *)(g_mem + 0x11A818) = 0xE3A00000u;  /* mov r0,#0 */
+        *(uint32_t *)(g_mem + 0x11A81C) = 0xE12FFF1Eu;  /* bx lr */
     }
 }
 
