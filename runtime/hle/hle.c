@@ -1294,6 +1294,7 @@ static void setup_config_mem(ArmCpu *c) {
 }
 
 static volatile int g_vblank_run = 0;
+static unsigned g_vblank_frames = 0;
 
 /* Simulierter VBlank: signalisiert periodisch alle Event-Handles. */
 static DWORD WINAPI vblank_thread(LPVOID p) {
@@ -1302,6 +1303,17 @@ static DWORD WINAPI vblank_thread(LPVOID p) {
         Sleep(16);
         for (int k = 1; k < MAX_HANDLES; k++) {
             if (g_handles[k].used) g_handles[k].signaled = 1;
+        }
+        /* HID-Shared-Memory: das Spiel mappt den Block an 0x10000000
+           (svc 0x1F Handle 0x17). PadState.current_state liegt bei +0x1C:
+           START (Bit 3) / A (Bit 0) periodisch druecken. */
+        if (g_cpu != NULL && g_vblank_frames >= 0) {
+            uint32_t addr = (0x10000000u + 0x1Cu) & 0x1FFFFFFFu;
+            if (addr + 4 <= g_cpu->mem_size) {
+                uint32_t btn = (((g_vblank_frames / 30) & 1) != 0) ? 0x9u : 0x0u;
+                memcpy(g_cpu->mem + addr, &btn, 4);
+            }
+            g_vblank_frames++;
         }
         /* Bekannte Arbitrate-Objekte ebenfalls "posten". */
         if (g_cpu != NULL) {
