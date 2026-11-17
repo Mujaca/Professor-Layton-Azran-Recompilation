@@ -667,15 +667,17 @@ static void fs_command(Ipc *r, uint32_t *p) {
             FileSlot *slot = NULL;
             int opened = path[0] ? open_guest_file(path, &slot) : 0;
             if (!opened) {
-                /* Fallback: leere Datei, damit die SDK weiterlaeuft */
+                /* Kein/leerer Pfad: als Archiv-Wurzel (Sentinel) bedienen. */
                 for (int i = 0; i < MAX_FILES; i++) {
                     if (!g_files[i].used) {
                         g_files[i].used = 1;
                         g_files[i].fp = NULL;
-                        g_files[i].size = 0x400;   /* synthetische Groesse */
+                        g_files[i].size = (path[0] == 0) ? 0u : 0x400u;
                         snprintf(g_files[i].path, sizeof(g_files[i].path), "out/savedata/save_%d.sav", i);
                         slot = &g_files[i];
                         opened = 1;
+                        if (g_log) printf("[fs] Sentinel-Slot %d (path=\"%s\" size=%u)\n",
+                                         i, path, g_files[i].size);
                         break;
                     }
                 }
