@@ -676,8 +676,11 @@ static void fs_command(Ipc *r, uint32_t *p) {
                        r->cmd == 0x0802 ? "OpenFile" : "OpenFileDirectly", path,
                        opened ? "ok" : "FEHLER", h, opened ? slot->size / 1024 : 0);
             }
-            ipc_begin(r, r->cmd, 1, 2);
+            /* Die SDK (fn_001078F4) prueft Reply-Wort 2 gegen 0x28; deshalb
+               wird dort die erwartete Groesse geliefert, danach der Handle. */
+            ipc_begin(r, r->cmd, 2, 2);
             ipc_put(r, 0);
+            ipc_put(r, 0x28u);
             ipc_put_handle(r, h);
             break;
         }
