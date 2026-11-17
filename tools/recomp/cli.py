@@ -83,7 +83,7 @@ def collect_stats(res, data):
     }
 
 
-def generate(res, path, max_funcs=None):
+def generate(res, path, max_funcs=None, trace=False):
     u32 = lambda v: v & 0xFFFFFFFF
     needed = set()
     for fn in res.functions.values():
@@ -95,7 +95,10 @@ def generate(res, path, max_funcs=None):
         funcs = funcs[:max_funcs]
     generated = set(fn.addr for fn in funcs)
 
-    out = ["/* generiert vom Recompiler-MVP */", '#include "arm_cpu.h"', ""]
+    out = ["/* generiert vom Recompiler-MVP */", '#include "arm_cpu.h"']
+    if trace:
+        out.append('#include "arm_trace.h"')
+    out.append("")
     for a in all_addrs:
         out.append("void fn_%08X(ArmCpu *c);" % u32(a))
     out.append("")
@@ -112,6 +115,8 @@ def generate(res, path, max_funcs=None):
         out.append("  goto %s;" % em.label(fn.blocks[0].addr))
         for blk in fn.blocks:
             out.append("%s:" % em.label(blk.addr))
+            if trace:
+                out.append("  arm_trace_block(0x%08Xu, %du);" % (u32(blk.addr), 1 if fn.thumb else 0))
             for ins in blk.insns:
                 lines, _ = instruction_lines(em, ins)
                 for ln in lines:
@@ -145,16 +150,22 @@ def main(argv=None):
     p_scan.add_argument("--in", dest="inp", required=True)
     p_scan.add_argument("--json")
     p_scan.add_argument("--prologues", action="store_true")
+    p_scan.add_argument("--trace")
 
     p_gen = sub.add_parser("gen")
     p_gen.add_argument("--in", dest="inp", required=True)
     p_gen.add_argument("--out", required=True)
     p_gen.add_argument("--prologues", action="store_true")
     p_gen.add_argument("--max-funcs", type=int)
+    p_gen.add_argument("--trace", action="store_true")
 
     args = ap.parse_args(argv)
     data = load(args.inp)
-    resimo = scanmod.scan(data, [(isa.ARM_BASE, "entry", False)], follow_prologues=args.prologues)
+    entries = [(isa.ARM_BASE, "entry", False)]
+    if getattr(args, "trace", None):
+        from . import trace as tracemod
+        entries += tracemod.entry_points(args.trace)
+    resimo = scanmod.scan(data, entries, follow_prologues=args.prologues)
 
     if args.cmd == "scan":
         stats = collect_stats(resimo, data)
@@ -171,7 +182,7 @@ def main(argv=None):
             with open(args.json, "w", encoding="utf-8") as f:
                 json.dump(stats, f, indent=2)
     else:
-        n, nt = generate(resimo, args.out, args.max_funcs)
+        n, nt = generate(resimo, args.out, args.max_funcs, trace=args.trace)
         print("geschrieben: %s (%d ARM-Funktionen, %d Thumb-Stubs)" % (args.out, n, nt))
 
 

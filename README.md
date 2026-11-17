@@ -57,6 +57,22 @@ python tests\mvp_selftest.py     # assembliert Snippets, recompiliert, prueft Se
 
 Details: [`reports/RECOMPILER_MVP.md`](reports/RECOMPILER_MVP.md)
 
+## Trace-Harness (Phase 1b)
+
+`runtime/arm_trace.c` + `tools/recomp/trace.py` erzeugen und analysieren
+Ausführungs-Traces (Format `CTRTRC01`: Blockstarts, SVCs, IPC, Frames).
+
+```powershell
+python tests\self_trace.py          # recompilierten Code ausfuehren und tracen
+python -m recomp.trace stats    out\selftrace\run.ctrt
+python -m recomp.trace coverage out\selftrace\run.ctrt --in out\exefs\code_decomp.bin --prologues
+python -m recomp.cli scan --in out\exefs\code_decomp.bin --prologues --trace out\selftrace\run.ctrt
+```
+
+Für Emulator-Traces liegt `patches/azahar-trace.patch` bereit (Hook in
+`MemoryReadCode`/`CallSVC`/`HandleSyncRequest`/`SetBufferSwap`); Details in
+[`reports/TRACE.md`](reports/TRACE.md).
+
 ## Struktur
 
 ```

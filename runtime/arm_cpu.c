@@ -1,4 +1,5 @@
 #include "arm_cpu.h"
+#include "arm_trace.h"
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
