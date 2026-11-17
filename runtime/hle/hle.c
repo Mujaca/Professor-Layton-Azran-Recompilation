@@ -713,6 +713,10 @@ static void fs_command(Ipc *r, uint32_t *p) {
             ipc_put(r, 0);
             ipc_put(r, 0x28u);
             ipc_put_handle(r, h);
+            /* Datei-Client-Objekt (0x3D66C0+4) mitversorgen: der zugehoerige
+               Setter im Spiel laeuft nie, sonst werfen Dateizugriffe E0A046DA. */
+            if (h != 0 && g_cpu != NULL && (0x3D66C4u & 0x1FFFFFFFu) + 4 <= g_cpu->mem_size)
+                memcpy(g_cpu->mem + 0x3D66C4u, &h, 4);
             break;
         }
         case 0x080C: { /* OpenArchive */
@@ -1179,7 +1183,7 @@ static void dispatch_ipc(uint32_t handle) {
     g_ipc_count++;
     if (cmd == 0x0001 && normal >= 32 && getenv("HLE_ERRCTX")) {
         static int ec = 0;
-        if (ec < 3) {
+        if (ec < 10) {
             ec++;
             printf("[errctx] fatal code=%08X site=%08X th=%u blk=%08X lr=%08X\n",
                    params[1], params[2],
