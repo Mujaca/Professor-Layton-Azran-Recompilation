@@ -919,6 +919,34 @@ static void dsp_command(Ipc *r, uint32_t *p) {
             ipc_put(r, 0);
             break;
         }
+        case 0x0001: { /* RecvData -> Result + Wert */
+            ipc_begin(r, 0x0001, 2, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x0002: case 0x0004: case 0x000B: { /* IsReady/IsEmpty/CheckSemaphore */
+            ipc_begin(r, r->cmd, 2, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x0016: { /* GetSemaphoreEventHandle -> Result + MoveHandle(Event) */
+            uint32_t ev = (uint32_t)alloc_handle(SVC_OTHER, "dsp-ev");
+            Handle *hh = get_handle(ev);
+            if (hh) hh->signaled = 1;
+            ipc_begin(r, 0x0016, 1, 2);
+            ipc_put(r, 0);
+            ipc_put_handle(r, ev);
+            if (g_log) printf("[dsp] GetSemaphoreEventHandle -> %u\n", ev);
+            break;
+        }
+        case 0x000F: { /* GetPipeReadableSize */
+            ipc_begin(r, 0x000F, 2, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 0);
+            break;
+        }
         case 0x0015: { /* RegisterInterruptEvents */
             uint32_t h = (uint32_t)alloc_handle(SVC_OTHER, "dsp-ev");
             ipc_begin(r, 0x0015, 1, 2);
@@ -1353,14 +1381,16 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                 if (g_guest_lock_init) ExitThread(0);
             }
             return 0;
-        case 0x0A: { /* SleepThread(ns) */
+        case 0x0A: { /* SleepThread(ns): echte Wartezeit */
             uint64_t ns = (uint64_t)c->r[0] | ((uint64_t)c->r[1] << 32);
             uint32_t ms = (uint32_t)(ns / 1000000ull);
-            if (ms > 5) ms = 5;
-            if (g_no_lock) {
+            if (ms > 50) ms = 50;
+            if (g_guest_lock_init && !g_no_lock) {
+                LeaveCriticalSection(&g_guest_lock);
                 Sleep(ms ? ms : 0);
+                EnterCriticalSection(&g_guest_lock);
             } else {
-                guest_yield();
+                Sleep(ms ? ms : 0);
             }
             return 0;
         }
@@ -1410,6 +1440,23 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             uint32_t value = c->r[3];
             if ((addr & 0x1FFFFFFFu) + 4 <= c->mem_size) {
                 uint32_t cur;
+                /* Echt blockieren: warten, bis die Bedingung erfuellt ist
+                   (max. ~20 ms, dann Timeout). */
+                for (int spin = 0; spin < 20; spin++) {
+                    memcpy(&cur, c->mem + (addr & 0x1FFFFFFFu), 4);
+                    if (type == 0 || type == 2) {
+                        if ((int32_t)cur >= (int32_t)value) break;
+                    } else {
+                        if ((int32_t)cur > 0) break;
+                    }
+                    if (g_guest_lock_init && !g_no_lock) {
+                        LeaveCriticalSection(&g_guest_lock);
+                        Sleep(1);
+                        EnterCriticalSection(&g_guest_lock);
+                    } else {
+                        Sleep(1);
+                    }
+                }
                 memcpy(&cur, c->mem + (addr & 0x1FFFFFFFu), 4);
                 if (type == 1 || type == 3) { /* Decrement(AndWait)IfLessThan */
                     if ((int32_t)cur <= -2) cur = 1;
@@ -1480,12 +1527,14 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             c->r[1] = nh;
             return 0;
         }
-        case 0x28: /* GetSystemTick -> 64 Bit in r0:r1 */
-            /* Virtuelle Zeit: deutlich schneller als Echtzeit, damit
-               Sleep-/Timeout-Schleifen nicht Millionen Iterationen brauchen. */
-            g_tick += 0x20000;
+        case 0x28: { /* GetSystemTick -> 64 Bit in r0:r1 (echte Zeitbasis) */
+            static uint64_t base_ms = 0;
+            uint64_t now = GetTickCount64();
+            if (base_ms == 0) base_ms = now;
+            g_tick = (now - base_ms) * 268111ull;   /* ~268.111 MHz */
             c->r[1] = (uint32_t)(g_tick >> 32);
             return (uint32_t)g_tick;
+        }
         case 0x2A: { /* GetSystemInfo(type, out u64*, param, process) */
             uint32_t type = c->r[0], out = c->r[1];
             uint64_t value = 0;
