@@ -209,6 +209,7 @@ static int alloc_handle(int service, const char *name) {
             g_handles[i].service = service;
             g_handles[i].file = -1;
             snprintf(g_handles[i].name, sizeof(g_handles[i].name), "%s", name ? name : "?");
+            if (getenv("HLE_HDL_LOG")) printf("[hdl] %d = %s\n", i, g_handles[i].name);
             return i;
         }
     }
@@ -842,6 +843,14 @@ static void dispatch_ipc(uint32_t handle) {
 
     int service = h ? h->service : SVC_OTHER;
     if (service < 0 || service > 33) service = SVC_OTHER;
+    /* Fallback: einige SDK-Wrapper senden ueber die srv-Session, obwohl das
+       Kommando zu APT/cfg gehoert (im Trace beobachtet). */
+    if (service == SVC_SRV) {
+        if (cmd == 0x0050 || cmd == 0x004F || cmd == 0x000D || cmd == 0x000E)
+            service = SVC_APT_U;
+        else if ((cmd == 0x0001 || cmd == 0x0003) && normal == 2)
+            service = SVC_CFG_U;
+    }
     /* Fallback: fs-Kommandos auch bei unbekanntem Handle als fs behandeln */
     if (h == NULL && (cmd & 0xFF00u) == 0x0800u) {
         service = SVC_FS_USER;
