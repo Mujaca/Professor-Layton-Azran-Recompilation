@@ -1,11 +1,14 @@
 /* Trace-Runtime: schreibt Records im Format "CTRTRC01" (siehe tools/recomp/trace.py). */
 #include "arm_trace.h"
+#include "arm_cpu.h"
 
 #include <stdio.h>
 #include <string.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 uint32_t arm_last_block = 0;
+uint32_t arm_watch_pc = 0;
 
 static FILE *g_file = NULL;
 static unsigned long long g_records = 0;
@@ -82,8 +85,23 @@ int arm_trace_is_open(void) {
     return g_file != NULL;
 }
 
-void arm_trace_block(uint32_t pc, uint32_t thumb) {
+void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
     arm_last_block = pc;
+    if (arm_watch_pc != 0 && pc == arm_watch_pc && c != NULL) {
+        fprintf(stderr, "[watch] 0x%08X r0=%08X r1=%08X r2=%08X r3=%08X "
+                        "r4=%08X r5=%08X r6=%08X r7=%08X sp=%08X lr=%08X\n",
+                pc, c->r[0], c->r[1], c->r[2], c->r[3], c->r[4], c->r[5], c->r[6],
+                c->r[7], c->r[13], c->r[14]);
+        {
+            uint32_t a = c->r[4] & ~3u;
+            if (a + 16 <= c->mem_size) {
+                fprintf(stderr, "[watch]   mem@r4: %08X %08X %08X %08X\n",
+                        (unsigned)arm_mem_read(c, a, 4), (unsigned)arm_mem_read(c, a + 4, 4),
+                        (unsigned)arm_mem_read(c, a + 8, 4), (unsigned)arm_mem_read(c, a + 12, 4));
+            }
+        }
+        fflush(stderr);
+    }
     if (!g_file) return;
     if (g_records >= g_max_records) return;
     if (g_unique_only && g_seen != NULL && !mark_seen(pc)) return;

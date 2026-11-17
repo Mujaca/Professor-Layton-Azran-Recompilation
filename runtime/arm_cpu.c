@@ -292,7 +292,16 @@ int arm_ldm_stm(ArmCpu *c, int base, int load, int writeback, int mode, uint32_t
         addr += 4;
     }
     if (writeback) {
-        c->r[base] = start + (uint32_t)total;
+        /* IA: +4n, IB: start-4+total, DA: start-4, DB: start */
+        if (mode == 3) {
+            c->r[base] = start;
+        } else if (mode == 2) {
+            c->r[base] = start - 4u;
+        } else if (mode == 1) {
+            c->r[base] = start - 4u + (uint32_t)total;
+        } else {
+            c->r[base] = start + (uint32_t)total;
+        }
     }
     return pc_loaded;
 }

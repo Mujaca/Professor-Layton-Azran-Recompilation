@@ -59,9 +59,9 @@ int main(int argc, char **argv) {
     arm_cpu_init(&c, g_mem, MEM_SIZE);
     load_code(&c);
 
-    c.r[13] = 0x08000000u + 0x00200000u;   /* Stack in FCRAM */
+    c.r[13] = 0x0FFF0000u;                 /* App-Heap-Ende - Stack */
     c.r[14] = 0u;
-    c.tpidruro = 0x1FF90000u;              /* TLS */
+    c.tpidruro = 0x1FF82000u;              /* TLS_AREA_VADDR */
     c.r[15] = 0x00100000u;
 
     if (getenv("ARM_TRACE_FILE")) {

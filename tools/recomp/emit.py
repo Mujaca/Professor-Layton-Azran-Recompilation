@@ -507,18 +507,34 @@ class Emitter:
             rd = isa.reg_num(ops[0])
             if rd is None:
                 raise Unsupported(ins.op_str)
+
             if base == "rrx":
-                return ["c->r[%d] = arm_shift_imm(SH_ROR, 0u, c->r[%d], 0);"
-                        % (rd, isa.reg_num(ops[1]))]
-            src = self.value(ops[1], pc)
-            if len(ops) >= 3:
+                expr = "arm_shift_imm(SH_ROR, 0u, %s, &sh)" % self.value(ops[1], pc)
+                plain = "arm_shift_imm(SH_ROR, 0u, %s, 0)" % self.value(ops[1], pc)
+            elif len(ops) >= 3:
+                src = self.value(ops[1], pc)
                 amt = ops[2]
                 if amt.startswith("#"):
-                    return ["c->r[%d] = arm_shift_imm(%s, %du, %s, 0);"
-                            % (rd, kind, isa.imm_value(amt), src)]
-                ra = self.value(amt, pc)
-                return ["c->r[%d] = arm_shift_reg(%s, %s, %s, 0);" % (rd, kind, ra, src)]
-            return ["c->r[%d] = %s;" % (rd, src)]
+                    expr = "arm_shift_imm(%s, %du, %s, &sh)" % (kind, isa.imm_value(amt), src)
+                    plain = "arm_shift_imm(%s, %du, %s, 0)" % (kind, isa.imm_value(amt), src)
+                else:
+                    ra = self.value(amt, pc)
+                    expr = "arm_shift_reg(%s, %s, %s, &sh)" % (kind, ra, src)
+                    plain = "arm_shift_reg(%s, %s, %s, 0)" % (kind, ra, src)
+            else:
+                src = self.value(ops[1], pc)
+                expr = src
+                plain = src
+
+            if not ins.update_flags:
+                return ["c->r[%d] = %s;" % (rd, plain)]
+
+            return ["{", "  int sh = -1;",
+                    "  uint32_t r = %s;" % expr,
+                    "  c->r[%d] = r;" % rd,
+                    "  c->n = r >> 31; c->z = (r == 0) ? 1u : 0u;",
+                    "  if (sh >= 0) c->c = (uint32_t)sh;",
+                    "}"]
 
         if base in ("uxth", "uxtb", "uxth.w", "uxtb.w", "sxth", "sxtb", "sxth.w", "sxtb.w"):
             rd = isa.reg_num(ops[0])

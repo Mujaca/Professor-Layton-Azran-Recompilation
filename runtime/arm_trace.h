@@ -5,17 +5,21 @@
 
 #include <stdint.h>
 
+struct ArmCpu;
+
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 extern uint32_t arm_last_block;
+extern uint32_t arm_watch_pc;
 
 void arm_trace_open(const char *path);
 void arm_trace_close(void);
 int arm_trace_is_open(void);
 
-void arm_trace_block(uint32_t pc, uint32_t thumb);
+void arm_trace_block(struct ArmCpu *c, uint32_t pc, uint32_t thumb);
 void arm_trace_svc(uint32_t imm);
 void arm_trace_ipc(const char *service, uint32_t cmd_id);
 void arm_trace_frame(void);

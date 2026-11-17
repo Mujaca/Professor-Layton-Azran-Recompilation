@@ -1,73 +1,78 @@
-# Erste lauffähige Version (Port-Skelett)
+# Port-Status
 
-Stand: 2026-11-17
+Letzte Aktualisierung: 2026-11-17 (abends)
 
-## Was läuft
+## Kurzfassung
 
-`out\port.exe` startet, öffnet ein natives Win32-Fenster, lädt den **recompilierten
-Spielcode** (17.087 ARM- + 64 Thumb-Funktionen, 1,18 Mio. Instruktionen) und führt ihn
-mit einer HLE-Schicht aus. Angezeigt werden:
-
-- das Spiele-Icon/Titel aus der **SMDH** (`icon.bin`) als Startscreen,
-- eine Statuszeile mit PC/Halt-Zustand,
-- der rohe Framebuffer-Bereich (`0x1FF00000`, 400×240) — sobald das Spiel zeichnet.
+Der recompilierte Code bootet jetzt durch die **SDK-Initialisierung** (Heap, Ressourcen,
+`srv`-Verbindung, APT-Handle) bis in die Applet-Initialisierung. Der Menü-Screen ist noch
+nicht erreicht; aktueller Blocker ist ein **Mutex-Spinlock in der APT-Phase**.
 
 ```powershell
 python tools\build_port.py
-.\out\port.exe out\romfs                # Fenster
-.\out\port.exe out\romfs --shot out\shot.bmp   # Screenshot + Ende
+.\out\port.exe out\romfs
 ```
 
-## Was in dieser Runde dazukam
+## Was in dieser Runde gefixt wurde (Recompiler)
 
-| Baustein | Datei | Inhalt |
-|---|---|---|
-| HLE-Schicht | `runtime/hle/hle.c` | IPC-Parser (Header-Layout aus Azahar verifiziert), Handle-Tabelle, `srv:` (RegisterClient/EnableNotification/RegisterService/GetServiceHandle), SVCs (ControlMemory, Threads, Sync, GetSystemInfo/ProcessInfo, ResourceLimits, ConnectToPort, SendSyncRequest …) |
-| Boot-Host | `tests/boot.c` | 768 MB Speichermodell (FCRAM + VRAM bis 0x20500000), Code-Load, TLS, Watchdog, Ereignis-Ringpuffer |
-| Port-Host | `tests/port.c` | Win32-Fenster, Spiel-Thread, Framebuffer-Blitten, SMDH-Startscreen, Screenshot |
-| Fenster | `runtime/platform/window.c` | GDI-Fenster, 32-Bit-DIB, Skalierung 2×, Statuszeilen |
-| Dispatcher | `generiert` | `arm_call_guest()` mit sortierter Adresstabelle (ARM/Thumb-Bit) — indirekte Aufrufe (`blx rN`) funktionieren jetzt |
-| Coverage | `tools/recomp/scan.py` | `--seed-pointers`: alle Wörter im Image, die auf Code zeigen, als Funktionskandidaten → **81,85 %** Textabdeckung (vorher 71,5 %) |
-| Recompiler-Fix | `tools/recomp/emit.py` | Post-Index-Schreibweise (`ldr/str rX, [rY], #imm`) setzt jetzt Writeback — vorher Endlosschleife beim BSS-Nullsetzen |
-| Build/Auto-Iteration | `tools/build_port.py`, `tools/port_build.py` | Build-Skript; `port_build.py` sammelt fehlende Call-Ziele und iteriert automatisch |
+| Bug | Wirkung |
+|---|---|
+| **Fehlender Fallthrough** zwischen Blöcken | Blöcke wurden in Fundreihenfolge ausgegeben; ohne explizites `goto` sprang der Code in den falschen Block (Ursache für viele „seltsame" Sprünge) |
+| **`lsls/lsrs/asrs` ohne Flag-Update** | SDK prüfte Ausrichtung über `lsls …; bne` → Heap-Allokation schlug fehl |
+| **Post-Index-Writeback** (`ldr/str rX, [rY], #imm`) | BSS-Nullschleife lief endlos |
+| **`push`/`stmdb`-Writeback** (DB/DA) | Stackpointer wurde nicht dekrementiert → SDK las ihre Argumente vom falschen Stack-Slot |
 
-## Aktueller Stand des Boots
+Alle 13 Semantik-Tests laufen weiterhin (`python tests\mvp_selftest.py`).
 
-Der Code läuft durch die SDK-Initialisierung bis zur Heap-/Ressourcen-Abfrage und
-danach in `srv:` (EnableNotification). Danach folgt ein `svcBreak` (Panic) und ein
-`memcpy` mit ungültigen Zeigern (Absturz bei `0x30000000`).
+## Was in dieser Runde dazukam (HLE)
 
-Ereignisfolge (aus dem Ringpuffer):
+- **Config-Memory** (`0x1FF80000`) initialisiert: Kernel-/Firmware-Version, `ns_tid`,
+  `app_mem_alloc = 128 MiB`, `sys_mem_alloc`, `base_mem_alloc`
+- **`svcControlMemory`** korrekt: Op/Flags aus `r0`, Permissions aus `r4`, Out-Pointer vom
+  Stack; Ergebnis in `r1` (SDK-Wrapper-Konvention); Bump-Allocator für App-/Linear-Heap
+- **`svcGetResourceLimit*`**, `QueryMemory`, `CreateAddressArbiter` mit Werten/Handles
+- **`srv:`** vollständig genug: RegisterClient, EnableNotification, RegisterService,
+  GetServiceHandle — inkl. Handle-Übergabe in **beiden** Layouts (normale Parameter und
+  Translate-Deskriptor), weil die Nintendo-SDK das Handle als normalen Parameter liest
+- **`APT:U`**: GetLockHandle, Initialize, Enable, Finalize, NotifyToWait, GetAppletManInfo
+- **Watchpoint-Diagnose**: `ARM_WATCH=0x…` loggt Register + Speicher an beliebigen Blöcken
+- **SVC-/IPC-Trace**: `HLE_TRACE=1` schreibt `out/hle_trace.txt`
+
+## Aktueller Boot-Verlauf (Log)
 
 ```
-svc 0x38 GetResourceLimit
-svc 0x3A GetResourceLimitCurrentValues
-svc 0x23 CloseHandle
-svc 0x3C Break            <- Panic: Heap-/Ressourcen-Setup schlaegt fehl
+svc 0x21 CreateAddressArbiter
+svc 0x38 GetResourceLimit / 0x3A CurrentValues / 0x23 CloseHandle
+svc 0x01 ControlMemory (ALLOC 87 MiB @0x08000000, ALLOC_LINEAR 41 MiB @0x14000000)
 svc 0x2D ConnectToPort("srv:")
-svc 0x32 SendSyncRequest  (srv: EnableNotification)
+ipc srv cmd 0x1 (RegisterClient)
+ipc srv cmd 0x2 (EnableNotification)
+ipc srv cmd 0x5 ("APT:U") -> Handle
+ipc APT:U cmd 0x1 (GetLockHandle)
+-> danach Spinlock (nn::os-Mutex) bei 0x12E1F0
 ```
 
-Der Break kommt also **vor** dem ersten Service-Aufruf: die HLE liefert bei der
-Heap-Berechnung (Resource-Limit-Werte / `svcControlMemory`) noch keine plausiblen
-Werte. Das ist der nächste konkrete Ansatzpunkt.
+## Nächster Blocker
 
-## Nächste Schritte bis zum Menü
+Der Mutex bei `0x12E1F0` wartet auf einen **positiven** Wert (Konvention: >0 = frei,
+<0 = belegt). Die Objekte liegen in `.bss` (0x3EB000–0x456168) und sind nach dem
+BSS-Nullen 0 — die C++-Statik-Initialisierer (`__libc_init_array`) setzen sie offenbar
+nicht (oder werden von uns noch nicht korrekt ausgeführt).
 
-1. **Heap korrekt modellieren**: `svcControlMemory` (Bump-Allocator in FCRAM),
-   `svcGetResourceLimit*` mit realistischen Werten, `svcQueryMemory`.
-2. **Threads** über Windows-Fibers (`svcCreateThread`/`ExitThread`/`WaitSynchronization`)
-   — GSP/HID laufen auf eigenen Threads.
-3. **fs:USER**: `romfs:`-Pfade auf `out/romfs/`, Datei-Handles, `ReadFile` mit echten Daten.
-4. **apt:U**, **hid:USER**, **gsp::Gpu** (Register-Schreiben, Interrupt-Queue, Swap).
-5. **PICA-Renderer** für den 2D-Anteil (TEV-Subset, Texturen ETC1/RGBA8) → erst
-   damit kann der Menü-Screen tatsächlich gezeichnet werden.
+Nächste Schritte:
+1. `__libc_init_array` verifizieren (Init-Array-Tabelle ablaufen, Konstruktoren aufrufen)
+   — damit werden alle globalen Mutexe/Objekte korrekt initialisiert.
+2. Danach APT-Initialisierung fortsetzen (`Initialize`, `Enable`, `GetSharedFont`).
+3. `fs:USER` (RomFS auf `out/romfs`, Datei-Handles, `ReadFile`).
+4. `hid:USER`, `gsp::Gpu` (Register/Command-Listen, Swap) und der PICA-2D-Renderer.
 
-## Reproduktion
+## Werkzeuge für die Weiterarbeit
 
 ```powershell
 $env:PYTHONPATH = "tools"
-python -m recomp.cli scan --in out\exefs\code_decomp.bin --prologues --seed-pointers
+$env:HLE_LOG = "1"           # IPC/SVC-Log
+$env:HLE_TRACE = "1"         # out/hle_trace.txt
+$env:ARM_WATCH = "12E1F0"    # Register+Speicher an diesem Block
+$env:HLE_MUTEX_HACK = "1"    # Workaround: erster Mutex auf 1 setzen
 python tools\build_port.py
-.\out\port.exe out\romfs --shot out\shot.bmp
 ```

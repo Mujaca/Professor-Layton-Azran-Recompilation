@@ -6,6 +6,7 @@
  *   bits 16-31 : command_id
  */
 #include "hle.h"
+#include "../arm_trace.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -73,6 +74,19 @@ static uint64_t g_tick = 0x1000;
 static Handle g_handles[MAX_HANDLES];
 static int g_next_handle = 1;
 static uint32_t g_srv_handle = 0;
+static FILE *g_trace_file = NULL;
+static int late_mutex_hack = 0;
+/* svc_mutex_hack */
+
+static void svc_trace(uint32_t imm, ArmCpu *c) {
+    if (g_trace_file) {
+        fprintf(g_trace_file, "svc %02X r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X blk=%08X\n",
+                imm, c->r[0], c->r[1], c->r[2], c->r[3], c->r[14], arm_last_block);
+        fflush(g_trace_file);
+    }
+}
+static uint32_t g_heap_cursor = 0x08000000u;   /* App-Heap: 0x08000000..0x10000000 */
+static uint32_t g_lin_cursor  = 0x14000000u;   /* Linear-Heap: 0x14000000..0x1C000000 */
 static int g_ipc_count = 0;
 static int g_ipc_log_limit = 60;
 static unsigned g_cmd_seen[64][64];
@@ -190,8 +204,9 @@ static void srv_command(Ipc *r, uint32_t *p) {
         case 2: { /* EnableNotification: keine Parameter */
             uint32_t h = (uint32_t)alloc_handle(SVC_OTHER, "srv:notif");
             if (g_log) printf("[srv] EnableNotification -> %u\n", h);
-            ipc_begin(r, 2, 1, 2);
+            ipc_begin(r, 2, 2, 2);
             ipc_put(r, 0);
+            ipc_put(r, h);
             ipc_put_handle_copy(r, h);
             break;
         }
@@ -222,8 +237,9 @@ static void srv_command(Ipc *r, uint32_t *p) {
             if (g_log) {
                 printf("[srv] GetServiceHandle \"%s\" -> %d (%s)\n", name, h, SERVICE_NAMES[svc]);
             }
-            ipc_begin(r, 5, 1, 2);
+            ipc_begin(r, 5, 2, 2);
             ipc_put(r, 0);
+            ipc_put(r, (uint32_t)h);
             ipc_put_handle(r, (uint32_t)h);
             break;
         }
@@ -231,6 +247,60 @@ static void srv_command(Ipc *r, uint32_t *p) {
             if (g_log) printf("[srv] cmd %u (unbekannt) -> 0\n", r->cmd);
             ipc_begin(r, r->cmd, 1, 0);
             ipc_put(r, 0);
+            break;
+    }
+}
+
+static void generic_command(Ipc *r, int service);
+
+static void put_result(Ipc *r) {
+    ipc_put(r, 0);
+}
+
+static void apt_command(Ipc *r, uint32_t *p) {
+    switch (r->cmd) {
+        case 1: { /* GetLockHandle */
+            uint32_t attrs = p[0];
+            uint32_t lock = (uint32_t)alloc_handle(SVC_OTHER, "apt-lock");
+            ipc_begin(r, 1, 3, 2);
+            put_result(r);
+            ipc_put(r, attrs);
+            ipc_put(r, 1);            /* state = running */
+            ipc_put_handle(r, lock);
+            break;
+        }
+        case 2: { /* Initialize */
+            uint32_t ev1 = (uint32_t)alloc_handle(SVC_OTHER, "apt-notif");
+            uint32_t ev2 = (uint32_t)alloc_handle(SVC_OTHER, "apt-param");
+            ipc_begin(r, 2, 1, 3);
+            put_result(r);
+            ipc_put(r, 0x00u);      /* CopyHandle deskriptor */
+            ipc_put_handle(r, ev1);
+            ipc_put_handle(r, ev2);
+            break;
+        }
+        case 3: case 4: case 0x28: { /* Enable / Finalize / NotifyToWait */
+            ipc_begin(r, r->cmd, 1, 0);
+            put_result(r);
+            break;
+        }
+        case 5: { /* GetAppletManInfo */
+            ipc_begin(r, 5, 5, 0);
+            put_result(r);
+            ipc_put(r, 1);         /* active applet position */
+            ipc_put(r, 0x101);     /* requested applet id */
+            ipc_put(r, 0x101);     /* home menu id */
+            ipc_put(r, 0x100);     /* active applet id */
+            break;
+        }
+        case 0x0B: case 0x43: { /* InquireNotification / ? */
+            ipc_begin(r, r->cmd, 2, 0);
+            put_result(r);
+            ipc_put(r, 0);
+            break;
+        }
+        default:
+            generic_command(r, SVC_APT_U);
             break;
     }
 }
@@ -266,6 +336,12 @@ static void dispatch_ipc(uint32_t handle) {
     r.written = 0;
 
     int service = h ? h->service : SVC_OTHER;
+    if (getenv("HLE_MUTEX_HACK") && !late_mutex_hack) {
+        late_mutex_hack = 1;
+        uint32_t v = 1;
+        memcpy(c->mem + 0x40EE10u, &v, 4);
+        printf("[hle] late Mutex-Hack: [0x40EE10] = 1\n");
+    }
     ev(2, (uint32_t)service, cmd, normal);
     g_ipc_count++;
     if (cmd < 64 && service >= 0 && service < 64) g_cmd_seen[service][cmd]++;
@@ -302,15 +378,56 @@ static void write_u64(ArmCpu *c, uint32_t addr, uint64_t value) {
     write_u32(c, addr + 4, (uint32_t)(value >> 32));
 }
 
+static void w32(ArmCpu *c, uint32_t addr, uint32_t v) {
+    memcpy(c->mem + addr, &v, 4);
+}
+
+static void setup_config_mem(ArmCpu *c) {
+    uint8_t *p = c->mem + 0x1FF80000u;
+    memset(p, 0, 0x1000);
+    p[0x01] = 0x3A;                 /* kernel version rev  */
+    p[0x02] = 0x02;                 /* kernel version min  */
+    p[0x03] = 0x02;                 /* kernel version maj  */
+    w32(c, 0x1FF80008u, 0x00008002u);  /* ns_tid low  */
+    w32(c, 0x1FF8000Cu, 0x00040130u);  /* ns_tid high */
+    w32(c, 0x1FF80010u, 2u);           /* sys_core_ver */
+    p[0x14] = 1;                 /* unit_info (retail) */
+    p[0x16] = 1;                    /* prev_firm */
+    w32(c, 0x1FF80018u, 0x0000F450u);  /* ctr_sdk_ver */
+    w32(c, 0x1FF80030u, 0u);           /* app_mem_type */
+    w32(c, 0x1FF80040u, 0x08000000u);  /* app_mem_alloc = 128 MiB */
+    w32(c, 0x1FF80044u, 0x01000000u);  /* sys_mem_alloc */
+    w32(c, 0x1FF80048u, 0x00800000u);  /* base_mem_alloc */
+    p[0x61] = 0x3A;
+    p[0x62] = 0x02;
+    p[0x63] = 0x02;
+    w32(c, 0x1FF80064u, 2u);
+    w32(c, 0x1FF80068u, 0x0000F450u);
+    printf("[hle] config-memory initialisiert (app_mem_alloc=128MiB)\n");
+}
+
 void hle_init(ArmCpu *c, const char *romfs_dir) {
     g_cpu = c;
     snprintf(g_romfs, sizeof(g_romfs), "%s", romfs_dir ? romfs_dir : "out/romfs");
     g_log = getenv("HLE_LOG") != NULL;
     const char *lim = getenv("HLE_IPC_LOG");
     if (lim) g_ipc_log_limit = atoi(lim);
+    setup_config_mem(c);
+    /* TODO: folgt aus der Analyse des Mutex-Spinlocks (Wert 1 = frei). */
+    if (getenv("HLE_MUTEX_HACK")) {
+        uint32_t v = 1;
+        memcpy(c->mem + 0x40EE10u, &v, 4);
+        printf("[hle] Mutex-Hack: [0x40EE10] = 1\n");
+    }
     memset(g_handles, 0, sizeof(g_handles));
     g_next_handle = 1;
     g_srv_handle = (uint32_t)alloc_handle(SVC_SRV, "srv:");
+    if (getenv("ARM_WATCH")) {
+        arm_watch_pc = (uint32_t)strtoul(getenv("ARM_WATCH"), NULL, 16);
+    }
+    if (getenv("HLE_TRACE")) {
+        g_trace_file = fopen("out/hle_trace.txt", "w");
+    }
     printf("[hle] romfs=%s log=%d srv-handle=%u\n", g_romfs, g_log, g_srv_handle);
 }
 
@@ -332,17 +449,84 @@ void hle_report(void) {
 
 uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
     ev(1, imm, c->r[0], c->r[1]);
+    svc_trace(imm, c);
+    if (getenv("HLE_MUTEX_HACK") && !late_mutex_hack) {
+        late_mutex_hack = 1;
+        uint32_t v = 1;
+        memcpy(c->mem + 0x40EE10u, &v, 4);
+    }
+    if (imm == 0x3C) {
+        printf("[svc] Break bei Block 0x%08X: r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X\n",
+               arm_last_block, c->r[0], c->r[1], c->r[2], c->r[3], c->r[14]);
+        if (g_log) {
+            uint32_t base = 0x003D8CC0u;
+            printf("      globals @0x%08X:", base);
+            for (int i = 0; i < 16; i++) {
+                printf(" %08X", (uint32_t)arm_mem_read(c, base + i * 4, 4));
+            }
+            printf("\n");
+        }
+    }
     switch (imm) {
-        case 0x01: { /* ControlMemory(addr, size, op, perm) */
-            uint32_t addr = c->r[1];
-            if (addr != 0) write_u32(c, c->r[0], addr);
+        case 0x01: { /* ControlMemory(out, addr0, addr1, size, op, perm) */
+            /* SDK-Wrapper (0x28ED30): r0=Operation, r4=Permissions,
+               r1=addr0, r2=addr1, r3=size; Out-Pointer liegt auf dem Stack. */
+            uint32_t out = (uint32_t)arm_mem_read(c, c->r[13], 4);
+            uint32_t addr0 = c->r[1], size = c->r[3];
+            uint32_t operation = c->r[0];
+            uint32_t perms = c->r[4];
+            (void)perms;
+            uint32_t op = operation & 0xFFu;
+            int linear = (operation & 0x10000u) != 0;
+            uint32_t addr = addr0;
+
+            if (op == 1) {                     /* MEMOP_FREE */
+                addr = addr0;
+            } else if (op == 3) {              /* MEMOP_COMMIT */
+                if (addr == 0) {
+                    if (linear) {
+                        addr = g_lin_cursor;
+                        g_lin_cursor += (size + 0xFFFu) & ~0xFFFu;
+                    } else {
+                        addr = g_heap_cursor;
+                        g_heap_cursor += (size + 0xFFFu) & ~0xFFFu;
+                    }
+                }
+            } else {                            /* RESERVE/MAP/UNMAP/PROTECT */
+                addr = addr0;
+            }
+            if (out) write_u32(c, out, addr);
+            c->r[1] = addr;          /* SDK-Wrapper speichert r1 nach *out */
+            if (g_log) {
+                printf("[svc] ControlMemory op=%u addr0=0x%08X size=0x%X linear=%d -> 0x%08X",
+                       op, addr0, size, linear, addr);
+                printf(" | r0=%08X r4=%08X stack:", c->r[0], c->r[4]);
+                for (int i = 0; i < 6; i++) {
+                    printf(" %08X", (uint32_t)arm_mem_read(c, c->r[13] + i * 4, 4));
+                }
+                printf("\n");
+            }
             return 0;
         }
-        case 0x02: /* QueryMemory */
+        case 0x02: { /* QueryMemory(info, page_info, addr) */
+            uint32_t info = c->r[0], page = c->r[1], addr = c->r[2];
+            uint32_t base = 0x08000000u, size = 0x08000000u;
+            if (addr >= 0x14000000u) { base = 0x14000000u; size = 0x08000000u; }
+            if (addr >= 0x1F000000u) { base = 0x1F000000u; size = 0x00600000u; }
+            if (info) {
+                write_u32(c, info + 0, base);
+                write_u32(c, info + 4, size);
+                write_u32(c, info + 8, 3);      /* state = committed */
+                write_u32(c, info + 12, 3);     /* perm = rw */
+            }
+            if (page) write_u32(c, page, 0);
             return 0;
+        }
         case 0x08: { /* CreateThread(out, entry, arg, stack, prio>>..., ...) */
             uint32_t out = c->r[0];
-            if (out) write_u32(c, out, (uint32_t)alloc_handle(SVC_OTHER, "thread"));
+            uint32_t h = (uint32_t)alloc_handle(SVC_OTHER, "thread");
+            if (out) write_u32(c, out, h);
+            c->r[1] = h;
             return 0;
         }
         case 0x09: /* ExitThread */
@@ -353,13 +537,21 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
         case 0x15: /* CreateSemaphore */
         case 0x17: { /* CreateEvent */
             uint32_t out = c->r[0];
-            if (out) write_u32(c, out, (uint32_t)alloc_handle(SVC_OTHER, "sync"));
+            uint32_t h = (uint32_t)alloc_handle(SVC_OTHER, "sync");
+            if (out) write_u32(c, out, h);
+            c->r[1] = h;
             return 0;
         }
         case 0x18: case 0x19: case 0x14: case 0x16: /* Signal/Clear/Release */
             return 0;
         case 0x1E: case 0x1F: case 0x20: /* MemoryBlock */
             return 0;
+        case 0x21: { /* CreateAddressArbiter(out) */
+            uint32_t h = (uint32_t)alloc_handle(SVC_OTHER, "arbiter");
+            if (c->r[0]) write_u32(c, c->r[0], h);
+            c->r[1] = h;
+            return 0;
+        }
         case 0x22: /* ArbitrateAddress */
             return 0;
         case 0x23: /* CloseHandle */
@@ -373,6 +565,7 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             Handle *h = get_handle(c->r[1]);
             uint32_t nh = h ? (uint32_t)alloc_handle(h->service, h->name) : 0;
             if (c->r[0]) write_u32(c, c->r[0], nh);
+            c->r[1] = nh;
             return 0;
         }
         case 0x28: /* GetSystemTick */
@@ -426,22 +619,21 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             return 0;
         case 0x38: { /* GetResourceLimit(out, process) */
             uint32_t out = c->r[0];
-            if (out) write_u32(c, out, (uint32_t)alloc_handle(SVC_OTHER, "reslimit"));
+            uint32_t h = (uint32_t)alloc_handle(SVC_OTHER, "reslimit");
+            if (out) write_u32(c, out, h);
+            c->r[1] = h;
             return 0;
         }
         case 0x39: { /* GetResourceLimitLimitValues(vals, handle, names, count) */
             uint32_t vals = c->r[0], names = c->r[2], count = c->r[3];
             for (uint32_t i = 0; i < count && i < 16; i++) {
-                uint32_t name = names ? (uint32_t)arm_mem_read(c, names + i * 4, 4) : 0;
-                uint64_t v = 0x40000000ull;
-                if (name == 0) v = 0x40000000ull;
-                write_u64(c, vals + i * 8, v);
+                write_u64(c, vals + i * 8, 0x08000000ull);   /* 128 MiB je Ressource */
             }
             return 0;
         }
         case 0x3A: { /* GetResourceLimitCurrentValues(vals, handle, names, count) */
             uint32_t vals = c->r[0], count = c->r[3];
-            for (uint32_t i = 0; i < count && i < 16; i++) write_u64(c, vals + i * 8, 0x00100000ull);
+            for (uint32_t i = 0; i < count && i < 16; i++) write_u64(c, vals + i * 8, 0ull);
             return 0;
         }
         case 0x3C: /* Break */

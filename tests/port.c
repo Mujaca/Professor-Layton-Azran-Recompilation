@@ -10,7 +10,7 @@
 #include <windows.h>
 
 #define MEM_SIZE 0x30000000u
-#define FB_ADDR  0x1FF00000u
+#define FB_ADDR  0x1F000000u
 #define FB_W 400
 #define FB_H 240
 
@@ -120,8 +120,8 @@ int main(int argc, char **argv) {
     printf("code: %zu Bytes geladen\n", n);
 
     arm_cpu_init(&g_cpu, g_mem, MEM_SIZE);
-    g_cpu.r[13] = 0x08000000u + 0x00200000u;
-    g_cpu.tpidruro = 0x1FF90000u;
+    g_cpu.r[13] = 0x0FFF0000u;
+    g_cpu.tpidruro = 0x1FF82000u;
     g_cpu.r[15] = 0x00100000u;
 
     hle_init(&g_cpu, romfs);

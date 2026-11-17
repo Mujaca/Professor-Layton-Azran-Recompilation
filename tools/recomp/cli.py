@@ -84,6 +84,29 @@ def collect_stats(res, data):
     }
 
 
+def needs_fallthrough(ins):
+    """True, wenn nach dieser Instruktion der naechste Block folgt."""
+    import capstone.arm as A
+    if ins.id == A.ARM_INS_B:
+        return ins.cc != A.ARM_CC_AL
+    if ins.id == A.ARM_INS_BX:
+        return False
+    if ins.id == A.ARM_INS_BLX:
+        for op in ins.operands:
+            if op.type == A.ARM_OP_REG:
+                return False
+        return True
+    if ins.id == A.ARM_INS_POP:
+        return "pc" not in ins.op_str
+    if ins.id == A.ARM_INS_LDM:
+        return "pc" not in ins.op_str
+    if ins.id in (A.ARM_INS_LDR, A.ARM_INS_MOV) and ins.op_str.startswith("pc"):
+        return False
+    if ins.id in (A.ARM_INS_ADD, A.ARM_INS_SUB) and ins.op_str.startswith("pc"):
+        return False
+    return True
+
+
 def generate(res, path, max_funcs=None, trace=False):
     u32 = lambda v: v & 0xFFFFFFFF
     needed = set()
@@ -98,8 +121,7 @@ def generate(res, path, max_funcs=None, trace=False):
 
     out = ["/* generiert vom Recompiler-MVP */", '#include "arm_cpu.h"',
            '#include <stdio.h>']
-    if trace:
-        out.append('#include "arm_trace.h"')
+    out.append('#include "arm_trace.h"')
     out.append("")
     for a in all_addrs:
         out.append("void fn_%08X(ArmCpu *c);" % u32(a))
@@ -150,11 +172,18 @@ def generate(res, path, max_funcs=None, trace=False):
         for blk in fn.blocks:
             out.append("%s:" % em.label(blk.addr))
             if trace:
-                out.append("  arm_trace_block(0x%08Xu, %du);" % (u32(blk.addr), 1 if fn.thumb else 0))
+                out.append("  arm_trace_block(c, 0x%08Xu, %du);" % (u32(blk.addr), 1 if fn.thumb else 0))
             for ins in blk.insns:
                 lines, _ = instruction_lines(em, ins)
                 for ln in lines:
                     out.append("  " + ln)
+            if blk.insns and needs_fallthrough(blk.insns[-1]):
+                nxt = blk.insns[-1].address + blk.insns[-1].size
+                known = set(b.addr for b in fn.blocks)
+                if nxt in known:
+                    out.append("  goto %s;" % em.label(nxt))
+                else:
+                    out.append("  return;")
         out.append("  return;")
         out.append("}")
         out.append("")
