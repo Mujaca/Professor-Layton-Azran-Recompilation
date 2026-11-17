@@ -632,7 +632,17 @@ static void fs_command(Ipc *r, uint32_t *p) {
                 if (addr) {
                     const uint8_t *dbg = g_cur_mem + (addr & 0x1FFFFFFFu);
                     printf(" bytes:");
-                    for (int i = 0; i < 16; i++) printf(" %02X", dbg[i]);
+                    for (int i = 0; i < 32; i++) printf(" %02X", dbg[i]);
+                }
+                /* Alle Translate-Paare mitschreiben, um den echten Pfadpuffer zu finden. */
+                for (int q = 0; q + 1 < r->translate; q += 2) {
+                    uint32_t f2 = p[r->normal + q];
+                    uint32_t a2 = p[r->normal + q + 1];
+                    printf(" | t%d flags=%08X addr=%08X:", q / 2, f2, a2);
+                    if (a2 >= 0x08000000u && a2 < 0x20000000u) {
+                        const uint8_t *b2 = g_cur_mem + (a2 & 0x1FFFFFFFu);
+                        for (int k = 0; k < 24; k++) printf(" %02X", b2[k]);
+                    }
                 }
                 printf("\n");
             }
