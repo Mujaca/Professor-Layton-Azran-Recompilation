@@ -1222,7 +1222,9 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             return 0;
         }
         case 0x28: /* GetSystemTick -> 64 Bit in r0:r1 */
-            g_tick += 0x1000;
+            /* Virtuelle Zeit: deutlich schneller als Echtzeit, damit
+               Sleep-/Timeout-Schleifen nicht Millionen Iterationen brauchen. */
+            g_tick += 0x20000;
             c->r[1] = (uint32_t)(g_tick >> 32);
             return (uint32_t)g_tick;
         case 0x2A: { /* GetSystemInfo(type, out u64*, param, process) */
