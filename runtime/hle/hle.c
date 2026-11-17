@@ -50,11 +50,23 @@ enum ServiceId {
     SVC_SSL,
     SVC_HTTP,
     SVC_OTHER,
+    SVC_FILE,
 };
+
+#define MAX_FILES 64
+typedef struct {
+    int used;
+    char path[256];
+    FILE *fp;
+    uint32_t size;
+} FileSlot;
+
+static FileSlot g_files[MAX_FILES];
 
 typedef struct {
     int used;
     int service;     /* ServiceId */
+    int file;        /* Index in g_files oder -1 */
     char name[12];
 } Handle;
 
@@ -77,6 +89,8 @@ static uint32_t g_srv_handle = 0;
 static FILE *g_trace_file = NULL;
 static int late_mutex_hack = 0;
 static int g_srv_layout = 2;
+static uint32_t g_cur_handle = 0;
+static uint8_t *g_cur_mem = NULL;
 /* svc_mutex_hack */
 
 static void svc_trace(uint32_t imm, ArmCpu *c) {
@@ -153,6 +167,7 @@ static int alloc_handle(int service, const char *name) {
         if (!g_handles[i].used) {
             g_handles[i].used = 1;
             g_handles[i].service = service;
+            g_handles[i].file = -1;
             snprintf(g_handles[i].name, sizeof(g_handles[i].name), "%s", name ? name : "?");
             return i;
         }
@@ -264,6 +279,8 @@ static void srv_command(Ipc *r, uint32_t *p) {
 
 static void generic_command(Ipc *r, int service);
 static void hid_command(Ipc *r, uint32_t *p);
+static void fs_command(Ipc *r, uint32_t *p);
+static void file_command(Ipc *r, uint32_t *p);
 
 static void put_result(Ipc *r) {
     ipc_put(r, 0);
@@ -342,6 +359,178 @@ static void hid_command(Ipc *rp, uint32_t *p) {
     }
 }
 
+/* Sucht im Command-Buffer nach einem Pfadstring (ASCII oder UTF-16LE). */
+static int find_path(const uint32_t *buf, char *out, int out_size) {
+    const uint8_t *base = (const uint8_t *)buf;
+    int best_len = 0;
+    for (int mode = 0; mode < 2; mode++) {
+        for (int off = 0; off + 8 < 0x100; off += (mode == 0 ? 1 : 2)) {
+            char tmp[256];
+            int n = 0;
+            if (mode == 0) {
+                for (int i = 0; i < 250; i++) {
+                    uint8_t c = base[off + i];
+                    if (c == 0) break;
+                    if (c < 0x20 || c > 0x7E) { n = -1; break; }
+                    tmp[n++] = (char)c;
+                }
+            } else {
+                for (int i = 0; i < 120; i++) {
+                    uint8_t lo = base[off + i * 2];
+                    uint8_t hi = base[off + i * 2 + 1];
+                    if (lo == 0 && hi == 0) break;
+                    if (hi != 0 || lo < 0x20 || lo > 0x7E) { n = -1; break; }
+                    tmp[n++] = (char)lo;
+                }
+            }
+            if (n < 3) continue;
+            tmp[n] = 0;
+            int score = 0;
+            for (int i = 0; i < n; i++) {
+                if (tmp[i] == '/') score += 2;
+                if (tmp[i] == '.') score += 1;
+                if (tmp[i] == ':') score += 1;
+            }
+            if (score < 2) continue;
+            if (n > best_len) {
+                best_len = n;
+                snprintf(out, out_size, "%s", tmp);
+            }
+        }
+    }
+    return best_len;
+}
+
+static int open_guest_file(const char *guest_path, FileSlot **slot_out) {
+    char path[256];
+    const char *q = guest_path;
+    if (strncmp(q, "romfs:", 6) == 0) q += 6;
+    while (*q == '/') q++;
+    snprintf(path, sizeof(path), "%s/%s", g_romfs, q);
+    for (char *c = path; *c; c++) {
+        if (*c == '/') *c = '\\';
+    }
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return 0;
+    fseek(fp, 0, SEEK_END);
+    long sz = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (!g_files[i].used) {
+            g_files[i].used = 1;
+            snprintf(g_files[i].path, sizeof(g_files[i].path), "%s", path);
+            g_files[i].fp = fp;
+            g_files[i].size = (uint32_t)sz;
+            *slot_out = &g_files[i];
+            return 1;
+        }
+    }
+    fclose(fp);
+    return 0;
+}
+
+static void fs_command(Ipc *r, uint32_t *p) {
+    switch (r->cmd) {
+        case 0x0801: { /* Initialize */
+            ipc_begin(r, 0x0801, 1, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x0802: case 0x0803: { /* OpenFile / OpenFileDirectly */
+            char path[256];
+            int ok = find_path(p, path, sizeof(path)) > 0;
+            FileSlot *slot = NULL;
+            int opened = ok ? open_guest_file(path, &slot) : 0;
+            uint32_t h = 0;
+            if (opened) {
+                h = (uint32_t)alloc_handle(SVC_FILE, "file");
+                if (h && h < MAX_HANDLES) g_handles[h].file = (int)(slot - g_files);
+            }
+            if (g_log) {
+                printf("[fs] %s \"%s\" -> %s (handle %u, %u KiB)\n",
+                       r->cmd == 0x0802 ? "OpenFile" : "OpenFileDirectly", path,
+                       opened ? "ok" : "FEHLER", h, opened ? slot->size / 1024 : 0);
+            }
+            ipc_begin(r, r->cmd, 2, 2);
+            ipc_put(r, 0);
+            ipc_put(r, h);
+            ipc_put_handle(r, h);
+            break;
+        }
+        case 0x0812: { /* GetFreeBytes */
+            ipc_begin(r, 0x0812, 3, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 0x10000000u);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x0817: case 0x0818: { /* IsSdmcDetected / Writeable */
+            ipc_begin(r, r->cmd, 2, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        default:
+            generic_command(r, SVC_FS_USER);
+            break;
+    }
+}
+
+static void file_command(Ipc *r, uint32_t *p) {
+    Handle *h = get_handle(g_cur_handle);
+    if (h == NULL || h->file < 0) {
+        ipc_begin(r, r->cmd, 1, 0);
+        ipc_put(r, 0);
+        return;
+    }
+    FileSlot *f = &g_files[h->file];
+    switch (r->cmd) {
+        case 0x0804: { /* GetSize */
+            ipc_begin(r, 0x0804, 3, 0);
+            ipc_put(r, 0);
+            ipc_put(r, f->size);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x0808: { /* Close */
+            if (f->fp) fclose(f->fp);
+            f->used = 0;
+            f->fp = NULL;
+            h->file = -1;
+            ipc_begin(r, 0x0808, 1, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x0802: { /* Read(offset u64, length u32, buffer) */
+            uint64_t offset = (uint64_t)p[0] | ((uint64_t)p[1] << 32);
+            uint32_t length = p[2];
+            uint32_t addr = 0;
+            int nn = r->normal;
+            for (int i = 0; i < 8; i++) {
+                uint32_t w = p[nn + i];
+                if (w >= 0x08000000u && w < 0x20000000u) { addr = w; break; }
+            }
+            uint32_t done = 0;
+            if (addr && length && f->fp) {
+                fseek(f->fp, (long)offset, SEEK_SET);
+                done = (uint32_t)fread(g_cur_mem + (addr & 0x1FFFFFFFu), 1, length, f->fp);
+            }
+            if (g_log) {
+                printf("[fs] Read off=0x%llX len=0x%X -> %u Bytes\n",
+                       (unsigned long long)offset, length, done);
+            }
+            ipc_begin(r, 0x0802, 3, 0);
+            ipc_put(r, 0);
+            ipc_put(r, done);
+            ipc_put(r, 0);
+            break;
+        }
+        default:
+            generic_command(r, SVC_FILE);
+            break;
+    }
+}
+
 static void generic_command(Ipc *r, int service) {
     if (g_log) {
         printf("[%s] cmd 0x%04X normal=%d -> 0\n",
@@ -373,6 +562,8 @@ static void dispatch_ipc(uint32_t handle) {
     r.written = 0;
 
     int service = h ? h->service : SVC_OTHER;
+    g_cur_handle = handle;
+    g_cur_mem = c->mem;
     if (getenv("HLE_MUTEX_HACK") && !late_mutex_hack) {
         late_mutex_hack = 1;
         uint32_t v = 1;
@@ -398,6 +589,12 @@ static void dispatch_ipc(uint32_t handle) {
             break;
         case SVC_HID_USER:
             hid_command(&r, params);
+            break;
+        case SVC_FS_USER: case SVC_FS_LDR:
+            fs_command(&r, params);
+            break;
+        case SVC_FILE:
+            file_command(&r, params);
             break;
         default:
             generic_command(&r, service);
