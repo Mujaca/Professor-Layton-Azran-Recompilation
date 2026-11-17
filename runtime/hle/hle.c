@@ -627,6 +627,9 @@ static void fs_command(Ipc *r, uint32_t *p) {
                 len = flags >> 4;
             }
             if (g_log) {
+                printf("[fsdbg-raw] cmd=%04X p:", r->cmd);
+                for (int i = 0; i < r->normal && i < 10; i++) printf(" %08X", p[i]);
+                printf("\n");
                 printf("[fsdbg] cmd=%04X n=%d t=%d type=%u size=%u addr=%08X len=%u",
                        r->cmd, r->normal, r->translate, ftype, fsize, addr, len);
                 if (addr) {
