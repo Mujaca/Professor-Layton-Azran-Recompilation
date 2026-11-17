@@ -60,10 +60,18 @@ static void guest_yield(void) {
     if (g_det_sched && t_tid >= 0) {
         g_turn = sched_next(t_tid);
         sched_wait_turn();
-    } else {
-        Sleep(0);
+        EnterCriticalSection(&g_guest_lock);
+        return;
     }
-    EnterCriticalSection(&g_guest_lock);
+    Sleep(0);
+    /* Kein unbegrenztes Blockieren: wenn ein anderer Gast-Thread den Lock
+       haelt und selbst in einer HLE-Wartezeit steckt, wuerde der Aufrufer
+       sonst dauerhaft stehen (Ring eingefroren). Daher zeitlich begrenzt
+       versuchen, sonst ohne Lock weiterlaufen. */
+    for (int i = 0; i < 200; i++) {
+        if (TryEnterCriticalSection(&g_guest_lock)) return;
+        Sleep(1);
+    }
 }
 
 extern void arm_call_guest_pub(ArmCpu *c, uint32_t addr);
@@ -1528,7 +1536,10 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                     if (g_guest_lock_init && !g_no_lock) {
                         LeaveCriticalSection(&g_guest_lock);
                         Sleep(1);
-                        EnterCriticalSection(&g_guest_lock);
+                        for (int t = 0; t < 100; t++) {
+                            if (TryEnterCriticalSection(&g_guest_lock)) break;
+                            Sleep(1);
+                        }
                     } else {
                         Sleep(1);
                     }
