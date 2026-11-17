@@ -378,11 +378,16 @@ static void y2r_command(Ipc *r, uint32_t *p);
 static int g_gsp_init_done = 0;
 static void hle_try_gsp_init(ArmCpu *c) {
     uint32_t save[16];
-    if (g_gsp_init_done || getenv("HLE_GSP_INIT") == NULL) return;
+    uint32_t tgt = 0x00138D70u;
+    const char *e;
+    if (g_gsp_init_done) return;
+    e = getenv("HLE_GSP_INIT");
+    if (e == NULL) return;
+    if (*e && strcmp(e, "1") != 0) tgt = (uint32_t)strtoul(e, NULL, 16);
     g_gsp_init_done = 1;
-    printf("[gspinit] calling 0x00138D70 (sp=%08X)\n", c->r[13]);
+    printf("[gspinit] calling 0x%08X (sp=%08X)\n", tgt, c->r[13]);
     memcpy(save, c->r, sizeof(save));
-    arm_call_guest_pub(c, 0x00138D70u);
+    arm_call_guest_pub(c, tgt);
     memcpy(c->r, save, sizeof(save));
     printf("[gspinit] returned (sp=%08X)\n", c->r[13]);
 }
