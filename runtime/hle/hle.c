@@ -1294,6 +1294,8 @@ static void setup_config_mem(ArmCpu *c) {
 }
 
 static volatile int g_vblank_run = 0;
+static volatile uint32_t g_arb_seen[64];
+static volatile int g_arb_seen_n = 0;
 static unsigned g_vblank_frames = 0;
 
 /* Simulierter VBlank: signalisiert periodisch alle Event-Handles. */
@@ -1315,10 +1317,21 @@ static DWORD WINAPI vblank_thread(LPVOID p) {
             }
             g_vblank_frames++;
         }
+        /* Alle tatsaechlich benutzten Arbitrate-Objekte posten. */
+        if (g_cpu != NULL) {
+            for (int k = 0; k < g_arb_seen_n; k++) {
+                uint32_t off = g_arb_seen[k] & 0x1FFFFFFFu;
+                if (off + 4 <= g_cpu->mem_size) {
+                    int32_t *w = (int32_t *)(g_cpu->mem + off);
+                    if (*w <= 0) *w = 1;
+                }
+            }
+        }
         /* Bekannte Arbitrate-Objekte ebenfalls "posten". */
         if (g_cpu != NULL) {
             static const uint32_t arbs[] = { 0x090001D4u, 0x0042BD54u, 0x0042B864u,
-                                          0x0040C628u, 0x0040C5B4u, 0x0040C5A8u };
+                                          0x0040C628u, 0x0040C5B4u, 0x0040C5A8u,
+                                          0x141EA4u, 0x141EA8u };
             for (unsigned a = 0; a < sizeof(arbs) / sizeof(arbs[0]); a++) {
                 uint32_t off = arbs[a] & 0x1FFFFFFFu;
                 if (off + 4 <= g_cpu->mem_size) {
@@ -1589,6 +1602,13 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             }
             uint32_t addr = c->r[1];
             uint32_t type = c->r[2];
+            {
+                uint32_t a0 = addr & ~3u;
+                int known = 0;
+                for (int k = 0; k < g_arb_seen_n; k++)
+                    if (g_arb_seen[k] == a0) { known = 1; break; }
+                if (!known && g_arb_seen_n < 64) g_arb_seen[g_arb_seen_n++] = a0;
+            }
             uint32_t value = c->r[3];
             if ((addr & 0x1FFFFFFFu) + 4 <= c->mem_size) {
                 uint32_t cur;
