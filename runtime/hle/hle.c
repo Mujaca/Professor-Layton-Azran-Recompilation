@@ -8,6 +8,8 @@
 #include "hle.h"
 #include "../arm_trace.h"
 
+void arm_trace_thread_dump(int ti, unsigned n);
+
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1175,6 +1177,17 @@ static void dispatch_ipc(uint32_t handle) {
     }
     ev(2, (uint32_t)service, cmd, normal);
     g_ipc_count++;
+    if (cmd == 0x0001 && normal >= 32 && getenv("HLE_ERRCTX")) {
+        static int ec = 0;
+        if (ec < 3) {
+            ec++;
+            printf("[errctx] fatal code=%08X site=%08X th=%u blk=%08X lr=%08X\n",
+                   params[1], params[2],
+                   (uint32_t)((c->tpidruro >> 12) & 0xFu), arm_last_block, c->r[14]);
+            arm_trace_thread_dump((int)((c->tpidruro >> 12) & 0xFu), 24);
+            fflush(stdout);
+        }
+    }
     if (cmd < 64 && service >= 0 && service < 64) g_cmd_seen[service][cmd]++;
     if (h && (g_ipc_count <= g_ipc_log_limit || g_log)) {
         printf("[ipc] th=%03X blk=%08X %-9s cmd=0x%04X n=%d t=%d h=%u", (uint32_t)((g_cpu ? g_cpu->tpidruro : 0) >> 12) & 0xFFFu, arm_last_block, SERVICE_NAMES[service], cmd,
@@ -1300,6 +1313,14 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
         uint32_t st = 6;
         memcpy(c->mem + 0x3D9200u, &st, 4);
         printf("[hle] GSP-State 0x3D9200 = 6 gesetzt\n");
+    }
+    if (getenv("HLE_FS_HANDLE") == NULL || getenv("HLE_FS_HANDLE")[0] != '0') {
+        /* Client-Handle-Slot 0x3D91D0 (Setter fn_00107AD4 wird nie gerufen):
+           gueltigen fs:USER-Handle eintragen, sonst laufen alle "rom:"-
+           Zugriffe mit Handle 0 und werfen FatalError. */
+        uint32_t fsh = (uint32_t)alloc_handle(SVC_FS_USER, "fs:USER");
+        memcpy(c->mem + 0x3D91D0u, &fsh, 4);
+        printf("[hle] fs-Client-Handle 0x3D91D0 = %u\n", fsh);
     }
     if (getenv("HLE_GSP_CLIENT")) {
         /* GSP-Client-Objekt 0x3D91E8 vorinitialisieren: Statusfeld +0x18 = 6 und
