@@ -37,9 +37,11 @@ static DWORD WINAPI watchdog(LPVOID unused) {
                     printf("[wd]   thread %X: pc=0x%08X lr=0x%08X\n", ti,
                            arm_thread_last_pc[ti], arm_thread_last_lr[ti]);
             }
-            if (ticks == 4 || ticks == 14) {
+            if (ticks == 4 || ticks == 14 || ticks == 29) {
                 fprintf(stderr, "[wd] ==== tdump bei tick %d ====\n", ticks);
-                arm_trace_thread_dump(2, 30);
+                arm_trace_thread_dump(2, 64);
+                for (int ti = 3; ti < 16; ti++)
+                    if (arm_thread_last_pc[ti]) arm_trace_thread_dump(ti, 8);
                 fflush(stderr);
             }
             if (g_cpu_view->aborted) {
