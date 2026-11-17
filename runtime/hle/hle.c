@@ -1183,6 +1183,16 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
         }
         case 0x22: { /* ArbitrateAddress(handle, addr, type, value, timeout) */
             guest_yield();
+            {
+                uint32_t obj = c->r[1] & ~3u;
+                if (obj == 0x0042BD50u || obj == 0x0042BD54u) {
+                    /* Gezielter Poster fuer das beobachtete statische Semaphor:
+                       Zaehler auf 1 setzen, damit der Waiter aufwacht. */
+                    uint32_t one = 1;
+                    if ((0x0042BD50u & 0x1FFFFFFFu) + 4 <= c->mem_size)
+                        memcpy(c->mem + (0x0042BD50u & 0x1FFFFFFFu), &one, 4);
+                }
+            }
             uint32_t addr = c->r[1];
             uint32_t type = c->r[2];
             uint32_t value = c->r[3];
