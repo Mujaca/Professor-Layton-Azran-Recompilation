@@ -36,12 +36,16 @@ liefert CPU-Zustand, Speicher und Instruktionssemantik.
 
 | Kennzahl | Wert |
 |---|---|
-| ARM-Funktionen | 10.215 |
-| ARM-Instruktionen | 720.643 |
+| ARM-/Thumb-Funktionen | 10.215 / 40 |
+| Instruktionen | 722.271 (720.643 ARM + 1.628 Thumb) |
 | Text-Abdeckung | 71,48 % |
-| nicht unterstützt | 1,53 % (nur ARMv6-SIMD) |
-| generiertes C | 46,4 MB, kompiliert mit `zig cc` |
-| Selbsttests | 7/7 |
+| nicht unterstützt | **0 (0,00 %)** |
+| generiertes C | 46,3 MB, kompiliert mit `zig cc` |
+| Selbsttests | 13/13 |
+
+Abgedeckt sind auch ARMv6-SIMD (`uadd8`, `uqsub8`, `sel`, …), DSP (`smlabb`, `qadd`,
+`pkhbt`), Thumb-Codegen und rotierte Immediates. Vollständiges `code.bin` → C ist
+damit übersetzbar; es fehlen nur noch Dispatcher/Speicher-Map (Phase 3).
 
 ```powershell
 $env:PYTHONPATH = "tools"

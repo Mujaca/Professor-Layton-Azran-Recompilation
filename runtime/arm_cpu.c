@@ -385,5 +385,176 @@ void vfp_fpscr_to_flags(ArmCpu *c) {
 }
 
 void vfp_flags_to_fpscr(ArmCpu *c) {
-    c->fpscr = (c->fpscr & 0x0FFFFFFFu) | (c->n << 31) | (c->z << 30) | (c->c << 29) | (c->v << 28);
+    c->fpscr = (c->fpscr & 0x0FFFFFFFu) | (c->n << 31) | (c->z << 30)
+             | (c->c << 29) | (c->v << 28);
 }
+
+/* ---------------- ARMv6 SIMD / DSP ---------------- */
+
+static int32_t sat_range(int32_t v, int32_t lo, int32_t hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+uint32_t arm_par8(ArmCpu *c, int op, uint32_t a, uint32_t b) {
+    uint32_t res = 0, ge = 0;
+    for (int i = 0; i < 4; i++) {
+        int ab = (int)((a >> (8 * i)) & 0xFFu);
+        int bb = (int)((b >> (8 * i)) & 0xFFu);
+        int r = 0;
+        switch (op) {
+            case PAR_UADD: { int t = ab + bb; ge |= (uint32_t)(t > 0xFF) << i; r = t; break; }
+            case PAR_USUB: { ge |= (uint32_t)(ab >= bb) << i; r = ab - bb; break; }
+            case PAR_SADD: { int t = (int8_t)ab + (int8_t)bb;
+                             ge |= (uint32_t)(t >= -128 && t <= 127) << i; r = t; break; }
+            case PAR_SSUB: { int t = (int8_t)ab - (int8_t)bb;
+                             ge |= (uint32_t)(t >= -128 && t <= 127) << i; r = t; break; }
+            case PAR_UQADD: r = sat_range(ab + bb, 0, 255); break;
+            case PAR_SQADD: r = sat_range((int8_t)ab + (int8_t)bb, -128, 127); break;
+            case PAR_UQSUB: r = sat_range(ab - bb, 0, 255); break;
+            case PAR_SQSUB: r = sat_range((int8_t)ab - (int8_t)bb, -128, 127); break;
+            case PAR_UHADD: r = (ab + bb) >> 1; break;
+            case PAR_SHADD: r = ((int8_t)ab + (int8_t)bb) >> 1; break;
+            case PAR_UHSUB: r = (ab - bb) > 0 ? ((ab - bb) >> 1) : 0; break;
+            case PAR_SHSUB: r = ((int8_t)ab - (int8_t)bb) >> 1; break;
+            default: r = 0; break;
+        }
+        res |= (uint32_t)(r & 0xFF) << (8 * i);
+    }
+    if (op <= PAR_SSUB) c->ge = ge;
+    return res;
+}
+
+uint32_t arm_par16(ArmCpu *c, int op, uint32_t a, uint32_t b) {
+    uint32_t res = 0, ge = 0;
+    for (int i = 0; i < 2; i++) {
+        int ab = (int)((a >> (16 * i)) & 0xFFFFu);
+        int bb = (int)((b >> (16 * i)) & 0xFFFFu);
+        int r = 0;
+        switch (op) {
+            case PAR_UADD: { int t = ab + bb; ge |= (uint32_t)(t > 0xFFFF) << i; r = t; break; }
+            case PAR_USUB: { ge |= (uint32_t)(ab >= bb) << i; r = ab - bb; break; }
+            case PAR_SADD: { int t = (int16_t)ab + (int16_t)bb;
+                             ge |= (uint32_t)(t >= -32768 && t <= 32767) << i; r = t; break; }
+            case PAR_SSUB: { int t = (int16_t)ab - (int16_t)bb;
+                             ge |= (uint32_t)(t >= -32768 && t <= 32767) << i; r = t; break; }
+            case PAR_UQADD: r = sat_range(ab + bb, 0, 0xFFFF); break;
+            case PAR_SQADD: r = sat_range((int16_t)ab + (int16_t)bb, -32768, 32767); break;
+            case PAR_UQSUB: r = sat_range(ab - bb, 0, 0xFFFF); break;
+            case PAR_SQSUB: r = sat_range((int16_t)ab - (int16_t)bb, -32768, 32767); break;
+            case PAR_UHADD: r = (ab + bb) >> 1; break;
+            case PAR_SHADD: r = ((int16_t)ab + (int16_t)bb) >> 1; break;
+            case PAR_UHSUB: r = (ab - bb) > 0 ? ((ab - bb) >> 1) : 0; break;
+            case PAR_SHSUB: r = ((int16_t)ab - (int16_t)bb) >> 1; break;
+            default: r = 0; break;
+        }
+        res |= (uint32_t)(r & 0xFFFF) << (16 * i);
+    }
+    if (op <= PAR_SSUB) c->ge = ge;
+    return res;
+}
+
+uint32_t arm_sel(ArmCpu *c, uint32_t a, uint32_t b) {
+    uint32_t res = 0;
+    for (int i = 0; i < 4; i++) {
+        uint32_t byte = ((c->ge >> i) & 1u) ? ((a >> (8 * i)) & 0xFFu)
+                                            : ((b >> (8 * i)) & 0xFFu);
+        res |= byte << (8 * i);
+    }
+    return res;
+}
+
+static uint32_t ror32(uint32_t v, int n) {
+    n &= 31;
+    if (n == 0) return v;
+    return (v >> n) | (v << (32 - n));
+}
+
+uint32_t arm_ext16(int is_signed, uint32_t v, int rot8) {
+    uint32_t x = ror32(v, rot8 * 8);
+    uint32_t lo = x & 0xFFu;
+    uint32_t hi = (x >> 16) & 0xFFu;
+    if (is_signed) {
+        return ((uint32_t)(int32_t)(int8_t)lo & 0xFFFFu)
+             | ((uint32_t)(int32_t)(int8_t)hi << 16);
+    }
+    return lo | (hi << 16);
+}
+
+uint32_t arm_pack16(int keep_low, uint32_t a, uint32_t b, int shift, int asr) {
+    (void)asr;
+    if (shift == 0) {
+        shift = 32;
+    }
+    if (keep_low) {
+        /* PKHBT: rd = rn[15:0] | (rm << shift)[31:16] */
+        uint32_t hi = (shift >= 32) ? 0u : (b << shift);
+        return (a & 0xFFFFu) | (hi & 0xFFFF0000u);
+    }
+    /* PKHTB: rd = rn[31:16] | (rm ASR shift)[15:0] */
+    uint32_t lo = (shift >= 32) ? 0u : (uint32_t)((int32_t)b >> shift);
+    return (a & 0xFFFF0000u) | (lo & 0xFFFFu);
+}
+
+uint32_t arm_sat16(ArmCpu *c, int is_signed, uint32_t v, int bits) {
+    uint32_t res = 0;
+    for (int i = 0; i < 2; i++) {
+        int32_t h = (int16_t)((v >> (16 * i)) & 0xFFFFu);
+        int32_t lo = is_signed ? -(1 << (bits - 1)) : 0;
+        int32_t hi = is_signed ? ((1 << (bits - 1)) - 1) : ((1 << bits) - 1);
+        int32_t s = sat_range(h, lo, hi);
+        if (s != h) {
+            c->qflag = 1;
+        }
+        res |= ((uint32_t)s & 0xFFFFu) << (16 * i);
+    }
+    return res;
+}
+
+uint32_t arm_usad(ArmCpu *c, uint32_t a, uint32_t b, int accumulate, uint32_t acc) {
+    (void)c;
+    uint32_t sum = accumulate ? acc : 0;
+    for (int i = 0; i < 4; i++) {
+        int x = (int)((a >> (8 * i)) & 0xFFu);
+        int y = (int)((b >> (8 * i)) & 0xFFu);
+        sum += (uint32_t)(x > y ? x - y : y - x);
+    }
+    return sum;
+}
+
+uint32_t arm_qadd32(ArmCpu *c, int op, uint32_t a, uint32_t b) {
+    int64_t x = (int64_t)(int32_t)a;
+    int64_t y = (int64_t)(int32_t)b;
+    int64_t r;
+    switch (op) {
+        case QADD_ADD: r = x + y; break;
+        case QADD_SUB: r = x - y; break;
+        case QADD_DADD: r = x + 2 * y; break;
+        default: r = x - 2 * y; break;
+    }
+    if (r > 2147483647LL) { r = 2147483647LL; c->qflag = 1; }
+    if (r < -2147483648LL) { r = -2147483648LL; c->qflag = 1; }
+    return (uint32_t)(int32_t)r;
+}
+
+uint32_t arm_smla16(ArmCpu *c, uint32_t rn, uint32_t rm, uint32_t ra,
+                    int ntop, int mtop, int accumulate) {
+    int32_t x = (int16_t)(ntop ? (rn >> 16) : rn);
+    int32_t y = (int16_t)(mtop ? (rm >> 16) : rm);
+    int64_t prod = (int64_t)x * (int64_t)y;
+    if (!accumulate) {
+        if (prod > 2147483647LL || prod < -2147483648LL) {
+            prod = (prod > 0) ? 2147483647LL : -2147483648LL;
+            c->qflag = 1;
+        }
+        return (uint32_t)(int32_t)prod;
+    }
+    int64_t sum = prod + (int64_t)(int32_t)ra;
+    if (sum > 2147483647LL || sum < -2147483648LL) {
+        sum = (sum > 0) ? 2147483647LL : -2147483648LL;
+        c->qflag = 1;
+    }
+    return (uint32_t)(int32_t)sum;
+}
+

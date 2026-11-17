@@ -5,39 +5,9 @@
   "arm_instructions": 720643,
   "thumb_instructions": 1628,
   "instructions": 722271,
-  "unsupported_total": 11024,
-  "unsupported_pct": 1.53,
-  "unsupported_by_mnemonic": {
-    "uqsub8": 3174,
-    "sel": 2724,
-    "uhadd8": 1326,
-    "uadd8": 1068,
-    "usub8": 735,
-    "uqadd8": 516,
-    "uxtb16": 492,
-    "ssub8": 333,
-    "smlabb": 184,
-    "pkhbt": 153,
-    "pkhtb": 150,
-    "smulbb": 93,
-    "vnmls": 17,
-    "smulbt": 14,
-    "vnmla": 10,
-    "stmdb": 5,
-    "smlatb": 4,
-    "ldrexd": 4,
-    "strexd": 4,
-    "add": 4,
-    "cdplo": 2,
-    "uqsub8ls": 2,
-    "smulbbgt": 2,
-    "smultt": 2,
-    "ldmdb": 2,
-    "stmibhi": 1,
-    "andeq": 1,
-    "ldcl": 1,
-    "stmibeq": 1
-  },
+  "unsupported_total": 0,
+  "unsupported_pct": 0.0,
+  "unsupported_by_mnemonic": {},
   "visited_bytes": 2187094,
   "text_bytes": 3059712,
   "coverage_pct": 71.48,
@@ -90,7 +60,7 @@
     {
       "addr": 2929592,
       "insns": 2106,
-      "unsupported": 2
+      "unsupported": 0
     },
     {
       "addr": 2028068,
@@ -110,12 +80,12 @@
     {
       "addr": 1523848,
       "insns": 1749,
-      "unsupported": 25
+      "unsupported": 0
     },
     {
       "addr": 2495424,
       "insns": 1648,
-      "unsupported": 12
+      "unsupported": 0
     }
   ]
 }

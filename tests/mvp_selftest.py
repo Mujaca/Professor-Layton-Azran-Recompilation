@@ -6,7 +6,7 @@ import os
 import subprocess
 import sys
 
-from keystone import Ks, KS_ARCH_ARM, KS_MODE_ARM, KS_MODE_LITTLE_ENDIAN
+from keystone import Ks, KS_ARCH_ARM, KS_MODE_ARM, KS_MODE_THUMB, KS_MODE_LITTLE_ENDIAN
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
@@ -16,14 +16,18 @@ from recomp import isa, emit, cli  # noqa: E402
 OUT = os.path.join(ROOT, "out", "selftest")
 
 
-def assemble(blocks):
-    """blocks: [(addr, asm_text)] -> bytearray ab 0x100000, nullterminiert."""
+def assemble(blocks, thumb=False, raw=None):
+    """blocks: [(addr, asm_text)] -> bytearray ab 0x100000."""
     img = bytearray(0x4000)
-    ks = Ks(KS_ARCH_ARM, KS_MODE_ARM | KS_MODE_LITTLE_ENDIAN)
+    mode = KS_MODE_THUMB if thumb else KS_MODE_ARM
+    ks = Ks(KS_ARCH_ARM, mode | KS_MODE_LITTLE_ENDIAN)
     for addr, text in blocks:
         encoding, count = ks.asm(text, addr)
         off = addr - isa.ARM_BASE
         img[off:off + len(encoding)] = bytes(encoding)
+    for addr, blob in (raw or []):
+        off = addr - isa.ARM_BASE
+        img[off:off + len(blob)] = blob
     # Instruktionscache leeren (sonst ARM11-Selbstmodifikationsproblematik)
     return img, ks
 
@@ -112,6 +116,72 @@ CASES = [
         "regs": {},
         "expect": {"r0": 0x40000000},
     },
+
+    {
+        "name": "simd_uadd8_sel",
+        "asm": """
+            uadd8 r0, r1, r2
+            sel r3, r1, r2
+            bx lr
+        """,
+        "regs": {"r1": 0x04030201, "r2": 0xFFFFFFFF},
+        "expect": {"r0": 0x03020100, "r3": 0x04030201},
+    },
+    {
+        "name": "simd_saturierung",
+        "asm": """
+            uqadd8 r0, r1, r2
+            uqsub8 r3, r1, r2
+            bx lr
+        """,
+        "regs": {"r1": 0xF0F0F0F0, "r2": 0x20202020},
+        "expect": {"r0": 0xFFFFFFFF, "r3": 0xD0D0D0D0},
+    },
+    {
+        "name": "dsp_smlabb",
+        "asm": """
+            smlabb r0, r1, r2, r3
+            smulbb r4, r1, r2
+            bx lr
+        """,
+        "regs": {"r1": 3, "r2": 4, "r3": 10},
+        "expect": {"r0": 22, "r4": 12},
+    },
+    {
+        "name": "pack_und_extend",
+        "asm": """
+            pkhbt r0, r1, r2, lsl #8
+            uxtb16 r3, r4
+            bx lr
+        """,
+        "regs": {"r1": 0xAAAAAAAA, "r2": 0xBBBBBBBB, "r4": 0x11223344},
+        "expect": {"r0": 0xBBBBAAAA, "r3": 0x00220044},
+    },
+    {
+        "name": "rotated_immediate",
+        "asm": """
+            mov r0, #0
+            bx lr
+        """,
+        "raw": [(0x100000, bytes.fromhex("b06f8fe2"))],
+        "regs": {},
+        "expect": {"r0": 0, "r6": 0x1002C8},
+    },
+    {
+        "name": "thumb_schleife",
+        "thumb": True,
+        "asm": """
+            movs r0, #0
+            movs r1, #5
+        loop:
+            adds r0, r0, r1
+            subs r1, #1
+            bne loop
+            bx lr
+        """,
+        "regs": {},
+        "expect": {"r0": 15, "r1": 0},
+    },
     {
         "name": "ldm_stm",
         "asm": """
@@ -133,9 +203,10 @@ CASES = [
 
 def build_case(case, idx):
     img, ks = assemble([(isa.ARM_BASE, case["asm"])] +
-                       sorted((case.get("extra") or {}).items()))
+                       sorted((case.get("extra") or {}).items()),
+                       thumb=case.get("thumb", False), raw=case.get("raw"))
     data = bytes(img)
-    res = cli.scanmod.scan(data, [(isa.ARM_BASE, "entry", False)])
+    res = cli.scanmod.scan(data, [(isa.ARM_BASE, "entry", case.get("thumb", False))])
     c_path = os.path.join(OUT, "gen_%d.c" % idx)
     n_arm, n_thumb = cli.generate(res, c_path)
 

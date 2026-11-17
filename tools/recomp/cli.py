@@ -40,7 +40,14 @@ def collect_stats(res, data):
             continue
         if fn.thumb:
             thumb_funcs += 1
-            thumb_ins += sum(len(b.insns) for b in fn.blocks)
+            em = emit.Emitter(addr, True)
+            for blk in fn.blocks:
+                for ins in blk.insns:
+                    thumb_ins += 1
+                    _, ok = instruction_lines(em, ins)
+                    if not ok:
+                        key = ins.mnemonic.split(".")[0]
+                        unsupported[key] = unsupported.get(key, 0) + 1
             continue
         arm_funcs += 1
         blocks += len(fn.blocks)
@@ -67,7 +74,7 @@ def collect_stats(res, data):
         "thumb_instructions": thumb_ins,
         "instructions": total_ins,
         "unsupported_total": sum(unsupported.values()),
-        "unsupported_pct": round(100.0 * sum(unsupported.values()) / max(1, arm_ins), 2),
+        "unsupported_pct": round(100.0 * sum(unsupported.values()) / max(1, arm_ins + thumb_ins),  2),
         "unsupported_by_mnemonic": dict(sorted(unsupported.items(), key=lambda kv: -kv[1])),
         "visited_bytes": sum(res.visited.values()),
         "text_bytes": len(data),
@@ -98,13 +105,9 @@ def generate(res, path, max_funcs=None):
     for fn in funcs:
         if fn.thumb:
             n_thumb += 1
-            out.append("void fn_%08X(ArmCpu *c) {" % u32(fn.addr))
-            out.append('  arm_unimplemented(c, 0x%08Xu, 0, "thumb");' % u32(fn.addr))
-            out.append("}")
-            out.append("")
-            continue
-        n_arm += 1
-        em = emit.Emitter(fn.addr)
+        else:
+            n_arm += 1
+        em = emit.Emitter(fn.addr, fn.thumb)
         out.append("void fn_%08X(ArmCpu *c) {" % u32(fn.addr))
         out.append("  goto %s;" % em.label(fn.blocks[0].addr))
         for blk in fn.blocks:

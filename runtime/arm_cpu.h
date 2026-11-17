@@ -20,7 +20,9 @@ typedef struct ArmCpu {
     uint32_t fpscr;
     uint8_t *mem;
     uint32_t mem_size;
-    uint32_t tpidruro;       /* mrc p15,c13,c0,3 (TLS-Zeiger) */
+    uint32_t tpidruro;      /* mrc p15,c13,c0,3 (TLS-Zeiger) */
+    uint32_t ge;            /* GE[3:0] der SIMD-Operationen */
+    uint32_t qflag;         /* CPSR.Q (Saturation) */
     int aborted;
     uint64_t insn_count;
 } ArmCpu;
@@ -69,5 +71,24 @@ void vfp_op(ArmCpu *c, int op, int dbl, int dest, int a, int b);
 void vfp_cmp(ArmCpu *c, int dbl, int a, int b, int to_zero);
 void vfp_fpscr_to_flags(ArmCpu *c);
 void vfp_flags_to_fpscr(ArmCpu *c);
+
+/* ---- ARMv6 SIMD / DSP ---- */
+enum {
+    PAR_UADD = 0, PAR_SADD, PAR_USUB, PAR_SSUB,
+    PAR_UQADD, PAR_SQADD, PAR_UQSUB, PAR_SQSUB,
+    PAR_UHADD, PAR_SHADD, PAR_UHSUB, PAR_SHSUB
+};
+enum { QADD_ADD = 0, QADD_SUB, QADD_DADD, QADD_DSUB };
+
+uint32_t arm_par8(ArmCpu *c, int op, uint32_t a, uint32_t b);
+uint32_t arm_par16(ArmCpu *c, int op, uint32_t a, uint32_t b);
+uint32_t arm_sel(ArmCpu *c, uint32_t a, uint32_t b);
+uint32_t arm_ext16(int is_signed, uint32_t v, int rot8);
+uint32_t arm_pack16(int keep_low, uint32_t a, uint32_t b, int shift, int asr);
+uint32_t arm_sat16(ArmCpu *c, int is_signed, uint32_t v, int bits);
+uint32_t arm_usad(ArmCpu *c, uint32_t a, uint32_t b, int accumulate, uint32_t acc);
+uint32_t arm_qadd32(ArmCpu *c, int op, uint32_t a, uint32_t b);
+uint32_t arm_smla16(ArmCpu *c, uint32_t rn, uint32_t rm, uint32_t ra,
+                    int ntop, int mtop, int accumulate);
 
 #endif

@@ -82,6 +82,8 @@ def imm_value(token: str):
 def reg_list(text: str):
     """'{r4, lr}' -> [4, 14]"""
     t = text.strip()
+    if t.endswith("^"):
+        t = t[:-1].strip()
     if t.startswith("{") and t.endswith("}"):
         t = t[1:-1]
     regs = []

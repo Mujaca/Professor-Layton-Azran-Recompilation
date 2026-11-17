@@ -2,6 +2,7 @@
 import capstone.arm as A
 
 from . import isa
+from . import simd
 
 
 class Unsupported(Exception):
@@ -54,19 +55,26 @@ VFP_BASES = ("vldr", "vstr", "vmov", "vadd", "vsub", "vmul", "vdiv", "vneg",
              "vmla", "vmls", "vnmul", "vcvt", "vldmia", "vldmdb", "vstmia", "vstmdb")
 
 
-CORE_BASES = {"nop", "hint", "pld", "pldw", "clrex", "lsl", "lsr", "asr", "ror",
+CORE_BASES = {"nop", "hint", "pld", "pldw", "clrex", "cdp", "cdp2",
+              "ldc", "stc", "mcrr", "mrrc", "lsl", "lsr", "asr", "ror",
               "rrx", "uxth", "uxtb", "sxth", "sxtb", "uxtah", "sxtah", "ldrd", "strd",
               "ldrex", "strex", "mrc", "mcr", "ldm", "stm", "push", "pop", "rev",
               "rev16", "revsh", "usat", "ssat", "qadd", "qsub", "sdiv", "udiv"}
 
 
+def _known(core):
+    return (simd.handles(core) or core in VFP_BASES or core in CORE_BASES)
+
+
 def strip_cc(mnemonic):
     """Entfernt eine Bedingungs-Endung (z.B. 'vmovls' -> 'vmov', 'ldrdeq' -> 'ldrd')."""
     m = mnemonic.split(".")[0].lower()
+    if _known(m):
+        return m
     for cc in COND_SUFFIXES:
         if m.endswith(cc):
             core = m[:-2]
-            if core in VFP_BASES or core in CORE_BASES:
+            if _known(core):
                 return core
     return m
 
@@ -75,9 +83,43 @@ def u32(v):
     return v & 0xFFFFFFFF
 
 
+def _build_aliases():
+    out = {}
+    for name, target in (("ARM_INS_MOVS", "ARM_INS_MOV"), ("ARM_INS_ADDS", "ARM_INS_ADD"),
+                         ("ARM_INS_SUBS", "ARM_INS_SUB"), ("ARM_INS_ANDS", "ARM_INS_AND"),
+                         ("ARM_INS_ORRS", "ARM_INS_ORR"), ("ARM_INS_EORS", "ARM_INS_EOR"),
+                         ("ARM_INS_BICS", "ARM_INS_BIC"), ("ARM_INS_MVNS", "ARM_INS_MVN"),
+                         ("ARM_INS_LSLS", "ARM_INS_LSL"), ("ARM_INS_LSRS", "ARM_INS_LSR"),
+                         ("ARM_INS_ASRS", "ARM_INS_ASR"), ("ARM_INS_RORS", "ARM_INS_ROR")):
+        a = getattr(A, name, None)
+        b = getattr(A, target, None)
+        if a is not None and b is not None:
+            out[a] = b
+    return out
+
+
+ID_ALIASES = _build_aliases()
+
+
+class InsnView(object):
+    """Duenne Huelle, die eine Alias-Instruktion auf ihre Basis-ID abbildet."""
+    def __init__(self, ins, iid):
+        self._ins = ins
+        self.id = iid
+
+    def __getattr__(self, name):
+        return getattr(self._ins, name)
+
+
 class Emitter:
-    def __init__(self, func_addr):
+    def __init__(self, func_addr, thumb=False):
         self.func = func_addr
+        self.thumb = thumb
+
+    def pc_value(self, pc):
+        if self.thumb:
+            return (pc + 4) & ~3
+        return pc + 8
 
     def label(self, addr):
         return "L_%08X_%08X" % (self.func, u32(addr))
@@ -94,12 +136,22 @@ class Emitter:
         if n is None:
             raise Unsupported(t)
         if n == 15:
-            return "0x%08Xu" % u32(pc + 8)
+            return "0x%08Xu" % u32(self.pc_value(pc))
         return "c->r[%d]" % n
 
     def operand2(self, toks, pc):
         if not toks:
             raise Unsupported("leerer Operand")
+        if len(toks) == 2 and toks[0].startswith("#") and toks[1].startswith("#"):
+            imm8 = isa.imm_value(toks[0])
+            rot = isa.imm_value(toks[1])
+            if imm8 is None or rot is None:
+                raise Unsupported(" ".join(toks))
+            v = imm8 & 0xFF
+            r = rot & 31
+            if r:
+                v = ((v >> r) | (v << (32 - r))) & 0xFFFFFFFF
+            return "0x%08Xu" % v, None
         base = self.value(toks[0], pc)
         if len(toks) == 1:
             return base, None
@@ -128,8 +180,12 @@ class Emitter:
             if rd is None:
                 raise Unsupported(ins.op_str)
             if uses_rn:
-                rn = self.value(ops[1], pc)
-                rest = ops[2:]
+                if self.thumb and len(ops) == 2:
+                    rn = "c->r[%d]" % rd
+                    rest = ops[1:]
+                else:
+                    rn = self.value(ops[1], pc)
+                    rest = ops[2:]
             else:
                 rn = "0"
                 rest = ops[1:]
@@ -164,7 +220,7 @@ class Emitter:
         base_reg = isa.reg_num(inner[0])
         if base_reg is None:
             raise Unsupported(ins.op_str)
-        basev = "0x%08Xu" % u32(pc + 8) if base_reg == 15 else "c->r[%d]" % base_reg
+        basev = "0x%08Xu" % u32(self.pc_value(pc)) if base_reg == 15 else "c->r[%d]" % base_reg
         post = len(ops) > 2
         if post:
             off, sh = self.operand2([ops[2]], pc)
@@ -215,13 +271,8 @@ class Emitter:
         for r in regs:
             mask |= 1 << r
         load = ins.id in LDM_IDS
-        mode = 0
-        if m.endswith("ib"):
-            mode = 1
-        elif m.endswith("da"):
-            mode = 2
-        elif m.endswith("db"):
-            mode = 3
+        sfx = m[3:5]
+        mode = {"ib": 1, "da": 2, "db": 3}.get(sfx, 0)
         call = "arm_ldm_stm(c, %d, %d, %d, %d, 0x%08Xu)" % (
             base_reg, 1 if load else 0, 1 if wb else 0, mode, mask)
         if load:
@@ -240,15 +291,15 @@ class Emitter:
             if not ins.operands or ins.operands[0].type != A.ARM_OP_IMM:
                 raise Unsupported(ins.op_str)
             tgt = ins.operands[0].imm
-            nxt = pc + 4
+            nxt = pc + ins.size + (1 if self.thumb else 0)
             return ["c->r[14] = 0x%08Xu;" % u32(nxt),
                     "fn_%08X(c);" % u32(tgt),
                     "if (c->aborted) return;"]
         if ins.id == A.ARM_INS_BLX:
             if ins.operands and ins.operands[0].type == A.ARM_OP_IMM:
                 tgt = ins.operands[0].imm
-                return ["c->r[14] = 0x%08Xu;" % u32(pc + 4),
-                        "c->t = 1u;",
+                return ["c->r[14] = 0x%08Xu;" % u32(pc + ins.size + (1 if self.thumb else 0)),
+                        "c->t = %du;" % (0 if self.thumb else 1),
                         "fn_%08X(c);" % u32(tgt),
                         "if (c->aborted) return;"]
         if ins.id in (A.ARM_INS_BX, A.ARM_INS_BLX):
@@ -257,7 +308,8 @@ class Emitter:
                 raise Unsupported(ins.op_str)
             lines = []
             if ins.id == A.ARM_INS_BLX:
-                lines.append("c->r[14] = 0x%08Xu;" % u32(pc + 4))
+                lines.append("c->r[14] = 0x%08Xu;"
+                             % u32(pc + ins.size + (1 if self.thumb else 0)))
             lines.append("{ uint32_t t = c->r[%d]; c->t = t & 1u; c->r[15] = t & ~1u; }" % reg)
             lines.append("return;")
             return lines
@@ -413,7 +465,25 @@ class Emitter:
         ops = isa.split_operands(ins.op_str)
         pc = ins.address
 
-        if base in ("nop", "hint", "pld", "pldw", "clrex", "dbg", "sev", "wfe", "wfi"):
+        if simd.handles(base):
+            lines = simd.emit(self, ins, base, ops)
+            if lines is None:
+                raise Unsupported(ins.op_str)
+            return lines
+
+        if base in ("vnmla", "vnmls"):
+            regs = [isa.vfp_reg(o) for o in ops]
+            if len(regs) != 3 or any(r is None for r in regs):
+                raise Unsupported(ins.op_str)
+            d, n, m = regs[0][1], regs[1][1], regs[2][1]
+            if base == "vnmla":
+                return ["vfp_set_s(c, %d, vfp_get_s(c, %d) - vfp_get_s(c, %d) * vfp_get_s(c, %d));"
+                        % (d, d, n, m)]
+            return ["vfp_set_s(c, %d, -(vfp_get_s(c, %d) * vfp_get_s(c, %d)) - vfp_get_s(c, %d));"
+                    % (d, n, m, d)]
+
+        if base in ("nop", "hint", "pld", "pldw", "clrex", "dbg", "sev", "wfe", "wfi",
+                    "cdp", "cdp2", "ldc", "stc", "mcrr", "mrrc") or base.startswith(("ldc", "stc")):
             return []
 
         if base.startswith(("lsl", "lsr", "asr", "ror", "rrx")):
@@ -552,17 +622,13 @@ class Emitter:
             return ["arm_mem_write(c, c->r[%d], %d, c->r[%d]);" % (rn, size, rm),
                     "c->r[%d] = 0;" % rd]
 
-        if base in ("mrc", "mcr"):
-            # p15,0,rX,c13,c0,3 = TPIDRURO (TLS-Zeiger)
-            if "c13" in ins.op_str and "c0" in ins.op_str:
-                rd = isa.reg_num(ops[2])
-                if rd is None:
-                    raise Unsupported(ins.op_str)
-                if base == "mrc":
+        if base in ("mrc", "mcr", "mrc2", "mcr2"):
+            rd = isa.reg_num(ops[2]) if len(ops) > 2 else None
+            if "c13" in ins.op_str and "c0" in ins.op_str and rd is not None:
+                if base.startswith("mrc"):
                     return ["c->r[%d] = c->tpidruro;" % rd]
                 return ["c->tpidruro = c->r[%d];" % rd]
-                rd = isa.reg_num(ops[2]) if len(ops) > 2 else None
-            if base == "mrc" and rd is not None:
+            if base.startswith("mrc") and rd is not None:
                 return ["c->r[%d] = 0;" % rd]
             return []
 
@@ -650,6 +716,9 @@ class Emitter:
 
     # ---------- dispatch ----------
     def emit(self, ins):
+        iid = ID_ALIASES.get(ins.id)
+        if iid is not None:
+            ins = InsnView(ins, iid)
         pc = ins.address
         cond = None if ins.cc == A.ARM_CC_AL else ins.cc
         if ins.id in DP_OPS:
@@ -662,6 +731,16 @@ class Emitter:
             lines = self.branch(ins)
         elif ins.id == A.ARM_INS_NOP:
             lines = []
+        elif ins.id in (A.ARM_INS_CBZ, A.ARM_INS_CBNZ):
+            ops = isa.split_operands(ins.op_str)
+            r = isa.reg_num(ops[0]) if ops else None
+            tgt = None
+            if len(ins.operands) > 1 and ins.operands[1].type == A.ARM_OP_IMM:
+                tgt = ins.operands[1].imm
+            if r is None or tgt is None:
+                raise Unsupported(ins.op_str)
+            op = "==" if ins.id == A.ARM_INS_CBZ else "!="
+            lines = ["if (c->r[%d] %s 0) goto %s;" % (r, op, self.label(tgt))]
         elif ins.id == A.ARM_INS_SVC:
             imm = ins.operands[0].imm if ins.operands else 0
             lines = ["arm_svc(c, %du);" % u32(imm)]
@@ -705,7 +784,7 @@ class Emitter:
             sf = 1 if ins.update_flags else 0
             if ins.id == A.ARM_INS_MUL:
                 rn = isa.reg_num(ops[1])
-                rm = isa.reg_num(ops[2]) if len(ops) > 2 else None
+                rm = isa.reg_num(ops[2]) if len(ops) > 2 else rn
                 if rn is None or rm is None:
                     raise Unsupported(ins.op_str)
                 lines = ["c->r[%d] = arm_mul(c, c->r[%d], c->r[%d], %d);" % (rd, rm, rn, sf)]
