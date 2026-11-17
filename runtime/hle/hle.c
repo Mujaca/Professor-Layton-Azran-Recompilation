@@ -1140,10 +1140,10 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
         case 0x23: /* CloseHandle */
             return 0;
         case 0x24: /* WaitSynchronization1 */
-            guest_yield();
+            for (int i = 0; i < 4; i++) guest_yield();
             return 0;
         case 0x25: /* WaitSynchronizationN(out, handles, count, wait_all, timeout) */
-            guest_yield();
+            for (int i = 0; i < 4; i++) guest_yield();
             if (c->r[0]) write_u32(c, c->r[0], 0);
             return 0;
         case 0x27: { /* DuplicateHandle(out, handleO) */
