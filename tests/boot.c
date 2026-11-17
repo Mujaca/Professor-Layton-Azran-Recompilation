@@ -72,6 +72,10 @@ static void load_code(ArmCpu *c) {
         /* 0x33E1B0: "str r0,[r4]" im Session-Destruktor -> NOP,
            damit das statische Session-Objekt nie Handle 0 bekommt. */
         *(uint32_t *)(g_mem + 0x33E1B0) = 0xE1A00000u;
+        /* 0x107A48 / 0x107B34: zwei SDK-Fehlerpfade (F96047A2,
+           C8A04554) entschaerfen. */
+        *(uint32_t *)(g_mem + 0x107A48) = 0xE1A00000u;
+        *(uint32_t *)(g_mem + 0x107B34) = 0xE1A00000u;
     }
 }
 

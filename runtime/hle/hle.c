@@ -631,7 +631,7 @@ static void fs_command(Ipc *r, uint32_t *p) {
                     if (!g_files[i].used) {
                         g_files[i].used = 1;
                         g_files[i].fp = NULL;
-                        g_files[i].size = 0;
+                        g_files[i].size = 0x400;   /* synthetische Groesse */
                         snprintf(g_files[i].path, sizeof(g_files[i].path), "out/savedata/save_%d.sav", i);
                         slot = &g_files[i];
                         opened = 1;
@@ -757,9 +757,16 @@ static void file_command(Ipc *r, uint32_t *p) {
                 if (w >= 0x00001000u && w < 0x30000000u) { addr = w; break; }
             }
             uint32_t done = 0;
-            if (addr && length && f->fp) {
-                fseek(f->fp, (long)offset, SEEK_SET);
-                done = (uint32_t)fread(g_cur_mem + (addr & 0x1FFFFFFFu), 1, length, f->fp);
+            if (addr && length) {
+                if (f->fp) {
+                    fseek(f->fp, (long)offset, SEEK_SET);
+                    done = (uint32_t)fread(g_cur_mem + (addr & 0x1FFFFFFFu), 1, length, f->fp);
+                } else {
+                    /* Synthetische Datei: Nullen liefern (SDK prueft >0 Bytes) */
+                    uint32_t avail = (offset < f->size) ? (uint32_t)(f->size - offset) : 0;
+                    done = length < avail ? length : avail;
+                    if (done) memset(g_cur_mem + (addr & 0x1FFFFFFFu), 0, done);
+                }
             }
             if (g_log) printf("[file] Read off=0x%llX len=0x%X -> %u\n",
                               (unsigned long long)offset, length, done);
