@@ -87,8 +87,11 @@ def collect_stats(res, data):
 def needs_fallthrough(ins):
     """True, wenn nach dieser Instruktion der naechste Block folgt."""
     import capstone.arm as A
+    # Bedingt ausgefuehrte Terminatoren haben immer einen Fallthrough
+    if ins.cc != A.ARM_CC_AL:
+        return True
     if ins.id == A.ARM_INS_B:
-        return ins.cc != A.ARM_CC_AL
+        return False
     if ins.id == A.ARM_INS_BX:
         return False
     if ins.id == A.ARM_INS_BLX:
@@ -157,6 +160,7 @@ def generate(res, path, max_funcs=None, trace=False):
     out.append("      if (mf) { fprintf(mf, \"%08X\\n\", addr); fclose(mf); } }")
     out.append("    /* unbekanntes Ziel: als No-op behandeln (Best-Effort-Modus) */")
     out.append("}")
+    out.append("void arm_call_guest_pub(ArmCpu *c, uint32_t addr) { arm_call_guest(c, addr); }")
     out.append("")
 
     n_arm = 0
@@ -171,6 +175,9 @@ def generate(res, path, max_funcs=None, trace=False):
         out.append("  goto %s;" % em.label(fn.blocks[0].addr))
         for blk in fn.blocks:
             out.append("%s:" % em.label(blk.addr))
+            if u32(blk.addr) in (0x0012E1E4, 0x0012E1F0):
+                out.append("  arm_mutex_bootstrap(c, c->r[0]);")
+                out.append("  arm_mutex_bootstrap(c, c->r[4]);")
             if trace:
                 out.append("  arm_trace_block(c, 0x%08Xu, %du);" % (u32(blk.addr), 1 if fn.thumb else 0))
             for ins in blk.insns:

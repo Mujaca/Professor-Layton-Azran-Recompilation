@@ -76,6 +76,7 @@ static int g_next_handle = 1;
 static uint32_t g_srv_handle = 0;
 static FILE *g_trace_file = NULL;
 static int late_mutex_hack = 0;
+static int g_srv_layout = 2;
 /* svc_mutex_hack */
 
 static void svc_trace(uint32_t imm, ArmCpu *c) {
@@ -237,10 +238,20 @@ static void srv_command(Ipc *r, uint32_t *p) {
             if (g_log) {
                 printf("[srv] GetServiceHandle \"%s\" -> %d (%s)\n", name, h, SERVICE_NAMES[svc]);
             }
-            ipc_begin(r, 5, 2, 2);
-            ipc_put(r, 0);
-            ipc_put(r, (uint32_t)h);
-            ipc_put_handle(r, (uint32_t)h);
+            if (g_srv_layout == 1) {
+                ipc_begin(r, 5, 2, 0);
+                ipc_put(r, 0);
+                ipc_put(r, (uint32_t)h);
+            } else if (g_srv_layout == 3) {
+                ipc_begin(r, 5, 1, 2);
+                ipc_put(r, 0);
+                ipc_put_handle(r, (uint32_t)h);
+            } else {
+                ipc_begin(r, 5, 2, 2);
+                ipc_put(r, 0);
+                ipc_put(r, (uint32_t)h);
+                ipc_put_handle(r, (uint32_t)h);
+            }
             break;
         }
         default:
@@ -252,6 +263,7 @@ static void srv_command(Ipc *r, uint32_t *p) {
 }
 
 static void generic_command(Ipc *r, int service);
+static void hid_command(Ipc *r, uint32_t *p);
 
 static void put_result(Ipc *r) {
     ipc_put(r, 0);
@@ -279,6 +291,11 @@ static void apt_command(Ipc *r, uint32_t *p) {
             ipc_put_handle(r, ev2);
             break;
         }
+        case 0x4F: { /* SetAppCpuTimeLimit */
+            ipc_begin(r, 0x4F, 1, 0);
+            put_result(r);
+            break;
+        }
         case 3: case 4: case 0x28: { /* Enable / Finalize / NotifyToWait */
             ipc_begin(r, r->cmd, 1, 0);
             put_result(r);
@@ -301,6 +318,26 @@ static void apt_command(Ipc *r, uint32_t *p) {
         }
         default:
             generic_command(r, SVC_APT_U);
+            break;
+    }
+}
+
+static void hid_command(Ipc *rp, uint32_t *p) {
+    (void)p;
+    switch (rp->cmd) {
+        case 0x000A: { /* GetIPCHandles: SharedMem + 5 Event-Handles */
+            uint32_t shmem = (uint32_t)alloc_handle(SVC_OTHER, "hid-shmem");
+            uint32_t h[5];
+            for (int i = 0; i < 5; i++) h[i] = (uint32_t)alloc_handle(SVC_OTHER, "hid-ev");
+            ipc_begin(rp, 0x000A, 1, 7);
+            ipc_put(rp, 0);
+            ipc_put(rp, 0x00u);            /* CopyHandle-Deskriptor */
+            ipc_put(rp, shmem);
+            for (int i = 0; i < 5; i++) ipc_put(rp, h[i]);
+            break;
+        }
+        default:
+            generic_command(rp, SVC_HID_USER);
             break;
     }
 }
@@ -356,6 +393,12 @@ static void dispatch_ipc(uint32_t handle) {
         case SVC_SRV:
             srv_command(&r, params);
             break;
+        case SVC_APT_U:
+            apt_command(&r, params);
+            break;
+        case SVC_HID_USER:
+            hid_command(&r, params);
+            break;
         default:
             generic_command(&r, service);
             break;
@@ -410,6 +453,7 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     g_cpu = c;
     snprintf(g_romfs, sizeof(g_romfs), "%s", romfs_dir ? romfs_dir : "out/romfs");
     g_log = getenv("HLE_LOG") != NULL;
+    if (getenv("HLE_SRV_LAYOUT")) g_srv_layout = atoi(getenv("HLE_SRV_LAYOUT"));
     const char *lim = getenv("HLE_IPC_LOG");
     if (lim) g_ipc_log_limit = atoi(lim);
     setup_config_mem(c);

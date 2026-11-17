@@ -308,6 +308,18 @@ int arm_ldm_stm(ArmCpu *c, int base, int load, int writeback, int mode, uint32_t
 
 /* ---------------- svc / fallback ---------------- */
 
+/* Null-initialisierte BSS-Semaphore beim ersten Warten als frei behandeln. */
+void arm_mutex_bootstrap(ArmCpu *c, uint32_t addr) {
+    uint32_t a = addr & 0x1FFFFFFFu;
+    if (a + 4 > c->mem_size) return;
+    uint32_t v;
+    memcpy(&v, c->mem + a, 4);
+    if (v == 0) {
+        v = 1;
+        memcpy(c->mem + a, &v, 4);
+    }
+}
+
 static ArmSvcHandler g_svc_handler = NULL;
 
 void arm_set_svc_handler(ArmSvcHandler handler) {
