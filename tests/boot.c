@@ -21,9 +21,16 @@ static DWORD WINAPI watchdog(LPVOID unused) {
     (void)unused;
     for (;;) {
         Sleep(2000);
+        static int ticks = 0;
         if (g_cpu_view) {
+            ticks++;
             printf("[wd] pc=0x%08X sp=0x%08X lr=0x%08X\n",
                    g_cpu_view->r[15], g_cpu_view->r[13], g_cpu_view->r[14]);
+            if (ticks == 4) {
+                arm_trace_pc_ring_dump(150);
+                fflush(stderr);
+                exit(0);
+            }
             if (g_cpu_view->aborted) {
                 hle_report();
                 exit(3);

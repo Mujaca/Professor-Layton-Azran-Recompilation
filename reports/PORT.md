@@ -37,15 +37,29 @@ Menü rendert daher noch nicht.
 
 ## Aktueller Blocker
 
-Endlosschleife in der Konstruktorausführung (Watchdog: `pc=0x00382BA0`,
-`lr=0x00382C40`, SP stabil `0x0FFEFFC8`). Reproduzierbar über
-`ARM_WATCH=0x00382BA0` (kein Treffer → PC im CPU-State ist nur ein Hinweis,
-der Block wird über einen anderen Pfad erreicht).
+Endlosschleife in der Konstruktorausfuehrung: Block **`0x0024B2DC`**
+(Float-nach-Int-Konvertierung) wird von `0x00382C40` aufgerufen und terminiert
+nicht.
 
-Nächster Schritt: den Konstruktor bei `0x382xxx` (Bereich des 4. Eintrags,
-`0x381CE4`) bzw. seine Callee-Kette auf die Schleifenbedingung prüfen
-(Register-/Flag-Semantik) und danach die restlichen Konstruktoren durchlaufen
-lassen.
+Der Code ist:
+
+```
+0x24B2C8  ldr  r2,[pc,#0x74]     ; 0x47800000 = 65536.0f
+0x24B2D4  vldrge s2,[pc,#0x6c]   ; 0x47800000 = 65536.0f
+0x24B2DC  vsub.f32 s1,s1,s2
+0x24B2E0  vmov r3,s1
+0x24B2E4  cmp  r3,r2
+0x24B2E8  bge  0x24B2DC
+```
+
+Das ist eine Bereichsreduktion fuer grosse Floats; sie terminiert nur bei
+endlichem `s1`. Upstream entsteht offenbar **+Inf** (frueher beobachteter
+Fehlzugriff auf `0x7F800000`), z. B. durch `vdiv.f32 s0,s1,s2` bei `0x00382C44`
+mit `s2 = 0`.
+
+Naechster Schritt: die VFP-Kette ab `0x382C40` pruefen (`vldmia sp`, `vdiv`,
+s1/s2-Werte) und die Ursache des Inf bzw. 0-Divisors beseitigen. Danach sollten
+die restlichen Konstruktoren und der eigentliche Spiel-Init-Code laufen.
 
 ## Umgesetzte HLE-Bausteine
 
