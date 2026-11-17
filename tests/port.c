@@ -18,7 +18,8 @@ void fn_00100000(ArmCpu *c);
 
 static unsigned char *g_mem = NULL;
 static ArmCpu g_cpu;
-static volatile int g_halt = 0;
+static int g_halt = 0;
+static int g_game_fb_seen = 0;
 static unsigned char g_rgb[FB_W * FB_H * 3];
 
 static DWORD WINAPI game_thread(LPVOID unused) {
@@ -254,8 +255,21 @@ int main(int argc, char **argv) {
         if (win_key_take(VK_RETURN)) {
             snprintf(g_menu_msg, sizeof(g_menu_msg), "%s SELECTED", MENU_ITEMS[g_menu_sel]);
         }
-        memcpy(g_rgb, g_mem + FB_ADDR, sizeof(g_rgb));
-        draw_menu();
+        {
+            /* Sobald das Spiel selbst in den Framebuffer schreibt, diesen zeigen,
+               sonst den Port-Menue-Platzhalter. */
+            int fb_used = 0;
+            const unsigned char *fb = g_mem + FB_ADDR;
+            for (size_t i = 0; i < sizeof(g_rgb); i += 97) {
+                if (fb[i]) { fb_used = 1; break; }
+            }
+            if (fb_used) {
+                memcpy(g_rgb, fb, sizeof(g_rgb));
+                if (!g_game_fb_seen) { g_game_fb_seen = 1; win_status("game framebuffer active", 2); }
+            } else {
+                draw_menu();
+            }
+        }
         win_blit(g_rgb, FB_W, FB_H);
 
         static int tick = 0;
