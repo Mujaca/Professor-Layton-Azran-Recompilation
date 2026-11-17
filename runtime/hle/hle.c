@@ -1558,6 +1558,14 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             return 0;
         }
         case 0x25: { /* WaitSynchronizationN(out, handles, count, wait_all, timeout) */
+            static int wl = 0;
+            if (getenv("HLE_WAIT_LOG") && wl < 40) {
+                wl++;
+                printf("[wait25] th=%u r0=%08X r1=%08X r2=%08X r3=%08X r4=%08X blk=%08X lr=%08X\n",
+                       (uint32_t)((c->tpidruro >> 12) & 0xFu),
+                       c->r[0], c->r[1], c->r[2], c->r[3], c->r[4],
+                       arm_last_block, c->r[14]);
+            }
             uint32_t out = c->r[0], hlist = c->r[1], cnt = c->r[2];
             static unsigned vb2 = 0;
             int idx = 0;
@@ -1582,7 +1590,7 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                     if (hh != NULL && hh->signaled) { hh->signaled = 0; break; }
                 }
             }
-            if (out) write_u32(c, out, (uint32_t)idx);
+            if (out != 0 && out != 0xFFFFFFFFu) write_u32(c, out, (uint32_t)idx);
             return 0;
         }
         case 0x27: { /* DuplicateHandle(out, handleO) */
