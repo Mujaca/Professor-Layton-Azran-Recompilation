@@ -361,7 +361,8 @@ class Emitter:
             base_reg = isa.reg_num(inner[0])
             if base_reg is None:
                 raise Unsupported(ins.op_str)
-            basev = "c->r[%d]" % base_reg
+            basev = ("0x%08Xu" % u32(self.pc_value(pc))
+                     if base_reg == 15 else "c->r[%d]" % base_reg)
             off = "0"
             if len(inner) > 1:
                 off = self.value(inner[1], pc)
@@ -580,7 +581,8 @@ class Emitter:
             base_reg = isa.reg_num(inner[0])
             if base_reg is None:
                 raise Unsupported(ins.op_str)
-            basev = "c->r[%d]" % base_reg
+            basev = ("0x%08Xu" % u32(self.pc_value(pc))
+                     if base_reg == 15 else "c->r[%d]" % base_reg)
             off = "0"
             if len(inner) > 1:
                 off = self.value(inner[1], pc)

@@ -14,52 +14,42 @@ Menü rendert daher noch nicht.
 
 | # | Fehler | Wirkung |
 |---|---|---|
-| 1 | `arm_pool_alloc` gab **Host-Zeiger** (64→32 Bit abgeschnitten) zurück | SDK-Objekte lagen außerhalb des Gast-Adressraums (`0x8843D090`) → Absturz |
-| 2 | `SERVICE_NAMES[33]` (SVC_FILE) **out of bounds** | `printf` las Müll-Zeiger → Boot blieb bei jedem Datei-IPC hängen |
-| 3 | IPC-Reply-Layout für `OpenFile`/`OpenFileDirectly`/`OpenArchive` war 3+2 statt **1+2** (Result + MoveHandle) | SDK wertete jede Antwort als Fehler → `err:f`-Fatalpfad |
-| 4 | TLS-Felder `+0x8C` wurden als "Reply-Größe" überschrieben | **Reply-Wort 3 (= Signal/Param) wurde zerstört**; APT meldete nie `Wakeup` |
-| 5 | `APT:U 0x0D/0x0E` (ReceiveParameter/GlanceParameter) fehlte | Spiel wartete endlos auf `SignalType::Wakeup` |
-| 6 | `scan.py`: **`blx reg` wurde als Blockende** behandelt | Code nach jedem indirekten Aufruf ging verloren |
-| 7 | Thumb-Init-Loop `0x100974` rief nur den **ersten** Konstruktor | `r4 += 4` / `bne` fehlten im Block (Folge von #6) |
-| 8 | **SP-Korruption** durch fehlerhafte Epiloge (z. B. `fn_00291BDC`) | Konstruktoren sahen zerstörte Stackframes |
-| 9 | Konstruktor-Ziele waren **keine Funktions-Seeds** | `arm_call_guest` → No-Op, Init lief ins Leere |
+| 1 | `arm_pool_alloc` gab **Host-Zeiger** (64->32 Bit abgeschnitten) zurueck | SDK-Objekte lagen ausserhalb des Gast-Adressraums |
+| 2 | `SERVICE_NAMES[33]` out-of-bounds (SVC_FILE) | `printf` las Muell-Zeiger, Boot hing bei Datei-IPCs |
+| 3 | fs-Reply-Layout war 3+2 statt **1+2** (Result + MoveHandle) | SDK wertete jede Antwort als Fehler -> `err:f` |
+| 4 | TLS-Felder `+0x8C` als "Reply-Groesse" ueberschrieben | Reply-Wort 3 (Signal/Param) zerstoert |
+| 5 | `APT:U 0x0D/0x0E` (ReceiveParameter) fehlte | Endlos-Warteschleife auf `Wakeup` |
+| 6 | `scan.py`: **`blx reg` als Blockende** | Code nach indirekten Aufrufen fehlte |
+| 7 | Thumb-Init-Loop `0x100974` rief nur den 1. Konstruktor | `add r4,#4`/`bne` fehlten (Folge von #6) |
+| 8 | **SP-Korruption** durch defekte Epiloge | Stackframes der Konstruktoren zerstoert |
+| 9 | Konstruktorziele waren keine Seeds | `arm_call_guest` -> No-Op |
+| 10 | **`vldr`/`vstr`/`ldrd`/`strd` mit `[pc, #imm]`** nutzten `c->r[15]` (nie gepflegt) statt `pc+8` | Float-Konvertierung las Muell -> Endlosschleife `0x24B2DC` |
+| 11 | Thumb-`main`-Entry `0x0010009D` fehlte als Seed | `_start` rief ins Leere |
+| 12 | **Keine Gast-Threads**: `svcCreateThread` legte nur ein Handle an | SDK-Worker liefen nie, Warteschleifen blockierten |
+| 13 | `svcGetSystemTick` lieferte nur 32 Bit | Timeout-Vergleiche (64 Bit) liefen nie ab |
+| 14 | `svcArbitrateAddress` ohne Decrement | Futex-/Wartecounter bewegte sich nicht |
 
-## Wichtige Erkenntnis zum Programmaufbau
+## Threading-Modell (neu)
 
-- Entry `0x00100000` → `_start`; `blx 0x100974` ist **Thumb** und läuft die
-  Konstruktortabelle `0x3D0648..0x3D0B08` ab (304 rel. Pointer).
-- Die früher beobachteten `fs:USER`/`hid`/`cfg`/`gsp`-Aufrufe kamen aus dem
-  **Exit-Pfad** (Destruktoren), nicht aus `main`.
-- `main` liegt in der Konstruktorkette; erst nach vollständigem Init ist mit
-  GSP/PICA zu rechnen.
-- `__libc_init_array` bei `0x100BB0` ist separat und wirklich leer
-  (`0x3D0B08..0x3D0B08`).
+- Jeder Gast-Thread = Host-Thread mit eigenem `ArmCpu` (gemeinsamer Speicher,
+  eigenes TLS-Fenster `0x1FF82000 + n*0x1000`).
+- Ein globaler `CRITICAL_SECTION` sorgt dafuer, dass immer nur **ein** Gast-
+  Thread laeuft (wie eine Single-Core-Konsole).
+- Blockierende SVCs (`SleepThread`, `WaitSynchronization*`, `ArbitrateAddress`)
+  geben den Lock kurz ab (`guest_yield`), damit andere Threads laufen.
 
-## Aktueller Blocker
+## Aktueller Stand
 
-Endlosschleife in der Konstruktorausfuehrung: Block **`0x0024B2DC`**
-(Float-nach-Int-Konvertierung) wird von `0x00382C40` aufgerufen und terminiert
-nicht.
+Der Konstruktor-Init laeuft komplett durch. Das Spiel erzeugt danach seine
+Worker-Threads (`svcCreateThread` x3) und initialisiert `fs`, `cfg`, `ptm`,
+`hid`, `ndm`, `dsp`, `y2r` sowie APT (inkl. `0x0050`). Danach haengt der
+**Haupt-Thread in einem Wartecounter** (`0x288B90`/`0x288C14`, Futex-Muster),
+waehrend der Notification-Thread `srv: 0x000B` pollt. `gsp::Gpu` wurde noch
+**nicht** aufgerufen -> kein Frame.
 
-Der Code ist:
-
-```
-0x24B2C8  ldr  r2,[pc,#0x74]     ; 0x47800000 = 65536.0f
-0x24B2D4  vldrge s2,[pc,#0x6c]   ; 0x47800000 = 65536.0f
-0x24B2DC  vsub.f32 s1,s1,s2
-0x24B2E0  vmov r3,s1
-0x24B2E4  cmp  r3,r2
-0x24B2E8  bge  0x24B2DC
-```
-
-Das ist eine Bereichsreduktion fuer grosse Floats; sie terminiert nur bei
-endlichem `s1`. Upstream entsteht offenbar **+Inf** (frueher beobachteter
-Fehlzugriff auf `0x7F800000`), z. B. durch `vdiv.f32 s0,s1,s2` bei `0x00382C44`
-mit `s2 = 0`.
-
-Naechster Schritt: die VFP-Kette ab `0x382C40` pruefen (`vldmia sp`, `vdiv`,
-s1/s2-Werte) und die Ursache des Inf bzw. 0-Divisors beseitigen. Danach sollten
-die restlichen Konstruktoren und der eigentliche Spiel-Init-Code laufen.
+Naechster Schritt: den Wartecounter in `0x288B90` korrekt bedienen (Signalisierung
+durch den Notification-/Worker-Thread) und danach `gsp::Gpu` + PICA-Renderer
+implementieren. Erst dann kann ein Menue-Frame per Screenshot belegt werden.
 
 ## Umgesetzte HLE-Bausteine
 

@@ -12,8 +12,46 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <windows.h>
 
 #define TLS_CMD_BUF 0x80u
+
+/* ---- kooperatives Threading: es laeuft immer nur ein Gast-Thread ---- */
+static CRITICAL_SECTION g_guest_lock;
+static int g_guest_lock_init = 0;
+static ArmCpu *g_main_cpu = NULL;
+
+static void guest_lock_enter(void) {
+    if (g_guest_lock_init) EnterCriticalSection(&g_guest_lock);
+}
+static void guest_lock_leave(void) {
+    if (g_guest_lock_init) LeaveCriticalSection(&g_guest_lock);
+}
+static void guest_yield(void) {
+    if (!g_guest_lock_init) return;
+    LeaveCriticalSection(&g_guest_lock);
+    Sleep(0);
+    EnterCriticalSection(&g_guest_lock);
+}
+
+extern void arm_call_guest_pub(ArmCpu *c, uint32_t addr);
+
+typedef struct {
+    int used;
+    ArmCpu *cpu;
+    uint32_t entry;
+} GuestThread;
+static GuestThread g_threads[32];
+static int g_thread_count = 0;
+
+static DWORD WINAPI guest_thread_main(LPVOID p) {
+    GuestThread *t = (GuestThread *)p;
+    EnterCriticalSection(&g_guest_lock);
+    arm_call_guest_pub(t->cpu, t->entry);
+    LeaveCriticalSection(&g_guest_lock);
+    return 0;
+}
+
 #define MAX_HANDLES 4096
 #define MAX_SERVICES 64
 
@@ -107,8 +145,8 @@ static int g_ipc_log_limit = 60;
 static unsigned g_cmd_seen[64][64];
 
 /* Ringpuffer der letzten Ereignisse (fuer Absturzdiagnose) */
-#define EV_RING 64
-static struct { int kind; uint32_t a, b, c; } g_ev_ring[EV_RING];
+#define HLE_EV_RING 64
+static struct { int kind; uint32_t a, b, c; } g_ev_ring[HLE_EV_RING];
 static int g_ev_pos = 0;
 
 static void ev(int kind, uint32_t a, uint32_t b, uint32_t c) {
@@ -116,7 +154,7 @@ static void ev(int kind, uint32_t a, uint32_t b, uint32_t c) {
     g_ev_ring[g_ev_pos].a = a;
     g_ev_ring[g_ev_pos].b = b;
     g_ev_ring[g_ev_pos].c = c;
-    g_ev_pos = (g_ev_pos + 1) % EV_RING;
+    g_ev_pos = (g_ev_pos + 1) % HLE_EV_RING;
 }   /* service x command */
 
 static const char *SERVICE_NAMES[] = {
@@ -857,14 +895,20 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     if (getenv("HLE_TRACE")) {
         g_trace_file = fopen("out/hle_trace.txt", "w");
     }
+    if (!g_guest_lock_init) {
+        InitializeCriticalSection(&g_guest_lock);
+        g_guest_lock_init = 1;
+        EnterCriticalSection(&g_guest_lock);
+    }
+    g_main_cpu = c;
     printf("[hle] romfs=%s log=%d srv-handle=%u\n", g_romfs, g_log, g_srv_handle);
 }
 
 void hle_report(void) {
     printf("[hle] ipc=%d ticks=%llu\n", g_ipc_count, (unsigned long long)g_tick);
     printf("[hle] letzte Ereignisse:\n");
-    for (int i = 0; i < EV_RING; i++) {
-        int idx = (g_ev_pos + i) % EV_RING;
+    for (int i = 0; i < HLE_EV_RING; i++) {
+        int idx = (g_ev_pos + i) % HLE_EV_RING;
         if (g_ev_ring[idx].kind == 0) continue;
         if (g_ev_ring[idx].kind == 1) {
             printf("   svc 0x%02X  r0=0x%08X r1=0x%08X\n",
@@ -877,6 +921,7 @@ void hle_report(void) {
 }
 
 uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
+    g_cpu = c;
     ev(1, imm, c->r[0], c->r[1]);
     svc_trace(imm, c);
     if (getenv("HLE_MUTEX_HACK") && !late_mutex_hack) {
@@ -951,16 +996,38 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             if (page) write_u32(c, page, 0);
             return 0;
         }
-        case 0x08: { /* CreateThread(out, entry, arg, stack, prio>>..., ...) */
-            uint32_t out = c->r[0];
+        case 0x08: { /* CreateThread(out, entry, arg, stack, prio, ...) */
+            uint32_t out = c->r[0], entry = c->r[1], arg = c->r[2];
+            uint32_t stack = c->r[3];
             uint32_t h = (uint32_t)alloc_handle(SVC_OTHER, "thread");
+            if (g_thread_count < 32) {
+                GuestThread *t = &g_threads[g_thread_count];
+                ArmCpu *tc = (ArmCpu *)calloc(1, sizeof(ArmCpu));
+                if (tc != NULL) {
+                    arm_cpu_init(tc, c->mem, c->mem_size);
+                    tc->tpidruro = c->tpidruro + (uint32_t)(g_thread_count + 1) * 0x1000u;
+                    tc->r[0] = arg;
+                    tc->r[13] = stack;
+                    tc->r[15] = entry;
+                    t->used = 1;
+                    t->cpu = tc;
+                    t->entry = entry;
+                    g_thread_count++;
+                    CreateThread(NULL, 0, guest_thread_main, t, 0, NULL);
+                }
+            }
             if (out) write_u32(c, out, h);
             c->r[1] = h;
             return 0;
         }
         case 0x09: /* ExitThread */
+            if (c != g_main_cpu) {
+                guest_lock_leave();
+                if (g_guest_lock_init) ExitThread(0);
+            }
             return 0;
         case 0x0A: /* SleepThread */
+            guest_yield();
             return 0;
         case 0x13: /* CreateMutex */
         case 0x15: /* CreateSemaphore */
@@ -981,13 +1048,32 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             c->r[1] = h;
             return 0;
         }
-        case 0x22: /* ArbitrateAddress */
+        case 0x22: { /* ArbitrateAddress(handle, addr, type, value, timeout) */
+            guest_yield();
+            uint32_t addr = c->r[1];
+            uint32_t type = c->r[2];
+            uint32_t value = c->r[3];
+            if ((addr & 0x1FFFFFFFu) + 4 <= c->mem_size) {
+                uint32_t cur;
+                memcpy(&cur, c->mem + (addr & 0x1FFFFFFFu), 4);
+                if (type == 1 || type == 3) { /* Decrement(AndWait)IfLessThan */
+                    /* Ohne echte Interrupts nie signalisierte Wartecounter nicht
+                       ins Unendliche laufen lassen: ab -2 als "signalisiert" behandeln. */
+                    if ((int32_t)cur <= -2) cur = 1;
+                    else cur -= 1;
+                    memcpy(c->mem + (addr & 0x1FFFFFFFu), &cur, 4);
+                }
+                (void)value;
+            }
             return 0;
+        }
         case 0x23: /* CloseHandle */
             return 0;
         case 0x24: /* WaitSynchronization1 */
+            guest_yield();
             return 0;
         case 0x25: /* WaitSynchronizationN(out, handles, count, wait_all, timeout) */
+            guest_yield();
             if (c->r[0]) write_u32(c, c->r[0], 0);
             return 0;
         case 0x27: { /* DuplicateHandle(out, handleO) */
@@ -997,8 +1083,9 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             c->r[1] = nh;
             return 0;
         }
-        case 0x28: /* GetSystemTick */
+        case 0x28: /* GetSystemTick -> 64 Bit in r0:r1 */
             g_tick += 0x1000;
+            c->r[1] = (uint32_t)(g_tick >> 32);
             return (uint32_t)g_tick;
         case 0x2A: { /* GetSystemInfo(type, out u64*, param, process) */
             uint32_t type = c->r[0], out = c->r[1];
