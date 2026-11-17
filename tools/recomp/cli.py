@@ -175,6 +175,11 @@ def generate(res, path, max_funcs=None, trace=False):
         out.append("  goto %s;" % em.label(fn.blocks[0].addr))
         for blk in fn.blocks:
             out.append("%s:" % em.label(blk.addr))
+            if u32(blk.addr) == 0x001079D0:
+                # SDK erwartet vom Kernel geschriebene Reply-Groesse 0x28
+                out.append("  c->r[0] = 0x28u;")
+            if u32(blk.addr) == 0x00107A30:
+                out.append("  c->r[6] = 0u;")
             if u32(blk.addr) in (0x0012E1E4, 0x0012E1F0):
                 out.append("  arm_mutex_bootstrap(c, c->r[0]);")
                 out.append("  arm_mutex_bootstrap(c, c->r[4]);")

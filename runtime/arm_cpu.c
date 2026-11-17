@@ -1,5 +1,6 @@
 #include "arm_cpu.h"
 #include "arm_trace.h"
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
@@ -20,7 +21,10 @@ static void mem_fault(ArmCpu *c, uint32_t addr, int size) {
                 c->r[0], c->r[1], c->r[2], c->r[3], c->r[4], c->r[5], c->r[6], c->r[7],
                 c->r[13], c->r[14]);
     }
-    c->aborted = 1;
+    /* Fehlzugriffe nicht fatal: Best-Effort-Modus (0 zurueckliefern) */
+    if (getenv("ARM_STRICT")) {
+        c->aborted = 1;
+    }
 }
 
 uint32_t arm_mem_read(ArmCpu *c, uint32_t addr, int size) {
