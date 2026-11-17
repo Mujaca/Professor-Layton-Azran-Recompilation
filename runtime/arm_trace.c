@@ -9,6 +9,23 @@
 
 uint32_t arm_last_block = 0;
 uint32_t arm_watch_pc = 0;
+static int g_watch_hits = 0;
+
+/* Ringpuffer der zuletzt ausgefuehrten Bloecke (Diagnose bei Abbruch). */
+#define PC_RING 65536
+static uint32_t g_pc_ring[PC_RING];
+static uint32_t g_lr_ring[PC_RING];
+static unsigned g_pc_pos = 0;
+
+void arm_trace_pc_ring_dump(unsigned count) {
+    unsigned n = count > PC_RING ? PC_RING : count;
+    fprintf(stderr, "[ring] letzte %u Bloecke (neueste zuerst):\n", n);
+    for (unsigned i = 0; i < n; i++) {
+        unsigned idx = (g_pc_pos + PC_RING - 1u - i) & (PC_RING - 1);
+        fprintf(stderr, "[ring] %04u pc=%08X lr=%08X\n", i, g_pc_ring[idx], g_lr_ring[idx]);
+    }
+    fflush(stderr);
+}
 
 static FILE *g_file = NULL;
 static unsigned long long g_records = 0;
@@ -87,7 +104,13 @@ int arm_trace_is_open(void) {
 
 void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
     arm_last_block = pc;
-    if (arm_watch_pc != 0 && pc == arm_watch_pc && c != NULL) {
+    if (c != NULL) {
+        g_pc_ring[g_pc_pos] = pc;
+        g_lr_ring[g_pc_pos] = c->r[14];
+        g_pc_pos = (g_pc_pos + 1) & (PC_RING - 1);
+    }
+    if (arm_watch_pc != 0 && pc == arm_watch_pc && c != NULL && g_watch_hits < 600) {
+        g_watch_hits++;
         fprintf(stderr, "[watch] 0x%08X r0=%08X r1=%08X r2=%08X r3=%08X "
                         "r4=%08X r5=%08X r6=%08X r7=%08X sp=%08X lr=%08X\n",
                 pc, c->r[0], c->r[1], c->r[2], c->r[3], c->r[4], c->r[5], c->r[6],
@@ -107,6 +130,13 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
                         (unsigned)arm_mem_read(c, a, 4), (unsigned)arm_mem_read(c, a + 4, 4),
                         (unsigned)arm_mem_read(c, a + 8, 4), (unsigned)arm_mem_read(c, a + 12, 4));
             }
+        }
+        if (getenv("ARM_WATCH_POOL")) {
+            uint32_t a = 0x004080C8u;
+            fprintf(stderr, "[watch]   pool:");
+            for (int i = 0; i < 16; i++)
+                fprintf(stderr, " %08X", (unsigned)arm_mem_read(c, a + (uint32_t)i * 4u, 4));
+            fprintf(stderr, "\n");
         }
         fflush(stderr);
     }

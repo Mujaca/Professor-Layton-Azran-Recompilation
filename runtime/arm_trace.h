@@ -24,6 +24,7 @@ void arm_trace_svc(uint32_t imm);
 void arm_trace_ipc(const char *service, uint32_t cmd_id);
 void arm_trace_frame(void);
 void arm_trace_event(uint32_t kind, uint32_t a, uint32_t b);
+void arm_trace_pc_ring_dump(unsigned count);
 
 #ifdef __cplusplus
 }

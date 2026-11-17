@@ -1,61 +1,66 @@
 # Port-Status
 
-Letzte Aktualisierung: 2026-11-18 (Blocker-Analyse)
+Letzte Aktualisierung: 2026-11-18 (Static-Init-Durchbruch)
 
-## Abstand zum Menü (Schätzung)
+## Kurzfassung
 
-| Bereich | Stand |
-|---|---|
-| Kernel/Heap/Threads | ~90 % (Heap, SVCs, Fibers, Handles) |
-| `srv:` / `APT:U` | ~80 % (Init-Kette läuft) |
-| `err:f`, `hid`, `ndm` | ~30 % (Stubs) |
-| `fs:USER` (Assets) | 0 % |
-| `gsp::Gpu` + PICA-Renderer | 0 % — **größter Posten** |
-| **Gesamt** | **~2–4 Arbeitstage** bis zum ersten Menü-Frame |
+Der Boot kommt jetzt **deutlich weiter als der alte `err:f`-Fatalpfad**: Die
+TLS-Reply-Semantik stimmt, `fs:USER`/`cfg:u`/`APT:U` antworten korrekt, und die
+**C++-Konstruktortabelle (304 Einträge, 0x3D0648..0x3D0B08) wird ausgeführt**.
+Aktuell hängt das Programm in einem der Konstruktoren (Endlosschleife); das
+Menü rendert daher noch nicht.
 
-## Blocker-Analyse
+## Diese Session behobene Fehler
 
-**Blocker 1 (Fatalcode `0xF96047A2`)**
-Der Code ist **kein dekodierter Fehler**, sondern ein hartkodiertes Literal im Fehlerpfad von
-`0x1078F4` (Literal bei `0x107A70`). Die Funktion ist ein IPC-Wrapper *mit Buffern*
-(`0x287E38`); nach dem Aufruf prüft sie `[sp+8] == 0x28` und eine berechnete Größe `r6 > 0`.
-Beides erwartet eine **vom Kernel geschriebene Reply-Größe**, die unsere HLE nicht liefert
-→ Fehlerpfad → `err:f::ThrowFatalError`.
+| # | Fehler | Wirkung |
+|---|---|---|
+| 1 | `arm_pool_alloc` gab **Host-Zeiger** (64→32 Bit abgeschnitten) zurück | SDK-Objekte lagen außerhalb des Gast-Adressraums (`0x8843D090`) → Absturz |
+| 2 | `SERVICE_NAMES[33]` (SVC_FILE) **out of bounds** | `printf` las Müll-Zeiger → Boot blieb bei jedem Datei-IPC hängen |
+| 3 | IPC-Reply-Layout für `OpenFile`/`OpenFileDirectly`/`OpenArchive` war 3+2 statt **1+2** (Result + MoveHandle) | SDK wertete jede Antwort als Fehler → `err:f`-Fatalpfad |
+| 4 | TLS-Felder `+0x8C` wurden als "Reply-Größe" überschrieben | **Reply-Wort 3 (= Signal/Param) wurde zerstört**; APT meldete nie `Wakeup` |
+| 5 | `APT:U 0x0D/0x0E` (ReceiveParameter/GlanceParameter) fehlte | Spiel wartete endlos auf `SignalType::Wakeup` |
+| 6 | `scan.py`: **`blx reg` wurde als Blockende** behandelt | Code nach jedem indirekten Aufruf ging verloren |
+| 7 | Thumb-Init-Loop `0x100974` rief nur den **ersten** Konstruktor | `r4 += 4` / `bne` fehlten im Block (Folge von #6) |
+| 8 | **SP-Korruption** durch fehlerhafte Epiloge (z. B. `fn_00291BDC`) | Konstruktoren sahen zerstörte Stackframes |
+| 9 | Konstruktor-Ziele waren **keine Funktions-Seeds** | `arm_call_guest` → No-Op, Init lief ins Leere |
 
-**Blocker 2 (NULL-Vtable `vtable+0x2C`)**
-Kein eigener Bug: Der Aufruf passiert **im selben Fehlerpfad** (`0x107A4C`), nachdem `r7` auf 0
-gesetzt wurde (`moveq r7,r0` bei fehlgeschlagenem Objekt-Create). Die Vtable selbst ist intakt
-(`0x3CB3E8`, `+0x2C = 0x33E054`). Fix von Blocker 1 beseitigt Blocker 2 automatisch.
+## Wichtige Erkenntnis zum Programmaufbau
 
-## Nächster konkreter Schritt
+- Entry `0x00100000` → `_start`; `blx 0x100974` ist **Thumb** und läuft die
+  Konstruktortabelle `0x3D0648..0x3D0B08` ab (304 rel. Pointer).
+- Die früher beobachteten `fs:USER`/`hid`/`cfg`/`gsp`-Aufrufe kamen aus dem
+  **Exit-Pfad** (Destruktoren), nicht aus `main`.
+- `main` liegt in der Konstruktorkette; erst nach vollständigem Init ist mit
+  GSP/PICA zu rechnen.
+- `__libc_init_array` bei `0x100BB0` ist separat und wirklich leer
+  (`0x3D0B08..0x3D0B08`).
 
-Reply-Größen-Semantik der SDK-IPC implementieren:
-1. Beim `svcSendSyncRequest` die Response-Wortzahl in den vom Wrapper erwarteten Out-Slot
-   schreiben (Wrapper `0x287E38`, Aufrufer `0x1078F4`).
-2. Danach läuft die APT/err-Kette ohne Fatalpfad weiter; als Nächstes `fs:USER`.
+## Aktueller Blocker
 
-## Aktueller Crash
+Endlosschleife in der Konstruktorausführung (Watchdog: `pc=0x00382BA0`,
+`lr=0x00382C40`, SP stabil `0x0FFEFFC8`). Reproduzierbar über
+`ARM_WATCH=0x00382BA0` (kein Treffer → PC im CPU-State ist nur ein Hinweis,
+der Block wird über einen anderen Pfad erreicht).
 
-Nach APT/hid/ndm läuft der Boot weiter und stürzt bei `0x134AAC` ab (kleiner Copy-Helper
-`*r1 = *r0` mit `r1 = 0xFFD76260`, also einem ungültigen Zeiger — vermutlich Folge der
-Reply-Größen-Thematik).
+Nächster Schritt: den Konstruktor bei `0x382xxx` (Bereich des 4. Eintrags,
+`0x381CE4`) bzw. seine Callee-Kette auf die Schleifenbedingung prüfen
+(Register-/Flag-Semantik) und danach die restlichen Konstruktoren durchlaufen
+lassen.
 
-## Recompiler-Fixes dieser Session
+## Umgesetzte HLE-Bausteine
 
-| Bug | Wirkung |
-|---|---|
-| Bedingte Terminatoren ohne Fallthrough (`bxeq lr`, `popne {pc}`) | Sprung in falschen Block → korrupte Zeiger |
-| `lsls/lsrs/asrs` ohne Flags | Heap-Ausrichtung schlug fehl |
-| Post-Index-Writeback | BSS-Nullschleife endlos |
-| `push`/`stmdb`-Writeback (DB/DA) | Stackpointer blieb stehen |
+- Config-Memory, ControlMemory (Bump), QueryMemory, GetSystemInfo, Threads,
+  Mutex-Bootstrap, `srv:` komplett, `APT:U` (1,2,3,4,5,0x0D,0x0E,0x4F),
+  `hid:USER` (0x0A), `ndm:u`, `ptm:u` (Stub), `cfg:u` (GetConfig/Region/Model),
+  `fs:USER` (OpenFile, OpenFileDirectly, OpenArchive/Control/Close, CreateFile,
+  GetFreeBytes) + Datei-Service (Read/Write/GetSize/SetSize/Close) auf `out/romfs`.
+- Reply-Semantik: Puffer liegt in `TLS+0x80`; Wort 1 = Result, danach Normal-
+  Parameter, danach Translate-Parameter (MoveHandle = `0x10`, Handle).
 
-## HLE-Stand
-
-Config-Memory, ControlMemory (Bump-Allocator), ResourceLimits, QueryMemory,
-CreateAddressArbiter, Threads (Windows-Fibers), Wait/Sleep, Mutex-Bootstrap,
-`srv:` komplett, `APT:U` (1,2,3,4,5,0x28,0x4F), `hid:USER` (0x0A), generische Antworten.
+## Kommandos
 
 ```powershell
 python tools\build_port.py
-.\out\port.exe out\romfs
+python tests\mvp_selftest.py        # 13/13
+.\out\port.exe out\romfs --shot out\shot.bmp
 ```

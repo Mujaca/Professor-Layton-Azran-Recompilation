@@ -78,6 +78,16 @@ int main(int argc, char **argv) {
     fn_00100000(&c);
 
     printf("halt: aborted=%d pc=0x%08X r0=0x%08X\n", c.aborted, c.r[15], c.r[0]);
+    if (c.aborted) {
+        unsigned *lo = (unsigned *)g_mem;
+        printf("lowmem:");
+        for (int i = 0; i < 16; i++) printf(" [%02X]=%08X", i * 4, lo[i]);
+        printf("\n");
+        printf("obj1C:");
+        for (int i = 0; i < 12; i++) printf(" %08X", lo[7 + i]);
+        printf("\n");
+    }
+    if (c.aborted) arm_trace_pc_ring_dump(250);
     hle_report();
     arm_trace_close();
     return 0;

@@ -50,8 +50,7 @@ def is_terminator(ins) -> bool:
         return True
     if ins.id in (A.ARM_INS_BX, A.ARM_INS_CBZ, A.ARM_INS_CBNZ):
         return True
-    if ins.id == A.ARM_INS_BLX:
-        return reg_operand(ins)       # blx reg = indirekter Sprung, blx imm = Aufruf
+    # BLX (Register und Immediate) ist immer ein Aufruf (setzt LR), kein Blockende.
     if ins.id == A.ARM_INS_POP:
         return "pc" in ins.op_str
     if ins.id in LDM_IDS:

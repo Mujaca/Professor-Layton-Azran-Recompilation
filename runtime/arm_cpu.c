@@ -5,16 +5,22 @@
 #include <string.h>
 #include <math.h>
 
+static ArmCpu *g_pool_cpu = NULL;
+
 void arm_cpu_init(ArmCpu *c, void *mem, uint32_t size) {
     memset(c, 0, sizeof(*c));
     c->mem = (uint8_t *)mem;
     c->mem_size = size;
+    g_pool_cpu = c;
 }
 
 /* ---------------- memory ---------------- */
 
+static int g_fault_prints = 0;
+
 static void mem_fault(ArmCpu *c, uint32_t addr, int size) {
-    if (!c->aborted) {
+    if (!c->aborted && g_fault_prints < 60) {
+        g_fault_prints++;
         fprintf(stderr, "arm: access outside memory: 0x%08X (size %d) block=0x%08X\n",
                 addr, size, arm_last_block);
         fprintf(stderr, "     r0=%08X r1=%08X r2=%08X r3=%08X r4=%08X r5=%08X r6=%08X r7=%08X sp=%08X lr=%08X\n",
@@ -312,16 +318,22 @@ int arm_ldm_stm(ArmCpu *c, int base, int load, int writeback, int mode, uint32_t
 
 /* ---------------- svc / fallback ---------------- */
 
-/* Einfacher Bump-Allocator fuer SDK-Objekte (Ersatz fuer leere SDK-Pools). */
-void *arm_pool_alloc(unsigned size) {
-    static unsigned char pool[1 << 18];
-    static unsigned used = 0;
+/* Bump-Allocator fuer SDK-Objekte im Gast-Adressraum (Ersatz fuer leere SDK-Pools).
+ * Region 0x1E000000..0x1E400000 liegt zwischen Linear-Heap und VRAM und wird
+ * von Spiel/HLE sonst nicht benutzt. */
+#define ARM_POOL_BASE 0x1E000000u
+#define ARM_POOL_SIZE 0x00400000u
+static uint32_t g_pool_used = 0;
+
+uint32_t arm_pool_alloc(unsigned size) {
     size = (size + 15u) & ~15u;
-    if (used + size > sizeof(pool)) return NULL;
-    void *p = &pool[used];
-    used += size;
-    memset(p, 0, size);
-    return p;
+    if (size == 0) size = 16;
+    if (g_pool_cpu == NULL) return 0;
+    if (g_pool_used + size > ARM_POOL_SIZE) return 0;
+    uint32_t addr = ARM_POOL_BASE + g_pool_used;
+    g_pool_used += size;
+    memset(g_pool_cpu->mem + addr, 0, size);
+    return addr;
 }
 
 /* Null-initialisierte BSS-Semaphore beim ersten Warten als frei behandeln. */
@@ -609,3 +621,26 @@ uint32_t arm_smla16(ArmCpu *c, uint32_t rn, uint32_t rm, uint32_t ra,
     return (uint32_t)(int32_t)sum;
 }
 
+
+void arm_sp_check(ArmCpu *c, uint32_t sp0, uint32_t tgt) {
+    if (c->r[13] != sp0) {
+        static int n = 0;
+        if (n++ < 25)
+            fprintf(stderr, "[sp] call 0x%08X changed sp %08X -> %08X (lr=%08X)\n",
+                    tgt, sp0, c->r[13], c->r[14]);
+        /* ABI-Garantie erzwingen: ein Guest-Aufruf darf SP nicht veraendern. */
+        c->r[13] = sp0;
+    }
+}
+
+/* ABI-Garantie: ein Guest-Aufruf darf SP nicht veraendern. Falls doch
+ * (Recompiler-Bug), SP wiederherstellen und einmalig melden. */
+void arm_restore_sp(ArmCpu *c, uint32_t sp0) {
+    if (c->r[13] != sp0) {
+        static int n = 0;
+        if (n++ < 40)
+            fprintf(stderr, "[sp] 0x%08X: SP %08X -> %08X (korrigiert)\n",
+                    arm_last_block, sp0, c->r[13]);
+        c->r[13] = sp0;
+    }
+}

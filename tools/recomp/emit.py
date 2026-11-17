@@ -300,19 +300,23 @@ class Emitter:
                 raise Unsupported(ins.op_str)
             tgt = ins.operands[0].imm
             nxt = pc + ins.size + (1 if self.thumb else 0)
-            lines = ["c->r[14] = 0x%08Xu;" % u32(nxt),
-                     "fn_%08X(c);" % u32(tgt),
-                     "if (c->aborted) return;"]
+            lines = ["{ uint32_t sp0 = c->r[13];",
+                     "  c->r[14] = 0x%08Xu;" % u32(nxt),
+                     "  fn_%08X(c);" % u32(tgt)]
             if u32(tgt) == 0x00287DD4:
-                lines.append("{ if (c->r[0] == 0) c->r[0] = "
-                             "(uint32_t)(uintptr_t)arm_pool_alloc(0x100); }")
+                lines.append("  if (c->r[0] == 0) c->r[0] = "
+                             "arm_pool_alloc(0x400);")
+            lines.append("  arm_restore_sp(c, sp0); }")
+            lines.append("if (c->aborted) return;")
             return lines
         if ins.id == A.ARM_INS_BLX:
             if ins.operands and ins.operands[0].type == A.ARM_OP_IMM:
                 tgt = ins.operands[0].imm
-                return ["c->r[14] = 0x%08Xu;" % u32(pc + ins.size + (1 if self.thumb else 0)),
-                        "c->t = %du;" % (0 if self.thumb else 1),
-                        "fn_%08X(c);" % u32(tgt),
+                return ["{ uint32_t sp0 = c->r[13];",
+                        "  c->r[14] = 0x%08Xu;" % u32(pc + ins.size + (1 if self.thumb else 0)),
+                        "  c->t = %du;" % (0 if self.thumb else 1),
+                        "  fn_%08X(c);" % u32(tgt),
+                        "  arm_restore_sp(c, sp0); }",
                         "if (c->aborted) return;"]
         if ins.id in (A.ARM_INS_BX, A.ARM_INS_BLX):
             reg = isa.reg_num(ops[0])
@@ -321,9 +325,13 @@ class Emitter:
             if ins.id == A.ARM_INS_BLX or reg != 14:
                 lines = []
                 if ins.id == A.ARM_INS_BLX:
-                    lines.append("c->r[14] = 0x%08Xu;"
+                    lines.append("{ uint32_t sp0 = c->r[13];")
+                    lines.append("  c->r[14] = 0x%08Xu;"
                                  % u32(pc + ins.size + (1 if self.thumb else 0)))
-                lines.append("arm_call_guest(c, c->r[%d]);" % reg)
+                    lines.append("  arm_call_guest(c, c->r[%d]);" % reg)
+                    lines.append("  arm_restore_sp(c, sp0); }")
+                else:
+                    lines.append("arm_call_guest(c, c->r[%d]);" % reg)
                 lines.append("if (c->aborted) return;")
                 if ins.id == A.ARM_INS_BX:
                     lines.append("return;")

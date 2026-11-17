@@ -124,7 +124,7 @@ static const char *SERVICE_NAMES[] = {
     "APT:U", "cfg:u", "ptm:u", "dsp::DSP", "y2r:u", "ndsp:", "soc:U",
     "ir:USER", "mic:u", "cam:u", "ac:u", "boss:U", "cecd:u", "news:u",
     "ndm:u", "nwm::UDS", "frd:u", "am:u", "ldr:ro", "mvd:std", "nfc:u",
-    "pxi:dev", "dlp:FKCL", "ssl:C", "http:C", "?",
+    "pxi:dev", "dlp:FKCL", "ssl:C", "http:C", "?", "file",
 };
 
 static int service_from_name(const char *name) {
@@ -182,6 +182,7 @@ static Handle *get_handle(uint32_t h) {
 
 /* ---------- IPC-Schreibzugriffe ---------- */
 
+static void write_u32(ArmCpu *c, uint32_t addr, uint32_t value);
 static void ipc_put(Ipc *r, uint32_t v) {
     r->buf[r->written++] = v;
 }
@@ -206,6 +207,9 @@ static void ipc_begin(Ipc *r, uint32_t cmd, int normal, int translate) {
 static void ipc_finish(Ipc *r) {
     r->buf[0] = ((r->cmd & 0xFFFFu) << 16) | ((uint32_t)(r->normal & 0x3F) << 6)
                 | (uint32_t)(r->translate & 0x3F);
+    /* Der Reply-Puffer liegt bereits in der TLS-Struktur (TLS+0x80):
+       Wort 1 = Result, Wort 2..n = Normal-Parameter, danach Translate.
+       Keine separaten TLS-Felder ueberschreiben. */
 }
 
 /* ---------- Services ---------- */
@@ -287,6 +291,8 @@ static void put_result(Ipc *r) {
     ipc_put(r, 0);
 }
 
+static int g_apt_wakeup_sent = 0;
+
 static void apt_command(Ipc *r, uint32_t *p) {
     switch (r->cmd) {
         case 1: { /* GetLockHandle */
@@ -326,6 +332,32 @@ static void apt_command(Ipc *r, uint32_t *p) {
             ipc_put(r, 0x101);     /* requested applet id */
             ipc_put(r, 0x101);     /* home menu id */
             ipc_put(r, 0x100);     /* active applet id */
+            break;
+        }
+        case 0x0D: case 0x0E: { /* ReceiveParameter / GlanceParameter */
+            uint32_t dsc_flags = 0, dsc_addr = 0;
+            if (r->translate >= 2) {
+                dsc_flags = p[r->normal];
+                dsc_addr = p[r->normal + 1];
+            }
+            if (!g_apt_wakeup_sent) {
+                g_apt_wakeup_sent = 1;
+                ipc_begin(r, r->cmd, 4, 2 + (r->translate >= 2 ? 2 : 0));
+                ipc_put(r, 0);          /* ResultSuccess */
+                ipc_put(r, 0);          /* sender_id = None */
+                ipc_put(r, 1);          /* signal = Wakeup */
+                ipc_put(r, 0);          /* Parameter-Groesse */
+                ipc_put_handle_copy(r, 0);
+                if (r->translate >= 2) {
+                    ipc_put(r, dsc_flags);
+                    ipc_put(r, dsc_addr);
+                }
+                if (g_log) printf("[apt] ReceiveParameter -> Wakeup\n");
+            } else {
+                ipc_begin(r, r->cmd, 1, 0);
+                ipc_put(r, 0xD8A0A000u); /* NoData (Applet) */
+                if (g_log) printf("[apt] ReceiveParameter -> NoData\n");
+            }
             break;
         }
         case 0x0B: case 0x43: { /* InquireNotification / ? */
@@ -520,10 +552,8 @@ static void fs_command(Ipc *r, uint32_t *p) {
                        r->cmd == 0x0802 ? "OpenFile" : "OpenFileDirectly", path,
                        opened ? "ok" : "FEHLER", h, opened ? slot->size / 1024 : 0);
             }
-            ipc_begin(r, r->cmd, 3, 2);
+            ipc_begin(r, r->cmd, 1, 2);
             ipc_put(r, 0);
-            ipc_put(r, h);
-            ipc_put(r, 0x28u);      /* Reply-Groesse fuer die SDK */
             ipc_put_handle(r, h);
             break;
         }
@@ -532,9 +562,8 @@ static void fs_command(Ipc *r, uint32_t *p) {
             find_path(p, path, sizeof(path));
             uint32_t h = (uint32_t)alloc_handle(SVC_FS_USER, "archive");
             if (g_log) printf("[fs] OpenArchive -> handle %u\n", h);
-            ipc_begin(r, 0x080C, 2, 2);
+            ipc_begin(r, 0x080C, 1, 2);
             ipc_put(r, 0);
-            ipc_put(r, h);
             ipc_put_handle(r, h);
             break;
         }
@@ -713,6 +742,7 @@ static void dispatch_ipc(uint32_t handle) {
     r.written = 0;
 
     int service = h ? h->service : SVC_OTHER;
+    if (service < 0 || service > 33) service = SVC_OTHER;
     /* Fallback: fs-Kommandos auch bei unbekanntem Handle als fs behandeln */
     if (h == NULL && (cmd & 0xFF00u) == 0x0800u) {
         service = SVC_FS_USER;
@@ -729,7 +759,7 @@ static void dispatch_ipc(uint32_t handle) {
     g_ipc_count++;
     if (cmd < 64 && service >= 0 && service < 64) g_cmd_seen[service][cmd]++;
     if (h && (g_ipc_count <= g_ipc_log_limit || g_log)) {
-        printf("[ipc] %-9s cmd=0x%04X n=%d t=%d h=%u", SERVICE_NAMES[service], cmd,
+        printf("[ipc] blk=%08X %-9s cmd=0x%04X n=%d t=%d h=%u", arm_last_block, SERVICE_NAMES[service], cmd,
                normal, translate, handle);
         for (int i = 0; i < normal && i < 8; i++) printf(" p%d=%08X", i, params[i]);
         printf("\n");
