@@ -734,8 +734,21 @@ static uint32_t ipc_out_buffer(uint32_t *p, int normal, int translate) {
 static void file_command(Ipc *r, uint32_t *p) {
     Handle *h = get_handle(g_cur_handle);
     if (h == NULL || h->file < 0) {
-        ipc_begin(r, r->cmd, 1, 0);
-        ipc_put(r, 0);
+        /* Richtige Reply-Form auch ohne Datei, sonst wertet die SDK
+           "0 Bytes gelesen" als Fehler (F96047A2). */
+        if (r->cmd == 0x0801 || r->cmd == 0x0802) {
+            ipc_begin(r, r->cmd, 2, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 0);
+        } else if (r->cmd == 0x0803) {
+            ipc_begin(r, r->cmd, 3, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 0);
+        } else {
+            ipc_begin(r, r->cmd, 1, 0);
+            ipc_put(r, 0);
+        }
         return;
     }
     FileSlot *f = &g_files[h->file];
@@ -768,8 +781,8 @@ static void file_command(Ipc *r, uint32_t *p) {
                     if (done) memset(g_cur_mem + (addr & 0x1FFFFFFFu), 0, done);
                 }
             }
-            if (g_log) printf("[file] Read off=0x%llX len=0x%X -> %u\n",
-                              (unsigned long long)offset, length, done);
+            if (g_log) printf("[file] Read %s off=0x%llX len=0x%X size=0x%X -> %u\n",
+                              f->path, (unsigned long long)offset, length, f->size, done);
             ipc_begin(r, 0x0801, 2, 0);
             ipc_put(r, 0);
             ipc_put(r, done);
@@ -932,7 +945,7 @@ static void dsp_command(Ipc *r, uint32_t *p) {
             break;
         }
         case 0x0003: case 0x0005: case 0x0007: case 0x0009:
-        case 0x000A: case 0x000C: case 0x0012: { /* Set/Send/Clear/Mask/… */
+        case 0x000A: case 0x000C: { /* Set/Send/Clear/Mask/… */
             ipc_begin(r, r->cmd, 1, 0);
             ipc_put(r, 0);
             break;
@@ -1215,7 +1228,8 @@ static DWORD WINAPI vblank_thread(LPVOID p) {
         }
         /* Bekannte Arbitrate-Objekte ebenfalls "posten". */
         if (g_cpu != NULL) {
-            static const uint32_t arbs[] = { 0x090001D4u, 0x0042BD54u, 0x0042B864u };
+            static const uint32_t arbs[] = { 0x090001D4u, 0x0042BD54u, 0x0042B864u,
+                                          0x0040C628u, 0x0040C5B4u, 0x0040C5A8u };
             for (unsigned a = 0; a < sizeof(arbs) / sizeof(arbs[0]); a++) {
                 uint32_t off = arbs[a] & 0x1FFFFFFFu;
                 if (off + 4 <= g_cpu->mem_size) {

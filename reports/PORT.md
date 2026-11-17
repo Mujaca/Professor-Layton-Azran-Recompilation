@@ -90,3 +90,19 @@ python tools\build_port.py
 python tests\mvp_selftest.py        # 13/13
 .\out\port.exe out\romfs --shot out\shot.bmp
 ```
+
+## Nachtrag: Stand nach den letzten Runden
+
+- `svcArbitrateAddress` blockiert echt **und gibt den Guest-Lock dabei ab** ->
+  IPC-Durchsatz 60 -> 12.148 (boot) bzw. ~66.000 (port).
+- Echte Zeitbasis (`GetTickCount64*268111`) und echtes `svcSleepThread`.
+- `dsp::DSPord` vollstaendig (RecvData/SendData/Fifo/Semaphore/GetSemaphoreEventHandle).
+- Datei-Service korrekt (0x0801 Read, 0x0802 Write, 0x0803 GetSize,
+  0x0804 SetSize, 0x0805 Close, 0x0806 Flush); Save-Dateien entstehen in
+  `out/savedata`.
+- FS-Reply ohne Datei liefert jetzt die richtige Wortzahl (Read/Write 2 Woerter,
+  GetSize 3 Woerter), damit die SDK nicht "0 Bytes" als Fehler wertet.
+
+Offen: `gsp::Gpu` wird weiterhin 0x geoeffnet; `0x1F000000` bleibt leer.
+Der Haupt-Thread wartet in der SDK-Terminierungs-/Idle-Schleife `0x288AAC`
+(Byte `[0x40B381]` = Terminate-Flag, Callback `[0x40B4E0]`).

@@ -239,6 +239,8 @@ int main(int argc, char **argv) {
            C8A04554) entschaerfen. */
         *(uint32_t *)(g_mem + 0x107A48) = 0xE1A00000u;
         *(uint32_t *)(g_mem + 0x107B34) = 0xE1A00000u;
+        /* 0x28F45C = SDK-Fehlerwerfer: komplett entschaerfen (bx lr). */
+        *(uint32_t *)(g_mem + 0x28F45C) = 0xE12FFF1Eu;
     }
 
 
