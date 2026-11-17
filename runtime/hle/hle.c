@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
+#include <direct.h>
 
 #define TLS_CMD_BUF 0x80u
 
@@ -485,16 +486,30 @@ static int find_path(const uint32_t *buf, char *out, int out_size) {
     return best_len;
 }
 
+static void ensure_savedata(void) {
+#ifdef _WIN32
+    _mkdir("out/savedata");
+#else
+    mkdir("out/savedata", 0755);
+#endif
+}
+
+/* Sucht eine Datei zuerst in out/savedata, dann in out/romfs. */
 static int open_guest_file(const char *guest_path, FileSlot **slot_out) {
     char path[256];
     const char *q = guest_path;
     if (strncmp(q, "romfs:", 6) == 0) q += 6;
     while (*q == '/') q++;
-    snprintf(path, sizeof(path), "%s/%s", g_romfs, q);
-    for (char *c = path; *c; c++) {
-        if (*c == '/') *c = '\\';
-    }
+    char base1[256];
+    snprintf(base1, sizeof(base1), "out/savedata/%s", q);
+    for (char *c = base1; *c; c++) if (*c == '/') *c = '\\';
+    snprintf(path, sizeof(path), "%s", base1);
     FILE *fp = fopen(path, "rb");
+    if (!fp) {
+        snprintf(path, sizeof(path), "%s/%s", g_romfs, q);
+        for (char *c = path; *c; c++) if (*c == '/') *c = '\\';
+        fp = fopen(path, "rb");
+    }
     if (!fp) return 0;
     fseek(fp, 0, SEEK_END);
     long sz = ftell(fp);
@@ -1006,6 +1021,7 @@ static void setup_config_mem(ArmCpu *c) {
 }
 
 void hle_init(ArmCpu *c, const char *romfs_dir) {
+    ensure_savedata();
     g_cpu = c;
     snprintf(g_romfs, sizeof(g_romfs), "%s", romfs_dir ? romfs_dir : "out/romfs");
     g_log = getenv("HLE_LOG") != NULL;
