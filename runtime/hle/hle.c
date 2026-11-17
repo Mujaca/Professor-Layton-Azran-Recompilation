@@ -331,6 +331,7 @@ static void file_command(Ipc *r, uint32_t *p);
 static void cfg_command(Ipc *r, uint32_t *p);
 static void dsp_command(Ipc *r, uint32_t *p);
 static void gsp_command(Ipc *r, uint32_t *p);
+static void y2r_command(Ipc *r, uint32_t *p);
 
 static void put_result(Ipc *r) {
     ipc_put(r, 0);
@@ -883,6 +884,42 @@ static void gsp_command(Ipc *r, uint32_t *p) {
     }
 }
 
+/* Y2R: die meisten Kommandos sind Setter (1 Result). Wichtig ist
+ * 0x000F GetTransferEndEvent -> Event-Handle, sonst wartet das Spiel auf
+ * Handle 0 und kommt nie zur Grafik-Initialisierung. */
+static void y2r_command(Ipc *r, uint32_t *p) {
+    switch (r->cmd) {
+        case 0x0002: case 0x0004: case 0x0006: case 0x0008:
+        case 0x000A: case 0x000C: case 0x000E: { /* Get* -> Result + Wert */
+            ipc_begin(r, r->cmd, 2, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x000F: { /* GetTransferEndEvent -> Result + MoveHandle(Event) */
+            uint32_t ev = (uint32_t)alloc_handle(SVC_OTHER, "y2r-ev");
+            Handle *hh = get_handle(ev);
+            if (hh) hh->signaled = 1;
+            ipc_begin(r, 0x000F, 1, 2);
+            ipc_put(r, 0);
+            ipc_put_handle(r, ev);
+            if (g_log) printf("[y2r] GetTransferEndEvent -> %u\n", ev);
+            break;
+        }
+        case 0x0014: case 0x0019: { /* IsFinished* -> true */
+            ipc_begin(r, r->cmd, 2, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 1);
+            break;
+        }
+        default:
+            ipc_begin(r, r->cmd, 1, 0);
+            ipc_put(r, 0);
+            if (g_log) printf("[y2r] cmd 0x%04X -> 0\n", r->cmd);
+            break;
+    }
+}
+
 static void generic_command(Ipc *r, int service) {
     if (g_log) {
         printf("[%s] cmd 0x%04X normal=%d -> 0\n",
@@ -969,6 +1006,9 @@ static void dispatch_ipc(uint32_t handle) {
             break;
         case SVC_GSP_GPU:
             gsp_command(&r, params);
+            break;
+        case SVC_Y2R:
+            y2r_command(&r, params);
             break;
         default:
             generic_command(&r, service);
