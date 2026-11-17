@@ -281,6 +281,7 @@ static void generic_command(Ipc *r, int service);
 static void hid_command(Ipc *r, uint32_t *p);
 static void fs_command(Ipc *r, uint32_t *p);
 static void file_command(Ipc *r, uint32_t *p);
+static void cfg_command(Ipc *r, uint32_t *p);
 
 static void put_result(Ipc *r) {
     ipc_put(r, 0);
@@ -438,23 +439,113 @@ static void fs_command(Ipc *r, uint32_t *p) {
         }
         case 0x0802: case 0x0803: { /* OpenFile / OpenFileDirectly */
             char path[256];
-            int ok = find_path(p, path, sizeof(path)) > 0;
+            int ok = 0;
+            /* Mapped Buffers: Deskriptor/Adresse-Paare ab p[normal] */
+            uint32_t addr = 0, len = 0;
+            if (r->translate >= 4) {
+                addr = p[r->normal + 3];
+                len = p[5];
+            } else if (r->translate >= 2) {
+                addr = p[r->normal + 1];
+                len = p[1];
+            }
+            if (addr >= 0x08000000u && addr < 0x20000000u && len > 0 && len < 250) {
+                const uint8_t *src = g_cur_mem + (addr & 0x1FFFFFFFu);
+                int n = 0;
+                if (len >= 2 && src[1] == 0 && src[0] != 0) {          /* UTF-16LE */
+                    for (uint32_t i = 0; i + 1 < len && n < 250; i += 2) {
+                        if (src[i] == 0) break;
+                        path[n++] = (char)src[i];
+                    }
+                } else {
+                    for (uint32_t i = 0; i < len && n < 250; i++) {
+                        if (src[i] == 0) break;
+                        path[n++] = (char)src[i];
+                    }
+                }
+                path[n] = 0;
+                ok = n > 0;
+            }
+            if (!ok) ok = find_path(p, path, sizeof(path)) > 0;
             FileSlot *slot = NULL;
             int opened = ok ? open_guest_file(path, &slot) : 0;
+            if (!opened) {
+                /* Fallback: leere Datei, damit die SDK weiterlaeuft */
+                for (int i = 0; i < MAX_FILES; i++) {
+                    if (!g_files[i].used) {
+                        g_files[i].used = 1;
+                        g_files[i].fp = NULL;
+                        g_files[i].size = 0;
+                        snprintf(g_files[i].path, sizeof(g_files[i].path), "%s", path);
+                        slot = &g_files[i];
+                        opened = 1;
+                        break;
+                    }
+                }
+            }
             uint32_t h = 0;
             if (opened) {
                 h = (uint32_t)alloc_handle(SVC_FILE, "file");
                 if (h && h < MAX_HANDLES) g_handles[h].file = (int)(slot - g_files);
             }
             if (g_log) {
+                printf("[fs] dump:");
+                for (int i = 0; i < 24; i++) printf(" %08X", p[i]);
+                printf("\n     ascii:");
+                for (int i = 0; i < 96; i++) {
+                    uint8_t ch = ((const uint8_t *)p)[i];
+                    printf("%c", (ch >= 0x20 && ch < 0x7F) ? ch : '.');
+                }
+                printf("\n");
+                if (g_log) {
+                    for (int k = r->normal; k + 1 < r->normal + r->translate; k += 2) {
+                        uint32_t a2 = p[k + 1];
+                        if (a2 >= 0x08000000u && a2 < 0x20000000u) {
+                            printf("[fs] mem 0x%08X:", a2);
+                            for (int b = 0; b < 20; b++) {
+                                printf(" %02X", g_cur_mem[(a2 & 0x1FFFFFFFu) + b]);
+                            }
+                            printf("\n");
+                        }
+                    }
+                }
+                if (addr >= 0x08000000u && addr < 0x20000000u) {
+                    printf("[fs] buf@0x%08X len=%u bytes:", addr, len);
+                    for (uint32_t i = 0; i < (len < 16 ? len : 16); i++) {
+                        printf(" %02X", g_cur_mem[(addr & 0x1FFFFFFFu) + i]);
+                    }
+                    printf("\n");
+                }
                 printf("[fs] %s \"%s\" -> %s (handle %u, %u KiB)\n",
                        r->cmd == 0x0802 ? "OpenFile" : "OpenFileDirectly", path,
                        opened ? "ok" : "FEHLER", h, opened ? slot->size / 1024 : 0);
             }
-            ipc_begin(r, r->cmd, 2, 2);
+            ipc_begin(r, r->cmd, 3, 2);
+            ipc_put(r, 0);
+            ipc_put(r, h);
+            ipc_put(r, 0x28u);      /* Reply-Groesse fuer die SDK */
+            ipc_put_handle(r, h);
+            break;
+        }
+        case 0x080C: { /* OpenArchive */
+            char path[256];
+            find_path(p, path, sizeof(path));
+            uint32_t h = (uint32_t)alloc_handle(SVC_FS_USER, "archive");
+            if (g_log) printf("[fs] OpenArchive -> handle %u\n", h);
+            ipc_begin(r, 0x080C, 2, 2);
             ipc_put(r, 0);
             ipc_put(r, h);
             ipc_put_handle(r, h);
+            break;
+        }
+        case 0x080D: { /* ControlArchive */
+            ipc_begin(r, 0x080D, 1, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x080E: { /* CloseArchive */
+            ipc_begin(r, 0x080E, 1, 0);
+            ipc_put(r, 0);
             break;
         }
         case 0x0812: { /* GetFreeBytes */
@@ -531,6 +622,66 @@ static void file_command(Ipc *r, uint32_t *p) {
     }
 }
 
+/* Schreibt Daten in den Antwort-Puffer eines IPC-Requests (Buffer-Scan). */
+static uint32_t ipc_out_buffer(uint32_t *p, int normal, int translate) {
+    for (int i = 0; i < translate; i++) {
+        uint32_t w = p[normal + i];
+        if (w >= 0x08000000u && w < 0x20000000u) return w;
+    }
+    return 0;
+}
+
+static void cfg_command(Ipc *r, uint32_t *p) {
+    switch (r->cmd) {
+        case 0x0001: { /* GetConfig(size, block_id) */
+            uint32_t size = p[0];
+            uint32_t block = p[1];
+            uint32_t addr = ipc_out_buffer(p, r->normal, r->translate);
+            if (size > 0x200) size = 0x200;
+            if (addr) {
+                uint8_t *dst = g_cur_mem + (addr & 0x1FFFFFFFu);
+                memset(dst, 0, size);
+                if (block == 0x000A0000) {         /* UsernameBlock (UTF-16) */
+                    const char *name = "LAYTON";
+                    for (int i = 0; name[i] && (uint32_t)(i * 2 + 1) < size; i++) {
+                        dst[i * 2] = (uint8_t)name[i];
+                    }
+                } else if (block == 0x000A0002) {  /* LanguageBlock */
+                    dst[0] = 1;                    /* Englisch */
+                } else if (block == 0x000B0000) {  /* CountryInfoBlock */
+                    dst[2] = 49;                   /* USA */
+                }
+            }
+            if (g_log) printf("[cfg] GetConfig block=0x%08X size=%u buf=0x%08X\n", block, size, addr);
+            ipc_begin(r, 0x0001, 1, r->translate);
+            ipc_put(r, 0);
+            for (int i = 0; i < r->translate; i++) ipc_put(r, p[r->normal + i]);
+            break;
+        }
+        case 0x0002: { /* GetRegion */
+            ipc_begin(r, 0x0002, 2, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 2);      /* EUR */
+            break;
+        }
+        case 0x0005: { /* GetSystemModel */
+            ipc_begin(r, 0x0005, 2, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x000B: { /* IsFangateSupported */
+            ipc_begin(r, 0x000B, 2, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        default:
+            generic_command(r, SVC_CFG_U);
+            break;
+    }
+}
+
 static void generic_command(Ipc *r, int service) {
     if (g_log) {
         printf("[%s] cmd 0x%04X normal=%d -> 0\n",
@@ -562,6 +713,10 @@ static void dispatch_ipc(uint32_t handle) {
     r.written = 0;
 
     int service = h ? h->service : SVC_OTHER;
+    /* Fallback: fs-Kommandos auch bei unbekanntem Handle als fs behandeln */
+    if (h == NULL && (cmd & 0xFF00u) == 0x0800u) {
+        service = SVC_FS_USER;
+    }
     g_cur_handle = handle;
     g_cur_mem = c->mem;
     if (getenv("HLE_MUTEX_HACK") && !late_mutex_hack) {
@@ -595,6 +750,9 @@ static void dispatch_ipc(uint32_t handle) {
             break;
         case SVC_FILE:
             file_command(&r, params);
+            break;
+        case SVC_CFG_U:
+            cfg_command(&r, params);
             break;
         default:
             generic_command(&r, service);

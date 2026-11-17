@@ -93,6 +93,14 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
                 pc, c->r[0], c->r[1], c->r[2], c->r[3], c->r[4], c->r[5], c->r[6],
                 c->r[7], c->r[13], c->r[14]);
         {
+            uint32_t s8 = (c->r[13] + 8) & ~3u;
+            if (s8 + 8 <= c->mem_size) {
+                fprintf(stderr, "[watch]   [sp+8]=%08X [sp+0x20]=%08X\n",
+                        (unsigned)arm_mem_read(c, s8, 4),
+                        (unsigned)arm_mem_read(c, (c->r[13] + 0x20) & ~3u, 4));
+            }
+        }
+        {
             uint32_t a = c->r[4] & ~3u;
             if (a + 16 <= c->mem_size) {
                 fprintf(stderr, "[watch]   mem@r4: %08X %08X %08X %08X\n",
