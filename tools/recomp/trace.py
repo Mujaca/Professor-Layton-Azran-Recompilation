@@ -26,14 +26,20 @@ def read(path):
         tag = data[off:off + 1]
         off += 1
         if tag == b"B":
+            if off + 5 > n:
+                break
             pc, thumb = struct.unpack_from("<IB", data, off)
             off += 5
             yield ("block", pc, thumb)
         elif tag == b"S":
+            if off + 4 > n:
+                break
             (imm,) = struct.unpack_from("<I", data, off)
             off += 4
             yield ("svc", imm)
         elif tag == b"I":
+            if off + 1 > n:
+                break
             ln = data[off]
             off += 1
             name = data[off:off + ln].decode("ascii", "replace")
@@ -42,10 +48,14 @@ def read(path):
             off += 2
             yield ("ipc", name, cmd)
         elif tag == b"F":
+            if off + 4 > n:
+                break
             (idx,) = struct.unpack_from("<I", data, off)
             off += 4
             yield ("frame", idx)
         elif tag == b"E":
+            if off + 12 > n:
+                break
             kind, a, b = struct.unpack_from("<III", data, off)
             off += 12
             yield ("event", kind, a, b)

@@ -6,6 +6,7 @@
 import argparse
 import json
 import os
+import sys
 
 from . import isa, emit
 from . import scan as scanmod
@@ -95,12 +96,45 @@ def generate(res, path, max_funcs=None, trace=False):
         funcs = funcs[:max_funcs]
     generated = set(fn.addr for fn in funcs)
 
-    out = ["/* generiert vom Recompiler-MVP */", '#include "arm_cpu.h"']
+    out = ["/* generiert vom Recompiler-MVP */", '#include "arm_cpu.h"',
+           '#include <stdio.h>']
     if trace:
         out.append('#include "arm_trace.h"')
     out.append("")
     for a in all_addrs:
         out.append("void fn_%08X(ArmCpu *c);" % u32(a))
+    out.append("")
+    out.append("typedef struct { uint32_t addr; void (*fn)(ArmCpu *c); } ArmEntry;")
+    out.append("static void arm_call_guest(ArmCpu *c, uint32_t addr);")
+    out.append("static const ArmEntry g_entries[] = {")
+    for a in all_addrs:
+        fn = res.functions.get(a)
+        key = u32(a) | (1 if (fn is not None and fn.thumb) else 0)
+        out.append("    { 0x%08Xu, fn_%08X }," % (key, u32(a)))
+    out.append("};")
+    out.append("static void arm_call_guest(ArmCpu *c, uint32_t addr) {")
+    out.append("    int lo = 0, hi = (int)(sizeof(g_entries) / sizeof(g_entries[0])) - 1;")
+    out.append("    uint32_t alt = addr ^ 1u;")
+    out.append("    while (lo <= hi) {")
+    out.append("        int mid = (lo + hi) / 2;")
+    out.append("        if (g_entries[mid].addr == addr) { g_entries[mid].fn(c); return; }")
+    out.append("        if (g_entries[mid].addr < addr) lo = mid + 1; else hi = mid - 1;")
+    out.append("    }")
+    out.append("    lo = 0; hi = (int)(sizeof(g_entries) / sizeof(g_entries[0])) - 1;")
+    out.append("    while (lo <= hi) {")
+    out.append("        int mid2 = (lo + hi) / 2;")
+    out.append("        if (g_entries[mid2].addr == alt) { g_entries[mid2].fn(c); return; }")
+    out.append("        if (g_entries[mid2].addr < alt) lo = mid2 + 1; else hi = mid2 - 1;")
+    out.append("    }")
+    out.append("    /* lineare Suche als Fallback (falls die Tabelle nicht exakt sortiert ist) */")
+    out.append("    { unsigned i; for (i = 0; i < sizeof(g_entries)/sizeof(g_entries[0]); i++) {")
+    out.append("        if (g_entries[i].addr == addr) { g_entries[i].fn(c); return; } } }")
+    out.append("    fprintf(stderr, \"arm: unbekanntes call-Ziel 0x%08X (von Block 0x%08X)\\n\",")
+    out.append("            addr, arm_last_block);")
+    out.append("    { FILE *mf = fopen(\"out/missing_calls.txt\", \"a\");")
+    out.append("      if (mf) { fprintf(mf, \"%08X\\n\", addr); fclose(mf); } }")
+    out.append("    /* unbekanntes Ziel: als No-op behandeln (Best-Effort-Modus) */")
+    out.append("}")
     out.append("")
 
     n_arm = 0
@@ -150,22 +184,49 @@ def main(argv=None):
     p_scan.add_argument("--in", dest="inp", required=True)
     p_scan.add_argument("--json")
     p_scan.add_argument("--prologues", action="store_true")
-    p_scan.add_argument("--trace")
+    p_scan.add_argument("--trace", dest="trace_path")
+    p_scan.add_argument("--seed-pointers", action="store_true")
+    p_scan.add_argument("--seed-file")
 
     p_gen = sub.add_parser("gen")
     p_gen.add_argument("--in", dest="inp", required=True)
     p_gen.add_argument("--out", required=True)
     p_gen.add_argument("--prologues", action="store_true")
     p_gen.add_argument("--max-funcs", type=int)
-    p_gen.add_argument("--trace", action="store_true")
+    p_gen.add_argument("--trace", dest="trace_flag", action="store_true")
+    p_gen.add_argument("--seed-pointers", action="store_true")
+    p_gen.add_argument("--seed-file")
 
     args = ap.parse_args(argv)
     data = load(args.inp)
     entries = [(isa.ARM_BASE, "entry", False)]
-    if getattr(args, "trace", None):
+    seed_file = getattr(args, "seed_file", None)
+    if seed_file:
+        import os as _os
+        if _os.path.exists(seed_file):
+            seen = set()
+            with open(seed_file, encoding="utf-8") as sf:
+                for line in sf:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        addr = int(line, 16)
+                    except ValueError:
+                        continue
+                    if addr in seen:
+                        continue
+                    seen.add(addr)
+                    entries.append((addr & ~1, "seedfile", bool(addr & 1)))
+            # Thumb-Seeds vor ARM-Seeds derselben Adresse einsortieren
+            head = entries[:1]
+            tail = sorted(entries[1:], key=lambda e: (e[0], 0 if e[2] else 1))
+            entries = head + tail
+    if getattr(args, "trace_path", None):
         from . import trace as tracemod
-        entries += tracemod.entry_points(args.trace)
-    resimo = scanmod.scan(data, entries, follow_prologues=args.prologues)
+        entries += tracemod.entry_points(args.trace_path)
+    resimo = scanmod.scan(data, entries, follow_prologues=args.prologues,
+                          seed_pointers=args.seed_pointers)
 
     if args.cmd == "scan":
         stats = collect_stats(resimo, data)
@@ -182,7 +243,7 @@ def main(argv=None):
             with open(args.json, "w", encoding="utf-8") as f:
                 json.dump(stats, f, indent=2)
     else:
-        n, nt = generate(resimo, args.out, args.max_funcs, trace=args.trace)
+        n, nt = generate(resimo, args.out, args.max_funcs, trace=args.trace_flag)
         print("geschrieben: %s (%d ARM-Funktionen, %d Thumb-Stubs)" % (args.out, n, nt))
 
 

@@ -5,8 +5,11 @@
 #include <string.h>
 #include <stdlib.h>
 
+uint32_t arm_last_block = 0;
+
 static FILE *g_file = NULL;
 static unsigned long long g_records = 0;
+static unsigned int g_flush_counter = 0;
 static unsigned long long g_max_records = 20000000ULL;
 static int g_unique_only = 1;
 
@@ -59,6 +62,7 @@ void arm_trace_open(const char *path) {
     g_file = fopen(path ? path : "trace.ctrt", "wb");
     if (g_file) {
         fwrite("CTRTRC01", 1, 8, g_file);
+        fflush(g_file);
     }
 }
 
@@ -79,10 +83,14 @@ int arm_trace_is_open(void) {
 }
 
 void arm_trace_block(uint32_t pc, uint32_t thumb) {
+    arm_last_block = pc;
     if (!g_file) return;
     if (g_records >= g_max_records) return;
     if (g_unique_only && g_seen != NULL && !mark_seen(pc)) return;
     g_records++;
+    if ((++g_flush_counter & 0x3Fu) == 0) {
+        fflush(g_file);
+    }
     put_u8('B');
     put_u32(pc);
     put_u8(thumb ? 1 : 0);

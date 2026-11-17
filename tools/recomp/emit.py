@@ -56,6 +56,8 @@ VFP_BASES = ("vldr", "vstr", "vmov", "vadd", "vsub", "vmul", "vdiv", "vneg",
 
 
 CORE_BASES = {"nop", "hint", "pld", "pldw", "clrex", "cdp", "cdp2",
+              "ldrt", "strt", "ldrbt", "strbt", "ldrht", "strht",
+              "ldrsbt", "ldrsht", "smlsld", "smlald", "smlsldx", "smlaldx",
               "ldc", "stc", "mcrr", "mrrc", "lsl", "lsr", "asr", "ror",
               "rrx", "uxth", "uxtb", "sxth", "sxtb", "uxtah", "sxtah", "ldrd", "strd",
               "ldrex", "strex", "mrc", "mcr", "ldm", "stm", "push", "pop", "rev",
@@ -90,7 +92,12 @@ def _build_aliases():
                          ("ARM_INS_ORRS", "ARM_INS_ORR"), ("ARM_INS_EORS", "ARM_INS_EOR"),
                          ("ARM_INS_BICS", "ARM_INS_BIC"), ("ARM_INS_MVNS", "ARM_INS_MVN"),
                          ("ARM_INS_LSLS", "ARM_INS_LSL"), ("ARM_INS_LSRS", "ARM_INS_LSR"),
-                         ("ARM_INS_ASRS", "ARM_INS_ASR"), ("ARM_INS_RORS", "ARM_INS_ROR")):
+                         ("ARM_INS_ASRS", "ARM_INS_ASR"), ("ARM_INS_RORS", "ARM_INS_ROR"),
+                         ("ARM_INS_LDRT", "ARM_INS_LDR"), ("ARM_INS_STRT", "ARM_INS_STR"),
+                         ("ARM_INS_LDRBT", "ARM_INS_LDRB"), ("ARM_INS_STRBT", "ARM_INS_STRB"),
+                         ("ARM_INS_LDRHT", "ARM_INS_LDRH"), ("ARM_INS_STRHT", "ARM_INS_STRH"),
+                         ("ARM_INS_LDRSBT", "ARM_INS_LDRSB"), ("ARM_INS_LDRSHT", "ARM_INS_LDRSH"),
+                         ("ARM_INS_SMLSLD", "ARM_INS_SMULL")):
         a = getattr(A, name, None)
         b = getattr(A, target, None)
         if a is not None and b is not None:
@@ -223,6 +230,7 @@ class Emitter:
         basev = "0x%08Xu" % u32(self.pc_value(pc)) if base_reg == 15 else "c->r[%d]" % base_reg
         post = len(ops) > 2
         if post:
+            wb = True
             off, sh = self.operand2([ops[2]], pc)
         elif len(inner) > 1:
             off, sh = self.operand2(inner[1:], pc)
@@ -306,10 +314,17 @@ class Emitter:
             reg = isa.reg_num(ops[0])
             if reg is None:
                 raise Unsupported(ins.op_str)
+            if ins.id == A.ARM_INS_BLX or reg != 14:
+                lines = []
+                if ins.id == A.ARM_INS_BLX:
+                    lines.append("c->r[14] = 0x%08Xu;"
+                                 % u32(pc + ins.size + (1 if self.thumb else 0)))
+                lines.append("arm_call_guest(c, c->r[%d]);" % reg)
+                lines.append("if (c->aborted) return;")
+                if ins.id == A.ARM_INS_BX:
+                    lines.append("return;")
+                return lines
             lines = []
-            if ins.id == A.ARM_INS_BLX:
-                lines.append("c->r[14] = 0x%08Xu;"
-                             % u32(pc + ins.size + (1 if self.thumb else 0)))
             lines.append("{ uint32_t t = c->r[%d]; c->t = t & 1u; c->r[15] = t & ~1u; }" % reg)
             lines.append("return;")
             return lines

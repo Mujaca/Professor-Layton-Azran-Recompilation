@@ -74,6 +74,10 @@ def direct_target(ins):
 
 
 def decode_function(data, fn, visited):
+    # Modus automatisch erkennen, falls der Seed falsch geraten war
+    if isa.decode(data, fn.addr, thumb=fn.thumb) is None:
+        if isa.decode(data, fn.addr, thumb=not fn.thumb) is not None:
+            fn.thumb = not fn.thumb
     todo = [fn.addr]
     seen = set()
     while todo:
@@ -108,7 +112,25 @@ def decode_function(data, fn, visited):
                 break
 
 
-def scan(data, entries, follow_prologues=False):
+def pointer_seeds(data, limit=40000):
+    """Alle Woerter im Image, die auf Code zeigen, als Funktionskandidaten."""
+    out = []
+    base = isa.ARM_BASE
+    end = base + len(data)
+    for off in range(0, len(data) - 4, 4):
+        v = int.from_bytes(data[off:off + 4], "little")
+        addr = v & ~1
+        if addr < base + 0x1000 or addr >= end:
+            continue
+        if isa.decode(data, addr) is None:
+            continue
+        out.append((addr, "pointer@%06X" % off, False))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def scan(data, entries, follow_prologues=False, seed_pointers=False):
     functions = {}
     visited = {}
     queue = list(entries)
@@ -126,6 +148,13 @@ def scan(data, entries, follow_prologues=False):
                     queue.append((call, f"bl@{addr:08X}", is_thumb))
 
     drain()
+
+    if seed_pointers:
+        extra = pointer_seeds(data)
+        for e in extra:
+            if e[0] not in functions:
+                queue.append(e)
+        drain()
 
     if follow_prologues:
         seeds = []

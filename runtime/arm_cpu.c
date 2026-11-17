@@ -14,7 +14,11 @@ void arm_cpu_init(ArmCpu *c, void *mem, uint32_t size) {
 
 static void mem_fault(ArmCpu *c, uint32_t addr, int size) {
     if (!c->aborted) {
-        fprintf(stderr, "arm: access outside memory: 0x%08X (size %d)\n", addr, size);
+        fprintf(stderr, "arm: access outside memory: 0x%08X (size %d) block=0x%08X\n",
+                addr, size, arm_last_block);
+        fprintf(stderr, "     r0=%08X r1=%08X r2=%08X r3=%08X r4=%08X r5=%08X r6=%08X r7=%08X sp=%08X lr=%08X\n",
+                c->r[0], c->r[1], c->r[2], c->r[3], c->r[4], c->r[5], c->r[6], c->r[7],
+                c->r[13], c->r[14]);
     }
     c->aborted = 1;
 }
@@ -295,8 +299,17 @@ int arm_ldm_stm(ArmCpu *c, int base, int load, int writeback, int mode, uint32_t
 
 /* ---------------- svc / fallback ---------------- */
 
+static ArmSvcHandler g_svc_handler = NULL;
+
+void arm_set_svc_handler(ArmSvcHandler handler) {
+    g_svc_handler = handler;
+}
+
 void arm_svc(ArmCpu *c, uint32_t imm) {
-    (void)c; (void)imm;
+    arm_trace_svc(imm);
+    if (g_svc_handler != NULL) {
+        c->r[0] = g_svc_handler(c, imm);
+    }
 }
 
 void arm_unimplemented(ArmCpu *c, uint32_t pc, uint32_t insn, const char *mnem) {

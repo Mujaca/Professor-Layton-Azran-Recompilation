@@ -60,6 +60,10 @@ void arm_st(ArmCpu *c, uint32_t addr, int size, uint32_t val);
 int arm_ldm_stm(ArmCpu *c, int base, int load, int writeback, int mode, uint32_t mask);
 
 void arm_svc(ArmCpu *c, uint32_t imm);
+
+/* Host-Handler fuer SVCs (Rueckgabewert landet in r0). */
+typedef uint32_t (*ArmSvcHandler)(ArmCpu *c, uint32_t imm);
+void arm_set_svc_handler(ArmSvcHandler handler);
 void arm_unimplemented(ArmCpu *c, uint32_t pc, uint32_t insn, const char *mnem);
 
 /* VFP */

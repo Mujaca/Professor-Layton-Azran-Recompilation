@@ -9,6 +9,8 @@
 extern "C" {
 #endif
 
+extern uint32_t arm_last_block;
+
 void arm_trace_open(const char *path);
 void arm_trace_close(void);
 int arm_trace_is_open(void);
