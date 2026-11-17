@@ -14,7 +14,7 @@
 #include <string.h>
 
 #define TLS_CMD_BUF 0x80u
-#define MAX_HANDLES 512
+#define MAX_HANDLES 4096
 #define MAX_SERVICES 64
 
 enum ServiceId {

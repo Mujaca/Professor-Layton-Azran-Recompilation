@@ -61,6 +61,7 @@ int arm_ldm_stm(ArmCpu *c, int base, int load, int writeback, int mode, uint32_t
 
 void arm_svc(ArmCpu *c, uint32_t imm);
 void arm_mutex_bootstrap(ArmCpu *c, uint32_t addr);
+void *arm_pool_alloc(unsigned size);
 
 /* Host-Handler fuer SVCs (Rueckgabewert landet in r0). */
 typedef uint32_t (*ArmSvcHandler)(ArmCpu *c, uint32_t imm);

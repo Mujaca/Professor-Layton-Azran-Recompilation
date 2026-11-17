@@ -300,9 +300,13 @@ class Emitter:
                 raise Unsupported(ins.op_str)
             tgt = ins.operands[0].imm
             nxt = pc + ins.size + (1 if self.thumb else 0)
-            return ["c->r[14] = 0x%08Xu;" % u32(nxt),
-                    "fn_%08X(c);" % u32(tgt),
-                    "if (c->aborted) return;"]
+            lines = ["c->r[14] = 0x%08Xu;" % u32(nxt),
+                     "fn_%08X(c);" % u32(tgt),
+                     "if (c->aborted) return;"]
+            if u32(tgt) == 0x00287DD4:
+                lines.append("{ if (c->r[0] == 0) c->r[0] = "
+                             "(uint32_t)(uintptr_t)arm_pool_alloc(0x100); }")
+            return lines
         if ins.id == A.ARM_INS_BLX:
             if ins.operands and ins.operands[0].type == A.ARM_OP_IMM:
                 tgt = ins.operands[0].imm

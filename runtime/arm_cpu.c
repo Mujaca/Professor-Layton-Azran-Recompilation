@@ -312,6 +312,18 @@ int arm_ldm_stm(ArmCpu *c, int base, int load, int writeback, int mode, uint32_t
 
 /* ---------------- svc / fallback ---------------- */
 
+/* Einfacher Bump-Allocator fuer SDK-Objekte (Ersatz fuer leere SDK-Pools). */
+void *arm_pool_alloc(unsigned size) {
+    static unsigned char pool[1 << 18];
+    static unsigned used = 0;
+    size = (size + 15u) & ~15u;
+    if (used + size > sizeof(pool)) return NULL;
+    void *p = &pool[used];
+    used += size;
+    memset(p, 0, size);
+    return p;
+}
+
 /* Null-initialisierte BSS-Semaphore beim ersten Warten als frei behandeln. */
 void arm_mutex_bootstrap(ArmCpu *c, uint32_t addr) {
     uint32_t a = addr & 0x1FFFFFFFu;
