@@ -28,6 +28,81 @@ static DWORD WINAPI game_thread(LPVOID unused) {
     return 0;
 }
 
+static void draw_icon(void);
+
+/* --- Minimaler 5x7-Font fuer den Menue-Platzhalter --- */
+static const unsigned char FONT5x7[][5] = {
+    {0x7E,0x11,0x11,0x11,0x7E}, {0x7F,0x49,0x49,0x49,0x36},
+    {0x3E,0x41,0x41,0x41,0x22}, {0x7F,0x41,0x41,0x22,0x1C},
+    {0x7F,0x49,0x49,0x49,0x41}, {0x7F,0x09,0x09,0x09,0x01},
+    {0x3E,0x41,0x49,0x49,0x7A}, {0x7F,0x08,0x08,0x08,0x7F},
+    {0x00,0x41,0x7F,0x41,0x00}, {0x20,0x40,0x41,0x3F,0x01},
+    {0x7F,0x08,0x14,0x22,0x41}, {0x7F,0x40,0x40,0x40,0x40},
+    {0x7F,0x02,0x0C,0x02,0x7F}, {0x7F,0x04,0x08,0x10,0x7F},
+    {0x3E,0x41,0x41,0x41,0x3E}, {0x7F,0x09,0x09,0x09,0x06},
+    {0x3E,0x41,0x51,0x21,0x5E}, {0x7F,0x09,0x19,0x29,0x46},
+    {0x46,0x49,0x49,0x49,0x31}, {0x01,0x01,0x7F,0x01,0x01},
+    {0x3F,0x40,0x40,0x40,0x3F}, {0x1F,0x20,0x40,0x20,0x1F},
+    {0x7F,0x20,0x18,0x20,0x7F}, {0x63,0x14,0x08,0x14,0x63},
+    {0x03,0x04,0x78,0x04,0x03}, {0x61,0x51,0x49,0x45,0x43},
+    {0x3E,0x51,0x49,0x45,0x3E}, {0x00,0x42,0x7F,0x40,0x00},
+    {0x42,0x61,0x51,0x49,0x46}, {0x21,0x41,0x45,0x4B,0x31},
+    {0x18,0x14,0x12,0x7F,0x10}, {0x27,0x45,0x45,0x45,0x39},
+    {0x3C,0x4A,0x49,0x49,0x30}, {0x01,0x71,0x09,0x05,0x03},
+    {0x36,0x49,0x49,0x49,0x36}, {0x06,0x49,0x49,0x29,0x1E},
+    {0,0,0,0,0}, {0x08,0x08,0x08,0x08,0x08}, {0,0x36,0x36,0,0},
+    {0,0,0x5F,0,0}, {0,0x60,0x60,0,0}
+};
+
+static int font_index(char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= '0' && c <= '9') return 26 + (c - '0');
+    if (c == ' ') return 36;
+    if (c == '-') return 37;
+    if (c == ':') return 38;
+    if (c == '!') return 39;
+    if (c == '.') return 40;
+    return 36;
+}
+
+static void draw_text(int x0, int y0, const char *txt, int scale, int r, int g, int b) {
+    int x = x0;
+    for (const char *p = txt; *p; p++) {
+        int idx = font_index(*p);
+        for (int col = 0; col < 5; col++) {
+            unsigned char bits = FONT5x7[idx][col];
+            for (int row = 0; row < 7; row++) {
+                if (bits & (1u << row)) {
+                    for (int dy = 0; dy < scale; dy++)
+                        for (int dx = 0; dx < scale; dx++) {
+                            int px = x + col * scale + dx, py = y0 + row * scale + dy;
+                            if (px < 0 || px >= FB_W || py < 0 || py >= FB_H) continue;
+                            unsigned char *d = g_rgb + ((size_t)py * FB_W + px) * 3;
+                            d[0] = (unsigned char)r; d[1] = (unsigned char)g; d[2] = (unsigned char)b;
+                        }
+                }
+            }
+        }
+        x += 6 * scale;
+    }
+}
+
+static void draw_menu(void) {
+    for (int y = 0; y < FB_H; y++) {
+        int v = 10 + y * 50 / FB_H;
+        for (int x = 0; x < FB_W; x++) {
+            unsigned char *d = g_rgb + ((size_t)y * FB_W + x) * 3;
+            d[0] = (unsigned char)(v / 2);
+            d[1] = (unsigned char)(v / 2);
+            d[2] = (unsigned char)v;
+        }
+    }
+    draw_icon();
+    draw_text((FB_W - 16 * 6 * 2) / 2, 16, "PROFESSOR LAYTON", 2, 245, 220, 120);
+    draw_text((FB_W - 19 * 6) / 2, 38, "AND THE AZRAN LEGACY", 1, 200, 200, 210);
+    draw_text((FB_W - 11 * 6 * 2) / 2, FB_H - 38, "PRESS START", 2, 255, 255, 255);
+}
+
 /* SMDH-Icon (48x48 RGB565 bei 0x24C0) ins Framebuffer zeichnen. */
 static void draw_icon(void) {
     FILE *f = fopen("out/exefs/icon.bin", "rb");
@@ -133,7 +208,7 @@ int main(int argc, char **argv) {
     }
     win_status("Layton 6 Port - recompiliert (ARM11 -> C)", 0);
     win_status("boot...", 1);
-    draw_icon();
+    draw_menu();
     memcpy(g_rgb, g_mem + FB_ADDR, sizeof(g_rgb));
 
     HANDLE th = CreateThread(NULL, 0, game_thread, NULL, 0, NULL);
@@ -142,7 +217,7 @@ int main(int argc, char **argv) {
     int frames = 0;
     while (win_pump()) {
         memcpy(g_rgb, g_mem + FB_ADDR, sizeof(g_rgb));
-        draw_icon();
+        draw_menu();
         win_blit(g_rgb, FB_W, FB_H);
 
         static int tick = 0;
