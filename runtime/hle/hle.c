@@ -107,6 +107,7 @@ typedef struct {
     int used;
     int service;     /* ServiceId */
     int file;        /* Index in g_files oder -1 */
+    int signaled;    /* Event-Zustand */
     char name[12];
 } Handle;
 
@@ -1171,7 +1172,17 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             c->r[1] = h;
             return 0;
         }
-        case 0x18: case 0x19: case 0x14: case 0x16: /* Signal/Clear/Release */
+        case 0x18: { /* SignalEvent */
+            Handle *hh = get_handle(c->r[0]);
+            if (hh != NULL) hh->signaled = 1;
+            return 0;
+        }
+        case 0x19: { /* ClearEvent */
+            Handle *hh = get_handle(c->r[0]);
+            if (hh != NULL) hh->signaled = 0;
+            return 0;
+        }
+        case 0x14: case 0x16: /* ReleaseMutex / ReleaseSemaphore */
             return 0;
         case 0x1E: case 0x1F: case 0x20: /* MemoryBlock */
             return 0;
@@ -1217,13 +1228,50 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
         }
         case 0x23: /* CloseHandle */
             return 0;
-        case 0x24: /* WaitSynchronization1 */
-            for (int i = 0; i < 4; i++) guest_yield();
+        case 0x24: { /* WaitSynchronization1(handle, timeout) */
+            uint32_t h = c->r[0];
+            Handle *hh = get_handle(h);
+            static unsigned vblank = 0;
+            for (int i = 0; i < 8; i++) {
+                if (hh != NULL && hh->signaled) break;
+                guest_yield();
+                if ((++vblank & 0x3FFu) == 0) {
+                    /* Virtueller VBlank: alle Events signalisieren */
+                    for (int k = 1; k < MAX_HANDLES; k++)
+                        if (g_handles[k].used) g_handles[k].signaled = 1;
+                }
+            }
+            if (hh != NULL) hh->signaled = 0;
             return 0;
-        case 0x25: /* WaitSynchronizationN(out, handles, count, wait_all, timeout) */
-            for (int i = 0; i < 4; i++) guest_yield();
-            if (c->r[0]) write_u32(c, c->r[0], 0);
+        }
+        case 0x25: { /* WaitSynchronizationN(out, handles, count, wait_all, timeout) */
+            uint32_t out = c->r[0], hlist = c->r[1], cnt = c->r[2];
+            static unsigned vb2 = 0;
+            int idx = 0;
+            for (int i = 0; i < 8; i++) {
+                int hit = -1;
+                for (uint32_t k = 0; k < cnt && k < 16; k++) {
+                    uint32_t hv = (hlist ? arm_mem_read(c, hlist + k * 4, 4) : 0);
+                    Handle *hh = get_handle(hv);
+                    if (hh != NULL && hh->signaled) { hit = (int)k; break; }
+                }
+                if (hit >= 0) { idx = hit; break; }
+                guest_yield();
+                if ((++vb2 & 0x3FFu) == 0) {
+                    for (int kk = 1; kk < MAX_HANDLES; kk++)
+                        if (g_handles[kk].used) g_handles[kk].signaled = 1;
+                }
+            }
+            if (cnt > 0) {
+                for (uint32_t k = 0; k < cnt && k < 16; k++) {
+                    uint32_t hv = (hlist ? arm_mem_read(c, hlist + k * 4, 4) : 0);
+                    Handle *hh = get_handle(hv);
+                    if (hh != NULL && hh->signaled) { hh->signaled = 0; break; }
+                }
+            }
+            if (out) write_u32(c, out, (uint32_t)idx);
             return 0;
+        }
         case 0x27: { /* DuplicateHandle(out, handleO) */
             Handle *h = get_handle(c->r[1]);
             uint32_t nh = h ? (uint32_t)alloc_handle(h->service, h->name) : 0;
