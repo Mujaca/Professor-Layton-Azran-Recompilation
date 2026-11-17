@@ -5,6 +5,9 @@
 #include <string.h>
 #include <math.h>
 
+static uint32_t g_memwatchrd = 0;
+static uint32_t g_memwatchrd_end = 0;
+static int g_memwatchrd_prints = 0;
 static uint32_t g_memwatch = 0;
 static uint32_t g_memwatch_end = 0;
 static int g_memwatch_prints = 0;
@@ -20,6 +23,15 @@ void arm_cpu_init(ArmCpu *c, void *mem, uint32_t size) {
         const char *mw = getenv("ARM_MEMWATCH");
         if (mw) g_memwatch = (uint32_t)strtoul(mw, NULL, 16);
         {
+            const char *mrd = getenv("ARM_MEMWATCHRD");
+            if (mrd) {
+                unsigned long base = strtoul(mrd, NULL, 16);
+                unsigned long size = 0x40;
+                char *comma = strchr(mrd, ',');
+                if (comma) size = strtoul(comma + 1, NULL, 16);
+                g_memwatchrd = (uint32_t)base;
+                g_memwatchrd_end = (uint32_t)(base + size);
+            }
             const char *mr = getenv("ARM_MEMWATCHRANGE");
             if (mr) {
                 unsigned long base = strtoul(mr, NULL, 16);
@@ -56,6 +68,12 @@ uint32_t arm_mem_read(ArmCpu *c, uint32_t addr, int size) {
     uint32_t v = 0;
     /* 3DS-Busalias: 0x8xxxxxxx/0xBxxxxxxx zeigen auf dieselben FCRAM-Seiten. */
     if (addr >= 0x20000000u) addr &= 0x1FFFFFFFu;
+    if (g_memwatchrd != 0 && addr >= g_memwatchrd && addr < g_memwatchrd_end &&
+        g_memwatchrd_prints < 200) {
+        g_memwatchrd_prints++;
+        fprintf(stderr, "[mrd] %08X size=%d blk=%08X lr=%08X\n",
+                addr, size, arm_last_block, c->r[14]);
+    }
     if ((uint64_t)addr + (uint64_t)size > c->mem_size) {
         mem_fault(c, addr, size);
         return 0;
