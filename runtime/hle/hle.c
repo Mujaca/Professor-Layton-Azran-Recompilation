@@ -1277,6 +1277,16 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
         memcpy(c->mem + 0x3D9200u, &st, 4);
         printf("[hle] GSP-State 0x3D9200 = 6 gesetzt\n");
     }
+    if (getenv("HLE_GSP_CLIENT")) {
+        /* GSP-Client-Objekt 0x3D91E8 vorinitialisieren: Statusfeld +0x18 = 6 und
+         * ein echter gsp::Gpu-Handle in +0x10, damit die Spiel-Renderlogik den
+         * Client ohne eigenen Open-Schritt benutzen kann. */
+        uint32_t st = 6;
+        uint32_t gh = (uint32_t)alloc_handle(SVC_GSP_GPU, "gsp::Gpu");
+        memcpy(c->mem + 0x3D9200u, &st, 4);
+        memcpy(c->mem + 0x3D91F8u, &gh, 4);
+        printf("[hle] GSP-Client vorinitialisiert: state=6 handle=%u\n", gh);
+    }
     /* TODO: folgt aus der Analyse des Mutex-Spinlocks (Wert 1 = frei). */
     if (getenv("HLE_MUTEX_HACK")) {
         uint32_t v = 1;
