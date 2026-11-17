@@ -226,6 +226,14 @@ int main(int argc, char **argv) {
     size_t n = fread(g_mem + 0x100000, 1, 0x300000, f);
     fclose(f);
     printf("code: %zu Bytes geladen\n", n);
+    /* Gezielte Code-Patches (Diagnose): SDK-Fehlerpfade entschaerfen.
+     * 0x212CC0: "bleq 0x28F45C" (wirft FS-Fehler, wenn ein Session-Handle 0 ist)
+     *           -> NOP, damit der Aufruf ohne Abbruch weiterlaeuft. */
+    if (0x212CC0u + 4 <= 0x300000u) {
+        *(uint32_t *)(g_mem + 0x212CC0) = 0xE1A00000u;
+        *(uint32_t *)(g_mem + 0x212FCC) = 0xE1A00000u;
+    }
+
 
     arm_cpu_init(&g_cpu, g_mem, MEM_SIZE);
     g_cpu.r[13] = 0x0FFF0000u;

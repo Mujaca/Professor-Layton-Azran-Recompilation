@@ -63,6 +63,13 @@ static void load_code(ArmCpu *c) {
         printf("code kurz gelesen\n");
     }
     fclose(f);
+    /* Gezielte Code-Patches (Diagnose): SDK-Fehlerpfade entschaerfen.
+     * 0x212CC0: "bleq 0x28F45C" (wirft FS-Fehler, wenn ein Session-Handle 0 ist)
+     *           -> NOP, damit der Aufruf ohne Abbruch weiterlaeuft. */
+    if (0x212CC0u + 4 <= 0x300000u) {
+        *(uint32_t *)(g_mem + 0x212CC0) = 0xE1A00000u;
+        *(uint32_t *)(g_mem + 0x212FCC) = 0xE1A00000u;
+    }
 }
 
 int main(int argc, char **argv) {
