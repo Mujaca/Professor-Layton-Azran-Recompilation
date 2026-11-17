@@ -9,5 +9,7 @@ int win_pump(void);                              /* 1 = Fenster offen */
 void win_blit(const uint8_t *rgb, int w, int h);  /* RGB24 -> Fenster */
 void win_status(const char *text, int line);
 void win_close(void);
+int win_key_take(int vk);
+void win_key_push(int vk);
 
 #endif

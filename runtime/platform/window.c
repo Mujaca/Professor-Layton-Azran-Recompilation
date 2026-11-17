@@ -12,6 +12,7 @@ static int g_w = 400, g_h = 240;
 static char g_status[10][192];
 static int g_status_lines = 0;
 static int g_scale = 2;
+static int g_keys[256];
 
 static void draw(HDC dc) {
     if (g_dib) {
@@ -29,6 +30,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_DESTROY:
             PostQuitMessage(0);
+            return 0;
+        case WM_KEYDOWN:
+            if (wp < 256) g_keys[wp] = 1;
             return 0;
         case WM_ERASEBKGND:
             return 1;
@@ -132,4 +136,16 @@ void win_close(void) {
     }
     free(g_dib);
     g_dib = NULL;
+}
+
+int win_key_take(int vk) {
+    int v;
+    if (vk < 0 || vk > 255) return 0;
+    v = g_keys[vk];
+    g_keys[vk] = 0;
+    return v;
+}
+
+void win_key_push(int vk) {
+    if (vk >= 0 && vk <= 255) g_keys[vk] = 1;
 }

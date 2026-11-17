@@ -30,6 +30,10 @@ static DWORD WINAPI game_thread(LPVOID unused) {
 
 static void draw_icon(void);
 
+static const char *MENU_ITEMS[] = { "NEW GAME", "CONTINUE", "OPTIONS" };
+static int g_menu_sel = 0;
+static char g_menu_msg[64] = "";
+
 /* --- Minimaler 5x7-Font fuer den Menue-Platzhalter --- */
 static const unsigned char FONT5x7[][5] = {
     {0x7E,0x11,0x11,0x11,0x7E}, {0x7F,0x49,0x49,0x49,0x36},
@@ -98,9 +102,22 @@ static void draw_menu(void) {
         }
     }
     draw_icon();
-    draw_text((FB_W - 16 * 6 * 2) / 2, 16, "PROFESSOR LAYTON", 2, 245, 220, 120);
-    draw_text((FB_W - 19 * 6) / 2, 38, "AND THE AZRAN LEGACY", 1, 200, 200, 210);
-    draw_text((FB_W - 11 * 6 * 2) / 2, FB_H - 38, "PRESS START", 2, 255, 255, 255);
+    draw_text((FB_W - 16 * 6 * 2) / 2, 12, "PROFESSOR LAYTON", 2, 245, 220, 120);
+    draw_text((FB_W - 19 * 6) / 2, 34, "AND THE AZRAN LEGACY", 1, 200, 200, 210);
+    for (int i = 0; i < 3; i++) {
+        int y = 96 + i * 22;
+        int sel = (i == g_menu_sel);
+        int w = (int)strlen(MENU_ITEMS[i]) * 6 * 2;
+        int x = (FB_W - w) / 2;
+        draw_text(x, y, MENU_ITEMS[i], 2,
+                  sel ? 255 : 170, sel ? 230 : 170, sel ? 120 : 170);
+        if (sel) {
+            draw_text(x - 16, y, ">", 2, 255, 230, 120);
+            draw_text(x + w + 4, y, "<", 2, 255, 230, 120);
+        }
+    }
+    if (g_menu_msg[0])
+        draw_text((FB_W - (int)strlen(g_menu_msg) * 6) / 2, FB_H - 34, g_menu_msg, 1, 255, 255, 255);
 }
 
 /* SMDH-Icon (48x48 RGB565 bei 0x24C0) ins Framebuffer zeichnen. */
@@ -180,8 +197,23 @@ int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     const char *romfs = "out/romfs";
     const char *shot = NULL;
+    int keyseq[32];
+    int keyn = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) shot = argv[++i];
+        else if (strcmp(argv[i], "--keys") == 0 && i + 1 < argc) {
+            char *tok = argv[++i];
+            while (*tok && keyn < 32) {
+                char name[16];
+                int n = 0;
+                while (*tok && *tok != ',' && n < 15) name[n++] = *tok++;
+                name[n] = 0;
+                if (*tok == ',') tok++;
+                if (strcmp(name, "down") == 0) keyseq[keyn++] = VK_DOWN;
+                else if (strcmp(name, "up") == 0) keyseq[keyn++] = VK_UP;
+                else if (strcmp(name, "enter") == 0) keyseq[keyn++] = VK_RETURN;
+            }
+        }
         else romfs = argv[i];
     }
 
@@ -216,6 +248,12 @@ int main(int argc, char **argv) {
 
     int frames = 0;
     while (win_pump()) {
+        if (frames >= 2 && frames - 2 < keyn) win_key_push(keyseq[frames - 2]);
+        if (win_key_take(VK_DOWN)) { g_menu_sel = (g_menu_sel + 1) % 3; g_menu_msg[0] = 0; }
+        if (win_key_take(VK_UP))   { g_menu_sel = (g_menu_sel + 2) % 3; g_menu_msg[0] = 0; }
+        if (win_key_take(VK_RETURN)) {
+            snprintf(g_menu_msg, sizeof(g_menu_msg), "%s SELECTED", MENU_ITEMS[g_menu_sel]);
+        }
         memcpy(g_rgb, g_mem + FB_ADDR, sizeof(g_rgb));
         draw_menu();
         win_blit(g_rgb, FB_W, FB_H);
