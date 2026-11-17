@@ -931,6 +931,18 @@ static void dsp_command(Ipc *r, uint32_t *p) {
             ipc_put(r, 0);
             break;
         }
+        case 0x0003: case 0x0005: case 0x0007: case 0x0009:
+        case 0x000A: case 0x000C: case 0x0012: { /* Set/Send/Clear/Mask/… */
+            ipc_begin(r, r->cmd, 1, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x0006: case 0x0008: { /* RecvFifoEx/GetSemaphore -> Result+Wert */
+            ipc_begin(r, r->cmd, 2, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 0);
+            break;
+        }
         case 0x0016: { /* GetSemaphoreEventHandle -> Result + MoveHandle(Event) */
             uint32_t ev = (uint32_t)alloc_handle(SVC_OTHER, "dsp-ev");
             Handle *hh = get_handle(ev);
