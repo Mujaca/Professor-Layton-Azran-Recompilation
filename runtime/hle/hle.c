@@ -1120,11 +1120,16 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                 uint32_t cur;
                 memcpy(&cur, c->mem + (addr & 0x1FFFFFFFu), 4);
                 if (type == 1 || type == 3) { /* Decrement(AndWait)IfLessThan */
-                    /* Ohne echte Interrupts nie signalisierte Wartecounter nicht
-                       ins Unendliche laufen lassen: ab -2 als "signalisiert" behandeln. */
                     if ((int32_t)cur <= -2) cur = 1;
                     else cur -= 1;
                     memcpy(c->mem + (addr & 0x1FFFFFFFu), &cur, 4);
+                } else if (type == 0 || type == 2) { /* WaitIfLessThan */
+                    /* Ohne echte Interrupts wuerde ein nie geposteter Semaphor
+                       ewig spinnen: hier einmalig "posten". */
+                    if ((int32_t)cur <= 0) {
+                        cur = 1;
+                        memcpy(c->mem + (addr & 0x1FFFFFFFu), &cur, 4);
+                    }
                 }
                 (void)value;
             }

@@ -17,6 +17,20 @@ static uint32_t g_pc_ring[PC_RING];
 static uint32_t g_lr_ring[PC_RING];
 static unsigned g_pc_pos = 0;
 uint32_t arm_thread_last_pc[16];
+static uint32_t g_t_ring[16][64];
+static uint32_t g_t_pos[16];
+
+void arm_trace_thread_dump(int ti, unsigned n) {
+    if (ti < 0 || ti > 15) return;
+    if (n > 64) n = 64;
+    fprintf(stderr, "[tdump] thread %X letzte %u Bloecke:\n", ti, n);
+    for (unsigned i = 0; i < n; i++) {
+        uint32_t idx = (g_t_pos[ti] + 64 - n + i) & 63u;
+        fprintf(stderr, "[tdump]   %02u %08X\n", i, g_t_ring[ti][idx]);
+    }
+    fflush(stderr);
+}
+
 uint32_t arm_thread_last_lr[16];
 
 void arm_trace_pc_ring_dump(unsigned count) {
@@ -111,6 +125,7 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
             uint32_t ti = (c->tpidruro >> 12) & 0xFu;
             arm_thread_last_pc[ti] = pc;
             arm_thread_last_lr[ti] = c->r[14];
+            if (ti < 16) { g_t_ring[ti][g_t_pos[ti] & 63u] = pc; g_t_pos[ti]++; }
         }
         g_pc_ring[g_pc_pos] = pc;
         g_lr_ring[g_pc_pos] = c->r[14];

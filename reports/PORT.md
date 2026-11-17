@@ -40,53 +40,40 @@ Menü rendert daher noch nicht.
 
 ## Aktueller Stand
 
-Der Konstruktor-Init laeuft durch; das Spiel startet seine Worker-Threads
-(bis zu 11 Gast-Threads mit eigenem TLS-Fenster) und initialisiert
-`fs`, `cfg`, `ptm`, `hid`, `ndm`, `dsp`, `y2r`, `APT`. Danach laeuft es in
-einer Frame-/Notification-Schleife und oeffnet Dateien (`fs:USER 0x0802`,
-u. a. `/gamecoin.dat`).
-
-**`gsp::Gpu` wird weiterhin nicht geoeffnet** -> kein Frame. Der Haupt-Thread
-haengt in einer SDK-Mutex-/Futex-Schleife (`0x287B90`, `0x288B80`).
-
-### Beobachtete IPC-Verteilung (20 s Lauf)
+Konstruktor-Init laeuft, bis zu 11 Gast-Threads, Services `fs/cfg/ptm/hid/
+ndm/dsp/y2r/APT` initialisiert. Der Haupt-Thread (TLS-Index 2) haengt danach
+in einer **Semaphor-Warteschleife**:
 
 ```
-450 x srv:  0x000B   (ReceiveNotification)
-226 x srv:  0x0050
- 75 x ?     0x0001   (Handle-Query)
- 26 x srv:  0x0000
-  9 x srv:  0x0005
-  3 x cfg:u 0x0001
-  3 x ptm:u 0x000C / 0x000B
+0x141EA4  ldrex r2,[r4]      ; r4 = 0x090001C8 (App-Heap)
+0x141EB8  cmp   r2,#0
+0x141EBC  ble   0x141ED8      ; -> svc 0x22 ArbitrateAddress
+0x141EC0  sub   r1,r2,#1
+0x141EC4  strex r2,r1,[r4]
 ```
+Der Zaehler wird **nie gepostet** (kein anderer Thread erhoeht ihn), daher
+pollt der Thread endlos. Zusaetzlich pollt Thread 3 `srv: 0x000B`
+(ReceiveNotification).
 
-### FS-Parameter (aus `[fsdbg]`)
+`gsp::Gpu` wird weiterhin **nicht** geoeffnet -> kein Frame.
 
-- `0x0803 OpenFileDirectly`: `n=8 t=4`, Binary-Pfad (12 Byte) im ersten
-  Translate-Puffer -> funktioniert.
-- `0x0802 OpenFile`: zwei Varianten beobachtet (`n=7` mit Wchar16-Pfad
-  `/gamecoin.dat`, und `n=3` ohne Pfad). Die `n=3`-Variante liefert noch
-  keinen Pfad -> leere Dateien.
+### Neue Diagnose
+
+`arm_trace_thread_dump(idx, n)` fuehrt pro Gast-Thread einen Ringpuffer der
+letzten 64 Bloecke und wird vom Watchdog ausgegeben. Damit ist der Aufenthalts-
+ort jedes Threads exakt bestimmbar (Thread 2 = Haupt-Thread).
 
 ### Fixes dieser Runde
 
 | Fix | Wirkung |
 |---|---|
-| `vldr`/`vstr`/`ldrd`/`strd` mit `[pc,#imm]`: `pc+8` statt `c->r[15]` | Float-Konvertierungs-Endlosschleife `0x24B2DC` behoben |
-| Seed `0x0010009D` (Thumb-`main`) | `_start` rief ins Leere |
-| Kooperative Gast-Threads | Worker-Threads laufen wirklich |
-| `svcGetSystemTick` 64 Bit | Timeout-Vergleiche laufen ab |
-| `svcArbitrateAddress` dekrementiert | Futex-Zaehler bewegt sich |
-| `dsp::DSP 0x0011` mit `(Result, true, MappedBuffer)` | DSP-Retry-Loop beendet |
-| `APT:U 0x0050` mit 2 Normal-Woertern | APT-Loop entschaerft |
-| Bus-Alias `0x8xxxxxxx`/`0xBxxxxxxx` maskiert | Gast-Fehlzugriffe beseitigt |
-| FS-Pfad aus Translate-Deskriptor `{flags,addr}` | Wchar16-Pfade werden gelesen |
+| Thread-Block-Ring + `arm_trace_thread_dump` | Haupt-Thread exakt lokalisiert |
+| `svcArbitrateAddress` Typ 0/2 postet einmalig, wenn Zaehler <= 0 | Semaphor-Warteschleife kann theoretisch terminieren |
 
 ### Naechster Schritt
 
-1. SDK-Mutex-Warteschleife (`0x287B90` / `0x288B80`) korrekt bedienen, damit
-   der Haupt-Thread die Grafik-Initialisierung erreicht.
+1. Den Poster des Semaphors `0x090001C8` identifizieren (wer ruft die
+   Inkrement-Routine?) und im HLE ausloesen.
 2. `gsp::Gpu` implementieren (WriteHWRegs, SetCommandList,
    RegisterInterruptRelayQueue, SetBufferSwap) + PICA-2D-Renderer auf
    `0x1F000000`.
