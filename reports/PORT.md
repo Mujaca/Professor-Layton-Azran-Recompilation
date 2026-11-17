@@ -40,48 +40,38 @@ Menü rendert daher noch nicht.
 
 ## Aktueller Stand
 
-Konstruktor-Init laeuft, bis zu 11 Gast-Threads, Services `fs/cfg/ptm/hid/
-ndm/dsp/y2r/APT` initialisiert. Das Spiel laeuft danach in seiner Poll-/Frame-
-Schleife (in 8 s ca. **233.000 IPCs**), aber **`gsp::Gpu` wird nie geoeffnet**
-(0 Treffer) -> kein Frame.
+Der Boot laeuft (Konstruktor-Init, bis zu 11 Gast-Threads, ~233.000 IPCs in
+8 s), initialisiert `fs/cfg/ptm/hid/ndm/dsp/y2r/APT` – aber **`gsp::Gpu` wird
+weiterhin nicht geoeffnet** (0 Treffer) -> kein Frame.
 
-### Thread-Diagnose
+### Wichtige Korrekturen an den IPC-Reply-Deskriptoren
 
-`arm_trace_thread_dump(idx, n)` (Ringpuffer pro Gast-Thread, vom Watchdog
-zweimal ausgegeben) zeigt: der Haupt-Thread (TLS-Index 2) wechselt zwischen
+Nach Azahar `apt.cpp` / `srv.cpp` / `hid`:
 
-- `0x141EA4` — Semaphor-Wait (`ldrex/strex` auf `[r4]`, `svcArbitrateAddress`)
-- `0x288B80` / `0x288BC4` — SDK-Critical-Section
-- `0x11A818` — Spin-Delay-Schleife (`subs r0,#2; bgt`)
+| Dienst | vorher | jetzt |
+|---|---|---|
+| `APT:U 0x0002 Initialize` | 3 Translate-Woerter deklariert, aber **5 geschrieben** (`0x00` + 2x `{0x10,handle}`) -> SDK las `0x10` als zweiten Handle | `{0x04000000 (CopyHandle x2), ev1, ev2}` = exakt 3 Woerter |
+| `APT:U 0x0001 GetLockHandle` | MoveHandle `0x10` | CopyHandle `0x00` |
+| `hid:USER 0x000A GetIPCHandles` | Deskriptor `0x00` (1 Handle) bei 6 Handles | `0x14000000` (CopyHandle x6) |
+| `srv: 0x0005 GetServiceHandle` | Standard 2 Normal + 2 Translate | Standard 1 Normal + 2 Translate (Citra `MakeBuilder(1,2)`) |
 
-und kommt nicht zur Grafik-Initialisierung. Die beiden Watchdog-Dumps
-(Tick 4 und Tick 14) sind identisch -> der Thread haengt an derselben Stelle.
+Effekt: `y2r:u` wird jetzt als eigener Dienst geoeffnet; der Haupt-Thread
+kommt weiter, erreicht aber die Grafik-Initialisierung noch nicht.
 
-### Fixes dieser Runde
+### Weitere Fixes
 
-| Fix | Wirkung |
-|---|---|
-| `guest_yield()` beachtet `HLE_NO_THREAD_LOCK` (kein `LeaveCriticalSection` auf nicht gehaltenem Lock) | IPC-Durchsatz von ~1.000 auf ~233.000 pro 8 s |
-| `ARM_MEMWATCH`-Watchpoint in `arm_mem_write` | zeigt Schreibzugriffe auf verdaechtige Variablen |
-| Zwei Thread-Dumps (Tick 4/14) im Watchdog | Stillstand vs. Fortschritt unterscheidbar |
-
-### Beobachtung zu `0x090001C8`
-
-Die Adresse ist ein **Critical-Section-Wort** (Wechsel `FFFFFFFF` <-> `1`),
-kein Semaphor:
-
-```
-[mw] 090001C8 <- 00000001 size=4 pc=002658F8 lr=00289E50
-[mw] 090001C8 <- FFFFFFFF size=4 pc=0012E1C4 lr=00287A48
-```
+- `APT:U 0x000D/0x000E` "kein Parameter" liefert jetzt den korrekten
+  Result-Code `0xC8A0CFEF` (NoData=1007, Applet=51, InvalidState=5, Status=25)
+  statt eines geratenen Werts.
+- `svcGetThreadId` (0x37) liefert pro Thread eine **eindeutige** ID
+  (`0x100 + TLS-Index`) statt konstant `0x100` (wichtig fuer Mutex-Besitz).
 
 ### Naechster Schritt
 
-1. Die Blockade des Haupt-Threads im Semaphor `0x141EA4` aufloesen (Poster
-   identifizieren; ggf. `svcArbitrateAddress` typkorrekt blockieren).
-2. `gsp::Gpu` (WriteHWRegs, SetCommandList, RegisterInterruptRelayQueue,
-   SetBufferSwap) + PICA-2D-Renderer auf `0x1F000000`.
-3. Menue-Frame per `out\port.exe out\romfs --shot out\shot.bmp` belegen.
+Weiterhin offen: der Haupt-Thread bleibt in APT-/Semaphor-Poll-Schleifen
+(`0x141EA4`, `0x288B80`, `0x11A818`). Als Naechstes `svcArbitrateAddress`
+typkorrekt blockieren (echte Warteschlange) und `srv:0x000B`-Poll durch echtes
+Event-Blocking ersetzen; danach `gsp::Gpu` + PICA-2D-Renderer auf `0x1F000000`.
 
 ## Umgesetzte HLE-Bausteine
 

@@ -301,7 +301,7 @@ static void srv_command(Ipc *r, uint32_t *p) {
                 ipc_begin(r, 5, 2, 0);
                 ipc_put(r, 0);
                 ipc_put(r, (uint32_t)h);
-            } else if (g_srv_layout == 3) {
+            } else if (g_srv_layout != 2) {
                 ipc_begin(r, 5, 1, 2);
                 ipc_put(r, 0);
                 ipc_put_handle(r, (uint32_t)h);
@@ -343,17 +343,17 @@ static void apt_command(Ipc *r, uint32_t *p) {
             put_result(r);
             ipc_put(r, attrs);
             ipc_put(r, 1);            /* state = running */
-            ipc_put_handle(r, lock);
+            ipc_put_handle_copy(r, lock);
             break;
         }
-        case 2: { /* Initialize */
+        case 2: { /* Initialize -> { CopyHandle x2, h1, h2 } */
             uint32_t ev1 = (uint32_t)alloc_handle(SVC_OTHER, "apt-notif");
             uint32_t ev2 = (uint32_t)alloc_handle(SVC_OTHER, "apt-param");
             ipc_begin(r, 2, 1, 3);
             put_result(r);
-            ipc_put(r, 0x00u);      /* CopyHandle deskriptor */
-            ipc_put_handle(r, ev1);
-            ipc_put_handle(r, ev2);
+            ipc_put(r, (1u << 26));   /* CopyHandle-Deskriptor, 2 Handles */
+            ipc_put(r, ev1);
+            ipc_put(r, ev2);
             break;
         }
         case 0x4F: { /* SetAppCpuTimeLimit */
@@ -402,7 +402,8 @@ static void apt_command(Ipc *r, uint32_t *p) {
                 if (g_log) printf("[apt] ReceiveParameter -> Wakeup\n");
             } else {
                 ipc_begin(r, r->cmd, 1, 0);
-                ipc_put(r, 0xD8A0A000u); /* NoData (Applet) */
+                /* Result(NoData=1007, Applet=51, InvalidState=5, Status=25) */
+                ipc_put(r, 0xC8A0CFEFu);
                 if (g_log) printf("[apt] ReceiveParameter -> NoData\n");
             }
             break;
@@ -428,7 +429,7 @@ static void hid_command(Ipc *rp, uint32_t *p) {
             for (int i = 0; i < 5; i++) h[i] = (uint32_t)alloc_handle(SVC_OTHER, "hid-ev");
             ipc_begin(rp, 0x000A, 1, 7);
             ipc_put(rp, 0);
-            ipc_put(rp, 0x00u);            /* CopyHandle-Deskriptor */
+            ipc_put(rp, (5u << 26));       /* CopyHandle-Deskriptor, 6 Handles */
             ipc_put(rp, shmem);
             for (int i = 0; i < 5; i++) ipc_put(rp, h[i]);
             break;
@@ -1199,9 +1200,11 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
         case 0x35: /* GetProcessId(out, process) */
             if (c->r[0]) write_u32(c, c->r[0], 0x20);
             return 0;
-        case 0x37: /* GetThreadId(out_*, thread) */
-            if (c->r[0]) write_u32(c, c->r[0], 0x100);
-            return 0;
+        case 0x37: { /* GetThreadId(out_*, thread): pro Thread eindeutig */
+            uint32_t tid = 0x100u + ((c->tpidruro >> 12) & 0xFu);
+            if (c->r[0]) write_u32(c, c->r[0], tid);
+            return tid;
+        }
         case 0x38: { /* GetResourceLimit(out, process) */
             uint32_t out = c->r[0];
             uint32_t h = (uint32_t)alloc_handle(SVC_OTHER, "reslimit");
