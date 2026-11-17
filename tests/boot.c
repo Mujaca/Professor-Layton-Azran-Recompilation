@@ -12,6 +12,9 @@
 
 #define MEM_SIZE 0x30000000u   /* 768 MiB: FCRAM + VRAM (bis 0x20500000) + MMIO */
 
+extern uint32_t arm_thread_last_pc[16];
+extern uint32_t arm_thread_last_lr[16];
+
 void fn_00100000(ArmCpu *c);
 
 static unsigned char *g_mem;
@@ -26,6 +29,11 @@ static DWORD WINAPI watchdog(LPVOID unused) {
             ticks++;
             printf("[wd] pc=0x%08X sp=0x%08X lr=0x%08X\n",
                    g_cpu_view->r[15], g_cpu_view->r[13], g_cpu_view->r[14]);
+            for (int ti = 0; ti < 16; ti++) {
+                if (arm_thread_last_pc[ti])
+                    printf("[wd]   thread %X: pc=0x%08X lr=0x%08X\n", ti,
+                           arm_thread_last_pc[ti], arm_thread_last_lr[ti]);
+            }
             if (ticks == 4) {
                 arm_trace_pc_ring_dump(150);
                 fflush(stderr);

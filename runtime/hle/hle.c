@@ -21,11 +21,12 @@ static CRITICAL_SECTION g_guest_lock;
 static int g_guest_lock_init = 0;
 static ArmCpu *g_main_cpu = NULL;
 
+static int g_no_lock = 0;
 static void guest_lock_enter(void) {
-    if (g_guest_lock_init) EnterCriticalSection(&g_guest_lock);
+    if (g_guest_lock_init && !g_no_lock) EnterCriticalSection(&g_guest_lock);
 }
 static void guest_lock_leave(void) {
-    if (g_guest_lock_init) LeaveCriticalSection(&g_guest_lock);
+    if (g_guest_lock_init && !g_no_lock) LeaveCriticalSection(&g_guest_lock);
 }
 static void guest_yield(void) {
     if (!g_guest_lock_init) return;
@@ -46,9 +47,9 @@ static int g_thread_count = 0;
 
 static DWORD WINAPI guest_thread_main(LPVOID p) {
     GuestThread *t = (GuestThread *)p;
-    EnterCriticalSection(&g_guest_lock);
+    if (!g_no_lock) EnterCriticalSection(&g_guest_lock);
     arm_call_guest_pub(t->cpu, t->entry);
-    LeaveCriticalSection(&g_guest_lock);
+    if (!g_no_lock) LeaveCriticalSection(&g_guest_lock);
     return 0;
 }
 
@@ -324,6 +325,7 @@ static void hid_command(Ipc *r, uint32_t *p);
 static void fs_command(Ipc *r, uint32_t *p);
 static void file_command(Ipc *r, uint32_t *p);
 static void cfg_command(Ipc *r, uint32_t *p);
+static void dsp_command(Ipc *r, uint32_t *p);
 
 static void put_result(Ipc *r) {
     ipc_put(r, 0);
@@ -356,6 +358,12 @@ static void apt_command(Ipc *r, uint32_t *p) {
         case 0x4F: { /* SetAppCpuTimeLimit */
             ipc_begin(r, 0x4F, 1, 0);
             put_result(r);
+            break;
+        }
+        case 0x50: { /* GetAppCpuTimeLimit -> (Result, Limit) */
+            ipc_begin(r, 0x50, 2, 0);
+            put_result(r);
+            ipc_put(r, 0x1Eu);      /* 30 % */
             break;
         }
         case 3: case 4: case 0x28: { /* Enable / Finalize / NotifyToWait */
@@ -749,6 +757,40 @@ static void cfg_command(Ipc *r, uint32_t *p) {
     }
 }
 
+static void dsp_command(Ipc *r, uint32_t *p) {
+    switch (r->cmd) {
+        case 0x0011: { /* LoadComponent: (u32 size, u16 prog, u16 data, MappedBuffer) */
+            uint32_t dsc_flags = 0, dsc_addr = 0;
+            if (r->translate >= 2) {
+                dsc_flags = p[r->normal];
+                dsc_addr = p[r->normal + 1];
+            }
+            ipc_begin(r, 0x0011, 2, 2);
+            ipc_put(r, 0);          /* ResultSuccess */
+            ipc_put(r, 1);          /* true = geladen */
+            ipc_put(r, dsc_flags);
+            ipc_put(r, dsc_addr);
+            if (g_log) printf("[dsp] LoadComponent size=0x%X -> ok\n", p[0]);
+            break;
+        }
+        case 0x0012: { /* UnloadComponent */
+            ipc_begin(r, 0x0012, 1, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x0015: { /* RegisterInterruptEvents */
+            uint32_t h = (uint32_t)alloc_handle(SVC_OTHER, "dsp-ev");
+            ipc_begin(r, 0x0015, 1, 2);
+            ipc_put(r, 0);
+            ipc_put_handle_copy(r, h);
+            break;
+        }
+        default:
+            generic_command(r, SVC_DSP);
+            break;
+    }
+}
+
 static void generic_command(Ipc *r, int service) {
     if (g_log) {
         printf("[%s] cmd 0x%04X normal=%d -> 0\n",
@@ -797,7 +839,7 @@ static void dispatch_ipc(uint32_t handle) {
     g_ipc_count++;
     if (cmd < 64 && service >= 0 && service < 64) g_cmd_seen[service][cmd]++;
     if (h && (g_ipc_count <= g_ipc_log_limit || g_log)) {
-        printf("[ipc] blk=%08X %-9s cmd=0x%04X n=%d t=%d h=%u", arm_last_block, SERVICE_NAMES[service], cmd,
+        printf("[ipc] th=%03X blk=%08X %-9s cmd=0x%04X n=%d t=%d h=%u", (uint32_t)((g_cpu ? g_cpu->tpidruro : 0) >> 12) & 0xFFFu, arm_last_block, SERVICE_NAMES[service], cmd,
                normal, translate, handle);
         for (int i = 0; i < normal && i < 8; i++) printf(" p%d=%08X", i, params[i]);
         printf("\n");
@@ -821,6 +863,9 @@ static void dispatch_ipc(uint32_t handle) {
             break;
         case SVC_CFG_U:
             cfg_command(&r, params);
+            break;
+        case SVC_DSP:
+            dsp_command(&r, params);
             break;
         default:
             generic_command(&r, service);
@@ -898,7 +943,8 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     if (!g_guest_lock_init) {
         InitializeCriticalSection(&g_guest_lock);
         g_guest_lock_init = 1;
-        EnterCriticalSection(&g_guest_lock);
+        g_no_lock = getenv("HLE_NO_THREAD_LOCK") != NULL;
+        if (!g_no_lock) EnterCriticalSection(&g_guest_lock);
     }
     g_main_cpu = c;
     printf("[hle] romfs=%s log=%d srv-handle=%u\n", g_romfs, g_log, g_srv_handle);

@@ -16,6 +16,8 @@ static int g_watch_hits = 0;
 static uint32_t g_pc_ring[PC_RING];
 static uint32_t g_lr_ring[PC_RING];
 static unsigned g_pc_pos = 0;
+uint32_t arm_thread_last_pc[16];
+uint32_t arm_thread_last_lr[16];
 
 void arm_trace_pc_ring_dump(unsigned count) {
     unsigned n = count > PC_RING ? PC_RING : count;
@@ -105,6 +107,11 @@ int arm_trace_is_open(void) {
 void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
     arm_last_block = pc;
     if (c != NULL) {
+        {
+            uint32_t ti = (c->tpidruro >> 12) & 0xFu;
+            arm_thread_last_pc[ti] = pc;
+            arm_thread_last_lr[ti] = c->r[14];
+        }
         g_pc_ring[g_pc_pos] = pc;
         g_lr_ring[g_pc_pos] = c->r[14];
         g_pc_pos = (g_pc_pos + 1) & (PC_RING - 1);

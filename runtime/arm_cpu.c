@@ -35,6 +35,8 @@ static void mem_fault(ArmCpu *c, uint32_t addr, int size) {
 
 uint32_t arm_mem_read(ArmCpu *c, uint32_t addr, int size) {
     uint32_t v = 0;
+    /* 3DS-Busalias: 0x8xxxxxxx/0xBxxxxxxx zeigen auf dieselben FCRAM-Seiten. */
+    if (addr >= 0x20000000u) addr &= 0x1FFFFFFFu;
     if ((uint64_t)addr + (uint64_t)size > c->mem_size) {
         mem_fault(c, addr, size);
         return 0;
@@ -46,6 +48,7 @@ uint32_t arm_mem_read(ArmCpu *c, uint32_t addr, int size) {
 }
 
 void arm_mem_write(ArmCpu *c, uint32_t addr, int size, uint32_t val) {
+    if (addr >= 0x20000000u) addr &= 0x1FFFFFFFu;
     if ((uint64_t)addr + (uint64_t)size > c->mem_size) {
         mem_fault(c, addr, size);
         return;
