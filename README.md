@@ -57,6 +57,17 @@ python tests\mvp_selftest.py     # assembliert Snippets, recompiliert, prueft Se
 
 Details: [`reports/RECOMPILER_MVP.md`](reports/RECOMPILER_MVP.md)
 
+## Erste lauffähige Version (Phase 2)
+
+`out\port.exe` startet ein natives Fenster, lädt den recompilierten Code und führt ihn
+mit der HLE-Schicht aus (SDK-Init bis `srv:`, Framebuffer-Ansicht, Spiel-Icon als
+Startscreen). Status und offene Punkte bis zum Menü: [`reports/PORT.md`](reports/PORT.md).
+
+```powershell
+python tools\build_port.py
+.\out\port.exe out\romfs
+```
+
 ## Trace-Harness (Phase 1b)
 
 `runtime/arm_trace.c` + `tools/recomp/trace.py` erzeugen und analysieren
