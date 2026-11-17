@@ -718,9 +718,19 @@ static void fs_command(Ipc *r, uint32_t *p) {
             find_path(p, path, sizeof(path));
             uint32_t h = (uint32_t)alloc_handle(SVC_FS_USER, "archive");
             if (g_log) printf("[fs] OpenArchive -> handle %u\n", h);
-            ipc_begin(r, 0x080C, 1, 2);
+            /* Azahar: MakeBuilder(3,0) -> result, ArchiveHandle, 0 */
+            ipc_begin(r, 0x080C, 3, 0);
             ipc_put(r, 0);
-            ipc_put_handle(r, h);
+            ipc_put(r, h);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x0808: { /* CreateFile -> MakeBuilder(1,0) */
+            char cpath[256];
+            find_path(p, cpath, sizeof(cpath));
+            ipc_begin(r, 0x0808, 1, 0);
+            ipc_put(r, 0);
+            if (g_log) printf("[fs] CreateFile \"%s\" -> ok\n", cpath);
             break;
         }
         case 0x080D: { /* ControlArchive */
