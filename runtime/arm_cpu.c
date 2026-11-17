@@ -6,6 +6,7 @@
 #include <math.h>
 
 static uint32_t g_memwatch = 0;
+static uint32_t g_memwatch_end = 0;
 static int g_memwatch_prints = 0;
 
 static ArmCpu *g_pool_cpu = NULL;
@@ -18,6 +19,17 @@ void arm_cpu_init(ArmCpu *c, void *mem, uint32_t size) {
     {
         const char *mw = getenv("ARM_MEMWATCH");
         if (mw) g_memwatch = (uint32_t)strtoul(mw, NULL, 16);
+        {
+            const char *mr = getenv("ARM_MEMWATCHRANGE");
+            if (mr) {
+                unsigned long base = strtoul(mr, NULL, 16);
+                unsigned long size = 0x600000;
+                char *comma = strchr(mr, ',');
+                if (comma) size = strtoul(comma + 1, NULL, 16);
+                g_memwatch = (uint32_t)base;
+                g_memwatch_end = (uint32_t)(base + size);
+            }
+        }
     }
 }
 
@@ -56,7 +68,10 @@ uint32_t arm_mem_read(ArmCpu *c, uint32_t addr, int size) {
 
 void arm_mem_write(ArmCpu *c, uint32_t addr, int size, uint32_t val) {
     if (addr >= 0x20000000u) addr &= 0x1FFFFFFFu;
-    if (g_memwatch != 0 && (addr & ~3u) == g_memwatch && g_memwatch_prints < 40) {
+    if (g_memwatch != 0 &&
+        ((g_memwatch_end != 0) ? (addr >= g_memwatch && addr < g_memwatch_end)
+                               : ((addr & ~3u) == g_memwatch)) &&
+        g_memwatch_prints < 400) {
         g_memwatch_prints++;
         fprintf(stderr, "[mw] %08X <- %08X size=%d pc=%08X lr=%08X\n",
                 addr, val, size, arm_last_block, c->r[14]);
