@@ -9,6 +9,7 @@
 void hle_init(ArmCpu *c, const char *romfs_dir荟);
 uint32_t hle_svc(ArmCpu *c, uint32_t imm);
 void hle_report(void);
+void hle_tick_stats(int *calls, unsigned long long *tick);
 
 /* Wird vom GPU-Teil aufgerufen */
 void hle_gpu_write_reg(uint32_t addr, uint32_t value);

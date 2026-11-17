@@ -165,6 +165,7 @@ static ArmCpu *g_cpu = NULL;
 static char g_romfs[512];
 static int g_log = 0;
 static uint64_t g_tick = 0x1000;
+static int g_tick_calls = 0;
 static Handle g_handles[MAX_HANDLES];
 static int g_next_handle = 1;
 static uint32_t g_srv_handle = 0;
@@ -373,6 +374,18 @@ static void dsp_command(Ipc *r, uint32_t *p);
 static void gsp_command(Ipc *r, uint32_t *p);
 static void y2r_command(Ipc *r, uint32_t *p);
 
+
+static int g_gsp_init_done = 0;
+static void hle_try_gsp_init(ArmCpu *c) {
+    uint32_t save[16];
+    if (g_gsp_init_done || getenv("HLE_GSP_INIT") == NULL) return;
+    g_gsp_init_done = 1;
+    printf("[gspinit] calling 0x00138D70 (sp=%08X)\n", c->r[13]);
+    memcpy(save, c->r, sizeof(save));
+    arm_call_guest_pub(c, 0x00138D70u);
+    memcpy(c->r, save, sizeof(save));
+    printf("[gspinit] returned (sp=%08X)\n", c->r[13]);
+}
 static void put_result(Ipc *r) {
     ipc_put(r, 0);
 }
@@ -410,6 +423,7 @@ static void apt_command(Ipc *r, uint32_t *p) {
             ipc_begin(r, 0x50, 2, 0);
             put_result(r);
             ipc_put(r, 0x1Eu);      /* 30 % */
+            hle_try_gsp_init(g_cpu);
             break;
         }
         case 3: case 4: case 0x28: { /* Enable / Finalize / NotifyToWait */
@@ -1276,8 +1290,13 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     printf("[hle] romfs=%s log=%d srv-handle=%u\n", g_romfs, g_log, g_srv_handle);
 }
 
+void hle_tick_stats(int *calls, unsigned long long *tick) {
+    if (calls) *calls = g_tick_calls;
+    if (tick) *tick = g_tick;
+}
+
 void hle_report(void) {
-    printf("[hle] ipc=%d ticks=%llu\n", g_ipc_count, (unsigned long long)g_tick);
+    printf("[hle] ipc=%d ticks=%llu tickcalls=%d\n", g_ipc_count, (unsigned long long)g_tick, g_tick_calls);
     printf("[hle] letzte Ereignisse:\n");
     for (int i = 0; i < HLE_EV_RING; i++) {
         int idx = (g_ev_pos + i) % HLE_EV_RING;
@@ -1450,6 +1469,15 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             return 0;
         }
         case 0x22: { /* ArbitrateAddress(handle, addr, type, value, timeout) */
+            static int arb_prints = 0;
+            if (getenv("HLE_ARB_LOG") && arb_prints < 300) {
+                uint32_t adbg;
+                memcpy(&adbg, c->mem + ((c->r[1] & ~3u) & 0x1FFFFFFFu), 4);
+                printf("[arb] th=%u addr=%08X type=%u val=%u mem=%08X\n",
+                       (uint32_t)((c->tpidruro >> 12) & 0xFu),
+                       c->r[1], c->r[2], c->r[3], adbg);
+                arb_prints++;
+            }
             guest_yield();
             {
                 uint32_t obj = c->r[1] & ~3u;
@@ -1558,6 +1586,7 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             uint64_t now = GetTickCount64();
             if (base_ms == 0) base_ms = now;
             g_tick = (now - base_ms) * 268111ull;   /* ~268.111 MHz */
+            g_tick_calls++;
             c->r[1] = (uint32_t)(g_tick >> 32);
             return (uint32_t)g_tick;
         }

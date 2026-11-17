@@ -30,6 +30,8 @@ static DWORD WINAPI watchdog(LPVOID unused) {
             ticks++;
             printf("[wd] pc=0x%08X sp=0x%08X lr=0x%08X\n",
                    g_cpu_view->r[15], g_cpu_view->r[13], g_cpu_view->r[14]);
+            { int tc = 0; unsigned long long tk = 0; hle_tick_stats(&tc, &tk);
+              printf("[wd] tickcalls=%d tick=%llu\n", tc, tk); }
             for (int ti = 0; ti < 16; ti++) {
                 if (arm_thread_last_pc[ti])
                     printf("[wd]   thread %X: pc=0x%08X lr=0x%08X\n", ti,
