@@ -1592,6 +1592,9 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
            den GSP-Init -> nur mit HLE_FS_SLOT2 aktiv. */
         if (getenv("HLE_FS_SLOT2"))
             memcpy(c->mem + 0x3D66C4u, &fsh, 4);
+        /* Der generische Session-Getter 0x212CA8 wird mit Objekt
+           0x3D67C0 aufgerufen (per ARM_WATCH gemessen) und prueft +4. */
+        memcpy(c->mem + 0x3D67C4u, &fsh, 4);
         printf("[hle] fs-Client-Handle 0x3D91D0/0x3D66C4 = %u\n", fsh);
     }
     if (getenv("HLE_GSP_CLIENT")) {
