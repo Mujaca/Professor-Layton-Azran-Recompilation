@@ -1609,10 +1609,13 @@ void hle_report(void) {
 /* Thread-Ende signalisieren: der zugehoerige Thread-Handle wird auf
  * "signaled" gesetzt, damit svcWaitSynchronization darauf zurueckkehrt. */
 static void thread_signal_exit(ArmCpu *c) {
+    if (getenv("HLE_THR_EXIT") == NULL) return;   /* A/B-Schalter */
     for (int i = 0; i < g_thread_count; i++) {
         if (g_threads[i].cpu == c) {
             Handle *hh = get_handle(g_threads[i].handle);
             if (hh != NULL) hh->signaled = 1;
+            if (getenv("HLE_THR_LOG"))
+                printf("[threxit] handle=%u\n", g_threads[i].handle);
             return;
         }
     }
@@ -1719,6 +1722,9 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                     t->entry = entry;
                     t->id = ((g_thread_count + 1) & 15);
                     t->handle = h;
+                    if (getenv("HLE_THR_LOG"))
+                        printf("[thrnew] handle=%u entry=%08X arg=%08X stack=%08X id=%d\n",
+                               h, entry, arg, stack, t->id);
                     g_thread_count++;
                     CreateThread(NULL, 0, guest_thread_main, t, 0, NULL);
                     if (g_det_sched && t->id >= 0 && t->id < 16) {
