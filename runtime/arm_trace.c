@@ -127,6 +127,10 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
        Tick-Zaehlung spinnt sie zig-tausend Runden und blockiert den
        kooperativen Scheduler (Thread 2 blieb dort haengen). */
     if (c != NULL && pc == 0x0011A818u) c->r[0] = 0;
+    /* 0x101364 bl 0x1034F4 -> bei 0x101370 wird sonst die gesamte
+       Asset-Registrierung (0x1013F0) uebersprungen. */
+    if (c != NULL && pc == 0x00101368u && getenv("HLE_FORCE_ASSET"))
+        c->r[0] = 1;
     /* Diagnose: an den Datei-Open-Fatal-Sites die Register zeigen. */
     if (c != NULL && getenv("HLE_DUMP_FATAL") &&
         (pc == 0x00107A4Cu || pc == 0x00107B34u)) {
