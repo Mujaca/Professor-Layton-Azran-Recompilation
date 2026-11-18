@@ -492,13 +492,49 @@ static void hle_try_gsp_init(ArmCpu *c) {
             uint32_t fa = (uint32_t)strtoul(ff, NULL, 16);
             const char *farg = getenv("HLE_FORCE_ARG");
             memcpy(save, c->r, sizeof(save));
-            if (farg != NULL && *farg != 0)
-                c->r[0] = (uint32_t)strtoul(farg, NULL, 16);
+            if (farg != NULL && *farg != 0) {
+                /* "r0" oder "r0,r1,r2,r3" */
+                char buf[128];
+                snprintf(buf, sizeof(buf), "%s", farg);
+                char *p = buf;
+                int ri = 0;
+                while (p != NULL && *p != 0 && ri < 4) {
+                    char *comma = strchr(p, ',');
+                    if (comma != NULL) *comma = 0;
+                    c->r[ri++] = (uint32_t)strtoul(p, NULL, 16);
+                    p = (comma != NULL) ? comma + 1 : NULL;
+                }
+            }
             printf("[forceframe] calling 0x%08X r0=%08X (sp=%08X)\n",
                    fa, c->r[0], c->r[13]);
             arm_call_guest_pub(c, fa);
             memcpy(c->r, save, sizeof(save));
             printf("[forceframe] returned (sp=%08X)\n", c->r[13]);
+        }
+    }
+    /* Optionaler zweiter Aufruf (Kette fuer Diagnosen). */
+    {
+        const char *ff2 = getenv("HLE_FORCE_FRAME2");
+        if (ff2 != NULL && *ff2 != 0) {
+            uint32_t fa2 = (uint32_t)strtoul(ff2, NULL, 16);
+            const char *farg2 = getenv("HLE_FORCE_ARG2");
+            memcpy(save, c->r, sizeof(save));
+            if (farg2 != NULL && *farg2 != 0) {
+                char buf[128];
+                snprintf(buf, sizeof(buf), "%s", farg2);
+                char *pp = buf;
+                int ri = 0;
+                while (pp != NULL && *pp != 0 && ri < 4) {
+                    char *comma = strchr(pp, ',');
+                    if (comma != NULL) *comma = 0;
+                    c->r[ri++] = (uint32_t)strtoul(pp, NULL, 16);
+                    pp = (comma != NULL) ? comma + 1 : NULL;
+                }
+            }
+            printf("[forceframe2] calling 0x%08X r0=%08X\n", fa2, c->r[0]);
+            arm_call_guest_pub(c, fa2);
+            memcpy(c->r, save, sizeof(save));
+            printf("[forceframe2] returned\n");
         }
     }
 }

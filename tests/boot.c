@@ -37,11 +37,27 @@ static DWORD WINAPI watchdog(LPVOID unused) {
                                                   0x40B4ECu, 0x40B378u, 0x40B374u,
                                                   0x40B36Cu, 0x40B37Cu, 0x3D91E8u,
                                                   0x3D91ECu, 0x3D91F8u, 0x3D9200u,
-                                                  0x3D92ECu, 0x3D91FCu };
+                                                  0x3D92ECu, 0x3D91FCu,
+                                                  0x3ECA5Cu, 0x3ECA60u, 0x3ECA64u,
+                                                  0x3EC028u, 0x3EC02Cu };
                 for (unsigned a = 0; a < sizeof(addrs) / sizeof(addrs[0]); a++) {
                     uint32_t v = 0;
                     memcpy(&v, g_mem + (addrs[a] & 0x1FFFFFFFu), 4);
                     printf("[idle] [%08X] = %08X\n", addrs[a], v);
+                    /* Verkettete Asset-Registry verfolgen (max. 3 Eintraege). */
+                    if (addrs[a] == 0x3ECA5Cu && v >= 0x08000000u && v < 0x20000000u) {
+                        uint32_t cur = v;
+                        for (int d = 0; d < 3 && cur >= 0x08000000u && cur < 0x20000000u; d++) {
+                            uint32_t w0 = 0, w1 = 0, w2 = 0, w3 = 0;
+                            memcpy(&w0, g_mem + (cur & 0x1FFFFFFFu), 4);
+                            memcpy(&w1, g_mem + ((cur + 4) & 0x1FFFFFFFu), 4);
+                            memcpy(&w2, g_mem + ((cur + 8) & 0x1FFFFFFFu), 4);
+                            memcpy(&w3, g_mem + ((cur + 12) & 0x1FFFFFFFu), 4);
+                            printf("[reg] %08X: %08X %08X %08X %08X\n", cur, w0, w1, w2, w3);
+                            if (w2 < 0x08000000u || w2 >= 0x20000000u) break;
+                            cur = w2;
+                        }
+                    }
                 }
             }
             for (int ti = 0; ti < 16; ti++) {
