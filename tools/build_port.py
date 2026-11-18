@@ -25,6 +25,23 @@ def main():
     if p.returncode != 0:
         return p.returncode
 
+    # Nachbearbeitung: das SDK schickt Service-Namen mit strlen+1
+    # (also 9 fuer "gsp::Gpu"), der Wrapper fn_0028EE00 akzeptiert
+    # aber nur <= 8 und bricht sonst ohne Request ab.
+    gpath = os.path.join(ROOT, "build", "gen_boot.c")
+    txt = open(gpath, encoding="utf-8").read()
+    key = "void fn_0028EE00(ArmCpu *c) {"
+    i = txt.find(key)
+    if i >= 0:
+        j = txt.find("\nvoid fn_", i + len(key))
+        if j < 0:
+            j = i + 4000
+        seg = txt[i:j]
+        seg = seg.replace("DP_CMP, -1, c->r[2], 0x00000008u",
+                          "DP_CMP, -1, c->r[2], 0x00000009u")
+        txt = txt[:i] + seg + txt[j:]
+        open(gpath, "w", encoding="utf-8", newline="\n").write(txt)
+
     import ziglang
     zig = os.path.join(os.path.dirname(ziglang.__file__), "zig.exe")
     cmd = [zig, "cc", "-std=c11", "-O1",

@@ -1195,7 +1195,9 @@ static void gsp_command(Ipc *r, uint32_t *p) {
         }
         case 0x000D: case 0x000E: case 0x000F: case 0x0010:
         case 0x0011: case 0x0012: case 0x0014: case 0x0015:
-        case 0x0016: case 0x0017: { /* Transfer / Perf / Right */
+        case 0x0016: case 0x0017:
+        case 0x0019: case 0x001A: case 0x001B: case 0x001C:
+        case 0x001D: case 0x001E: case 0x001F: { /* Transfer / Perf / Right / Vram */
             ipc_begin(r, r->cmd, 1, 0);
             ipc_put(r, 0);
             break;
@@ -1302,9 +1304,14 @@ static void dispatch_ipc(uint32_t handle) {
         else if ((cmd == 0x0001 || cmd == 0x0003) && normal == 2)
             service = SVC_CFG_U;
     }
-    /* Fallback: fs-Kommandos auch bei unbekanntem Handle als fs behandeln */
-    if (h == NULL && (cmd & 0xFF00u) == 0x0800u) {
-        service = SVC_FS_USER;
+    /* Fallback: Datei-/FS-Kommandos auch dann richtig routen, wenn das
+       Handle im HLE einer anderen Kategorie zugeordnet ist (im Trace
+       sendet das Spiel 0x0802/0x0803/0x0808 auf Handle 4 = "sync"). */
+    if ((cmd & 0xFF00u) == 0x0800u && (h == NULL || service == SVC_OTHER)) {
+        if (cmd == 0x080Cu || cmd == 0x080Du || cmd == 0x080Eu || cmd == 0x0812u)
+            service = SVC_FS_USER;
+        else
+            service = SVC_FILE;
     }
     g_cur_handle = handle;
     g_cur_mem = c->mem;
