@@ -301,16 +301,17 @@ int main(int argc, char **argv) {
         static int tick = 0;
         if ((++tick % 30) == 0) {
             char line[192];
+            printf("[port] frames=%d\n", frames);
             snprintf(line, sizeof(line), "PC=0x%08X  halted=%d  frames=%d",
                      g_cpu.r[15], g_halt, frames);
             win_status(line, 1);
         }
         frames++;
         Sleep(16);
-        if (shot != NULL && frames == 120) {
+        if (shot != NULL && frames == 3) {
             save_bmp(shot);
         }
-        if (shot != NULL && frames > 130) {
+        if (shot != NULL && frames > 6) {
             break;
         }
         if (g_halt && shot == NULL) {
