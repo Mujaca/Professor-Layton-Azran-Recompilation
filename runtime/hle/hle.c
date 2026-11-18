@@ -1724,6 +1724,16 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                        arm_last_block, c->r[14]);
             }
             uint32_t out = c->r[0], hlist = c->r[1], cnt = c->r[2];
+            if (getenv("HLE_WAIT_LOG") && cnt > 0 && cnt <= 8 && hlist != 0) {
+                printf("[wait25 handles] th=%u n=%u:",
+                       (uint32_t)((c->tpidruro >> 12) & 0xFu), cnt);
+                for (uint32_t k = 0; k < cnt; k++) {
+                    uint32_t hv = arm_mem_read(c, hlist + k * 4, 4);
+                    Handle *hh2 = get_handle(hv);
+                    printf(" %u(%s)", hv, hh2 ? hh2->name : "-");
+                }
+                printf("\n");
+            }
             static unsigned vb2 = 0;
             int idx = 0;
             for (int i = 0; i < 64; i++) {
@@ -1731,7 +1741,9 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                 for (uint32_t k = 0; k < cnt && k < 16; k++) {
                     uint32_t hv = (hlist ? arm_mem_read(c, hlist + k * 4, 4) : 0);
                     Handle *hh = get_handle(hv);
-                    if (hh != NULL && hh->signaled) { hit = (int)k; break; }
+                    /* Handle 0 = ungueltig: als "sofort erfuellt" behandeln,
+                       sonst blockiert der Waiter dauerhaft. */
+                    if (hv == 0 || (hh != NULL && hh->signaled)) { hit = (int)k; break; }
                 }
                 if (hit >= 0) { idx = hit; break; }
                 guest_yield();
