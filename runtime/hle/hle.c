@@ -852,8 +852,8 @@ static void fs_command(Ipc *r, uint32_t *p) {
             char path[256];
             find_path(p, path, sizeof(path));
             uint32_t h = (uint32_t)alloc_handle(SVC_FS_USER, "archive");
-            if (g_log) printf("[fs] OpenArchive id=0x%08X path=\"%s\" -> handle %u\n",
-                              p[1], path, h);
+            if (g_log) printf("[fs] OpenArchive id=0x%08X type=%u size=%u path=\"%s\" -> handle %u\n",
+                              p[0], p[1], p[2], path, h);
             /* Der FS-Client der App (Objekt 0x3D66C0) braucht den
                Archiv-Handle in +4, sonst wirft 0x212CC4 E0A046DA. */
             if (g_cpu != NULL && (0x3D66C4u & 0x1FFFFFFFu) + 4 <= g_cpu->mem_size)
