@@ -1008,6 +1008,29 @@ static void dsp_command(Ipc *r, uint32_t *p) {
             if (g_log) printf("[dsp] LoadComponent size=0x%X -> ok\n", p[0]);
             break;
         }
+        case 0x000D: { /* WriteProcessPipe(channel, size, buffer) -> Result */
+            uint32_t size = p[1];
+            uint32_t addr = 0;
+            if (r->translate >= 2) addr = p[r->normal + 1];
+            ipc_begin(r, 0x000D, 1, 0);
+            ipc_put(r, 0);
+            if (g_log) printf("[dsp] WriteProcessPipe ch=%u size=%u addr=%08X\n",
+                              p[0], size, addr);
+            break;
+        }
+        case 0x000E: { /* ReadPipe(ch, size, flags, buffer) -> Result + StaticBuffer */
+            uint32_t dsc_flags = 0, dsc_addr = 0;
+            if (r->translate >= 2) {
+                dsc_flags = p[r->normal];
+                dsc_addr = p[r->normal + 1];
+            }
+            ipc_begin(r, 0x000E, 1, 2);
+            ipc_put(r, 0);
+            ipc_put(r, dsc_flags);
+            ipc_put(r, dsc_addr);
+            if (g_log) printf("[dsp] ReadPipe ch=%u size=%u -> 0\n", p[0], p[1]);
+            break;
+        }
         case 0x0012: { /* UnloadComponent */
             ipc_begin(r, 0x0012, 1, 0);
             ipc_put(r, 0);
