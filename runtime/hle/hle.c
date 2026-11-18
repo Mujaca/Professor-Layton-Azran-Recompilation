@@ -1924,7 +1924,12 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                     Handle *hh = get_handle(hv);
                     /* Handle 0 = ungueltig: als "sofort erfuellt" behandeln,
                        sonst blockiert der Waiter dauerhaft. */
-                    if (hv == 0 || (hh != NULL && hh->signaled)) { hit = (int)k; break; }
+                    /* Handle 0 = ungueltig: standardmaessig als sofort
+                       erfuellt behandeln. Mit HLE_H0_WAIT dagegen als
+                       "nie signalisiert", damit der Dispatcher die echten
+                       Indizes (z. B. APT-Parameter = 2) sieht. */
+                    int h0ok = (hv == 0) && getenv("HLE_H0_WAIT") == NULL;
+                    if (h0ok || (hh != NULL && hh->signaled)) { hit = (int)k; break; }
                 }
                 if (hit >= 0) { idx = hit; break; }
                 guest_yield();
@@ -1940,7 +1945,14 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                     if (hh != NULL && hh->signaled) { hh->signaled = 0; break; }
                 }
             }
+            if (getenv("HLE_WAIT_LOG"))
+                printf("[wait25 idx] th=%u out=%08X cnt=%u -> idx=%d\n",
+                       (uint32_t)((c->tpidruro >> 12) & 0xFu), out, cnt, idx);
             if (out != 0 && out != 0xFFFFFFFFu) write_u32(c, out, (uint32_t)idx);
+            /* Der SDK-Wrapper (0x287B90) erwartet den Index in r1 und
+               schreibt ihn selbst nach *out; ohne r1 nimmt der
+               Dispatcher den falschen Zweig. */
+            c->r[1] = (uint32_t)idx;
             return 0;
         }
         case 0x27: { /* DuplicateHandle(out, handleO) */
