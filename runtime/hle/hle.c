@@ -1475,6 +1475,9 @@ static void arb_unlock_short(void) {
     }
 }
 
+/* Handles, auf die tatsaechlich gewartet wird (fuer deterministisches
+ * VBlank-Signalisieren statt "alle Handles fluten"). */
+static unsigned char g_wait_seen[MAX_HANDLES];
 static volatile uint32_t g_arb_seen[64];
 static volatile int g_arb_seen_n = 0;
 static unsigned g_vblank_frames = 0;
@@ -1485,7 +1488,10 @@ static DWORD WINAPI vblank_thread(LPVOID p) {
     while (g_vblank_run) {
         Sleep(16);
         for (int k = 1; k < MAX_HANDLES; k++) {
-            if (g_handles[k].used) g_handles[k].signaled = 1;
+            /* Nur Handles wecken, auf die wirklich gewartet wird. */
+            if (g_handles[k].used &&
+                (getenv("HLE_VB_ONLY") == NULL || g_wait_seen[k]))
+                g_handles[k].signaled = 1;
         }
         /* GSP-Interrupt-Relay-Queue: das Spiel mappt sie an 0x10002000.
            Ohne VBlank-Eintrag dort wartet die Render-Schleife ewig. */
@@ -1937,6 +1943,7 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                 int hit = -1;
                 for (uint32_t k = 0; k < cnt && k < 16; k++) {
                     uint32_t hv = (hlist ? arm_mem_read(c, hlist + k * 4, 4) : 0);
+                    if (hv < MAX_HANDLES) g_wait_seen[hv] = 1;
                     Handle *hh = get_handle(hv);
                     /* Handle 0 = ungueltig: als "sofort erfuellt" behandeln,
                        sonst blockiert der Waiter dauerhaft. */
