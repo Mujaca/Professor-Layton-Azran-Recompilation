@@ -32,6 +32,15 @@ static DWORD WINAPI watchdog(LPVOID unused) {
                    g_cpu_view->r[15], g_cpu_view->r[13], g_cpu_view->r[14]);
             { int tc = 0; unsigned long long tk = 0; hle_tick_stats(&tc, &tk);
               printf("[wd] tickcalls=%d tick=%llu\n", tc, tk); }
+            if (getenv("HLE_DUMPIDLE")) {
+                static const unsigned addrs[] = { 0x40B370u, 0x40B4E8u, 0x40B4E0u,
+                                                  0x40B4ECu, 0x40B378u };
+                for (unsigned a = 0; a < sizeof(addrs) / sizeof(addrs[0]); a++) {
+                    uint32_t v = 0;
+                    memcpy(&v, g_mem + (addrs[a] & 0x1FFFFFFFu), 4);
+                    printf("[idle] [%08X] = %08X\n", addrs[a], v);
+                }
+            }
             for (int ti = 0; ti < 16; ti++) {
                 if (arm_thread_last_pc[ti])
                     printf("[wd]   thread %X: pc=0x%08X lr=0x%08X\n", ti,

@@ -363,6 +363,12 @@ static void srv_command(Ipc *r, uint32_t *p) {
             if (name_len < 8) name[name_len] = 0;
             int svc = service_from_name(name);
             int h = alloc_handle(svc, name);
+            /* Der fs-Client der App holt sein Handle zur Laufzeit: bei
+               "fs:USER" den echten Handle in den Client-Slot 0x3D91D0 legeneil. */
+            if (strcmp(name, "fs:USER") == 0 && g_cpu != NULL) {
+                uint32_t hv = (uint32_t)h;
+                memcpy(g_cpu->mem + 0x3D91D0u, &hv, 4);
+            }
             if (g_log || getenv("HLE_SRV_NAMES")) {
                 printf("[srvname] \"%s\" srvh=%u blk=%08X lr=%08X desc=%08X -> %d (%s)\n",
                        name, g_cur_handle, arm_last_block, g_cpu ? g_cpu->r[14] : 0u,
@@ -1349,6 +1355,40 @@ static void setup_config_mem(ArmCpu *c) {
 }
 
 static volatile int g_vblank_run = 0;
+/* Warteschlange fuer svcArbitrateAddress (Adresse -> Anzahl Weckungen).
+ * Die echte Semantik: type 0 = Signal weckt Waiter, ohne zu blockieren. */
+static uint32_t g_sig_addr[64];
+static int g_sig_cnt[64];
+static int g_sig_n = 0;
+
+static void arb_signal(uint32_t a, int32_t n) {
+    int i;
+    for (i = 0; i < g_sig_n; i++) if (g_sig_addr[i] == a) break;
+    if (i == g_sig_n) { if (g_sig_n >= 64) return; g_sig_addr[g_sig_n] = a; g_sig_cnt[g_sig_n] = 0; g_sig_n++; }
+    if (n < 0) g_sig_cnt[i] = 0x3FFFFFFF;
+    else g_sig_cnt[i] += n;
+}
+
+static int arb_take(uint32_t a) {
+    for (int i = 0; i < g_sig_n; i++) {
+        if (g_sig_addr[i] == a && g_sig_cnt[i] > 0) { g_sig_cnt[i]--; return 1; }
+    }
+    return 0;
+}
+
+static void arb_unlock_short(void) {
+    if (g_guest_lock_init && !g_no_lock) {
+        LeaveCriticalSection(&g_guest_lock);
+        Sleep(1);
+        for (int t = 0; t < 100; t++) {
+            if (TryEnterCriticalSection(&g_guest_lock)) return;
+            Sleep(1);
+        }
+    } else {
+        Sleep(1);
+    }
+}
+
 static volatile uint32_t g_arb_seen[64];
 static volatile int g_arb_seen_n = 0;
 static unsigned g_vblank_frames = 0;
@@ -1645,71 +1685,76 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
         }
         case 0x22: { /* ArbitrateAddress(handle, addr, type, value, timeout) */
             static int arb_prints = 0;
+            uint32_t addr = c->r[1] & ~3u;
+            uint32_t type = c->r[2];
+            int32_t value = (int32_t)c->r[3];
+            uint32_t off = addr & 0x1FFFFFFFu;
+
             if (getenv("HLE_ARB_LOG") && arb_prints < 300) {
-                uint32_t adbg;
-                memcpy(&adbg, c->mem + ((c->r[1] & ~3u) & 0x1FFFFFFFu), 4);
-                printf("[arb] th=%u addr=%08X type=%u val=%u mem=%08X\n",
+                int32_t adbg = 0;
+                if (off + 4 <= c->mem_size) memcpy(&adbg, c->mem + off, 4);
+                printf("[arb] th=%u addr=%08X type=%u val=%d mem=%08X\n",
                        (uint32_t)((c->tpidruro >> 12) & 0xFu),
-                       c->r[1], c->r[2], c->r[3], adbg);
+                       addr, type, value, (uint32_t)adbg);
                 arb_prints++;
             }
-            guest_yield();
+
+            /* Objekt fuer das VBlank-Posting registrieren. */
             {
-                uint32_t obj = c->r[1] & ~3u;
-                if (obj == 0x0042BD50u || obj == 0x0042BD54u) {
-                    /* Gezielter Poster fuer das beobachtete statische Semaphor:
-                       Zaehler auf 1 setzen, damit der Waiter aufwacht. */
-                    uint32_t one = 1;
-                    if ((0x0042BD50u & 0x1FFFFFFFu) + 4 <= c->mem_size)
-                        memcpy(c->mem + (0x0042BD50u & 0x1FFFFFFFu), &one, 4);
-                }
-            }
-            uint32_t addr = c->r[1];
-            uint32_t type = c->r[2];
-            {
-                uint32_t a0 = addr & ~3u;
                 int known = 0;
                 for (int k = 0; k < g_arb_seen_n; k++)
-                    if (g_arb_seen[k] == a0) { known = 1; break; }
-                if (!known && g_arb_seen_n < 64) g_arb_seen[g_arb_seen_n++] = a0;
+                    if (g_arb_seen[k] == addr) { known = 1; break; }
+                if (!known && g_arb_seen_n < 64) {
+                    g_arb_seen[g_arb_seen_n++] = addr;
+                    if (getenv("HLE_ARB_LOG"))
+                        printf("[arbnew] addr=%08X type=%u val=%d th=%u\n",
+                               addr, type, value,
+                               (uint32_t)((c->tpidruro >> 12) & 0xFu));
+                }
             }
-            uint32_t value = c->r[3];
-            if ((addr & 0x1FFFFFFFu) + 4 <= c->mem_size) {
-                uint32_t cur;
-                /* Echt blockieren: warten, bis die Bedingung erfuellt ist
-                   (max. ~20 ms, dann Timeout). */
-                for (int spin = 0; spin < 20; spin++) {
-                    memcpy(&cur, c->mem + (addr & 0x1FFFFFFFu), 4);
-                    if (type == 0 || type == 2) {
-                        if ((int32_t)cur >= (int32_t)value) break;
-                    } else {
-                        if ((int32_t)cur > 0) break;
+
+            if (off + 4 > c->mem_size) return 0;
+
+            /* type 0 = SIGNAL: weckt Waiter, blockiert selbst nie. */
+            if (type == 0) {
+                arb_signal(addr, value);
+                return 0;
+            }
+
+            /* Warte-Typen 1..4: blockieren, solange Wert < value. */
+            {
+                int decremented = 0;
+                for (int spin = 0; spin < 200; spin++) {
+                    int32_t cur = 0;
+                    memcpy(&cur, c->mem + off, 4);
+                    if (arb_take(addr)) break;          /* per Signal geweckt */
+                    if (cur >= value) break;            /* Bedingung erfuellt */
+                    /* Negativer Wert = Waiter eingetragen. Erst dem VBlank-
+                       Posting ~8 ms Zeit geben, dann zwangsweise signalisieren
+                       (sonst laeuft 0x288B90 endlos bzw. blockiert dauerhaft). */
+                    if (cur < 0 && spin >= 8) {
+                        int32_t nv = 1;
+                        memcpy(c->mem + off, &nv, 4);
+                        break;
                     }
-                    if (g_guest_lock_init && !g_no_lock) {
-                        LeaveCriticalSection(&g_guest_lock);
-                        Sleep(1);
-                        for (int t = 0; t < 100; t++) {
-                            if (TryEnterCriticalSection(&g_guest_lock)) break;
-                            Sleep(1);
-                        }
-                    } else {
-                        Sleep(1);
+
+
+                    if ((type == 2 || type == 4) && !decremented) {
+                        int32_t nv = cur - 1;
+                        memcpy(c->mem + off, &nv, 4);
+                        decremented = 1;
+                    }
+                    arb_unlock_short();
+                }
+                /* Notausgang: nach Timeout als signalisiert markieren. */
+                {
+                    int32_t cur = 0;
+                    memcpy(&cur, c->mem + off, 4);
+                    if (cur < value) {
+                        int32_t nv = 1;
+                        memcpy(c->mem + off, &nv, 4);
                     }
                 }
-                memcpy(&cur, c->mem + (addr & 0x1FFFFFFFu), 4);
-                if (type == 1 || type == 3) { /* Decrement(AndWait)IfLessThan */
-                    if ((int32_t)cur <= -2) cur = 1;
-                    else cur -= 1;
-                    memcpy(c->mem + (addr & 0x1FFFFFFFu), &cur, 4);
-                } else if (type == 0 || type == 2) { /* WaitIfLessThan */
-                    /* Ohne echte Interrupts wuerde ein nie geposteter Semaphor
-                       ewig spinnen: hier einmalig "posten". */
-                    if ((int32_t)cur <= 0) {
-                        cur = 1;
-                        memcpy(c->mem + (addr & 0x1FFFFFFFu), &cur, 4);
-                    }
-                }
-                (void)value;
             }
             return 0;
         }
