@@ -55,6 +55,21 @@ static void guest_lock_enter(void) {
 static void guest_lock_leave(void) {
     if (g_guest_lock_init && !g_no_lock) LeaveCriticalSection(&g_guest_lock);
 }
+/* Wird bei jedem Gast-Block aufgerufen: verhindert, dass rein
+ * CPU-gebundene Gast-Schleifen (ohne SVC) den kooperativen Lock
+ * dauerhaft halten und andere Threads aushungern. */
+static volatile unsigned g_pump_count = 0;
+void hle_pump(void) {
+    if (!g_guest_lock_init || g_no_lock) return;
+    if ((++g_pump_count & 0x3FFFu) != 0) return;
+    LeaveCriticalSection(&g_guest_lock);
+    Sleep(0);
+    for (int i = 0; i < 50; i++) {
+        if (TryEnterCriticalSection(&g_guest_lock)) return;
+        Sleep(0);
+    }
+}
+
 static void guest_yield(void) {
     if (!g_guest_lock_init) return;
     if (g_no_lock) { Sleep(0); return; }

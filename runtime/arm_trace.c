@@ -119,8 +119,11 @@ int arm_trace_is_open(void) {
     return g_file != NULL;
 }
 
+void hle_pump(void);
+
 void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
     arm_last_block = pc;
+    hle_pump();
     if (c != NULL) {
         {
             uint32_t ti = (c->tpidruro >> 12) & 0xFu;
