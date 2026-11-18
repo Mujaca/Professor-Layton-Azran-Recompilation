@@ -1392,6 +1392,11 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     if (lim) g_ipc_log_limit = atoi(lim);
     setup_config_mem(c);
     arm_pump_hook = hle_pump;
+    if (getenv("HLE_QUEUE_INIT")) {
+        uint32_t lim = 0x8000u;
+        memcpy(c->mem + 0x42B934u, &lim, 4);
+        printf("[hle] Queue-Limit 0x42B934 = 0x8000\n");
+    }
     if (getenv("HLE_GSP_STATE")) {
         uint32_t st = 6;
         memcpy(c->mem + 0x3D9200u, &st, 4);
