@@ -1933,6 +1933,9 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
         case 0x14: case 0x16: /* ReleaseMutex / ReleaseSemaphore */
             return 0;
         case 0x1E: case 0x1F: case 0x20: /* MemoryBlock */
+            if (getenv("HLE_MAP_LOG"))
+                printf("[map] svc=%02X r0=%08X r1=%08X r2=%08X r3=%08X\n",
+                       imm, c->r[0], c->r[1], c->r[2], c->r[3]);
             return 0;
         case 0x21: { /* CreateAddressArbiter(out) */
             uint32_t h = (uint32_t)alloc_handle(SVC_OTHER, "arbiter");
