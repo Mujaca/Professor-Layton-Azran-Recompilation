@@ -540,8 +540,11 @@ static void apt_command(Ipc *r, uint32_t *p) {
                 dsc_flags = p[r->normal];
                 dsc_addr = p[r->normal + 1];
             }
-            if (!g_apt_wakeup_sent) {
-                g_apt_wakeup_sent = 1;
+            /* Hardware-Semantik: GlanceParameter (0x000E) konsumiert den
+               Parameter NICHT, ReceiveParameter (0x000D) schon. Sonst
+               sieht die App den Wakeup nie, weil sie zuerst glance-t. */
+            if (1) {   /* Wakeup immer liefern (Diagnose) */
+                if (r->cmd == 0x000D) g_apt_wakeup_sent = 1;
                 ipc_begin(r, r->cmd, 4, 2 + (r->translate >= 2 ? 2 : 0));
                 ipc_put(r, 0);          /* ResultSuccess */
                 ipc_put(r, 0);          /* sender_id = None */
@@ -1483,6 +1486,19 @@ static DWORD WINAPI vblank_thread(LPVOID p) {
         Sleep(16);
         for (int k = 1; k < MAX_HANDLES; k++) {
             if (g_handles[k].used) g_handles[k].signaled = 1;
+        }
+        /* GSP-Interrupt-Relay-Queue: das Spiel mappt sie an 0x10002000.
+           Ohne VBlank-Eintrag dort wartet die Render-Schleife ewig. */
+        if (g_cpu != NULL && getenv("HLE_GSP_IRQ")) {
+            uint32_t base = 0x10002000u & 0x1FFFFFFFu;
+            if (base + 0x10 <= g_cpu->mem_size) {
+                static uint32_t irq_n = 0;
+                uint32_t hdr = 0;
+                irq_n++;
+                memcpy(g_cpu->mem + base + 0x00, &hdr, 4);   /* header  */
+                memcpy(g_cpu->mem + base + 0x04, &hdr, 4);   /* index   */
+                memcpy(g_cpu->mem + base + 0x08, &irq_n, 4); /* count   */
+            }
         }
         /* HID-Shared-Memory: das Spiel mappt den Block an 0x10000000
            (svc 0x1F Handle 0x17). PadState.current_state liegt bei +0x1C:
