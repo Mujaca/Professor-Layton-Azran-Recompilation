@@ -490,8 +490,12 @@ static void hle_try_gsp_init(ArmCpu *c) {
         const char *ff = getenv("HLE_FORCE_FRAME");
         if (ff != NULL && *ff != 0) {
             uint32_t fa = (uint32_t)strtoul(ff, NULL, 16);
+            const char *farg = getenv("HLE_FORCE_ARG");
             memcpy(save, c->r, sizeof(save));
-            printf("[forceframe] calling 0x%08X (sp=%08X)\n", fa, c->r[13]);
+            if (farg != NULL && *farg != 0)
+                c->r[0] = (uint32_t)strtoul(farg, NULL, 16);
+            printf("[forceframe] calling 0x%08X r0=%08X (sp=%08X)\n",
+                   fa, c->r[0], c->r[13]);
             arm_call_guest_pub(c, fa);
             memcpy(c->r, save, sizeof(save));
             printf("[forceframe] returned (sp=%08X)\n", c->r[13]);
