@@ -823,6 +823,10 @@ static void fs_command(Ipc *r, uint32_t *p) {
             uint32_t h = (uint32_t)alloc_handle(SVC_FS_USER, "archive");
             if (g_log) printf("[fs] OpenArchive id=0x%08X path=\"%s\" -> handle %u\n",
                               p[1], path, h);
+            /* Der FS-Client der App (Objekt 0x3D66C0) braucht den
+               Archiv-Handle in +4, sonst wirft 0x212CC4 E0A046DA. */
+            if (g_cpu != NULL && (0x3D66C4u & 0x1FFFFFFFu) + 4 <= g_cpu->mem_size)
+                memcpy(g_cpu->mem + 0x3D66C4u, &h, 4);
             /* Azahar: MakeBuilder(3,0) -> result, ArchiveHandle, 0 */
             ipc_begin(r, 0x080C, 3, 0);
             ipc_put(r, 0);
@@ -1351,6 +1355,16 @@ static void dispatch_ipc(uint32_t handle) {
                    params[1], params[2],
                    (uint32_t)((c->tpidruro >> 12) & 0xFu), arm_last_block, c->r[14]);
             arm_trace_thread_dump((int)((c->tpidruro >> 12) & 0xFu), 24);
+            {
+                uint32_t q;
+                printf("[errctx] object 3D66C0:");
+                for (q = 0; q < 8; q++) {
+                    uint32_t w = 0;
+                    memcpy(&w, c->mem + (0x3D66C0u & 0x1FFFFFFFu) + q * 4, 4);
+                    printf(" %08X", w);
+                }
+                printf("\n");
+            }
             fflush(stdout);
         }
     }
