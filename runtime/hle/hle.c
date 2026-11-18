@@ -1567,6 +1567,7 @@ static DWORD WINAPI vblank_thread(LPVOID p) {
                 /* Die Engine liest das Flag-Byte bei 0x10002001 (per
                    ARM_MEMWATCHRD gemessen) -> VBlank/PDC melden. */
                 g_cpu->mem[base + 0x01] = 1;
+                { uint32_t st = 0x00000100u; memcpy(g_cpu->mem + base, &st, 4); }
                 g_cpu->mem[base + 0x00] = 1;
             }
         }
