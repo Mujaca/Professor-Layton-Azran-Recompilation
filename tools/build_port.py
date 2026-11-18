@@ -52,6 +52,13 @@ def main():
                 j2 = i2 + 8000
             seg2 = txt[i2:j2].replace("goto L_001187F8_001188B0;", ";")
             txt = txt[:i2] + seg2 + txt[j2:]
+        # Diagnose: den Rueckgabewert des "rom:"-Datei-Opens als Erfolg
+        # behandeln (sonst wirft fn_00107AE4 D8604659).
+        txt = open(gpath, encoding="utf-8").read()
+        key3 = "fn_001187F8(c);\n    arm_restore_sp(c, sp0); }\n  if (c->aborted) return;"
+        if key3 in txt:
+            txt = txt.replace(key3, key3 + "\n  c->r[0] = 0u;   /* Datei-Open = Erfolg */", 1)
+            open(gpath, "w", encoding="utf-8", newline="\n").write(txt)
             open(gpath, "w", encoding="utf-8", newline="\n").write(txt)
 
     import ziglang
