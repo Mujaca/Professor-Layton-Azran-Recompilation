@@ -815,7 +815,8 @@ static void fs_command(Ipc *r, uint32_t *p) {
             char path[256];
             find_path(p, path, sizeof(path));
             uint32_t h = (uint32_t)alloc_handle(SVC_FS_USER, "archive");
-            if (g_log) printf("[fs] OpenArchive -> handle %u\n", h);
+            if (g_log) printf("[fs] OpenArchive id=0x%08X path=\"%s\" -> handle %u\n",
+                              p[1], path, h);
             /* Azahar: MakeBuilder(3,0) -> result, ArchiveHandle, 0 */
             ipc_begin(r, 0x080C, 3, 0);
             ipc_put(r, 0);
