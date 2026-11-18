@@ -1557,7 +1557,7 @@ static DWORD WINAPI vblank_thread(LPVOID p) {
            Ohne VBlank-Eintrag dort wartet die Render-Schleife ewig. */
         if (g_cpu != NULL && getenv("HLE_GSP_IRQ")) {
             uint32_t base = 0x10002000u & 0x1FFFFFFFu;
-            if (base + 0x10 <= g_cpu->mem_size) {
+            if (base + 0x10 <= 0x20000000u) {
                 static uint32_t irq_n = 0;
                 uint32_t hdr = 0;
                 irq_n++;
@@ -1621,6 +1621,13 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     if (lim) g_ipc_log_limit = atoi(lim);
     setup_config_mem(c);
     arm_pump_hook = hle_pump;
+    /* Der VBlank-Thread war nie gestartet (g_vblank_run blieb 0) ->
+       keine Handle-Signalisierung, kein HID-Update, kein Relay-Flag. */
+    if (getenv("HLE_NO_VBLANK") == NULL) {
+        g_vblank_run = 1;
+        CreateThread(NULL, 0, vblank_thread, NULL, 0, NULL);
+        printf("[hle] VBlank-Thread gestartet\n");
+    }
     if (getenv("HLE_QUEUE_INIT")) {
         uint32_t lim = 0x8000u;
         memcpy(c->mem + 0x42B934u, &lim, 4);
