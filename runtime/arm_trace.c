@@ -127,6 +127,18 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
        Tick-Zaehlung spinnt sie zig-tausend Runden und blockiert den
        kooperativen Scheduler (Thread 2 blieb dort haengen). */
     if (c != NULL && pc == 0x0011A818u) c->r[0] = 0;
+    /* Diagnose: beim "rom:"-Open-Wrapper die Struktur hinter r3 zeigen. */
+    if (c != NULL && pc == 0x00107AE4u && getenv("HLE_DUMP_R3")) {
+        uint32_t a = c->r[3] & 0x1FFFFFFFu;
+        printf("[r3] r1=%08X r2=%08X r3=%08X:", c->r[1], c->r[2], c->r[3]);
+        for (int i = 0; i < 8 && a + i * 4 + 4 <= c->mem_size; i++) {
+            uint32_t w = 0;
+            memcpy(&w, c->mem + a + i * 4, 4);
+            printf(" %08X", w);
+        }
+        printf("\n");
+        fflush(stdout);
+    }
     if (arm_pump_hook != NULL) arm_pump_hook();
     if (c != NULL) {
         {
