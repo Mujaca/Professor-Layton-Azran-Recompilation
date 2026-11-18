@@ -1885,6 +1885,11 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
         }
         case 0x25: { /* WaitSynchronizationN(out, handles, count, wait_all, timeout) */
             static int wl = 0;
+            if (getenv("HLE_WAIT_NONBLOCK")) {
+                uint32_t o = c->r[0];
+                if (o != 0 && o != 0xFFFFFFFFu) write_u32(c, o, 0);
+                return 0;
+            }
             if (getenv("HLE_WAIT_LOG") && wl < 40) {
                 wl++;
                 printf("[wait25] th=%u r0=%08X r1=%08X r2=%08X r3=%08X r4=%08X blk=%08X lr=%08X\n",
