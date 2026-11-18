@@ -418,6 +418,29 @@ static void hle_try_gsp_init(ArmCpu *c) {
     if (e == NULL) return;
     if (*e && strcmp(e, "1") != 0) tgt = (uint32_t)strtoul(e, NULL, 16);
     g_gsp_init_done = 1;
+    /* Guard und Felder des GSP-Clients raeumen: er steht auf
+       0x01000101 (Init markiert), hat aber weder Handle (+0x10)
+       noch State (+0x18) -> fn_00138D70 kehrt sonst sofort zurueck. */
+    {
+        uint32_t zero = 0;
+        memcpy(c->mem + 0x3D91E8u, &zero, 4);
+        memcpy(c->mem + 0x3D91F8u, &zero, 4);
+        memcpy(c->mem + 0x3D9200u, &zero, 4);
+        memcpy(c->mem + 0x3D91FCu, &zero, 4);
+        /* Guard von 0x28EE00 (srvGetServiceHandle-Wrapper) oeffnen:
+           bei <= 0 wird kein Request gesendet (D8A067F8). */
+        { uint32_t eight = 8; memcpy(c->mem + 0x3D92ECu, &eight, 4); }
+        /* 0x27625C liest den Ziel-Handle aus [0x3D9300]; ohne ihn geht
+           der Request an einen unbekannten Dienst. Auf die echte
+           srv-Session (Client-Slot 0x3D9098) setzen. */
+        {
+            uint32_t srvh = 5;   /* srv-Session-Handle der App */
+            if (srvh == 0) srvh = 5;
+            memcpy(c->mem + 0x3D9300u, &srvh, 4);
+            printf("[gspinit] srv-Handle [3D9300] = %u\n", srvh);
+        }
+        printf("[gspinit] Client geraeumt: [3D91E8]=0 [3D91F8]=0 [3D9200]=0 [3D92EC]=8\n");
+    }
     printf("[gspinit] calling 0x%08X (sp=%08X)\n", tgt, c->r[13]);
     memcpy(save, c->r, sizeof(save));
     arm_call_guest_pub(c, tgt);

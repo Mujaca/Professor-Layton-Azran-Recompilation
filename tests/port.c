@@ -241,6 +241,11 @@ int main(int argc, char **argv) {
         *(uint32_t *)(g_mem + 0x107B34) = 0xE1A00000u;
         /* 0x28F45C = SDK-Fehlerwerfer: komplett entschaerfen (bx lr). */
         *(uint32_t *)(g_mem + 0x28F45C) = 0xE12FFF1Eu;
+        /* 0x28EE00 (srvGetServiceHandle-Wrapper) hat zwei Guards, die den
+           Request ohne Sendung abbrechen: [0x3D92EC] <= 0 und name_len > 8.
+           Beide Pruefungen entschaerfen, damit der Request rausgeht. */
+        for (unsigned q = 0; q < 6; q++)
+            *(uint32_t *)(g_mem + 0x28EE08u + q * 4) = 0xE1A00000u;
         /* 0x11A818: kalibrierte Busy-Wait-Delay -> sofort zurueck,
            sonst blockiert der Delay den kooperativen Scheduler. */
         *(uint32_t *)(g_mem + 0x11A818) = 0xE3A00000u;  /* mov r0,#0 */
