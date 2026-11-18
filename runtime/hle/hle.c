@@ -1587,7 +1587,12 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
            Zugriffe mit Handle 0 und werfen FatalError. */
         uint32_t fsh = (uint32_t)alloc_handle(SVC_FS_USER, "fs:USER");
         memcpy(c->mem + 0x3D91D0u, &fsh, 4);
-        printf("[hle] fs-Client-Handle 0x3D91D0 = %u\n", fsh);
+        /* Der Session-Werfer 0x212CA8 prueft [obj+4] (Objekt 0x3D66C0).
+           Vorbelegung optional: sie erhoeht die Fatal-Zahl und bremst
+           den GSP-Init -> nur mit HLE_FS_SLOT2 aktiv. */
+        if (getenv("HLE_FS_SLOT2"))
+            memcpy(c->mem + 0x3D66C4u, &fsh, 4);
+        printf("[hle] fs-Client-Handle 0x3D91D0/0x3D66C4 = %u\n", fsh);
     }
     if (getenv("HLE_GSP_CLIENT")) {
         /* GSP-Client-Objekt 0x3D91E8 vorinitialisieren: Statusfeld +0x18 = 6 und
