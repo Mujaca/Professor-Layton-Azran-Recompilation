@@ -85,9 +85,12 @@ static void guest_yield(void) {
        haelt und selbst in einer HLE-Wartezeit steckt, wuerde der Aufrufer
        sonst dauerhaft stehen (Ring eingefroren). Daher zeitlich begrenzt
        versuchen, sonst ohne Lock weiterlaufen. */
+    /* Sleep(0): der Lock wird nur kurz gehalten; mit Sleep(1) kostete
+       jeder Wiedereintritt bis zu 200 ms und der Gast kroch (Wait auf
+       0x142620 feuerte in 12 s gar nicht). */
     for (int i = 0; i < 200; i++) {
         if (TryEnterCriticalSection(&g_guest_lock)) return;
-        Sleep(1);
+        Sleep(0);
     }
 }
 
@@ -1458,7 +1461,7 @@ static void arb_unlock_short(void) {
         Sleep(1);
         for (int t = 0; t < 100; t++) {
             if (TryEnterCriticalSection(&g_guest_lock)) return;
-            Sleep(1);
+            Sleep(0);
         }
     } else {
         Sleep(1);
