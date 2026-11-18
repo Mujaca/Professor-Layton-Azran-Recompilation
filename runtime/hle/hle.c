@@ -684,6 +684,20 @@ static int open_guest_file(const char *guest_path, FileSlot **slot_out) {
 }
 
 static void fs_command(Ipc *r, uint32_t *p) {
+    if (getenv("HLE_FS_PATHS")) {
+        printf("[fscmd] cmd=0x%04X n=%d t=%d", r->cmd, r->normal, r->translate);
+        for (int i = 0; i < r->normal && i < 8; i++) printf(" p%d=%08X", i, p[i]);
+        for (int q = 0; q + 1 < r->translate; q += 2) {
+            uint32_t fl = p[r->normal + q];
+            uint32_t ad = p[r->normal + q + 1];
+            printf(" | b%d fl=%08X a=%08X:", q / 2, fl, ad);
+            if (ad >= 0x08000000u && ad < 0x20000000u) {
+                const uint8_t *bb = g_cur_mem + (ad & 0x1FFFFFFFu);
+                for (int k = 0; k < 20; k++) printf(" %02X", bb[k]);
+            }
+        }
+        printf("\n");
+    }
     switch (r->cmd) {
         case 0x0801: { /* Initialize */
             ipc_begin(r, 0x0801, 1, 0);
@@ -732,12 +746,15 @@ static void fs_command(Ipc *r, uint32_t *p) {
                 }
                 printf("\n");
             }
-            if (addr >= 0x08000000u && addr < 0x20000000u) {
+            /* Pfadpuffer liegen auch im .data-Bereich (z. B. 0x3CF74A),
+               nicht nur im Heap ab 0x08000000. */
+            if (addr >= 0x00100000u && addr < 0x20000000u) {
                 const uint8_t *src = g_cur_mem + (addr & 0x1FFFFFFFu);
                 uint32_t limit = len ? len : fsize;
-                if (limit > 250) limit = 250;
+                if (limit > 250 || limit < 2) limit = 250;
                 int n = 0;
-                if (ftype == 4 || (ftype == 0 && limit >= 4 && src[1] == 0)) {
+                /* Robuste Erkennung: Wchar, wenn das zweite Byte 0 ist. */
+                if (src[1] == 0) {
                     for (uint32_t i = 0; i + 1 < limit && n < 250; i += 2) {
                         if (src[i] == 0) break;
                         path[n++] = (char)src[i];
