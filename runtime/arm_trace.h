@@ -13,6 +13,7 @@ extern "C" {
 #endif
 
 extern uint32_t arm_last_block;
+extern void (*arm_pump_hook)(void);
 extern uint32_t arm_watch_pc;
 
 void arm_trace_open(const char *path);

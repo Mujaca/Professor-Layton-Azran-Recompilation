@@ -8,6 +8,7 @@
 #include <stdlib.h>
 
 uint32_t arm_last_block = 0;
+void (*arm_pump_hook)(void) = NULL;
 uint32_t arm_watch_pc = 0;
 static int g_watch_hits = 0;
 
@@ -119,11 +120,10 @@ int arm_trace_is_open(void) {
     return g_file != NULL;
 }
 
-void hle_pump(void);
 
 void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
     arm_last_block = pc;
-    hle_pump();
+    if (arm_pump_hook != NULL) arm_pump_hook();
     if (c != NULL) {
         {
             uint32_t ti = (c->tpidruro >> 12) & 0xFu;
