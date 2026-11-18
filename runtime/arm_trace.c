@@ -123,6 +123,10 @@ int arm_trace_is_open(void) {
 
 void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
     arm_last_block = pc;
+    /* Kalibrierte SDK-Busy-Wait-Verzoegerung sofort beenden: ohne echte
+       Tick-Zaehlung spinnt sie zig-tausend Runden und blockiert den
+       kooperativen Scheduler (Thread 2 blieb dort haengen). */
+    if (c != NULL && pc == 0x0011A818u) c->r[0] = 0;
     if (arm_pump_hook != NULL) arm_pump_hook();
     if (c != NULL) {
         {
