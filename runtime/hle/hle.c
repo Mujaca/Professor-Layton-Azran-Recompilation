@@ -1585,7 +1585,10 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
         /* Client-Handle-Slot 0x3D91D0 (Setter fn_00107AD4 wird nie gerufen):
            gueltigen fs:USER-Handle eintragen, sonst laufen alle "rom:"-
            Zugriffe mit Handle 0 und werfen FatalError. */
-        uint32_t fsh = (uint32_t)alloc_handle(SVC_FS_USER, "fs:USER");
+        /* Das Spiel sendet ueber [0x3D91D0] Datei-Kommandos
+           (0x0801 Read / 0x0802 Write / 0x0803 GetSize / 0x0808
+           SetPriority) -> es braucht einen DATEI-Client, nicht fs:USER. */
+        uint32_t fsh = (uint32_t)alloc_handle(SVC_FILE, "file");
         memcpy(c->mem + 0x3D91D0u, &fsh, 4);
         /* Der Session-Werfer 0x212CA8 prueft [obj+4] (Objekt 0x3D66C0).
            Vorbelegung optional: sie erhoeht die Fatal-Zahl und bremst
