@@ -1458,13 +1458,13 @@ static int arb_take(uint32_t a) {
 static void arb_unlock_short(void) {
     if (g_guest_lock_init && !g_no_lock) {
         LeaveCriticalSection(&g_guest_lock);
-        Sleep(1);
+        Sleep(0);
         for (int t = 0; t < 100; t++) {
             if (TryEnterCriticalSection(&g_guest_lock)) return;
             Sleep(0);
         }
     } else {
-        Sleep(1);
+        Sleep(0);
     }
 }
 
