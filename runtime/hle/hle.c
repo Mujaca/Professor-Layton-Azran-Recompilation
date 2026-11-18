@@ -98,9 +98,13 @@ typedef struct {
     ArmCpu *cpu;
     uint32_t entry;
     int id;
+    uint32_t handle;   /* Handle aus svcCreateThread */
 } GuestThread;
 static GuestThread g_threads[32];
+
 static int g_thread_count = 0;
+
+static void thread_signal_exit(ArmCpu *c);
 
 static DWORD WINAPI guest_thread_main(LPVOID p) {
     GuestThread *t = (GuestThread *)p;
@@ -112,6 +116,7 @@ static DWORD WINAPI guest_thread_main(LPVOID p) {
         EnterCriticalSection(&g_guest_lock);
     }
     arm_call_guest_pub(t->cpu, t->entry);
+    thread_signal_exit(t->cpu);
     if (!g_no_lock) {
         g_thread_alive[t_tid] = 0;
         if (g_turn == t_tid) g_turn = sched_next(t_tid);
@@ -1601,6 +1606,18 @@ void hle_report(void) {
     }
 }
 
+/* Thread-Ende signalisieren: der zugehoerige Thread-Handle wird auf
+ * "signaled" gesetzt, damit svcWaitSynchronization darauf zurueckkehrt. */
+static void thread_signal_exit(ArmCpu *c) {
+    for (int i = 0; i < g_thread_count; i++) {
+        if (g_threads[i].cpu == c) {
+            Handle *hh = get_handle(g_threads[i].handle);
+            if (hh != NULL) hh->signaled = 1;
+            return;
+        }
+    }
+}
+
 uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
     if (getenv("HLE_SVC_SEEN")) {
         static unsigned char seen[256];
@@ -1701,6 +1718,7 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                     t->cpu = tc;
                     t->entry = entry;
                     t->id = ((g_thread_count + 1) & 15);
+                    t->handle = h;
                     g_thread_count++;
                     CreateThread(NULL, 0, guest_thread_main, t, 0, NULL);
                     if (g_det_sched && t->id >= 0 && t->id < 16) {
@@ -1719,6 +1737,7 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
         }
         case 0x09: /* ExitThread */
             if (c != g_main_cpu) {
+                thread_signal_exit(c);
                 guest_lock_leave();
                 if (g_guest_lock_init) ExitThread(0);
             }
