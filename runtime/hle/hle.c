@@ -1590,7 +1590,7 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
         /* Der Session-Werfer 0x212CA8 prueft [obj+4] (Objekt 0x3D66C0).
            Vorbelegung optional: sie erhoeht die Fatal-Zahl und bremst
            den GSP-Init -> nur mit HLE_FS_SLOT2 aktiv. */
-        if (getenv("HLE_FS_SLOT2"))
+        if (getenv("HLE_FS_SLOT2") == NULL || getenv("HLE_FS_SLOT2")[0] != '0')
             memcpy(c->mem + 0x3D66C4u, &fsh, 4);
         /* Der generische Session-Getter 0x212CA8 wird mit Objekt
            0x3D67C0 aufgerufen (per ARM_WATCH gemessen) und prueft +4. */
