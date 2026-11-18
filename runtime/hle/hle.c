@@ -442,8 +442,13 @@ static void apt_command(Ipc *r, uint32_t *p) {
             ipc_begin(r, 2, 1, 3);
             put_result(r);
             ipc_put(r, (1u << 26));   /* CopyHandle-Deskriptor, 2 Handles */
-            ipc_put(r, ev1);
-            ipc_put(r, ev2);
+            if (getenv("HLE_APT_SWAP")) {
+                ipc_put(r, ev2);
+                ipc_put(r, ev1);
+            } else {
+                ipc_put(r, ev1);
+                ipc_put(r, ev2);
+            }
             break;
         }
         case 0x4F: { /* SetAppCpuTimeLimit */
