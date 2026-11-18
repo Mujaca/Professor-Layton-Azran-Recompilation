@@ -66,6 +66,11 @@ static void mem_fault(ArmCpu *c, uint32_t addr, int size) {
 
 uint32_t arm_mem_read(ArmCpu *c, uint32_t addr, int size) {
     uint32_t v = 0;
+    /* Diagnose: das Relay-Flag 0x10002001 liest die Engine, der Gast
+       ueberschreibt es aber selbst mit 0 -> konstant 1 liefern. */
+    if (getenv("HLE_IRQ_FORCE") &&
+        ((addr & 0x1FFFFFFFu) == 0x10002001u && size == 1))
+        return 1;
     /* 3DS-Busalias: 0x8xxxxxxx/0xBxxxxxxx zeigen auf dieselben FCRAM-Seiten. */
     if (addr >= 0x20000000u) addr &= 0x1FFFFFFFu;
     if (g_memwatchrd != 0 && addr >= g_memwatchrd && addr < g_memwatchrd_end &&
