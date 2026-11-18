@@ -1602,6 +1602,13 @@ void hle_report(void) {
 }
 
 uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
+    if (getenv("HLE_SVC_SEEN")) {
+        static unsigned char seen[256];
+        if (imm < 256 && !seen[imm]) {
+            seen[imm] = 1;
+            printf("[svcseen] 0x%02X\n", imm);
+        }
+    }
     g_cpu = c;
     ev(1, imm, c->r[0], c->r[1]);
     svc_trace(imm, c);
