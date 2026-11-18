@@ -59,7 +59,30 @@ static void guest_lock_leave(void) {
  * CPU-gebundene Gast-Schleifen (ohne SVC) den kooperativen Lock
  * dauerhaft halten und andere Threads aushungern. */
 static volatile unsigned g_pump_count = 0;
+extern void arm_call_guest_pub(ArmCpu *c, uint32_t addr);
+static ArmCpu *g_frame_cpu = NULL;
+
 void hle_pump(void) {
+    /* Diagnose: Frame-Aufbau periodisch aus dem Gast-Kontext aufrufen. */
+    {
+        static const char *fl_env = NULL;
+        static int in_frame_call = 0;
+        if (fl_env == NULL) fl_env = getenv("HLE_FRAME_LOOP");
+        if (fl_env != NULL && *fl_env != 0 && !in_frame_call && g_frame_cpu != NULL) {
+            static unsigned fc = 0;
+            if ((++fc & 0xFFFu) == 0) {
+                uint32_t fsave[16];
+                uint32_t fa = (uint32_t)strtoul(fl_env, NULL, 16);
+                in_frame_call = 1;
+                memcpy(fsave, g_frame_cpu->r, sizeof(fsave));
+                printf("[frameloop] call 0x%08X\n", fa);
+                fflush(stdout);
+                arm_call_guest_pub(g_frame_cpu, fa);
+                memcpy(g_frame_cpu->r, fsave, sizeof(fsave));
+                in_frame_call = 0;
+            }
+        }
+    }
     if (!g_guest_lock_init || g_no_lock) return;
     if ((++g_pump_count & 0x3FFFu) != 0) return;
     LeaveCriticalSection(&g_guest_lock);
@@ -462,6 +485,18 @@ static void hle_try_gsp_init(ArmCpu *c) {
     arm_call_guest_pub(c, tgt);
     memcpy(c->r, save, sizeof(save));
     printf("[gspinit] returned (sp=%08X)\n", c->r[13]);
+    /* Diagnose: Renderpfad einmalig direkt anstossen. */
+    {
+        const char *ff = getenv("HLE_FORCE_FRAME");
+        if (ff != NULL && *ff != 0) {
+            uint32_t fa = (uint32_t)strtoul(ff, NULL, 16);
+            memcpy(save, c->r, sizeof(save));
+            printf("[forceframe] calling 0x%08X (sp=%08X)\n", fa, c->r[13]);
+            arm_call_guest_pub(c, fa);
+            memcpy(c->r, save, sizeof(save));
+            printf("[forceframe] returned (sp=%08X)\n", c->r[13]);
+        }
+    }
 }
 static void put_result(Ipc *r) {
     ipc_put(r, 0);
@@ -1622,6 +1657,7 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     if (lim) g_ipc_log_limit = atoi(lim);
     setup_config_mem(c);
     arm_pump_hook = hle_pump;
+    g_frame_cpu = c;
     /* Der VBlank-Thread war nie gestartet (g_vblank_run blieb 0) ->
        keine Handle-Signalisierung, kein HID-Update, kein Relay-Flag. */
     if (getenv("HLE_NO_VBLANK") == NULL) {
