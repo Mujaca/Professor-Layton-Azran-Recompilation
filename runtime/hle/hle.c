@@ -424,9 +424,17 @@ static void hle_try_gsp_init(ArmCpu *c) {
     {
         uint32_t zero = 0;
         memcpy(c->mem + 0x3D91E8u, &zero, 4);
-        memcpy(c->mem + 0x3D91F8u, &zero, 4);
+        /* +0x10/+0x14 mit einem ECHTEN gsp::Gpu-Handle belegen: der
+           Dienst-Open scheitert, weil der SDK den Namen mit Laenge 9
+           (strlen+1) schickt und der Wrapper nur <= 8 erlaubt. Der
+           Init kopiert +0x10 -> +0x14 und sendet danach auf +0x14. */
+        {
+            uint32_t gh = (uint32_t)alloc_handle(SVC_GSP_GPU, "gsp::Gpu");
+            memcpy(c->mem + 0x3D91F8u, &gh, 4);
+            memcpy(c->mem + 0x3D91FCu, &gh, 4);
+            printf("[gspinit] GSP-Handle +0x10/+0x14 = %u\n", gh);
+        }
         memcpy(c->mem + 0x3D9200u, &zero, 4);
-        memcpy(c->mem + 0x3D91FCu, &zero, 4);
         /* Guard von 0x28EE00 (srvGetServiceHandle-Wrapper) oeffnen:
            bei <= 0 wird kein Request gesendet (D8A067F8). */
         { uint32_t eight = 8; memcpy(c->mem + 0x3D92ECu, &eight, 4); }
@@ -1142,46 +1150,74 @@ static uint32_t g_gsp_fb_addr[3] = {0x1F000000u, 0x1F000000u, 0x1F000000u};
 static int g_gsp_last_screen = 0;
 
 static void gsp_command(Ipc *r, uint32_t *p) {
+    /* Kommandonummern wie auf echter Hardware / in Azahar (gsp_gpu.cpp),
+     * NICHT die alte Citra-Nummerierung. */
     switch (r->cmd) {
-        case 0x0001: { /* WriteHWRegs(addr, size, data...) */
-            if (g_log) printf("[gsp] WriteHWRegs addr=0x%X size=%u\n", p[0], p[1]);
-            ipc_begin(r, 0x0001, 1, 0);
+        case 0x0001: case 0x0002: case 0x0003: { /* WriteHWRegs* */
+            if (g_log) printf("[gsp] WriteHWRegs cmd=0x%04X addr=0x%X size=%u\n",
+                              r->cmd, p[0], p[1]);
+            ipc_begin(r, r->cmd, 1, 0);
             ipc_put(r, 0);
             break;
         }
-        case 0x0004: { /* SetBufferSwap(screen, framebuffer_info) */
+        case 0x0004: { /* ReadHWRegs -> Result + Wert */
+            ipc_begin(r, 0x0004, 2, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x0005: { /* SetBufferSwap(screen, framebuffer_info) */
             uint32_t screen = p[0];
             uint32_t fb = p[1];
             if (screen < 3) g_gsp_fb_addr[screen] = fb;
             g_gsp_last_screen = (int)(screen & 1);
             if (g_log) printf("[gsp] SetBufferSwap screen=%u fb=0x%08X\n", screen, fb);
-            ipc_begin(r, 0x0004, 1, 0);
+            ipc_begin(r, 0x0005, 1, 0);
             ipc_put(r, 0);
             break;
         }
-        case 0x0006: { /* RegisterInterruptRelayQueue -> Event + SharedMem */
+        case 0x0006: case 0x0007: { /* SetCommandList / RequestDma */
+            ipc_begin(r, r->cmd, (r->cmd == 0x0007) ? 2 : 1, 0);
+            ipc_put(r, 0);
+            if (r->cmd == 0x0007) ipc_put(r, 0);
+            break;
+        }
+        case 0x0008: case 0x0009: case 0x000A:
+        case 0x000B: { /* Cache / Events / LcdForceBlack */
+            ipc_begin(r, r->cmd, 1, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x000C: { /* TriggerCmdReqQueue */
+            ipc_begin(r, 0x000C, 1, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x000D: case 0x000E: case 0x000F: case 0x0010:
+        case 0x0011: case 0x0012: case 0x0014: case 0x0015:
+        case 0x0016: case 0x0017: { /* Transfer / Perf / Right */
+            ipc_begin(r, r->cmd, 1, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x0013: { /* RegisterInterruptRelayQueue */
             uint32_t ev = (uint32_t)alloc_handle(SVC_OTHER, "gsp-ev");
-            ipc_begin(r, 0x0006, 1, 2);
+            uint32_t shm = (uint32_t)alloc_handle(SVC_OTHER, "gsp-shmem");
+            Handle *hh = get_handle(ev);
+            if (hh) hh->signaled = 1;
+            ipc_begin(r, 0x0013, 2, 2);
             ipc_put(r, 0);
-            ipc_put_handle_copy(r, ev);
+            ipc_put(r, 0x100u);
+            ipc_put_handle_copy(r, shm);
+            if (g_log) printf("[gsp] RegisterInterruptRelayQueue -> ev=%u shm=%u\n", ev, shm);
             break;
         }
-        case 0x0008: { /* TriggerCmdReqQueue */
-            ipc_begin(r, 0x0008, 1, 0);
-            ipc_put(r, 0);
-            break;
-        }
-        case 0x0009: { /* ImportDisplayCaptureInfo -> 2x Framebuffer-Info */
-            ipc_begin(r, 0x0009, 6, 0);
+        case 0x0018: { /* ImportDisplayCaptureInfo */
+            ipc_begin(r, 0x0018, 6, 0);
             ipc_put(r, 0);
             ipc_put(r, 0x1F000000u); ipc_put(r, 0);
             ipc_put(r, 0x1F000000u); ipc_put(r, 0);
             ipc_put(r, 0); ipc_put(r, 0);
-            break;
-        }
-        case 0x000B: { /* SetLcdForceBlack */
-            ipc_begin(r, 0x000B, 1, 0);
-            ipc_put(r, 0);
             break;
         }
         default:
@@ -1904,6 +1940,14 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
         }
         case 0x32: { /* SendSyncRequest(handle) */
             uint32_t handle = c->r[0];
+            if (getenv("HLE_IPC_RAW")) {
+                uint32_t *rb = (uint32_t *)(c->mem + c->tpidruro + TLS_CMD_BUF);
+                uint32_t hdr = rb[0];
+                printf("[ipcraw] h=%u hdr=%08X cmd=%04X n=%d t=%d p0=%08X p1=%08X blk=%08X lr=%08X\n",
+                       handle, hdr, (hdr >> 16) & 0xFFFFu,
+                       (int)((hdr >> 6) & 0x3Fu), (int)(hdr & 0x3Fu),
+                       rb[1], rb[2], arm_last_block, c->r[14]);
+            }
             dispatch_ipc(handle);
             return 0;
         }
