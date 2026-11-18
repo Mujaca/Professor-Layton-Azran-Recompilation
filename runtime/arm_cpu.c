@@ -86,6 +86,11 @@ uint32_t arm_mem_read(ArmCpu *c, uint32_t addr, int size) {
 
 void arm_mem_write(ArmCpu *c, uint32_t addr, int size, uint32_t val) {
     if (addr >= 0x20000000u) addr &= 0x1FFFFFFFu;
+    /* Diagnose: das Spiel setzt den FS-Session-Slot 0x3D67C4 selbst auf 0
+       (fs-Close); der folgende Datei-Open scheitert dann lokal. */
+    if (getenv("HLE_KEEP_SLOT") && size == 4 &&
+        addr == 0x3D67C4u && val == 0)
+        val = 1;
     if (g_memwatch != 0 &&
         ((g_memwatch_end != 0) ? (addr >= g_memwatch && addr < g_memwatch_end)
                                : ((addr & ~3u) == g_memwatch)) &&
