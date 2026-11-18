@@ -35,7 +35,8 @@ static DWORD WINAPI watchdog(LPVOID unused) {
             if (getenv("HLE_DUMPIDLE")) {
                 static const unsigned addrs[] = { 0x40B370u, 0x40B4E8u, 0x40B4E0u,
                                                   0x40B4ECu, 0x40B378u, 0x40B374u,
-                                                  0x40B36Cu, 0x40B37Cu };
+                                                  0x40B36Cu, 0x40B37Cu, 0x3D91E8u,
+                                                  0x3D91ECu, 0x3D91F8u, 0x3D9200u };
                 for (unsigned a = 0; a < sizeof(addrs) / sizeof(addrs[0]); a++) {
                     uint32_t v = 0;
                     memcpy(&v, g_mem + (addrs[a] & 0x1FFFFFFFu), 4);

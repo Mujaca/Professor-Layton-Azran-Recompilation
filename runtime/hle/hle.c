@@ -1479,6 +1479,10 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
         memcpy(c->mem + 0x3D9200u, &st, 4);
         memcpy(c->mem + 0x3D91F8u, &gh, 4);
         printf("[hle] GSP-Client vorinitialisiert: state=6 handle=%u\n", gh);
+        /* Denselben Log-Pfad wie ein echter srv:GetServiceHandle bedienen. */
+        if (getenv("HLE_SRV_NAMES"))
+            printf("[srvname] \"gsp::Gpu\" srvh=%u blk=%08X lr=%08X desc=%08X -> %u (gsp::Gpu)\n",
+                   0u, 0u, 0u, 0x003D91E8u, gh);
     }
     /* TODO: folgt aus der Analyse des Mutex-Spinlocks (Wert 1 = frei). */
     if (getenv("HLE_MUTEX_HACK")) {
