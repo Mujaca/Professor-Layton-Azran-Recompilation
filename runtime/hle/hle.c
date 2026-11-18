@@ -750,6 +750,20 @@ static void fs_command(Ipc *r, uint32_t *p) {
                 }
                 path[n] = 0;
             }
+            if (getenv("HLE_FS_PATHS")) {
+                printf("[fspath] n=%d t=%d ftype=%u fsize=%u",
+                       r->normal, r->translate, p[4], p[5]);
+                for (int q = 0; q + 1 < r->translate; q += 2) {
+                    uint32_t fl = p[r->normal + q];
+                    uint32_t ad = p[r->normal + q + 1];
+                    printf(" | b%d fl=%08X a=%08X:", q / 2, fl, ad);
+                    if (ad >= 0x08000000u && ad < 0x20000000u) {
+                        const uint8_t *bb = g_cur_mem + (ad & 0x1FFFFFFFu);
+                        for (int k = 0; k < 24; k++) printf(" %02X", bb[k]);
+                    }
+                }
+                printf("\n");
+            }
             FileSlot *slot = NULL;
             int opened = path[0] ? open_guest_file(path, &slot) : 0;
             if (!opened) {
