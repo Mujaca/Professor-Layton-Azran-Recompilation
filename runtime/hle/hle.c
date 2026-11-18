@@ -648,6 +648,9 @@ static int open_guest_file(const char *guest_path, FileSlot **slot_out) {
     char path[256];
     const char *q = guest_path;
     if (strncmp(q, "romfs:", 6) == 0) q += 6;
+    /* Das Spiel adressiert RomFS-Dateien mit dem Praefix "rom:"
+       (Literal 0x1023AC), nicht "romfs:". */
+    else if (strncmp(q, "rom:", 4) == 0) q += 4;
     while (*q == '/') q++;
     char base1[256];
     snprintf(base1, sizeof(base1), "out/savedata/%s", q);
