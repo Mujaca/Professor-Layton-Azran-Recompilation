@@ -1848,6 +1848,8 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                 if (g_guest_lock_init) ExitThread(0);
             }
             return 0;
+        case 0x0C: /* SetThreadPriority(handle, prio) -> Result */
+            return 0;
         case 0x0A: { /* SleepThread(ns): echte Wartezeit */
             uint64_t ns = (uint64_t)c->r[0] | ((uint64_t)c->r[1] << 32);
             uint32_t ms = (uint32_t)(ns / 1000000ull);
