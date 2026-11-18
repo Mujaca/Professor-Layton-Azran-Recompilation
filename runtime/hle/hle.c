@@ -1354,6 +1354,9 @@ static DWORD WINAPI vblank_thread(LPVOID p) {
                 memcpy(g_cpu->mem + addr, &btn, 4);
             }
             g_vblank_frames++;
+            /* Queue-Sperrflag (0x42B938, Byte +0x18C) offen halten, damit
+               die App ihre Ringpuffer-Pushes ausfuehrt. */
+            if (getenv("HLE_QPUSH")) g_cpu->mem[0x42B938u] = 0;
         }
         /* Alle tatsaechlich benutzten Arbitrate-Objekte posten. */
         if (g_cpu != NULL) {
