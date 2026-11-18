@@ -1334,6 +1334,13 @@ static void dispatch_ipc(uint32_t handle) {
     if ((cmd & 0xFF00u) == 0x0800u && (h == NULL || service == SVC_OTHER)) {
         if (cmd == 0x080Cu || cmd == 0x080Du || cmd == 0x080Eu || cmd == 0x0812u)
             service = SVC_FS_USER;
+        /* 0x0803 ist mehrdeutig: als fs:USER-Kommando ist es
+           OpenFileDirectly (8 Parameter + 2 Puffer), als Datei-
+           Kommando GetSize (4 Parameter). */
+        else if (cmd == 0x0803u && normal >= 8)
+            service = SVC_FS_USER;
+        else if (cmd == 0x0801u && normal >= 5)
+            service = SVC_FS_USER;
         else
             service = SVC_FILE;
     }
