@@ -1564,6 +1564,10 @@ static DWORD WINAPI vblank_thread(LPVOID p) {
                 memcpy(g_cpu->mem + base + 0x00, &hdr, 4);   /* header  */
                 memcpy(g_cpu->mem + base + 0x04, &hdr, 4);   /* index   */
                 memcpy(g_cpu->mem + base + 0x08, &irq_n, 4); /* count   */
+                /* Die Engine liest das Flag-Byte bei 0x10002001 (per
+                   ARM_MEMWATCHRD gemessen) -> VBlank/PDC melden. */
+                g_cpu->mem[base + 0x01] = 1;
+                g_cpu->mem[base + 0x00] = 1;
             }
         }
         /* HID-Shared-Memory: das Spiel mappt den Block an 0x10000000
