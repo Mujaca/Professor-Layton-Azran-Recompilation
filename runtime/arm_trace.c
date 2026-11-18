@@ -127,10 +127,38 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
        Tick-Zaehlung spinnt sie zig-tausend Runden und blockiert den
        kooperativen Scheduler (Thread 2 blieb dort haengen). */
     if (c != NULL && pc == 0x0011A818u) c->r[0] = 0;
+    /* Diagnose: Asset-Kette (Registrierung -> Dispatcher) mitzaehlen. */
+    if (c != NULL && getenv("HLE_ASSET_TRACE")) {
+        if (pc == 0x001013F0u || pc == 0x001014D4u || pc == 0x00291A88u ||
+            pc == 0x002919DCu || pc == 0x00291AA0u) {
+            printf("[asset-trace] pc=%08X r0=%08X r1=%08X r2=%08X r3=%08X\n",
+                   pc, c->r[0], c->r[1], c->r[2], c->r[3]);
+            fflush(stdout);
+        }
+    }
+
+    /* Diagnose: Blockpfad in [lo, lo+0x4000) protokollieren. */
+    if (c != NULL && getenv("HLE_BLKLOGF")) {
+        static uint32_t last = 0xFFFFFFFFu;
+        uint32_t lo = (uint32_t)strtoul(getenv("HLE_BLKLOGF"), NULL, 16);
+        if (pc >= lo && pc < lo + 0x4000u) {
+            if (pc != last) {
+                last = pc;
+                printf("[blk] %08X r0=%08X r4=%08X r8=%08X\n",
+                       pc, c->r[0], c->r[4], c->r[8]);
+                fflush(stdout);
+            }
+        }
+    }
+
     /* 0x101364 bl 0x1034F4 -> bei 0x101370 wird sonst die gesamte
        Asset-Registrierung (0x1013F0) uebersprungen. */
-    if (c != NULL && pc == 0x00101368u && getenv("HLE_FORCE_ASSET"))
+    if (c != NULL && getenv("HLE_FORCE_ASSET") &&
+        (pc == 0x00101368u || pc == 0x00101370u || pc == 0x00101374u)) {
+        static int fc2 = 0;
+        if (fc2 < 5) { fc2++; printf("[forceasset] pc=%08X r0=%08X\n", pc, c->r[0]); }
         c->r[0] = 1;
+    }
     /* Diagnose: an den Datei-Open-Fatal-Sites die Register zeigen. */
     if (c != NULL && getenv("HLE_DUMP_FATAL") &&
         (pc == 0x00107A4Cu || pc == 0x00107B34u)) {

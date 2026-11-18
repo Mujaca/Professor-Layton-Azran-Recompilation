@@ -59,6 +59,32 @@ def main():
         if key3 in txt:
             txt = txt.replace(key3, key3 + "\n  c->r[0] = 0u;   /* Datei-Open = Erfolg */", 1)
             open(gpath, "w", encoding="utf-8", newline="\n").write(txt)
+        # Asset-Registrierung: fn_00100F98 bricht bei 0x101370 ab, wenn
+        # fn_001034F4 0 liefert (Flag [sb+0x567] aus dem Save ist bei uns 0).
+        # Den Zweig auf den Asset-Block 0x1013F0 umbiegen.
+        txt = open(gpath, encoding="utf-8").read()
+        key4 = "void fn_00100F98(ArmCpu *c) {"
+        i4 = txt.find(key4)
+        if i4 >= 0:
+            j4 = txt.find("\nvoid fn_", i4 + len(key4))
+            if j4 < 0:
+                j4 = i4 + 30000
+            seg4 = txt[i4:j4]
+            bad = ("    fn_001034F4(c);\n    arm_restore_sp(c, sp0); }\n"
+                   "  if (c->aborted) return;\n"
+                   "  arm_dp(c, DP_MOV, 4, 0, c->r[0], 1, -1);\n"
+                   "  if (arm_cond(c, 0)) {\n"
+                   "    goto L_00100F98_001015D0;\n")
+            good = ("    fn_001034F4(c);\n    arm_restore_sp(c, sp0); }\n"
+                    "  if (c->aborted) return;\n"
+                    "  arm_dp(c, DP_MOV, 4, 0, c->r[0], 1, -1);\n"
+                    "  if (arm_cond(c, 14)) {   /* Asset-Registrierung erzwingen */\n"
+                    "    goto L_00100F98_001013F0;\n")
+            if bad in seg4:
+                seg4 = seg4.replace(bad, good)
+            txt = txt[:i4] + seg4 + txt[j4:]
+            open(gpath, "w", encoding="utf-8", newline="\n").write(txt)
+
             open(gpath, "w", encoding="utf-8", newline="\n").write(txt)
 
     import ziglang
