@@ -1203,12 +1203,17 @@ static void gsp_command(Ipc *r, uint32_t *p) {
             break;
         }
         case 0x0013: { /* RegisterInterruptRelayQueue */
+            static int gsp_relay_first = 1;
             uint32_t ev = (uint32_t)alloc_handle(SVC_OTHER, "gsp-ev");
             uint32_t shm = (uint32_t)alloc_handle(SVC_OTHER, "gsp-shmem");
             Handle *hh = get_handle(ev);
             if (hh) hh->signaled = 1;
             ipc_begin(r, 0x0013, 2, 2);
-            ipc_put(r, 0);
+            /* Azahar: beim ERSTEN Aufruf muss FirstInitialization (nicht 0)
+               zurueckkommen, sonst bricht die GSP-Initialisierung ab.
+               Result = (GX << 10) | 519 = 0x00000E07 */
+            ipc_put(r, gsp_relay_first ? 0x00000E07u : 0u);
+            gsp_relay_first = 0;
             ipc_put(r, 0x100u);
             ipc_put_handle_copy(r, shm);
             if (g_log) printf("[gsp] RegisterInterruptRelayQueue -> ev=%u shm=%u\n", ev, shm);
