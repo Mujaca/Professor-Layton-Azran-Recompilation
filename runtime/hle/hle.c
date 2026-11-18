@@ -1021,6 +1021,12 @@ static void file_command(Ipc *r, uint32_t *p) {
         }
         default:
             if (g_log) printf("[file] cmd 0x%04X -> 0\n", r->cmd);
+            if (r->cmd == 0x0808) { /* SetPriority -> Result + Priority */
+                ipc_begin(r, 0x0808, 2, 0);
+                ipc_put(r, 0);
+                ipc_put(r, 0);
+                break;
+            }
             ipc_begin(r, r->cmd, 1, 0);
             ipc_put(r, 0);
             break;
