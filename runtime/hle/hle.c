@@ -1732,7 +1732,7 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                     /* Negativer Wert = Waiter eingetragen. Erst dem VBlank-
                        Posting ~8 ms Zeit geben, dann zwangsweise signalisieren
                        (sonst laeuft 0x288B90 endlos bzw. blockiert dauerhaft). */
-                    if (cur < 0 && spin >= 8) {
+                    if (cur < 0 && spin >= 0) {
                         int32_t nv = 1;
                         memcpy(c->mem + off, &nv, 4);
                         break;
