@@ -441,6 +441,18 @@ static void apt_command(Ipc *r, uint32_t *p) {
             uint32_t ev2 = (uint32_t)alloc_handle(SVC_OTHER, "apt-param");
             ipc_begin(r, 2, 1, 3);
             put_result(r);
+            if (getenv("HLE_APT_3H")) {
+                /* Diagnose: zusaetzlich den Lock-Handle als drittes CopyHandle
+                   anbieten (App erwartet offenbar drei Slots). */
+                uint32_t lk = (uint32_t)alloc_handle(SVC_OTHER, "apt-lock");
+                ipc_begin(r, 2, 1, 5);
+                ipc_put(r, 0);
+                ipc_put(r, (1u << 26));
+                ipc_put(r, ev1);
+                ipc_put(r, ev2);
+                ipc_put_handle_copy(r, lk);
+                break;
+            }
             ipc_put(r, (1u << 26));   /* CopyHandle-Deskriptor, 2 Handles */
             if (getenv("HLE_APT_SWAP")) {
                 ipc_put(r, ev2);
