@@ -41,6 +41,18 @@ def main():
                           "DP_CMP, -1, c->r[2], 0x00000009u")
         txt = txt[:i] + seg + txt[j:]
         open(gpath, "w", encoding="utf-8", newline="\n").write(txt)
+        # Datei-Open: fn_001187F8 bricht ab, wenn 0x27E2E0/0x27E1FC 0
+        # liefern (Rueckgabe dann 0xD8604659). Abzweige entschaerfen.
+        txt = open(gpath, encoding="utf-8").read()
+        key2 = "void fn_001187F8(ArmCpu *c) {"
+        i2 = txt.find(key2)
+        if i2 >= 0:
+            j2 = txt.find("\nvoid fn_", i2 + len(key2))
+            if j2 < 0:
+                j2 = i2 + 8000
+            seg2 = txt[i2:j2].replace("goto L_001187F8_001188B0;", ";")
+            txt = txt[:i2] + seg2 + txt[j2:]
+            open(gpath, "w", encoding="utf-8", newline="\n").write(txt)
 
     import ziglang
     zig = os.path.join(os.path.dirname(ziglang.__file__), "zig.exe")

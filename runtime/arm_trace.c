@@ -127,6 +127,16 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
        Tick-Zaehlung spinnt sie zig-tausend Runden und blockiert den
        kooperativen Scheduler (Thread 2 blieb dort haengen). */
     if (c != NULL && pc == 0x0011A818u) c->r[0] = 0;
+    /* Diagnose: an den Datei-Open-Fatal-Sites die Register zeigen. */
+    if (c != NULL && getenv("HLE_DUMP_FATAL") &&
+        (pc == 0x00107A4Cu || pc == 0x00107B34u)) {
+        printf("[fatal-site] pc=%08X r0=%08X r1=%08X r2=%08X r3=%08X "
+               "r4=%08X r5=%08X r6=%08X r7=%08X\n",
+               pc, c->r[0], c->r[1], c->r[2], c->r[3],
+               c->r[4], c->r[5], c->r[6], c->r[7]);
+        fflush(stdout);
+    }
+
     /* Diagnose: beim "rom:"-Open-Wrapper die Struktur hinter r3 zeigen. */
     if (c != NULL && pc == 0x00107AE4u && getenv("HLE_DUMP_R3")) {
         uint32_t a = c->r[3] & 0x1FFFFFFFu;
