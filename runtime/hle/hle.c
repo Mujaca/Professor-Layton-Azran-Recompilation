@@ -53,11 +53,34 @@ static void sched_wait_turn(void) {
         Sleep(0);
     }
 }
+/* Thread-lokales Eigentums-Flag: LeaveCriticalSection darf nur der Besitzer
+   aufrufen, sonst wird der Lock-Count korrupt (Races/Starvation). */
+static _Thread_local int t_lock_owned = 0;
+
 static void guest_lock_enter(void) {
-    if (g_guest_lock_init && !g_no_lock) EnterCriticalSection(&g_guest_lock);
+    if (!g_guest_lock_init || g_no_lock) return;
+    if (t_lock_owned) return;
+    EnterCriticalSection(&g_guest_lock);
+    t_lock_owned = 1;
 }
 static void guest_lock_leave(void) {
-    if (g_guest_lock_init && !g_no_lock) LeaveCriticalSection(&g_guest_lock);
+    if (!g_guest_lock_init || g_no_lock) return;
+    if (!t_lock_owned) return;
+    t_lock_owned = 0;
+    LeaveCriticalSection(&g_guest_lock);
+}
+/* Wartet garantiert, bis der Lock wieder erlangt ist (kein "ohne Lock
+   weiterlaufen" mehr). */
+static void guest_lock_reacquire(void) {
+    if (!g_guest_lock_init || g_no_lock) return;
+    if (t_lock_owned) return;
+    /* Kurz schlafen, damit wartende Gast-Threads wirklich zum Zug kommen
+       (Sleep(0) laesst den Aufrufer sonst sofort wieder gewinnen). */
+    Sleep(1);
+    for (int i = 0; ; i++) {
+        if (TryEnterCriticalSection(&g_guest_lock)) { t_lock_owned = 1; return; }
+        if (i < 2000) Sleep(0); else Sleep(1);
+    }
 }
 /* Wird bei jedem Gast-Block aufgerufen: verhindert, dass rein
  * CPU-gebundene Gast-Schleifen (ohne SVC) den kooperativen Lock
@@ -136,36 +159,26 @@ void hle_pump(void) {
     }
     if (!g_guest_lock_init || g_no_lock) return;
     if ((++g_pump_count & 0x3FFFu) != 0) return;
-    LeaveCriticalSection(&g_guest_lock);
+    if (!t_lock_owned) return;
+    guest_lock_leave();
     Sleep(0);
-    for (int i = 0; i < 50; i++) {
-        if (TryEnterCriticalSection(&g_guest_lock)) return;
-        Sleep(0);
-    }
+    guest_lock_reacquire();
 }
 
 static void guest_yield(void) {
     if (!g_guest_lock_init) return;
     if (g_no_lock) { Sleep(0); return; }
-    LeaveCriticalSection(&g_guest_lock);
+    if (!t_lock_owned) { Sleep(0); return; }
+    guest_lock_leave();
     if (g_det_sched && t_tid >= 0) {
         g_turn = sched_next(t_tid);
         sched_wait_turn();
-        EnterCriticalSection(&g_guest_lock);
+        guest_lock_reacquire();
         return;
     }
     Sleep(0);
-    /* Kein unbegrenztes Blockieren: wenn ein anderer Gast-Thread den Lock
-       haelt und selbst in einer HLE-Wartezeit steckt, wuerde der Aufrufer
-       sonst dauerhaft stehen (Ring eingefroren). Daher zeitlich begrenzt
-       versuchen, sonst ohne Lock weiterlaufen. */
-    /* Sleep(0): der Lock wird nur kurz gehalten; mit Sleep(1) kostete
-       jeder Wiedereintritt bis zu 200 ms und der Gast kroch (Wait auf
-       0x142620 feuerte in 12 s gar nicht). */
-    for (int i = 0; i < 200; i++) {
-        if (TryEnterCriticalSection(&g_guest_lock)) return;
-        Sleep(0);
-    }
+    /* Garantiert wieder in den Lock zurueck (bilanziert ueber t_lock_owned). */
+    guest_lock_reacquire();
 }
 
 extern void arm_call_guest_pub(ArmCpu *c, uint32_t addr);
@@ -190,14 +203,14 @@ static DWORD WINAPI guest_thread_main(LPVOID p) {
     g_thread_started[t_tid] = 1;
     if (!g_no_lock) {
         sched_wait_turn();
-        EnterCriticalSection(&g_guest_lock);
+        guest_lock_enter();
     }
     arm_call_guest_pub(t->cpu, t->entry);
     thread_signal_exit(t->cpu);
     if (!g_no_lock) {
         g_thread_alive[t_tid] = 0;
         if (g_turn == t_tid) g_turn = sched_next(t_tid);
-        LeaveCriticalSection(&g_guest_lock);
+        guest_lock_leave();
     }
     return 0;
 }
@@ -1716,10 +1729,11 @@ static int arb_take(uint32_t a) {
 
 static void arb_unlock_short(void) {
     if (g_guest_lock_init && !g_no_lock) {
-        LeaveCriticalSection(&g_guest_lock);
-        Sleep(0);
-        for (int t = 0; t < 100; t++) {
-            if (TryEnterCriticalSection(&g_guest_lock)) return;
+        if (t_lock_owned) {
+            guest_lock_leave();
+            Sleep(0);
+            guest_lock_reacquire();
+        } else {
             Sleep(0);
         }
     } else {
@@ -1933,12 +1947,10 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     if (!g_guest_lock_init) {
         InitializeCriticalSection(&g_guest_lock);
         g_guest_lock_init = 1;
-        /* Default: ohne Guest-Lock laufen. Mit Lock wurden die Worker-Threads
-           3..9 nie gescheduled (Main-Thread re-acquirete den Lock sofort),
-           die App hing im Join auf Thread 7/8. HLE_THREAD_LOCK=1 schaltet
-           den Lock wieder ein. */
+        /* Default: ohne Guest-Lock (mehr Thread-Fortschritt). HLE_THREAD_LOCK=1
+           aktiviert den (jetzt bilanzierten, fairen) Lock. */
         g_no_lock = (getenv("HLE_THREAD_LOCK") == NULL);
-        if (!g_no_lock) EnterCriticalSection(&g_guest_lock);
+        if (!g_no_lock) guest_lock_enter();
     }
     g_main_cpu = c;
     printf("[hle] romfs=%s log=%d srv-handle=%u\n", g_romfs, g_log, g_srv_handle);
@@ -2114,9 +2126,9 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             uint32_t ms = (uint32_t)(ns / 1000000ull);
             if (ms > 50) ms = 50;
             if (g_guest_lock_init && !g_no_lock) {
-                LeaveCriticalSection(&g_guest_lock);
+                guest_lock_leave();
                 Sleep(ms ? ms : 0);
-                EnterCriticalSection(&g_guest_lock);
+                guest_lock_reacquire();
             } else {
                 Sleep(ms ? ms : 0);
             }
