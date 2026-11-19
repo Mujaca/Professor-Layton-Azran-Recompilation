@@ -66,10 +66,11 @@ static void mem_fault(ArmCpu *c, uint32_t addr, int size) {
 
 uint32_t arm_mem_read(ArmCpu *c, uint32_t addr, int size) {
     uint32_t v = 0;
+    static int s_irq_on = -1;
+    if (s_irq_on < 0) s_irq_on = getenv("HLE_IRQ_FORCE") != NULL;
     /* Diagnose: das Relay-Flag 0x10002001 liest die Engine, der Gast
        ueberschreibt es aber selbst mit 0 -> konstant 1 liefern. */
-    if (getenv("HLE_IRQ_FORCE") &&
-        ((addr & 0x1FFFFFFFu) == 0x10002001u && size == 1))
+    if (s_irq_on && ((addr & 0x1FFFFFFFu) == 0x10002001u && size == 1))
         return 1;
     /* 3DS-Busalias: 0x8xxxxxxx/0xBxxxxxxx zeigen auf dieselben FCRAM-Seiten. */
     if (addr >= 0x20000000u) addr &= 0x1FFFFFFFu;
@@ -90,34 +91,34 @@ uint32_t arm_mem_read(ArmCpu *c, uint32_t addr, int size) {
 }
 
 void arm_mem_write(ArmCpu *c, uint32_t addr, int size, uint32_t val) {
-    if (addr >= 0x20000000u) addr &= 0x1FFFFFFFu;
-    /* Diagnose: Schreibzugriffe auf einen bestimmten WERT protokollieren
-       (z. B. den String-Zeiger "arc/lt6_a.fa" = 0x1015F8). */
-    if (size == 4 && getenv("HLE_MEMWATCHVAL")) {
-        static uint32_t want = 0xFFFFFFFFu;
-        if (want == 0xFFFFFFFFu)
-            want = (uint32_t)strtoul(getenv("HLE_MEMWATCHVAL"), NULL, 16);
-        if (val == want) {
-            printf("[mwval] %08X <- %08X pc=%08X\n", addr, val, arm_last_block);
-            fflush(stdout);
-        }
+    /* Env-Lookups einmalig cachen: getenv() pro Speicherzugriff war der
+       groesste Bremsklotz (der Gast kopiert Daten in den Linear-Heap). */
+    static int s_init = 0, s_mwval_on = 0, s_keep = 1, s_reg = 0, s_fsobj = 1;
+    static uint32_t s_want = 0;
+    if (!s_init) {
+        const char *v;
+        s_init = 1;
+        v = getenv("HLE_MEMWATCHVAL");
+        if (v != NULL && *v != 0) { s_mwval_on = 1; s_want = (uint32_t)strtoul(v, NULL, 16); }
+        v = getenv("HLE_KEEP_SLOT");
+        s_keep = !(v != NULL && v[0] == '0');
+        s_reg = getenv("HLE_REG_ENABLE") != NULL;
+        v = getenv("HLE_FS_OBJ");
+        s_fsobj = !(v != NULL && v[0] == '0');
     }
-    /* Diagnose: das Spiel setzt den FS-Session-Slot 0x3D67C4 selbst auf 0
-       (fs-Close); der folgende Datei-Open scheitert dann lokal. */
-    if ((getenv("HLE_KEEP_SLOT") == NULL || getenv("HLE_KEEP_SLOT")[0] != '0') &&
-        size == 4 && val == 0 &&
-        (addr == 0x3D67C4u || addr == 0x3D66C4u))
-        val = 1;
-    /* Asset-Registry-Guard vor dem BSS-Clear des Loaders schuetzen.
-       Der Guard ist KEIN Bool, sondern ein Zeiger auf einen Array-
-       Deskriptor {basis, stride, count} (siehe 0x287FF8). */
-    if (getenv("HLE_REG_ENABLE") && size == 4 && addr == 0x3ECA5Cu && val == 0)
-        val = 0x00401000u;
-    /* FS-Objektzeiger: die App setzt [0x3D8D8C] auf 0, der Fehlerhelfer
-       0x28EDCC liefert dann 0xE0A046DB. Wert offen halten. */
-    if ((getenv("HLE_FS_OBJ") == NULL || getenv("HLE_FS_OBJ")[0] != '0') &&
-        size == 4 && addr == 0x3D8D8Cu && val == 0)
-        val = 0x00408000u;
+    if (addr >= 0x20000000u) addr &= 0x1FFFFFFFu;
+    if (s_mwval_on && size == 4 && val == s_want) {
+        printf("[mwval] %08X <- %08X pc=%08X\n", addr, val, arm_last_block);
+        fflush(stdout);
+    }
+    if (size == 4) {
+        if (s_keep && val == 0 && (addr == 0x3D67C4u || addr == 0x3D66C4u))
+            val = 1;
+        if (s_reg && addr == 0x3ECA5Cu && val == 0)
+            val = 0x00401000u;
+        if (s_fsobj && addr == 0x3D8D8Cu && val == 0)
+            val = 0x00408000u;
+    }
     if (g_memwatch != 0 &&
         ((g_memwatch_end != 0) ? (addr >= g_memwatch && addr < g_memwatch_end)
                                : ((addr & ~3u) == g_memwatch)) &&
