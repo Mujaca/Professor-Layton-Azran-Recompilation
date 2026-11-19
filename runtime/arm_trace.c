@@ -151,6 +151,19 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
             fflush(stdout);
         }
     }
+    /* Diagnose: beim FA-Scan den Request-Struct zeigen, den 0x2B95F8 parst. */
+    if (c != NULL && pc == 0x002B9664u && getenv("HLE_REG_DEBUG")) {
+        static int dbg = 0;
+        if (dbg < 3) {
+            dbg++;
+            printf("[fastruct] entry=%08X off20=%08X req=%08X:",
+                   c->r[4], arm_mem_read(c, c->r[4] + 0x20u, 4), c->r[5]);
+            for (int i = 0; i < 8; i++)
+                printf(" %08X", arm_mem_read(c, c->r[5] + (uint32_t)i * 4u, 4));
+            printf("\n");
+            fflush(stdout);
+        }
+    }
     /* Diagnose: Asset-Kette (Registrierung -> Dispatcher) mitzaehlen. */
     if (c != NULL && getenv("HLE_ASSET_TRACE")) {
         if (pc == 0x001013F0u || pc == 0x001014D4u || pc == 0x00291A88u ||
