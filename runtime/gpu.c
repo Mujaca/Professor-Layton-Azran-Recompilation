@@ -40,9 +40,9 @@ static void put_px(ArmCpu *c, int x, int y, uint32_t rgb)
     if (x < 0 || y < 0 || x >= GPU_W || y >= GPU_H) return;
     uint32_t off = (g_fb & 0x1FFFFFFFu) + (uint32_t)(y * GPU_W + x) * 3u;
     if (off + 3u > c->mem_size) return;
-    c->mem[off + 0] = (uint8_t)(rgb & 0xFF);
-    c->mem[off + 1] = (uint8_t)((rgb >> 8) & 0xFF);
-    c->mem[off + 2] = (uint8_t)((rgb >> 16) & 0xFF);
+    arm_mem_write(c, off + 0u, 1, (rgb >> 0) & 0xFFu);
+    arm_mem_write(c, off + 1u, 1, (rgb >> 8) & 0xFFu);
+    arm_mem_write(c, off + 2u, 1, (rgb >> 16) & 0xFFu);
 }
 
 static void fill_rect(ArmCpu *c, int x, int y, int w, int h, uint32_t rgb)

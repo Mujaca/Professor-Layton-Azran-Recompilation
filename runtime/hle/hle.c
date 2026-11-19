@@ -7,6 +7,9 @@
  */
 #include "hle.h"
 #include "../gpu.h"
+
+static uint32_t g_hle_gsp_handle;
+static void dispatch_ipc(uint32_t handle);
 #include "../arm_trace.h"
 
 void arm_trace_thread_dump(int ti, unsigned n);
@@ -63,7 +66,39 @@ static volatile unsigned g_pump_count = 0;
 extern void arm_call_guest_pub(ArmCpu *c, uint32_t addr);
 static ArmCpu *g_frame_cpu = NULL;
 
+/* Diagnose: eine echte GSP-Kommandoliste ueber die normalen HLE-Handler
+ * abgeben (SetCommandList 0x0006 + TriggerCmdReqQueue 0x000C). */
+static void hle_gpu_submit_once(void)
+{
+    static int done = 0;
+    if (done || g_hle_gsp_handle == 0 || g_frame_cpu == NULL) return;
+    done = 1;
+    {
+        uint32_t cl = 0x00410000u;
+        uint32_t list[7];
+        list[0] = 0x0400FF00u;
+        list[1] = 0x050FFFFFu;
+        list[2] = 4u;
+        list[3] = 0u; list[4] = 0u; list[5] = 400u; list[6] = 240u;
+        memcpy(g_frame_cpu->mem + cl, list, sizeof(list));
+
+        uint32_t *buf = (uint32_t *)(g_frame_cpu->mem + g_frame_cpu->tpidruro + 0x80u);
+        buf[0] = (0x0006u << 16) | (3u << 6);
+        buf[1] = cl;
+        buf[2] = (uint32_t)sizeof(list);
+        buf[3] = 0u;
+        dispatch_ipc(g_hle_gsp_handle);
+
+        buf[0] = (0x000Cu << 16);
+        buf[1] = 0u;
+        dispatch_ipc(g_hle_gsp_handle);
+        printf("[gpusubmit] handle=%u list=%08X size=%u\n",
+               g_hle_gsp_handle, cl, (unsigned)sizeof(list));
+    }
+}
+
 void hle_pump(void) {
+    if (getenv("HLE_GPU_SUBMIT")) hle_gpu_submit_once();
     /* Diagnose: Frame-Aufbau periodisch aus dem Gast-Kontext aufrufen. */
     {
         static const char *fl_env = NULL;
@@ -417,6 +452,7 @@ static void srv_command(Ipc *r, uint32_t *p) {
                 uint32_t hv = (uint32_t)h;
                 memcpy(g_cpu->mem + 0x3D91D0u, &hv, 4);
             }
+            if (svc == SVC_GSP_GPU) g_hle_gsp_handle = h;
             if (g_log || getenv("HLE_SRV_NAMES")) {
                 printf("[srvname] \"%s\" srvh=%u blk=%08X lr=%08X desc=%08X -> %d (%s)\n",
                        name, g_cur_handle, arm_last_block, g_cpu ? g_cpu->r[14] : 0u,
