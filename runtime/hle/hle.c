@@ -75,7 +75,22 @@ void hle_pump(void) {
                 uint32_t fa = (uint32_t)strtoul(fl_env, NULL, 16);
                 in_frame_call = 1;
                 memcpy(fsave, g_frame_cpu->r, sizeof(fsave));
-                printf("[frameloop] call 0x%08X\n", fa);
+                {
+                    const char *fa_arg = getenv("HLE_FRAME_ARG");
+                    if (fa_arg != NULL && *fa_arg != 0) {
+                        char buf[128];
+                        char *pp = buf;
+                        int ri = 0;
+                        snprintf(buf, sizeof(buf), "%s", fa_arg);
+                        while (pp != NULL && *pp != 0 && ri < 4) {
+                            char *comma = strchr(pp, ',');
+                            if (comma != NULL) *comma = 0;
+                            g_frame_cpu->r[ri++] = (uint32_t)strtoul(pp, NULL, 16);
+                            pp = (comma != NULL) ? comma + 1 : NULL;
+                        }
+                    }
+                }
+                printf("[frameloop] call 0x%08X r0=%08X\n", fa, g_frame_cpu->r[0]);
                 fflush(stdout);
                 arm_call_guest_pub(g_frame_cpu, fa);
                 memcpy(g_frame_cpu->r, fsave, sizeof(fsave));
