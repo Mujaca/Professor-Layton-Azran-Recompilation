@@ -1387,18 +1387,38 @@ static void dsp_command(Ipc *r, uint32_t *p) {
     switch (r->cmd) {
         case 0x0010: { /* ReadPipeIfPossible(ch, peer, size + StaticBuffer) */
             uint32_t dsc_flags = 0, dsc_addr = 0;
+            static int rp_calls = 0;
             if (r->translate >= 2) {
                 dsc_flags = p[r->normal];
                 dsc_addr = p[r->normal + 1];
             }
-            /* Dummy + Result + length_read(0) + Buffer-Echo */
+            rp_calls++;
+            {
+                /* Erster Read: Anzahl DSP-Variablen (1). Zweiter: die
+                   Variablenliste (eine DSP-DRAM-Adresse). */
+                uint16_t val = (rp_calls & 1) ? 1u : 0x0000u;
+                if (dsc_addr && g_cpu != NULL &&
+                    (dsc_addr & 0x1FFFFFFFu) + 2u <= g_cpu->mem_size)
+                    memcpy(g_cur_mem + (dsc_addr & 0x1FFFFFFFu), &val, 2);
+            }
+            /* Dummy + Result + length_read(2) + Buffer-Echo */
             ipc_begin(r, 0x0010, 3, 2);
             ipc_put(r, 0);
             ipc_put(r, 0);
-            ipc_put(r, 0);
+            ipc_put(r, 2);
             ipc_put(r, dsc_flags);
             ipc_put(r, dsc_addr);
-            if (g_log) printf("[dsp] ReadPipeIfPossible ch=%u size=%u -> 0\n", p[0], p[2]);
+            if (g_log) printf("[dsp] ReadPipeIfPossible ch=%u size=%u -> 2\n", p[0], p[2]);
+            break;
+        }
+        case 0x000C: { /* ConvertProcessAddressFromDspDram(addr) -> Result + ARM-Adresse */
+            uint32_t dsp_addr = p[0];
+            uint32_t arm = 0x00408800u + (dsp_addr & 0xFFu) * 0x10u;
+            ipc_begin(r, 0x000C, 3, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 0);
+            ipc_put(r, arm);
+            if (g_log) printf("[dsp] ConvertProcessAddress 0x%X -> 0x%X\n", dsp_addr, arm);
             break;
         }
         case 0x0011: { /* LoadComponent: (u32 size, u16 prog, u16 data, MappedBuffer) */
@@ -1470,7 +1490,7 @@ static void dsp_command(Ipc *r, uint32_t *p) {
             break;
         }
         case 0x0003: case 0x0005: case 0x0007: case 0x0009:
-        case 0x000A: case 0x000C: { /* Set/Send/Clear/Mask/… */
+        case 0x000A: { /* Set/Send/Clear/Mask/… */
             ipc_begin(r, r->cmd, 1, 0);
             ipc_put(r, 0);
             break;
