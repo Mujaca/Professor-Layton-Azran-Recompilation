@@ -1439,7 +1439,8 @@ static void dsp_command(Ipc *r, uint32_t *p) {
             uint32_t size = p[1];
             uint32_t addr = 0;
             if (r->translate >= 2) addr = p[r->normal + 1];
-            ipc_begin(r, 0x000D, 1, 0);
+            ipc_begin(r, 0x000D, 2, 0);
+            ipc_put(r, 0);
             ipc_put(r, 0);
             if (g_log) printf("[dsp] WriteProcessPipe ch=%u size=%u addr=%08X\n",
                               p[0], size, addr);
@@ -1459,7 +1460,8 @@ static void dsp_command(Ipc *r, uint32_t *p) {
             break;
         }
         case 0x0012: { /* UnloadComponent */
-            ipc_begin(r, 0x0012, 1, 0);
+            ipc_begin(r, 0x0012, 2, 0);
+            ipc_put(r, 0);
             ipc_put(r, 0);
             break;
         }
@@ -1489,9 +1491,15 @@ static void dsp_command(Ipc *r, uint32_t *p) {
             }
             break;
         }
-        case 0x0003: case 0x0005: case 0x0007: case 0x0009:
+        case 0x0003: case 0x0005: case 0x0009:
         case 0x000A: { /* Set/Send/Clear/Mask/… */
             ipc_begin(r, r->cmd, 1, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x0007: case 0x0017: { /* SetSemaphore / SetSemaphoreMask -> Result */
+            ipc_begin(r, r->cmd, 2, 0);
+            ipc_put(r, 0);
             ipc_put(r, 0);
             break;
         }
