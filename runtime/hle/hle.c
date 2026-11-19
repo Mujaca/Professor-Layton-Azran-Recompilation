@@ -1933,7 +1933,11 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     if (!g_guest_lock_init) {
         InitializeCriticalSection(&g_guest_lock);
         g_guest_lock_init = 1;
-        g_no_lock = getenv("HLE_NO_THREAD_LOCK") != NULL;
+        /* Default: ohne Guest-Lock laufen. Mit Lock wurden die Worker-Threads
+           3..9 nie gescheduled (Main-Thread re-acquirete den Lock sofort),
+           die App hing im Join auf Thread 7/8. HLE_THREAD_LOCK=1 schaltet
+           den Lock wieder ein. */
+        g_no_lock = (getenv("HLE_THREAD_LOCK") == NULL);
         if (!g_no_lock) EnterCriticalSection(&g_guest_lock);
     }
     g_main_cpu = c;
