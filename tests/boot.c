@@ -106,6 +106,7 @@ static DWORD WINAPI watchdog(LPVOID unused) {
                     printf("[wd]   thread %X: pc=0x%08X lr=0x%08X\n", ti,
                            arm_thread_last_pc[ti], arm_thread_last_lr[ti]);
             }
+            fflush(stdout);
             if (ticks == 4 || ticks == 14 || ticks == 29) {
                 fprintf(stderr, "[wd] ==== tdump bei tick %d ====\n", ticks);
                 arm_trace_thread_dump(2, 64);
@@ -211,6 +212,24 @@ int main(int argc, char **argv) {
     printf("boot: entry 0x00100000, romfs=%s\n", romfs);
 
     fn_00100000(&c);
+
+    /* Diagnose: Haupt-Entry ist zurueckgekehrt, die Engine-Threads laufen
+       aber weiter (der echte 3DS-Prozess lebt, bis exit() kommt). Mit
+       HLE_KEEP_ALIVE=<sek> lassen wir sie weiterlaufen. */
+    {
+        const char *ka = getenv("HLE_KEEP_ALIVE");
+        if (ka != NULL && *ka != 0) {
+            int secs = atoi(ka);
+            printf("keepalive: main zurueck, warte %d s auf Threads\n", secs);
+            fflush(stdout);
+            for (int i = 0; i < secs; i++) {
+                Sleep(1000);
+                printf("keepalive %d s: t2=%08X t5=%08X t9=%08X tA=%08X\n",
+                       i + 1, arm_thread_last_pc[2], arm_thread_last_pc[5],
+                       arm_thread_last_pc[9], arm_thread_last_pc[10]);
+                fflush(stdout);            }
+        }
+    }
 
     printf("halt: aborted=%d pc=0x%08X r0=0x%08X\n", c.aborted, c.r[15], c.r[0]);
     if (c.aborted) {

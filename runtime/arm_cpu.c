@@ -77,8 +77,9 @@ uint32_t arm_mem_read(ArmCpu *c, uint32_t addr, int size) {
     if (g_memwatchrd != 0 && addr >= g_memwatchrd && addr < g_memwatchrd_end &&
         g_memwatchrd_prints < 200) {
         g_memwatchrd_prints++;
-        fprintf(stderr, "[mrd] %08X size=%d blk=%08X lr=%08X\n",
-                addr, size, arm_last_block, c->r[14]);
+        fprintf(stderr, "[mrd] %08X size=%d blk=%08X lr=%08X th=%X\n",
+                addr, size, arm_last_block, c->r[14],
+                (unsigned)((c->tpidruro >> 12) & 0xFu));
     }
     if ((uint64_t)addr + (uint64_t)size > c->mem_size) {
         mem_fault(c, addr, size);
@@ -124,8 +125,9 @@ void arm_mem_write(ArmCpu *c, uint32_t addr, int size, uint32_t val) {
                                : ((addr & ~3u) == g_memwatch)) &&
         g_memwatch_prints < 400) {
         g_memwatch_prints++;
-        fprintf(stderr, "[mw] %08X <- %08X size=%d pc=%08X lr=%08X\n",
-                addr, val, size, arm_last_block, c->r[14]);
+        fprintf(stderr, "[mw] %08X <- %08X size=%d pc=%08X lr=%08X th=%X\n",
+                addr, val, size, arm_last_block, c->r[14],
+                (unsigned)((c->tpidruro >> 12) & 0xFu));
     }
     if ((uint64_t)addr + (uint64_t)size > c->mem_size) {
         mem_fault(c, addr, size);

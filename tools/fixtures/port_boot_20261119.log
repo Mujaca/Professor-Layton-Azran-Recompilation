@@ -1,0 +1,183 @@
+[hle] config-memory initialisiert (app_mem_alloc=128MiB)
+[hle] VBlank-Thread gestartet
+[hle] FS-Objektzeiger 0x3D8D8C = 00408000
+[hle] romfs=out\romfs log=0 srv-handle=1
+boot: entry 0x00100000, romfs=out\romfs
+[ipc] th=F82 blk=00119330 srv:      cmd=0x0001 n=0 t=2 h=5
+[ipc] th=F82 blk=001082C8 srv:      cmd=0x0002 n=0 t=0 h=5
+[ipc] th=F82 blk=00279AB4 srv:      cmd=0x0005 n=4 t=0 h=5 p0=3A545041 p1=72650055 p2=00000006 p3=00000000
+[srvname] "APT:U" srvh=5 blk=00279AB4 lr=00276288 desc=003D91E8 -> 8 (APT:U)
+[ipc] th=F82 blk=0010873C APT:U     cmd=0x0001 n=1 t=0 h=8 p0=00000000
+[ipc] th=F82 blk=00279AB4 srv:      cmd=0x0005 n=4 t=0 h=5 p0=3A545041 p1=72650055 p2=00000006 p3=00000000
+[srvname] "APT:U" srvh=5 blk=00279AB4 lr=00276288 desc=003D91E8 -> 10 (APT:U)
+[ipc] th=F82 blk=001086EC APT:U     cmd=0x0002 n=2 t=0 h=10 p0=00000300 p1=00000000
+[ipc] th=F82 blk=00279AB4 srv:      cmd=0x0005 n=4 t=0 h=5 p0=3A6D646E p1=FFFF0075 p2=00000007 p3=00000000
+[srvname] "ndm:u" srvh=5 blk=00279AB4 lr=00276288 desc=003D91E8 -> 17 (ndm:u)
+[ipc] th=F82 blk=0011929C ndm:u     cmd=0x0014 n=1 t=0 h=17 p0=0000000F
+[ipc] th=F82 blk=00119260 ndm:u     cmd=0x0006 n=1 t=0 h=17 p0=00000006
+[ipc] th=F82 blk=00279AB4 srv:      cmd=0x0005 n=4 t=0 h=5 p0=3A545041 p1=72650055 p2=00000006 p3=00000000
+[srvname] "APT:U" srvh=5 blk=00279AB4 lr=00276288 desc=003D91E8 -> 18 (APT:U)
+[ipc] th=F82 blk=00108828 APT:U     cmd=0x0003 n=1 t=0 h=18 p0=00000000
+[ipc] th=F82 blk=00279AB4 srv:      cmd=0x0005 n=4 t=0 h=5 p0=3A545041 p1=72650055 p2=00000006 p3=00000000
+[srvname] "APT:U" srvh=5 blk=00279AB4 lr=00276288 desc=003D91E8 -> 19 (APT:U)
+[ipc] th=F82 blk=00121120 APT:U     cmd=0x0043 n=1 t=0 h=19 p0=00000300
+[ipc] th=F82 blk=00279AB4 srv:      cmd=0x0005 n=4 t=0 h=5 p0=3A545041 p1=72650055 p2=00000006 p3=00000000
+[srvname] "APT:U" srvh=5 blk=00279AB4 lr=00276288 desc=003D91E8 -> 20 (APT:U)
+[ipc] th=F82 blk=00275F78 APT:U     cmd=0x000D n=2 t=0 h=20 p0=00000300 p1=00001000
+[ipc] th=F82 blk=00279AB4 srv:      cmd=0x0005 n=4 t=0 h=5 p0=3A545041 p1=72650055 p2=00000006 p3=00000000
+[srvname] "APT:U" srvh=5 blk=00279AB4 lr=00276288 desc=003D91E8 -> 21 (APT:U)
+[ipc] th=F82 blk=0012633C APT:U     cmd=0x004B n=3 t=2 h=21 p0=00000007 p1=00000004 p2=00000001
+[ipc] th=F82 blk=00279AB4 srv:      cmd=0x0005 n=4 t=0 h=5 p0=3A545041 p1=72650055 p2=00000006 p3=00000000
+[srvname] "APT:U" srvh=5 blk=00279AB4 lr=00276288 desc=003D91E8 -> 22 (APT:U)
+[ipc] th=F82 blk=0012633C APT:U     cmd=0x004B n=3 t=2 h=22 p0=00000004 p1=00000001 p2=00000001
+[ipc] th=F82 blk=00279AB4 srv:      cmd=0x0005 n=4 t=0 h=5 p0=3A545041 p1=72650055 p2=00000006 p3=00000000
+[srvname] "APT:U" srvh=5 blk=00279AB4 lr=00276288 desc=003D91E8 -> 23 (APT:U)
+[ipc] th=F82 blk=0011A3A8 APT:U     cmd=0x004F n=2 t=0 h=23 p0=00000001 p1=0000001E
+[ipc] th=F82 blk=0033E8F8 file      cmd=0x0802 n=3 t=2 h=24 p0=00000000 p1=00000000 p2=00000028
+[ipc] th=F82 blk=0033E950 file      cmd=0x0808 n=0 t=0 h=24
+[ipc] th=F82 blk=0033E8F8 file      cmd=0x0802 n=3 t=2 h=25 p0=00000000 p1=00000000 p2=00000028
+[ipc] th=F82 blk=0033E8F8 file      cmd=0x0802 n=3 t=2 h=25 p0=00000000 p1=00000000 p2=00000028
+[ipc] th=F82 blk=0033E8F8 file      cmd=0x0802 n=3 t=2 h=25 p0=00000028 p1=00000000 p2=000001E0
+[ipc] th=F82 blk=0033E8F8 file      cmd=0x0802 n=3 t=2 h=25 p0=00000208 p1=00000000 p2=00000DF8
+[ipc] th=F82 blk=0033E8F8 file      cmd=0x0802 n=3 t=2 h=25 p0=00001000 p1=00000000 p2=00000000
+[ipc] th=F82 blk=0033E8F8 file      cmd=0x0802 n=3 t=2 h=25 p0=00001000 p1=00000000 p2=0000DD80
+[ipc] th=F82 blk=00279AB4 srv:      cmd=0x0005 n=4 t=0 h=5 p0=3A646968 p1=52455355 p2=00000008 p3=00000000
+[srvname] "hid:USER" srvh=5 blk=00279AB4 lr=00276288 desc=003D91E8 -> 26 (hid:USER)
+[ipc] th=F82 blk=001191B4 hid:USER  cmd=0x000A n=0 t=0 h=26
+[ipc] th=F82 blk=00119260 ndm:u     cmd=0x0006 n=1 t=0 h=17 p0=00000006
+[ipc] th=F82 blk=00279AB4 srv:      cmd=0x0005 n=4 t=0 h=5 p0=3A6D7470 p1=74700075 p2=00000005 p3=00000000
+[srvname] "ptm:u" srvh=5 blk=00279AB4 lr=00276288 desc=003D91E8 -> 37 (ptm:u)
+[ipc] th=F82 blk=00279AB4 srv:      cmd=0x0005 n=4 t=0 h=5 p0=3A676663 p1=63240075 p2=00000005 p3=00000000
+[srvname] "cfg:u" srvh=5 blk=00279AB4 lr=00276288 desc=003D91E8 -> 38 (cfg:u)
+[ipc] th=F82 blk=0011FFEC cfg:u     cmd=0x0001 n=2 t=2 h=38 p0=0000001C p1=000A0000
+[ipc] th=F82 blk=001254C0 cfg:u     cmd=0x0003 n=1 t=0 h=38 p0=00000F30
+[svc] Break bei Block 0x00276344: r0=00000000 r1=00000000 r2=00000000 r3=003D8CC8 lr=002763CC
+[ipc] th=F82 blk=0033E4C4 fs:USER   cmd=0x0808 n=8 t=2 h=1 p0=00000000 p1=00000000 p2=00000000 p3=00000004 p4=0000001C p5=00000000 p6=00000014 p7=00000000
+[ipc] th=F82 blk=0012EAEC ptm:u     cmd=0x000C n=0 t=0 h=37
+[ipc] th=F82 blk=0012EAA0 ptm:u     cmd=0x000B n=3 t=2 h=37 p0=00000018 p1=B7299000 p2=0081DB22
+[ipc] th=F82 blk=0033E81C fs:USER   cmd=0x0802 n=7 t=2 h=1 p0=00000000 p1=00000000 p2=00000000 p3=00000004 p4=0000001C p5=00000003 p6=00000000
+[ipc] th=F82 blk=0033E97C file      cmd=0x0803 n=4 t=2 h=40 p0=00000000 p1=00000000 p2=00000014 p3=00010001
+[ipc] th=F82 blk=0033E950 file      cmd=0x0808 n=0 t=0 h=40
+[ipc] th=F82 blk=0033E81C fs:USER   cmd=0x0802 n=7 t=2 h=40 p0=00000000 p1=00000000 p2=00000000 p3=00000004 p4=0000001C p5=00000003 p6=00000000
+[ipc] th=F82 blk=0033E8F8 file      cmd=0x0802 n=3 t=2 h=41 p0=00000000 p1=00000000 p2=00000014
+[ipc] th=F82 blk=0012EAEC ptm:u     cmd=0x000C n=0 t=0 h=37
+[ipc] th=F82 blk=0033E97C file      cmd=0x0803 n=4 t=2 h=41 p0=00000000 p1=00000000 p2=00000014 p3=00010001
+[ipc] th=F82 blk=0033E950 file      cmd=0x0808 n=0 t=0 h=41
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F82 blk=00279AB4 srv:      cmd=0x0005 n=4 t=0 h=5 p0=3A707367 p1=7570473A p2=00000009 p3=00000000
+[srvname] "gsp::Gpu" srvh=5 blk=00279AB4 lr=00276288 desc=003D91E8 -> 42 (gsp::Gpu)
+[ipc] th=F82 blk=0012F954 gsp::Gpu  cmd=0x0016 n=1 t=2 h=42 p0=00000000
+[ipc] th=F82 blk=001427EC gsp::Gpu  cmd=0x0013 n=1 t=2 h=42 p0=00000001
+[ipc] th=F82 blk=0027604C gsp::Gpu  cmd=0x0010 n=1 t=0 h=42 p0=00000203
+[ipc] th=F82 blk=0027604C gsp::Gpu  cmd=0x001E n=2 t=0 h=42 p0=00000010 p1=00000011
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F82 blk=0011FFEC cfg:u     cmd=0x0001 n=2 t=2 h=38 p0=00000020 p1=00050005
+[ipc] th=F82 blk=00279AB4 srv:      cmd=0x0005 n=4 t=0 h=5 p0=3A723279 p1=10000075 p2=00000005 p3=00000001
+[srvname] "y2r:u" srvh=5 blk=00279AB4 lr=00276288 desc=003D91E8 -> 47 (y2r:u)
+[ipc] th=F82 blk=00125F54 y2r:u     cmd=0x002B n=0 t=0 h=47
+[ipc] th=F82 blk=00125FC0 y2r:u     cmd=0x000D n=1 t=0 h=47 p0=00000001
+[ipc] th=F82 blk=00125F84 y2r:u     cmd=0x000F n=0 t=0 h=47
+[ipc] th=F82 blk=00279AB4 srv:      cmd=0x0005 n=4 t=0 h=5 p0=3A545041 p1=72650055 p2=00000006 p3=00000000
+[srvname] "APT:U" srvh=5 blk=00279AB4 lr=00276288 desc=003D91E8 -> 49 (APT:U)
+[ipc] th=F82 blk=00139218 APT:U     cmd=0x0050 n=1 t=0 h=49 p0=00000001
+[ipc] th=F82 blk=00279AB4 srv:      cmd=0x0005 n=4 t=0 h=5 p0=3A707364 p1=5053443A p2=00000008 p3=00000000
+[srvname] "dsp::DSP" srvh=5 blk=00279AB4 lr=00276288 desc=003D91E8 -> 50 (dsp::DSP)
+[ipc] th=F82 blk=002762D4 dsp::DSP  cmd=0x0011 n=3 t=2 h=50 p0=0000C234 p1=000000FF p2=000000FF
+[wd] pc=0x00111AC8 sp=0x0FFEF950 lr=0x00120184
+[wd] tickcalls=3 tick=29224099
+[ipc] th=F82 blk=00138698 dsp::DSP  cmd=0x0015 n=2 t=2 h=50 p0=00000002 p1=00000002
+[wd]   thread 2: pc=0x00138698 lr=0x0026954C
+[wd]   thread 3: pc=0x00287B90 lr=0x00108158
+[wd]   thread 4: pc=0x0011A824 lr=0x00119DFC
+[wd]   thread 5: pc=0x00288B80 lr=0x00289DC0
+[wd]   thread 6: pc=0x00265914 lr=0x00289E50
+[wd]   thread 7: pc=0x00287B90 lr=0x0012E388
+[wd]   thread 8: pc=0x00287B90 lr=0x00142620
+[ipc] th=F82 blk=00138664 dsp::DSP  cmd=0x0016 n=0 t=0 h=50
+[ipc] th=F82 blk=0013862C dsp::DSP  cmd=0x0017 n=1 t=0 h=50 p0=00002000
+[ipc] th=F82 blk=0013E330 dsp::DSP  cmd=0x000D n=2 t=2 h=50 p0=00000002 p1=00000004
+[ipc] th=F82 blk=0013E2B4 dsp::DSP  cmd=0x0007 n=1 t=0 h=50 p0=00004000
+[ipc] th=F82 blk=0013E378 dsp::DSP  cmd=0x0010 n=3 t=0 h=50 p0=00000002 p1=00000000 p2=00000002
+[ipc] th=F82 blk=0013E378 dsp::DSP  cmd=0x0010 n=3 t=0 h=50 p0=00000002 p1=00000000 p2=00000002
+[ipc] th=F82 blk=0013E3E0 dsp::DSP  cmd=0x000C n=1 t=0 h=50 p0=00002188
+[ipc] th=F82 blk=0013E3E0 dsp::DSP  cmd=0x000C n=1 t=0 h=50 p0=00012188
+[ipc] th=F82 blk=0013E2B4 dsp::DSP  cmd=0x0007 n=1 t=0 h=50 p0=00004000
+[ipc] th=F82 blk=0011FFEC cfg:u     cmd=0x0001 n=2 t=2 h=38 p0=00000001 p1=00070001
+[ipc] th=F82 blk=00279AB4 srv:      cmd=0x0005 n=4 t=0 h=5 p0=3A545041 p1=72650055 p2=00000006 p3=00000000
+[srvname] "APT:U" srvh=5 blk=00279AB4 lr=00276288 desc=003D91E8 -> 54 (APT:U)
+[ipc] th=F82 blk=00139218 APT:U     cmd=0x0050 n=1 t=0 h=54 p0=00000001
+[ipc] th=F82 blk=00119260 ndm:u     cmd=0x0006 n=1 t=0 h=17 p0=00000006
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[perf] 1000000 blocks in 3500 ms (285714/s)
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[wd] pc=0x0011ACE8 sp=0x0FFEF930 lr=0x0011ACE8
+[wd] tickcalls=3 tick=29224099
+[wd]   thread 2: pc=0x0011AD2C lr=0x0011ACE8
+[wd]   thread 3: pc=0x00287B90 lr=0x00108158
+[wd]   thread 4: pc=0x00119D90 lr=0x00119DFC
+[wd]   thread 5: pc=0x00289DB8 lr=0x00289E50
+[wd]   thread 6: pc=0x00287A18 lr=0x00289E50
+[wd]   thread 7: pc=0x00287B90 lr=0x0012E388
+[wd]   thread 8: pc=0x00287B90 lr=0x00142620
+[wd]   thread 9: pc=0x0026E930 lr=0x00141F24
+[wd]   thread A: pc=0x00287B90 lr=0x0014B0A4
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[wd] pc=0x0011B24C sp=0x0FFEF930 lr=0x00284B7C
+[wd] tickcalls=3 tick=29224099
+[wd]   thread 2: pc=0x0011B258 lr=0x00284B7C
+[wd]   thread 3: pc=0x00287B90 lr=0x00108158
+[wd]   thread 4: pc=0x0011A818 lr=0x00119DFC
+[wd]   thread 5: pc=0x00287A08 lr=0x00289E50
+[wd]   thread 6: pc=0x00287A18 lr=0x00289E50
+[wd]   thread 7: pc=0x00287B90 lr=0x0012E388
+[wd]   thread 8: pc=0x00287B90 lr=0x00142620
+[wd]   thread 9: pc=0x0026E930 lr=0x00141F24
+[wd]   thread A: pc=0x00287B90 lr=0x0014B0A4
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[perf] 2000000 blocks in 6297 ms (317612/s)
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
+[ipc] th=F83 blk=001193A4 srv:      cmd=0x000B n=0 t=0 h=5
