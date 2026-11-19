@@ -219,6 +219,15 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         }
     }
 
+    /* Diagnose: Ergebnis der Archiv-Query in der Asset-Registrierung zeigen. */
+    if (c != NULL && pc == 0x00103BD8u && getenv("HLE_FA_DEBUG")) {
+        uint32_t out1 = arm_mem_read(c, c->r[13] + 0x10u, 4);
+        uint32_t out2 = arm_mem_read(c, c->r[13] + 0x0Cu, 4);
+        printf("[assetreg] r0=%08X r7=%08X out10=%08X out0C=%08X\n",
+               c->r[0], c->r[7], out1, out2);
+        fflush(stdout);
+    }
+
     /* Diagnose: den gesuchten Hash in den synthetischen Namespace-Eintrag
        schreiben, damit 0x24FD74 ihn garantiert findet. */
     if (c != NULL && pc == 0x0024FD74u && getenv("HLE_REG_ENABLE") &&
