@@ -300,6 +300,7 @@ static int service_from_name(const char *name) {
     if (strcmp(name, "cam:u") == 0) return SVC_CAM;
     if (strcmp(name, "ac:u") == 0) return SVC_AC;
     if (strcmp(name, "boss:U") == 0) return SVC_BOSS;
+    if (strcmp(name, "boss:u") == 0) return SVC_BOSS;
     if (strcmp(name, "cecd:u") == 0) return SVC_CECD;
     if (strcmp(name, "news:u") == 0) return SVC_NEWS;
     if (strcmp(name, "ndm:u") == 0) return SVC_NDM;
@@ -596,6 +597,17 @@ static void apt_command(Ipc *r, uint32_t *p) {
                 ipc_put(r, ev1);
                 ipc_put(r, ev2);
             }
+            break;
+        }
+        case 0x9: { /* NotifyToWait (Azahar: 1 Wort Result) */
+            ipc_begin(r, 0x9, 1, 0);
+            put_result(r);
+            break;
+        }
+        case 0x4B: { /* AppletUtility (Azahar: Result + Ausgabewert) */
+            ipc_begin(r, 0x4B, 2, 0);
+            put_result(r);
+            ipc_put(r, 0);
             break;
         }
         case 0x4F: { /* SetAppCpuTimeLimit */
