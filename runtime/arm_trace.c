@@ -634,10 +634,19 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
 
     /* Diagnose: RomFS-Archive-Mount fn_00284D24 (schreibt den Guard
        [archive+0xA34] bei 0x285038). */
+    if (c != NULL && g_te.romfs_log && pc == 0x0012BC58u) {
+        uint32_t sc = c->r[1];
+        printf("[scene] %08X E0..108:", sc);
+        for (int i = 0; i < 11; i++)
+            printf(" %08X", arm_mem_read(c, sc + 0xE0u + (uint32_t)i * 4u, 4));
+        printf("\n");
+        fflush(stdout);
+    }
     if (c != NULL && g_te.romfs_log &&
         ((pc >= 0x00284D24u && pc < 0x002851ACu) ||
          (pc >= 0x0011B98Cu && pc < 0x0011BAB4u) ||
-         (pc >= 0x0012BC58u && pc < 0x0012BEBCu))) {
+         (pc >= 0x0012BC58u && pc < 0x0012BEBCu) ||
+         (pc >= 0x00289AA0u && pc < 0x00289C00u))) {
         static int rn = 0;
         if (rn < 400) {
             rn++;
