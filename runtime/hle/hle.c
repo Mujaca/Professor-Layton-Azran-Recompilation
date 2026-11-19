@@ -1351,8 +1351,10 @@ static void dsp_command(Ipc *r, uint32_t *p) {
             ipc_put(r, 0);
             break;
         }
-        case 0x0001: { /* RecvData -> Result + Wert (1 = DSP-Finalize-Quittung) */
-            ipc_begin(r, 0x0001, 2, 0);
+        case 0x0001: { /* RecvData -> Result + Wert (1 = DSP-Finalize-Quittung)
+                         Layout wie 0x0002: Wert muss auf cmdbuf[2] liegen. */
+            ipc_begin(r, 0x0001, 3, 0);
+            ipc_put(r, 0);
             ipc_put(r, 0);
             ipc_put(r, 1);
             break;
@@ -1363,10 +1365,20 @@ static void dsp_command(Ipc *r, uint32_t *p) {
             const char *dr = getenv("HLE_DSP_READY");
             if (dr != NULL && *dr != 0) warm = (unsigned)strtoul(dr, NULL, 0);
             dsp_calls++;
-            ipc_begin(r, r->cmd, 2, 0);
-            ipc_put(r, 0);
+            /* Reply-Layout: ipc_put schreibt ab buf[0], ipc_finish setzt buf[0]=Header
+               -> das Ergebnis rutscht auf cmdbuf[1]. Die SDK liest den Wert aus
+               cmdbuf[2], deshalb hier explizit drei Woerter ablegen. */
+            ipc_begin(r, r->cmd, 3, 0);
+            ipc_put(r, 0);          /* -> cmdbuf[1] = Result */
+            ipc_put(r, 0);          /* -> cmdbuf[2] = Wert (Platzhalter) */
             ipc_put(r, getenv("HLE_DSP_ZERO") ? 0u
                         : ((warm && dsp_calls <= warm) ? 0u : 1u));
+            if (getenv("HLE_DSP_DEBUG")) {
+                printf("[dsp2] n=%d t=%d w=%d:", r->normal, r->translate, r->written);
+                for (int i = 0; i < r->written; i++) printf(" %08X", r->buf[i]);
+                printf("\n");
+                fflush(stdout);
+            }
             break;
         }
         case 0x0003: case 0x0005: case 0x0007: case 0x0009:
