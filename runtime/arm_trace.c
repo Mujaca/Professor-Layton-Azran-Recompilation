@@ -127,6 +127,15 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
        Tick-Zaehlung spinnt sie zig-tausend Runden und blockiert den
        kooperativen Scheduler (Thread 2 blieb dort haengen). */
     if (c != NULL && pc == 0x0011A818u) c->r[0] = 0;
+    if (c != NULL && pc == 0x0024FD74u && getenv("HLE_FA_DEBUG")) {
+        static int nfamax = 0;
+        if (nfamax < 12) {
+            nfamax++;
+            printf("[fahash] ns=%08X hash=%08X\n", c->r[1], c->r[0]);
+            fflush(stdout);
+        }
+    }
+
     /* Asset-Registry synthetisch bestuecken: Deskriptor {basis,stride,count}
        plus Eintraege. Layout laut 0x2B95F8: [+0x14] != 0 (aktiv),
        [+0x1C] = Zeiger auf den Dateinamen. */
@@ -142,16 +151,22 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
             memcpy(c->mem + e + 0x14u, &ns, 4);
             memcpy(c->mem + e + 0x1Cu, &names[i], 4);
         }
-        /* Fake-Namespace fuer 0x24FD74: {.., off=0x10, .., count=1}
-           und ein Eintrag mit dem Hash von "arc" (0x10AAF679). */
+        /* Fake-Namespace (2 Ebenen) fuer 0x24FD74:
+           ns 0x403000 {+4=0x100 Eintraege, +12=0x200 Kindtabelle, +24=1}
+           Eintrag 0x403100 {Hash(arc)=0x10AAF679, +8=0, +10=1}
+           Kind    0x403200 {Hash(lt6_a.fa)=0xD56041E4} */
         {
-            uint32_t z = 0, off = 0x10u, cnt = 2u;
+            uint32_t z = 0, eoff = 0x100u, ctab = 0x200u, cnt = 1u;
             uint32_t hash_arc = 0x10AAF679u, hash_fa = 0xD56041E4u;
+            uint16_t cidx = 0u, ccnt = 1u;
             memcpy(c->mem + 0x00403000u, &z, 4);
-            memcpy(c->mem + 0x00403004u, &off, 4);
+            memcpy(c->mem + 0x00403004u, &eoff, 4);
+            memcpy(c->mem + 0x0040300Cu, &ctab, 4);
             memcpy(c->mem + 0x00403018u, &cnt, 2);
-            memcpy(c->mem + 0x00403010u, &hash_arc, 4);
-            memcpy(c->mem + 0x00403024u, &hash_fa, 4);
+            memcpy(c->mem + 0x00403100u, &hash_arc, 4);
+            memcpy(c->mem + 0x00403108u, &cidx, 2);
+            memcpy(c->mem + 0x0040310Au, &ccnt, 2);
+            memcpy(c->mem + 0x00403200u, &hash_fa, 4);
         }
         memcpy(c->mem + 0x00401000u, &d0, 4);
         memcpy(c->mem + 0x00401004u, &d1, 4);
