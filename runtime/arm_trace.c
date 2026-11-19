@@ -138,8 +138,20 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         uint32_t one = 1u;
         for (int i = 0; i < 4; i++) {
             uint32_t e = 0x00400000u + (uint32_t)i * 0xC0u;
-            memcpy(c->mem + e + 0x14u, &one, 4);
+            uint32_t ns = 0x00403000u;
+            memcpy(c->mem + e + 0x14u, &ns, 4);
             memcpy(c->mem + e + 0x1Cu, &names[i], 4);
+        }
+        /* Fake-Namespace fuer 0x24FD74: {.., off=0x10, .., count=1}
+           und ein Eintrag mit dem Hash von "arc" (0x10AAF679). */
+        {
+            uint32_t z = 0, off = 0x10u, cnt = 2u;
+            uint32_t hash_arc = 0x10AAF679u, hash_fa = 0xD56041E4u;
+            memcpy(c->mem + 0x00403000u, &z, 4);
+            memcpy(c->mem + 0x00403004u, &off, 4);
+            memcpy(c->mem + 0x00403018u, &cnt, 2);
+            memcpy(c->mem + 0x00403010u, &hash_arc, 4);
+            memcpy(c->mem + 0x00403024u, &hash_fa, 4);
         }
         memcpy(c->mem + 0x00401000u, &d0, 4);
         memcpy(c->mem + 0x00401004u, &d1, 4);
