@@ -119,6 +119,40 @@ static void hle_gpu_submit_once(void)
     }
 }
 
+/* VBlank-/Frame-Dispatcher: Die Engine registriert ihre Tick-Tasks in der
+   Callback-Tabelle 0x3D7C50 (Basis [0x3D91E8+0x1C]); Slot 2 = 0x00134818
+   (Timebase 0x400) und Slot 3 = 0x0013485C (Timebase 0x401). Ohne diese
+   Aufrufe bleiben die Resource-Manager-Zaehler 0x40B4C4/0x40B4C8 auf 0 und
+   fn_0028F250 wartet endlos. Wir rufen die Tasks alle ~16 ms im Kontext der
+   Haupt-CPU auf (wie ein VBlank-Handler beim echten 3DS). */
+static void hle_tick(ArmCpu *c) {
+    static int init = 0, on = 1, busy = 0;
+    static uint64_t last = 0;
+    static uint32_t period_ms = 2;
+    uint64_t now;
+    uint32_t sr[16], sn, sz, sc, sv, st, sq;
+    if (!init) {
+        const char *e = getenv("HLE_TICK");
+        const char *p;
+        on = !(e != NULL && e[0] == '0');
+        p = getenv("HLE_TICK_MS");
+        if (p != NULL && *p != 0) period_ms = (uint32_t)strtoul(p, NULL, 0);
+        init = 1;
+    }
+    if (!on || busy || c == NULL || c != g_frame_cpu) return;
+    now = (uint64_t)GetTickCount64();
+    if (now - last < (uint64_t)period_ms) return;
+    last = now;
+    busy = 1;
+    memcpy(sr, c->r, sizeof(sr));
+    sn = c->n; sz = c->z; sc = c->c; sv = c->v; st = c->t; sq = c->qflag;
+    arm_call_guest_pub(c, 0x00134818u);
+    arm_call_guest_pub(c, 0x0013485Cu);
+    memcpy(c->r, sr, sizeof(sr));
+    c->n = sn; c->z = sz; c->c = sc; c->v = sv; c->t = st; c->qflag = sq;
+    busy = 0;
+}
+
 void hle_pump(void) {
     /* Diagnose: Event-Queue (Objekt 0x408508) testweise als "1 Eintrag"
        markieren, damit die Warteschleife (0x28992C) sie verlaesst. */
@@ -2002,6 +2036,7 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     if (lim) g_ipc_log_limit = atoi(lim);
     setup_config_mem(c);
     arm_pump_hook = hle_pump;
+    arm_tick_hook = hle_tick;
     g_frame_cpu = c;
     /* Der VBlank-Thread war nie gestartet (g_vblank_run blieb 0) ->
        keine Handle-Signalisierung, kein HID-Update, kein Relay-Flag. */

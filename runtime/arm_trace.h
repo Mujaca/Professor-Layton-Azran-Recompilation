@@ -14,6 +14,9 @@ extern "C" {
 
 extern uint32_t arm_last_block;
 extern void (*arm_pump_hook)(void);
+/* Pro Block mit der laufenden CPU aufgerufen: dient als VBlank-/Frame-
+   Dispatcher (die Engine registriert ihre Tick-Tasks in 0x3D7C50). */
+extern void (*arm_tick_hook)(struct ArmCpu *c);
 extern uint32_t arm_watch_pc;
 
 void arm_trace_open(const char *path);

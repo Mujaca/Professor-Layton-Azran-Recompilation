@@ -10,6 +10,7 @@
 
 uint32_t arm_last_block = 0;
 void (*arm_pump_hook)(void) = NULL;
+void (*arm_tick_hook)(struct ArmCpu *c) = NULL;
 uint32_t arm_watch_pc = 0;
 static int g_watch_hits = 0;
 
@@ -394,6 +395,7 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         fflush(stdout);
     }
     if (arm_pump_hook != NULL) arm_pump_hook();
+    if (arm_tick_hook != NULL) arm_tick_hook(c);
     if (c != NULL) {
         {
             uint32_t ti = (c->tpidruro >> 12) & 0xFu;
