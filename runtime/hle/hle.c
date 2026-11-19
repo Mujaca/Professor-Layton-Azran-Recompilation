@@ -1320,10 +1320,14 @@ static void dsp_command(Ipc *r, uint32_t *p) {
             break;
         }
         case 0x0002: case 0x0004: case 0x000B: { /* RecvDataIsReady/IsEmpty/CheckSemaphore */
+            static unsigned dsp_calls = 0;
+            unsigned warm = 0;
+            const char *dr = getenv("HLE_DSP_READY");
+            if (dr != NULL && *dr != 0) warm = (unsigned)strtoul(dr, NULL, 0);
+            dsp_calls++;
             ipc_begin(r, r->cmd, 2, 0);
             ipc_put(r, 0);
-            ipc_put(r, getenv("HLE_DSP_READY")
-                        ? (uint32_t)strtoul(getenv("HLE_DSP_READY"), NULL, 0) : 1u);
+            ipc_put(r, (warm && dsp_calls <= warm) ? 0u : 1u);
             break;
         }
         case 0x0003: case 0x0005: case 0x0007: case 0x0009:
