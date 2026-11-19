@@ -46,8 +46,19 @@ with open(ROM, "rb") as f, open(OUT, "wb") as g:
 
 print("geschrieben:", OUT)
 
-# Hinweis: Der IVFC-Header bleibt UNVERAENDERT (Original aus dem ROM).
-# Frueher wurden hier die Groessen bei 0x10/0x18/0x20 ueberschrieben; das
-# hat den Mount der Engine nicht verbessert (fn_0012BC58 liefert weiter 0),
-# daher ist der originale Header die ehrlichere Variante.
+# Der Parser der Engine liest die IVFC-Groessen als u32 bei 0x10/0x18/0x20
+# und die Bereiche SEQUENZIELL:
+#   0x208 + L1  -> Metadaten,  danach L2,  danach Metadaten (L3).
+# Deshalb muessen dort die tatsaechlichen Bereichsgroessen stehen:
+#   L1 = 0x1000 - 0x208 = 0xDF8, L2 = 0, L3 = 0xDD80 (Metadaten).
+# Mit dem unveraenderten ROM-Header liest die Engine sonst 0 Byte
+# (gemessen: off=0x208 len=0x0) und kann das RomFS nicht parsen.
+with open(OUT, "r+b") as f:
+    f.seek(0x10)
+    f.write(struct.pack("<I", 0xDF8))
+    f.seek(0x18)
+    f.write(struct.pack("<I", 0))
+    f.seek(0x20)
+    f.write(struct.pack("<I", 0xDD80))
+print("IVFC-Groessen fuer die Engine gesetzt: L1=0xDF8 L2=0 L3=0xDD80")
 
