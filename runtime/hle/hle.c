@@ -1734,6 +1734,14 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
         memcpy(c->mem + 0x3D67C4u, &fsh, 4);
         printf("[hle] fs-Client-Handle 0x3D91D0/0x3D66C4 = %u\n", fsh);
     }
+    /* Asset-Registry-Guard: [0x3EC028+0xA34] = 0x3ECA5C. Ist er 0,
+       verwirft 0x2919DC jede .fa-Registrierung (Sprung nach 0x291A7C).
+       Der Setter 0x285038 laeuft bei uns nicht -> Guard vorbelegen. */
+    if (getenv("HLE_REG_ENABLE")) {
+        uint32_t one = 1;
+        memcpy(c->mem + 0x3ECA5Cu, &one, 4);
+        printf("[hle] Asset-Registry-Guard 0x3ECA5C = 1\n");
+    }
     if (getenv("HLE_GSP_CLIENT")) {
         /* GSP-Client-Objekt 0x3D91E8 vorinitialisieren: Statusfeld +0x18 = 6 und
          * ein echter gsp::Gpu-Handle in +0x10, damit die Spiel-Renderlogik den

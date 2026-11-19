@@ -97,6 +97,9 @@ void arm_mem_write(ArmCpu *c, uint32_t addr, int size, uint32_t val) {
         size == 4 && val == 0 &&
         (addr == 0x3D67C4u || addr == 0x3D66C4u))
         val = 1;
+    /* Asset-Registry-Guard vor dem BSS-Clear des Loaders schuetzen. */
+    if (getenv("HLE_REG_ENABLE") && size == 4 && addr == 0x3ECA5Cu && val == 0)
+        val = 1;
     if (g_memwatch != 0 &&
         ((g_memwatch_end != 0) ? (addr >= g_memwatch && addr < g_memwatch_end)
                                : ((addr & ~3u) == g_memwatch)) &&
