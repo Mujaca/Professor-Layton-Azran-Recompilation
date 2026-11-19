@@ -701,6 +701,24 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         } else if (pc == 0x00289858u) {
             printf("[queue-start] elems=%lu batchsize(r8)=%u\n", q_el, c->r[8]);
             fflush(stdout);
+        } else if (pc == 0x00283418u) {
+            static unsigned long an = 0;
+            an++;
+            if (an <= 4u || (an % 1000u) == 0) {
+                printf("[arena-free] n=%lu obj=%08X lr=%08X\n", an, c->r[0], c->r[14]);
+                fflush(stdout);
+            }
+        } else if (pc == 0x00274CA8u) {
+            static unsigned long ln = 0;
+            ln++;
+            if (ln <= 5u) {
+                printf("[rmlist] n=%lu node=%08X lr=%08X r1=%08X\n",
+                       ln, c->r[0], c->r[14], c->r[1]);
+                fflush(stdout);
+            } else if ((ln % 200u) == 0) {
+                printf("[rmlist] n=%lu node=%08X lr=%08X\n", ln, c->r[0], c->r[14]);
+                fflush(stdout);
+            }
         } else if (pc == 0x001233C0u) {
             static unsigned long dn2 = 0;
             static unsigned long long t0 = 0;
