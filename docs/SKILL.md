@@ -23,7 +23,7 @@ python tools\build_boot.py                  # -> out\boot.exe (headless)
 
 # Pflicht-Selbsttests
 python tests\mvp_selftest.py                # 13/13
-python tools\selftest_tools.py              # 7/7
+python tools\selftest_tools.py              # 12/12
 ```
 
 `python tools\build_port.py` regeneriert `build/gen_boot.c` (dauert) und

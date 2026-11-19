@@ -80,6 +80,55 @@ def parse_perfmap(path: Path) -> PerfMap:
     return PerfMap(total, thread_total, pcs, edges)
 
 
+_TDUMP_HDR = re.compile(
+    r"^\[tdump\]\s+thread\s+([0-9A-Fa-f]+)\s+letzte\s+(\d+)\s+Bloecke")
+_TDUMP_ROW = re.compile(
+    r"^\[tdump\]\s+\d+\s+pc=([0-9A-Fa-f]+)\s+lr=([0-9A-Fa-f]+)")
+_WD_ROW = re.compile(
+    r"^\[wd\]\s+thread\s+([0-9A-Fa-f]+):\s+pc=0x([0-9A-Fa-f]+)")
+
+
+def parse_tdump(path: Path) -> PerfMap:
+    """tdump-Log (tests/boot.c Watchdog) in ein PerfMap umwandeln.
+
+    Die Ringpuffer sind nur Stichproben; sie reichen fuer Spin-/PC-Analyse,
+    nicht fuer eine belastbare Blockrate.
+    """
+    lines = common.read_text_auto(path).splitlines()
+    per_thread: Dict[int, List[int]] = {}
+    cur = None
+    for line in lines:
+        m = _TDUMP_HDR.match(line)
+        if m:
+            cur = int(m.group(1), 16)
+            per_thread.setdefault(cur, [])
+            continue
+        m = _TDUMP_ROW.match(line)
+        if m and cur is not None:
+            per_thread[cur].append(int(m.group(1), 16))
+            continue
+        m = _WD_ROW.match(line)
+        if m:
+            ti = int(m.group(1), 16)
+            per_thread.setdefault(ti, []).append(int(m.group(2), 16))
+    counts: Dict[Tuple[int, int], int] = {}
+    edges: Dict[Tuple[int, int, int], int] = {}
+    thread_total: Dict[int, int] = {}
+    for ti, seq in per_thread.items():
+        for pc in seq:
+            counts[(pc, ti)] = counts.get((pc, ti), 0) + 1
+            thread_total[ti] = thread_total.get(ti, 0) + 1
+        prev = 0
+        for pc in seq:
+            if prev and pc < prev and prev - pc < 0x10000:
+                k = (ti, prev, pc)
+                edges[k] = edges.get(k, 0) + 1
+            prev = pc
+    return PerfMap(sum(thread_total.values()), thread_total,
+                    [(pc, ti, n) for (pc, ti), n in counts.items()],
+                    [Edge(ti, frm, to, n) for (ti, frm, to), n in edges.items()])
+
+
 def _hot_functions(graph: callgraph.Graph,
                    pcs: Sequence[Tuple[int, int, int]],
                    thread: int) -> List[Tuple[int, int]]:
@@ -413,6 +462,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         description="Warteschleifen, gelesene Felder und Schreiber lokalisieren")
     p.add_argument("--run", action="store_true", help="Port mit Perfmap starten")
     p.add_argument("--perfmap", help="vorhandenes Perfmap-File")
+    p.add_argument("--log", help="tdump-Log ([tdump]/[wd]) auswerten")
     p.add_argument("--perfmap-out", help="Zielpfad fuer --run")
     p.add_argument("--thread", type=int, help="nur diesen Gast-Thread analysieren")
     p.add_argument("--exe", choices=["boot", "port"], default="boot")
@@ -428,6 +478,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     graph = callgraph.load(verbose=args.verbose)
     if args.perfmap:
         pm_path = Path(args.perfmap)
+    elif args.log:
+        pm_path = Path(args.log)
     elif args.run:
         pm_path = _run_perfmap(args)
     else:
@@ -435,8 +487,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not pm_path.is_file():
             pm_path = _run_perfmap(args)
     if not pm_path.is_file():
-        common.fail("Perfmap fehlt: %s" % pm_path)
-    pm = parse_perfmap(pm_path)
+        common.fail("Perfmap/Log fehlt: %s" % pm_path)
+    if args.log:
+        pm = parse_tdump(pm_path)
+    else:
+        pm = parse_perfmap(pm_path)
     lines = analyze(graph, pm, args.thread, not args.no_dynamic,
                     args.exe, args.dynamic_timeout)
     common.print_summary(lines, 60 if not args.verbose else 200)

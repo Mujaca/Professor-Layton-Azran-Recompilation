@@ -123,14 +123,21 @@ def compare(ref: trace_diff.Trace, port: trace_diff.Trace, kind: str,
             after: Optional[str], collapse: bool = True) -> dict:
     if kind == "srv":
         base = trace_diff.compare(ref, port, "srv")
+        missing = list(base.get("missing", []))
         return {
             "mode": base.get("mode"),
             "anchor": after,
             "first": base.get("first"),
-            "missing": base.get("missing", []),
+            "missing": missing,
+            "missing_total": len(missing),
+            "missing_detail": [{"display": "srv:GetServiceHandle(%s)" % m,
+                                "key": "srv.getservicehandle(%s)" % m.lower(),
+                                "line": 0, "count": 1} for m in missing],
             "extra": base.get("extra", []),
             "ref_events": len(ref.events),
             "port_events": len(port.events),
+            "ref_after": len(ref.events),
+            "port_after": len(port.events),
             "context": [],
         }
 

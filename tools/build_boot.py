@@ -22,9 +22,13 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="build_boot")
     p.add_argument("--regen", action="store_true",
                    help="vorher python tools/build_port.py ausfuehren")
-    p.add_argument("--out", default=str(ROOT / "out" / "boot.exe"))
+    p.add_argument("--out", help="Default: out/boot.exe bzw. out/port.exe")
     p.add_argument("--opt", default="-O1")
+    p.add_argument("--port", action="store_true",
+                   help="tests/port.c + window.c statt tests/boot.c bauen")
     args = p.parse_args(argv)
+    if not args.out:
+        args.out = str(ROOT / "out" / ("port.exe" if args.port else "boot.exe"))
 
     if args.regen:
         r = subprocess.run([sys.executable, str(TOOLS / "build_port.py")],
@@ -39,14 +43,17 @@ def main(argv=None) -> int:
         "-I", str(ROOT / "runtime"),
         "-I", str(ROOT / "runtime" / "hle"),
         "-I", str(ROOT / "runtime" / "platform"),
-        str(ROOT / "tests" / "boot.c"),
+        str(ROOT / "tests" / ("port.c" if args.port else "boot.c")),
         str(ROOT / "build" / "gen_boot.c"),
         str(ROOT / "runtime" / "arm_cpu.c"),
         str(ROOT / "runtime" / "arm_trace.c"),
         str(ROOT / "runtime" / "gpu.c"),
         str(ROOT / "runtime" / "hle" / "hle.c"),
-        "-o", args.out,
     ]
+    if args.port:
+        cmd.append(str(ROOT / "runtime" / "platform" / "window.c"))
+        cmd.extend(["-luser32", "-lgdi32"])
+    cmd.extend(["-o", args.out])
     print("baue %s ..." % args.out)
     r = subprocess.run(cmd, cwd=str(ROOT))
     if r.returncode != 0:
