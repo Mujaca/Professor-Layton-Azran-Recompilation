@@ -33,12 +33,10 @@ static DWORD WINAPI watchdog(LPVOID unused) {
             { int tc = 0; unsigned long long tk = 0; hle_tick_stats(&tc, &tk);
               printf("[wd] tickcalls=%d tick=%llu\n", tc, tk); }
             if (getenv("HLE_DUMP_RANGE")) {
-                static int rd = 0;
-                if (!rd) {
+                if (1) {
                     const char *spec = getenv("HLE_DUMP_RANGE");
                     unsigned lo = 0, hi = 0;
                     if (sscanf(spec, "%x,%x", &lo, &hi) == 2 && hi > lo) {
-                        rd = 1;
                         for (unsigned a = lo; a + 4 <= hi; a += 4) {
                             uint32_t w = 0;
                             memcpy(&w, g_mem + (a & 0x1FFFFFFFu), 4);

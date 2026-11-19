@@ -127,6 +127,23 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
        Tick-Zaehlung spinnt sie zig-tausend Runden und blockiert den
        kooperativen Scheduler (Thread 2 blieb dort haengen). */
     if (c != NULL && pc == 0x0011A818u) c->r[0] = 0;
+    /* Asset-Registry-Deskriptor kurz vor dem Insert frisch setzen, weil der
+       BSS-Clear des Loaders ihn sonst wieder auf 0 zieht. */
+    if (c != NULL && pc == 0x00104E44u && getenv("HLE_REG_ENABLE")) {
+        uint32_t d0 = 0x00400000u, d1 = 0x000000C0u, d2 = 8u, g = 0x00401000u;
+        memcpy(c->mem + 0x00401000u, &d0, 4);
+        memcpy(c->mem + 0x00401004u, &d1, 4);
+        memcpy(c->mem + 0x00401008u, &d2, 4);
+        memcpy(c->mem + 0x3ECA5Cu, &g, 4);
+        {
+            uint32_t rb0 = 0, rb2 = 0, rg = 0;
+            memcpy(&rb0, c->mem + 0x00401000u, 4);
+            memcpy(&rb2, c->mem + 0x00401008u, 4);
+            memcpy(&rg, c->mem + 0x3ECA5Cu, 4);
+            printf("[regdesc] desc0=%08X count=%08X guard=%08X\n", rb0, rb2, rg);
+            fflush(stdout);
+        }
+    }
     /* Diagnose: Asset-Kette (Registrierung -> Dispatcher) mitzaehlen. */
     if (c != NULL && getenv("HLE_ASSET_TRACE")) {
         if (pc == 0x001013F0u || pc == 0x001014D4u || pc == 0x00291A88u ||

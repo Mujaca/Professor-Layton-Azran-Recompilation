@@ -1738,9 +1738,15 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
        verwirft 0x2919DC jede .fa-Registrierung (Sprung nach 0x291A7C).
        Der Setter 0x285038 laeuft bei uns nicht -> Guard vorbelegen. */
     if (getenv("HLE_REG_ENABLE")) {
-        uint32_t one = 1;
-        memcpy(c->mem + 0x3ECA5Cu, &one, 4);
-        printf("[hle] Asset-Registry-Guard 0x3ECA5C = 1\n");
+        /* Deskriptor {basis, stride, count} + Eintragsarray synthetisch anlegen. */
+        uint32_t desc[3];
+        uint32_t g = 0x00401000u;
+        desc[0] = 0x00400000u;
+        desc[1] = 0x000000C0u;
+        desc[2] = 8u;
+        memcpy(c->mem + g, desc, sizeof(desc));
+        memcpy(c->mem + 0x3ECA5Cu, &g, 4);
+        printf("[hle] Asset-Registry-Deskriptor 0x00401000 {0x00400000,0xC0,8}, Guard=0x401000\n");
     }
     if (getenv("HLE_GSP_CLIENT")) {
         /* GSP-Client-Objekt 0x3D91E8 vorinitialisieren: Statusfeld +0x18 = 6 und
