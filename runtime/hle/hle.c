@@ -1339,6 +1339,28 @@ static void cfg_command(Ipc *r, uint32_t *p) {
     }
 }
 
+static void ptm_command(Ipc *r, uint32_t *p) {
+    (void)p;
+    switch (r->cmd) {
+        case 0x000B: { /* GetStepHistory -> Result */
+            ipc_begin(r, 0x000B, 2, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x000C: { /* GetTotalStepCount -> Result + u32 */
+            ipc_begin(r, 0x000C, 3, 0);
+            ipc_put(r, 0);      /* Dummy (Header-Slot) */
+            ipc_put(r, 0);      /* Result */
+            ipc_put(r, 0);      /* StepCount */
+            break;
+        }
+        default:
+            generic_command(r, SVC_PTM_U);
+            break;
+    }
+}
+
 static void dsp_command(Ipc *r, uint32_t *p) {
     switch (r->cmd) {
         case 0x0011: { /* LoadComponent: (u32 size, u16 prog, u16 data, MappedBuffer) */
@@ -1714,6 +1736,9 @@ static void dispatch_ipc(uint32_t handle) {
             break;
         case SVC_DSP:
             dsp_command(&r, params);
+            break;
+        case SVC_PTM_U:
+            ptm_command(&r, params);
             break;
         case SVC_GSP_GPU:
             gsp_command(&r, params);
