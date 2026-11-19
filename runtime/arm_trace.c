@@ -127,6 +127,15 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
        Tick-Zaehlung spinnt sie zig-tausend Runden und blockiert den
        kooperativen Scheduler (Thread 2 blieb dort haengen). */
     if (c != NULL && pc == 0x0011A818u) c->r[0] = 0;
+    if (c != NULL && pc == 0x0022ADE4u && getenv("HLE_FA_DEBUG")) {
+        static int nl2 = 0;
+        if (nl2 < 8) {
+            nl2++;
+            printf("[falevel2] hash=%08X base=%08X cnd=%08X\n",
+                   c->r[11], c->r[8], c->r[4]);
+            fflush(stdout);
+        }
+    }
     if (c != NULL && pc == 0x0024FD74u && getenv("HLE_FA_DEBUG")) {
         static int nfamax = 0;
         if (nfamax < 12) {
@@ -157,7 +166,7 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
            Kind    0x403200 {Hash(lt6_a.fa)=0xD56041E4} */
         {
             uint32_t z = 0, eoff = 0x100u, ctab = 0x200u, cnt = 1u;
-            uint32_t hash_arc = 0x10AAF679u, hash_fa = 0xD56041E4u;
+            uint32_t hash_arc = 0x10AAF679u, hash_fa = 0x2A7A446Cu;
             uint16_t cidx = 0u, ccnt = 1u;
             memcpy(c->mem + 0x00403000u, &z, 4);
             memcpy(c->mem + 0x00403004u, &eoff, 4);
