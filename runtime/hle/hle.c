@@ -696,14 +696,13 @@ static void apt_command(Ipc *r, uint32_t *p) {
                 rx_calls++;
                 if (!g_apt_wakeup_sent && rx_calls >= wake_at) {
                     if (r->cmd == 0x000D) g_apt_wakeup_sent = 1;
-                    ipc_begin(r, r->cmd, 4, 2 + (r->translate >= 2 ? 2 : 0));
+                    ipc_begin(r, r->cmd, 4, r->translate >= 2 ? 2 : 0);
                     ipc_put(r, 0);          /* ResultSuccess */
                     ipc_put(r, getenv("HLE_APT_SENDER")
                                 ? (uint32_t)strtoul(getenv("HLE_APT_SENDER"), NULL, 0) : 0x101u);
                     ipc_put(r, getenv("HLE_APT_SIG")
                                 ? (uint32_t)strtoul(getenv("HLE_APT_SIG"), NULL, 0) : 0x11u);
                     ipc_put(r, 0);          /* Parameter-Groesse */
-                    ipc_put_handle_copy(r, 0);
                     if (r->translate >= 2) {
                         ipc_put(r, dsc_flags);
                         ipc_put(r, dsc_addr);
