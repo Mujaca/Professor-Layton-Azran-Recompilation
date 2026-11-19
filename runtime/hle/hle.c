@@ -1790,6 +1790,17 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
        verwirft 0x2919DC jede .fa-Registrierung (Sprung nach 0x291A7C).
        Der Setter 0x285038 laeuft bei uns nicht -> Guard vorbelegen. */
     /* Diagnose: Frame-Callback-Slot des Pacing-Loops (0x3D7C74) vorbelegen. */
+    /* GPU: vom Spiel gebaute Kommandodaten ausfuehren (Adresse via Env). */
+    if (getenv("HLE_GPU_TEST_ADDR")) {
+        uint32_t ca = (uint32_t)strtoul(getenv("HLE_GPU_TEST_ADDR"), NULL, 16);
+        uint32_t cs = 0x2000u;
+        if (getenv("HLE_GPU_TEST_SIZE"))
+            cs = (uint32_t)strtoul(getenv("HLE_GPU_TEST_SIZE"), NULL, 16);
+        {
+            int nops2 = gpu_run_command_list(c, ca, cs);
+            printf("[gputest2] addr=%08X size=%X ops=%d\n", ca, cs, nops2);
+        }
+    }
     /* GPU-Selbsttest: synthetische Kommandoliste ausfuehren. */
     if (getenv("HLE_GPU_TEST")) {
         uint32_t cl = 0x00410000u;
