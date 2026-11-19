@@ -25,7 +25,7 @@
 
 #include "arm_cpu.h"
 
-#define GPU_FB_DEFAULT 0x1F380000u
+#define GPU_FB_DEFAULT 0x1F000000u  /* Port-Fenster liest hier */
 #define GPU_W 400
 #define GPU_H 240
 

@@ -1332,6 +1332,7 @@ static void gsp_command(Ipc *r, uint32_t *p) {
             uint32_t screen = p[0];
             uint32_t fb = p[1];
             if (screen < 3) g_gsp_fb_addr[screen] = fb;
+            gpu_set_fb(fb);
             g_gsp_last_screen = (int)(screen & 1);
             if (g_log) printf("[gsp] SetBufferSwap screen=%u fb=0x%08X\n", screen, fb);
             ipc_begin(r, 0x0005, 1, 0);
@@ -1789,6 +1790,22 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
        verwirft 0x2919DC jede .fa-Registrierung (Sprung nach 0x291A7C).
        Der Setter 0x285038 laeuft bei uns nicht -> Guard vorbelegen. */
     /* Diagnose: Frame-Callback-Slot des Pacing-Loops (0x3D7C74) vorbelegen. */
+    /* GPU-Selbsttest: synthetische Kommandoliste ausfuehren. */
+    if (getenv("HLE_GPU_TEST")) {
+        uint32_t cl = 0x00410000u;
+        uint32_t glist[7];
+        glist[0] = 0x0400FF00u;      /* ClearColor gruen */
+        glist[1] = 0x050FFFFFu;      /* FillRect, Anzahl folgt */
+        glist[2] = 4u;
+        glist[3] = 0u; glist[4] = 0u; glist[5] = 400u; glist[6] = 240u;
+        memcpy(c->mem + cl, glist, sizeof(glist));
+        {
+            int nops = gpu_run_command_list(c, cl, (uint32_t)sizeof(glist));
+            printf("[gputest] ops=%d fb=%08X px=%02X%02X%02X\n", nops,
+                   gpu_get_fb(), c->mem[0x1F000000u + 2],
+                   c->mem[0x1F000000u + 1], c->mem[0x1F000000u + 0]);
+        }
+    }
     if (getenv("HLE_FRAME_CB")) {
         uint32_t cb = (uint32_t)strtoul(getenv("HLE_FRAME_CB"), NULL, 16);
         memcpy(c->mem + 0x3D7C74u, &cb, 4);
