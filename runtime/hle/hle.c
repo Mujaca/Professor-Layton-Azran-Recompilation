@@ -711,21 +711,15 @@ static void apt_command(Ipc *r, uint32_t *p) {
                 rx_calls++;
                 if (!g_apt_wakeup_sent && rx_calls >= wake_at) {
                     if (r->cmd == 0x000D) g_apt_wakeup_sent = 1;
-                    /* Header belegt cmdbuf[0]; ein Dummy-Wort sorgt dafuer,
-                       dass Result/Sender/Signal/Groesse auf cmdbuf[1..4] liegen. */
-                    ipc_begin(r, r->cmd, 9, r->translate >= 2 ? 2 : 0);
-                    ipc_put(r, 0);          /* Dummy (Header-Slot) */
+                    /* Referenz (Azahar-Trace): sender=0, signal=1 (Wakeup),
+                       Groesse 0. Layout: 宝贵的4 Normalwoerter + Translate-Echo. */
+                    ipc_begin(r, r->cmd, 4, r->translate >= 2 ? 2 : 0);
                     ipc_put(r, 0);          /* ResultSuccess */
                     ipc_put(r, getenv("HLE_APT_SENDER")
-                                ? (uint32_t)strtoul(getenv("HLE_APT_SENDER"), NULL, 0) : 0x101u);
+                                ? (uint32_t)strtoul(getenv("HLE_APT_SENDER"), NULL, 0) : 0u);
                     ipc_put(r, getenv("HLE_APT_SIG")
-                                ? (uint32_t)strtoul(getenv("HLE_APT_SIG"), NULL, 0) : 0x11u);
-                    ipc_put(r, 0x10u);      /* Parameter-Groesse */
-                    /* Launch-Parameter-Payload (16 Byte, Nullwerte) */
-                    ipc_put(r, 0);
-                    ipc_put(r, 0);
-                    ipc_put(r, 0);
-                    ipc_put(r, 0);
+                                ? (uint32_t)strtoul(getenv("HLE_APT_SIG"), NULL, 0) : 1u);
+                    ipc_put(r, 0);          /* Parameter-Groesse */
                     if (r->translate >= 2) {
                         ipc_put(r, dsc_flags);
                         ipc_put(r, dsc_addr);
