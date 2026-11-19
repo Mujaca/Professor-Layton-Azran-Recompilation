@@ -1312,6 +1312,15 @@ static void cfg_command(Ipc *r, uint32_t *p) {
             ipc_put(r, 2);      /* EUR */
             break;
         }
+        case 0x0003: { /* GetTransferableId(salt) -> Result + u64 */
+            ipc_begin(r, 0x0003, 4, 0);
+            ipc_put(r, 0);              /* Dummy (Header-Slot) */
+            ipc_put(r, 0);              /* Result */
+            ipc_put(r, 0x12345678u);    /* low  */
+            ipc_put(r, 0x00000000u);    /* high */
+            if (g_log) printf("[cfg] GetTransferableId salt=0x%X -> ok\n", p[0]);
+            break;
+        }
         case 0x0005: { /* GetSystemModel */
             ipc_begin(r, 0x0005, 2, 0);
             ipc_put(r, 0);
