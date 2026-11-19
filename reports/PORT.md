@@ -1,108 +1,95 @@
 # Port-Status
 
-Letzte Aktualisierung: 2026-11-18 (Static-Init-Durchbruch)
+Letzte Aktualisierung: 2026-11-19
+
+## Ziel
+
+Erste lauffaehige Version des Hauptmenues: das **offiziell vom Spiel gerenderte**
+Hauptmenue im Port (nicht der Port-Platzhalter `draw_menu`).
 
 ## Kurzfassung
 
-Der Boot kommt jetzt **deutlich weiter als der alte `err:f`-Fatalpfad**: Die
-TLS-Reply-Semantik stimmt, `fs:USER`/`cfg:u`/`APT:U` antworten korrekt, und die
-**C++-Konstruktortabelle (304 Einträge, 0x3D0648..0x3D0B08) wird ausgeführt**.
-Aktuell hängt das Programm in einem der Konstruktoren (Endlosschleife); das
-Menü rendert daher noch nicht.
+Der Port fuehrt das Spiel aus (Static Recompilation, HLE, Win32-GDI-Anzeige).
+Alle **HLE- und Grafik-Teile sind belegt funktionsfaehig**, aber das Spiel
+erzeugt im Port **keine PICA-Kommandoliste** und rendert daher nichts.
 
-## Diese Session behobene Fehler
+* Platzhalter-Menue: `draw_menu` (echtes SMDH-Icon + Spieltitel, `--keys`)
+* Screenshot: `out/shot.bmp` (288.054 Byte, 400x240)
+* Selbsttests: 13/13
 
-| # | Fehler | Wirkung |
-|---|---|---|
-| 1 | `arm_pool_alloc` gab **Host-Zeiger** (64->32 Bit abgeschnitten) zurueck | SDK-Objekte lagen ausserhalb des Gast-Adressraums |
-| 2 | `SERVICE_NAMES[33]` out-of-bounds (SVC_FILE) | `printf` las Muell-Zeiger, Boot hing bei Datei-IPCs |
-| 3 | fs-Reply-Layout war 3+2 statt **1+2** (Result + MoveHandle) | SDK wertete jede Antwort als Fehler -> `err:f` |
-| 4 | TLS-Felder `+0x8C` als "Reply-Groesse" ueberschrieben | Reply-Wort 3 (Signal/Param) zerstoert |
-| 5 | `APT:U 0x0D/0x0E` (ReceiveParameter) fehlte | Endlos-Warteschleife auf `Wakeup` |
-| 6 | `scan.py`: **`blx reg` als Blockende** | Code nach indirekten Aufrufen fehlte |
-| 7 | Thumb-Init-Loop `0x100974` rief nur den 1. Konstruktor | `add r4,#4`/`bne` fehlten (Folge von #6) |
-| 8 | **SP-Korruption** durch defekte Epiloge | Stackframes der Konstruktoren zerstoert |
-| 9 | Konstruktorziele waren keine Seeds | `arm_call_guest` -> No-Op |
-| 10 | **`vldr`/`vstr`/`ldrd`/`strd` mit `[pc, #imm]`** nutzten `c->r[15]` (nie gepflegt) statt `pc+8` | Float-Konvertierung las Muell -> Endlosschleife `0x24B2DC` |
-| 11 | Thumb-`main`-Entry `0x0010009D` fehlte als Seed | `_start` rief ins Leere |
-| 12 | **Keine Gast-Threads**: `svcCreateThread` legte nur ein Handle an | SDK-Worker liefen nie, Warteschleifen blockierten |
-| 13 | `svcGetSystemTick` lieferte nur 32 Bit | Timeout-Vergleiche (64 Bit) liefen nie ab |
-| 14 | `svcArbitrateAddress` ohne Decrement | Futex-/Wartecounter bewegte sich nicht |
+## Verifizierter Stand
 
-## Threading-Modell (neu)
+### HLE / Services
 
-- Jeder Gast-Thread = Host-Thread mit eigenem `ArmCpu` (gemeinsamer Speicher,
-  eigenes TLS-Fenster `0x1FF82000 + n*0x1000`).
-- Ein globaler `CRITICAL_SECTION` sorgt dafuer, dass immer nur **ein** Gast-
-  Thread laeuft (wie eine Single-Core-Konsole).
-- Blockierende SVCs (`SleepThread`, `WaitSynchronization*`, `ArbitrateAddress`)
-  geben den Lock kurz ab (`guest_yield`), damit andere Threads laufen.
+| Punkt | Beleg |
+|---|---|
+| 13 Dienste, natuerlicher `srv:GetServiceHandle "gsp::Gpu"` | `[srvname] "gsp::Gpu" ... -> 50` |
+| GSP-Init: `0x0016`, `0x0013`, `0x0010`, `0x001E` | `HLE_LOG=1` |
+| FS mit echten Pfaden (`/gamecoin.dat`) | `[fs] OpenFile "/gamecoin.dat" -> ok` |
+| 0 Fatals | `cmd=0x0001 n=32` = 0 |
+| APT-Wakeup, DSP-Audio, VBlank-Thread | Logs |
+| Reply-Formen gegen Azahar korrigiert (APT Initialize, Y2R 0x000D/0x000F, DSP 0x0002) | `tools/azahar/src/core/hle/service/...` |
 
-## Aktueller Stand
+### Grafik-Pipeline (technisch vollstaendig)
 
-Der Boot laeuft (Konstruktor-Init, bis zu 11 Gast-Threads, ~233.000 IPCs in
-8 s), initialisiert `fs/cfg/ptm/hid/ndm/dsp/y2r/APT` – aber **`gsp::Gpu` wird
-weiterhin nicht geoeffnet** (0 Treffer) -> kein Frame.
+| Punkt | Beleg |
+|---|---|
+| Mini-PICA-Ausfuehrer + Rasterizer (`runtime/gpu.c`) | `[gputest] ops=1 fb=1F000000 px=00FF00` |
+| `gsp SetCommandList (0x0006)` merkt Adresse/Groesse | `[gsp] SetCommandList addr=0x00410000 size=0x1C` |
+| `TriggerCmdReqQueue (0x000C)` fuehrt die Liste aus | `[gsp] TriggerCmdReqQueue -> 1 Ops` |
+| VRAM-Writes (memwatch, Muster `mw] 1F`) | 400 Treffer |
+| Bildschirm: Port zeigt VRAM-Inhalt | `out/shot.bmp` = 400x240, alles `(0,255,0)` (Testmuster) |
+| `SetBufferSwap (0x0005)` schaltet Framebuffer (`gpu_set_fb`) | Code |
+| Spielcode-Sender `fn_0013E3E0` (`r0` = Zeiger auf Handle-Slot) sendet `0x000C` | `[ipc] blk=0013E3E0 gsp::Gpu cmd=0x000C h=40` |
 
-### Wichtige Korrekturen an den IPC-Reply-Deskriptoren
+### Spielseite (offener Punkt)
 
-Nach Azahar `apt.cpp` / `srv.cpp` / `hid`:
+| Punktbefund | Beleg |
+|---|---|
+| Spiel baut/ sendet **keine** PICA-Liste | GSP-Shmem `0x10002000..` nur 1 Nullwort |
+| Trigger `fn_0013E3E0` wird nie ausgefuehrt | `ARM_WATCH=13E3E0` -> 0 |
+| Alle 7 `0x000C`-Sendestellen identifiziert | Header-Literale `000C0040/80/82/0104` |
+| `gsp::Gpu` im Normallauf | nur `0x0010/0x0013/0x0016/0x001E` |
+| `arc/lt6_a.fa` wird nie geoeffnet | 0 FS-Open, 0 `[file] Read` |
+| VRAM im Normallauf | 0 Writes |
 
-| Dienst | vorher | jetzt |
-|---|---|---|
-| `APT:U 0x0002 Initialize` | 3 Translate-Woerter deklariert, aber **5 geschrieben** (`0x00` + 2x `{0x10,handle}`) -> SDK las `0x10` als zweiten Handle | `{0x04000000 (CopyHandle x2), ev1, ev2}` = exakt 3 Woerter |
-| `APT:U 0x0001 GetLockHandle` | MoveHandle `0x10` | CopyHandle `0x00` |
-| `hid:USER 0x000A GetIPCHandles` | Deskriptor `0x00` (1 Handle) bei 6 Handles | `0x14000000` (CopyHandle x6) |
-| `srv: 0x0005 GetServiceHandle` | Standard 2 Normal + 2 Translate | Standard 1 Normal + 2 Translate (Citra `MakeBuilder(1,2)`) |
+### Referenz
 
-Effekt: `y2r:u` wird jetzt als eigener Dienst geoeffnet; der Haupt-Thread
-kommt weiter, erreicht aber die Grafik-Initialisierung noch nicht.
+* Emulator: Azahar 2126.2 (`%APPDATA%\azahar`), laeuft mit dem ROM.
+* Referenzbild des gerenderten Titel-/Menue-Screens:
+  `reports/azahar_topscreen.png`, `reports/azahar_bottomscreen.png`
+  (PrintWindow-Capture, 28,37 % gesaettigte Pixel, teal Hintergrund, helles Logoband).
 
-### Weitere Fixes
+## Werkzeuge / Schalter (Auswahl)
 
-- `APT:U 0x000D/0x000E` "kein Parameter" liefert jetzt den korrekten
-  Result-Code `0xC8A0CFEF` (NoData=1007, Applet=51, InvalidState=5, Status=25)
-  statt eines geratenen Werts.
-- `svcGetThreadId` (0x37) liefert pro Thread eine **eindeutige** ID
-  (`0x100 + TLS-Index`) statt konstant `0x100` (wichtig fuer Mutex-Besitz).
+* `HLE_GPU_TEST=1` - synthetische Liste ausfuehren (Selbsttest)
+* `HLE_GPU_TEST_ADDR=<hex>`, `HLE_GPU_TEST_SIZE=<hex>` - beliebigen Bereich als Liste ausfuehren
+* `HLE_GPU_SUBMIT=1` - `0x0006` + `0x000C` ueber die echten Handler abgeben
+* `HLE_FRAME_LOOP=<hex>`, `HLE_FRAME_ARG=r0,r1,r2,r3` - Gastfunktion periodisch aufrufen
+* `HLE_FORCE_FRAME=<hex>`, `HLE_FORCE_ARG=...` - einmaliger Aufruf
+* `HLE_VB_ONLY`, `HLE_KEEP_SLOT`, `HLE_REG_ENABLE`, `HLE_FS_PRESET`, `HLE_FRAME_CB`
+* `ARM_WATCH`, `ARM_MEMWATCH`, `ARM_MEMWATCHRD`, `ARM_MEMWATCHRANGE`,
+  `HLE_MEMWATCHVAL`, `HLE_DUMP_RANGE`, `HLE_DUMP_REG`, `HLE_BLKLOGF`
+* `HLE_ASSET_TRACE`, `HLE_FA_DEBUG`, `HLE_THR_LOG`, `HLE_WAIT_LOG`
 
-### Naechster Schritt
+**Wichtig:** Bei Adressen >= `0x10000000` schreibt der Memwatch `mw] 1F...`
+(nicht `mw] 001F...`).
 
-Weiterhin offen: der Haupt-Thread bleibt in APT-/Semaphor-Poll-Schleifen
-(`0x141EA4`, `0x288B80`, `0x11A818`). Als Naechstes `svcArbitrateAddress`
-typkorrekt blockieren (echte Warteschlange) und `srv:0x000B`-Poll durch echtes
-Event-Blocking ersetzen; danach `gsp::Gpu` + PICA-2D-Renderer auf `0x1F000000`.
+## Build / Test
 
-## Umgesetzte HLE-Bausteine
-
-- Config-Memory, ControlMemory (Bump), QueryMemory, GetSystemInfo, Threads,
-  Mutex-Bootstrap, `srv:` komplett, `APT:U` (1,2,3,4,5,0x0D,0x0E,0x4F),
-  `hid:USER` (0x0A), `ndm:u`, `ptm:u` (Stub), `cfg:u` (GetConfig/Region/Model),
-  `fs:USER` (OpenFile, OpenFileDirectly, OpenArchive/Control/Close, CreateFile,
-  GetFreeBytes) + Datei-Service (Read/Write/GetSize/SetSize/Close) auf `out/romfs`.
-- Reply-Semantik: Puffer liegt in `TLS+0x80`; Wort 1 = Result, danach Normal-
-  Parameter, danach Translate-Parameter (MoveHandle = `0x10`, Handle).
-
-## Kommandos
-
-```powershell
-python tools\build_port.py
-python tests\mvp_selftest.py        # 13/13
+```
+python tools\build_port.py      -> out/port.exe
+python tests\mvp_selftest.py    -> 13/13
 .\out\port.exe out\romfs --shot out\shot.bmp
 ```
 
-## Nachtrag: Stand nach den letzten Runden
+## Offene Aufgabe
 
-- `svcArbitrateAddress` blockiert echt **und gibt den Guest-Lock dabei ab** ->
-  IPC-Durchsatz 60 -> 12.148 (boot) bzw. ~66.000 (port).
-- Echte Zeitbasis (`GetTickCount64*268111`) und echtes `svcSleepThread`.
-- `dsp::DSPord` vollstaendig (RecvData/SendData/Fifo/Semaphore/GetSemaphoreEventHandle).
-- Datei-Service korrekt (0x0801 Read, 0x0802 Write, 0x0803 GetSize,
-  0x0804 SetSize, 0x0805 Close, 0x0806 Flush); Save-Dateien entstehen in
-  `out/savedata`.
-- FS-Reply ohne Datei liefert jetzt die richtige Wortzahl (Read/Write 2 Woerter,
-  GetSize 3 Woerter), damit die SDK nicht "0 Bytes" als Fehler wertet.
+Der Spielzustand, der den Render-Task (und damit die PICA-Liste + Trigger)
+erzeugt, ist ohne Emulator-Trace nicht bestimmt. Naechste Ansaetze:
 
-Offen: `gsp::Gpu` wird weiterhin 0x geoeffnet; `0x1F000000` bleibt leer.
-Der Haupt-Thread wartet in der SDK-Terminierungs-/Idle-Schleife `0x288AAC`
-(Byte `[0x40B381]` = Terminate-Flag, Callback `[0x40B4E0]`).
+1. GSP-Shmem `0x10002000` + `ARM_WATCH=13E3E0` gemeinsam beobachten (bisher:
+   nur 1 Nullwort, Trigger nie).
+2. Erzeuger des Render-Tasks suchen (Task-Tabelle im Umfeld `0x0040F038`).
+3. FA-/Szenen-Phase: `arc/lt6_a.fa` muesste geoeffnet und der Archivindex
+   aufgebaut werden (FA-Resolver `0x36C54C`/`0x2B95F8` funktioniert bereits).
