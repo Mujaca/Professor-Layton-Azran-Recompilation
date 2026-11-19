@@ -120,6 +120,18 @@ static void hle_gpu_submit_once(void)
 }
 
 void hle_pump(void) {
+    /* Diagnose: Event-Queue (Objekt 0x408508) testweise als "1 Eintrag"
+       markieren, damit die Warteschleife (0x28992C) sie verlaesst. */
+    if (getenv("HLE_QUEUE_FAKE") && g_frame_cpu != NULL) {
+        static int qdone = 0;
+        if (!qdone) {
+            uint16_t cnt = 1, pos = 0;
+            qdone = 1;
+            memcpy(g_frame_cpu->mem + 0x40852Eu, &cnt, 2);   /* [+0x26] Anzahl */
+            memcpy(g_frame_cpu->mem + 0x408528u, &pos, 2);   /* [+0x20] Position */
+            printf("[queuefake] 0x408508: count=1 pos=0\n");
+        }
+    }
     if (getenv("HLE_GPU_SUBMIT")) hle_gpu_submit_once();
     /* Diagnose: Frame-Aufbau periodisch aus dem Gast-Kontext aufrufen. */
     {
