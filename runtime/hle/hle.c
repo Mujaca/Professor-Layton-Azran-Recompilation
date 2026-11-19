@@ -608,7 +608,9 @@ static void apt_command(Ipc *r, uint32_t *p) {
             ipc_begin(r, 1, 3, 2);
             put_result(r);
             ipc_put(r, attrs);
-            ipc_put(r, 1);            /* state = running */
+            /* state: Azahar liefert 0; per HLE_APT_STATE zur Diagnose aenderbar. */
+            ipc_put(r, getenv("HLE_APT_STATE")
+                        ? (uint32_t)strtoul(getenv("HLE_APT_STATE"), NULL, 0) : 0u);
             ipc_put_handle_copy(r, lock);
             break;
         }
@@ -683,14 +685,15 @@ static void apt_command(Ipc *r, uint32_t *p) {
                 dsc_addr = p[r->normal + 1];
             }
             /* Hardware-Semantik: GlanceParameter (0x000E) konsumiert den
-               Parameter NICHT, ReceiveParameter (0x000D) schon. Sonst
-               sieht die App den Wakeup nie, weil sie zuerst glance-t. */
-            if (1) {   /* Wakeup immer liefern (Diagnose) */
+               Parameter NICHT, ReceiveParameter (0x000D) schon. Der Wakeup
+               wird genau EINMAL geliefert; danach NoData, damit die App
+               weiterlaeuft statt endlos Wakeups zu verarbeiten. */
+            if (!g_apt_wakeup_sent) {
                 if (r->cmd == 0x000D) g_apt_wakeup_sent = 1;
                 ipc_begin(r, r->cmd, 4, 2 + (r->translate >= 2 ? 2 : 0));
                 ipc_put(r, 0);          /* ResultSuccess */
-                ipc_put(r, 0);          /* sender_id = None */
-                ipc_put(r, 1);          /* signal = Wakeup */
+                ipc_put(r, 0x101);      /* sender_id = HomeMenu */
+                ipc_put(r, 0x11);       /* signal = WakeupToLaunchApplication */
                 ipc_put(r, 0);          /* Parameter-Groesse */
                 ipc_put_handle_copy(r, 0);
                 if (r->translate >= 2) {
