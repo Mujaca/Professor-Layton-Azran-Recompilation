@@ -1254,10 +1254,10 @@ static void dsp_command(Ipc *r, uint32_t *p) {
             ipc_put(r, 0);
             break;
         }
-        case 0x0002: case 0x0004: case 0x000B: { /* IsReady/IsEmpty/CheckSemaphore */
+        case 0x0002: case 0x0004: case 0x000B: { /* RecvDataIsReady/IsEmpty/CheckSemaphore */
             ipc_begin(r, r->cmd, 2, 0);
             ipc_put(r, 0);
-            ipc_put(r, 0);
+            ipc_put(r, 1);   /* bereit -> 1 (Azahar: RecvDataIsReady) */
             break;
         }
         case 0x0003: case 0x0005: case 0x0007: case 0x0009:
