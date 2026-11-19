@@ -686,26 +686,34 @@ static void apt_command(Ipc *r, uint32_t *p) {
             }
             /* Hardware-Semantik: GlanceParameter (0x000E) konsumiert den
                Parameter NICHT, ReceiveParameter (0x000D) schon. Der Wakeup
-               wird genau EINMAL geliefert; danach NoData, damit die App
-               weiterlaeuft statt endlos Wakeups zu verarbeiten. */
-            if (!g_apt_wakeup_sent) {
-                if (r->cmd == 0x000D) g_apt_wakeup_sent = 1;
-                ipc_begin(r, r->cmd, 4, 2 + (r->translate >= 2 ? 2 : 0));
-                ipc_put(r, 0);          /* ResultSuccess */
-                ipc_put(r, 0x101);      /* sender_id = HomeMenu */
-                ipc_put(r, 0x11);       /* signal = WakeupToLaunchApplication */
-                ipc_put(r, 0);          /* Parameter-Groesse */
-                ipc_put_handle_copy(r, 0);
-                if (r->translate >= 2) {
-                    ipc_put(r, dsc_flags);
-                    ipc_put(r, dsc_addr);
+               wird erst zugestellt, wenn die Main-Loop bereits pollt
+               (HLE_APT_WAKE_AT, Default 40 Aufrufe), danach NoData. */
+            {
+                static unsigned rx_calls = 0;
+                unsigned wake_at = 40u;
+                const char *wa = getenv("HLE_APT_WAKE_AT");
+                if (wa != NULL && *wa != 0) wake_at = (unsigned)strtoul(wa, NULL, 0);
+                rx_calls++;
+                if (!g_apt_wakeup_sent && rx_calls >= wake_at) {
+                    if (r->cmd == 0x000D) g_apt_wakeup_sent = 1;
+                    ipc_begin(r, r->cmd, 4, 2 + (r->translate >= 2 ? 2 : 0));
+                    ipc_put(r, 0);          /* ResultSuccess */
+                    ipc_put(r, getenv("HLE_APT_SENDER")
+                                ? (uint32_t)strtoul(getenv("HLE_APT_SENDER"), NULL, 0) : 0x101u);
+                    ipc_put(r, getenv("HLE_APT_SIG")
+                                ? (uint32_t)strtoul(getenv("HLE_APT_SIG"), NULL, 0) : 0x11u);
+                    ipc_put(r, 0);          /* Parameter-Groesse */
+                    ipc_put_handle_copy(r, 0);
+                    if (r->translate >= 2) {
+                        ipc_put(r, dsc_flags);
+                        ipc_put(r, dsc_addr);
+                    }
+                    if (g_log) printf("[apt] ReceiveParameter -> Wakeup (#%u)\n", rx_calls);
+                } else {
+                    ipc_begin(r, r->cmd, 1, 0);
+                    /* Result(NoData=1007, Applet=51, InvalidState=5, Status=25) */
+                    ipc_put(r, 0xC8A0CFEFu);
                 }
-                if (g_log) printf("[apt] ReceiveParameter -> Wakeup\n");
-            } else {
-                ipc_begin(r, r->cmd, 1, 0);
-                /* Result(NoData=1007, Applet=51, InvalidState=5, Status=25) */
-                ipc_put(r, 0xC8A0CFEFu);
-                if (g_log) printf("[apt] ReceiveParameter -> NoData\n");
             }
             break;
         }
