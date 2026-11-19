@@ -974,7 +974,32 @@ static void fs_command(Ipc *r, uint32_t *p) {
                 printf("\n");
             }
             FileSlot *slot = NULL;
-            int opened = path[0] ? open_guest_file(path, &slot) : 0;
+            int opened = 0;
+            /* SelfNCCH (Archive-ID 3): das Spiel oeffnet sein eigenes RomFS
+               direkt. Wir liefern das extrahierte Image (IVFC-Header + Daten). */
+            if (r->cmd == 0x0803 && r->normal >= 2 && p[1] == 3) {
+                FILE *img = fopen("out/romfs_image.bin", "rb");
+                if (img != NULL) {
+                    fseek(img, 0, SEEK_END);
+                    long isz = ftell(img);
+                    fseek(img, 0, SEEK_SET);
+                    for (int i = 0; i < MAX_FILES; i++) {
+                        if (!g_files[i].used) {
+                            g_files[i].used = 1;
+                            g_files[i].fp = img;
+                            g_files[i].size = (uint32_t)isz;
+                            snprintf(g_files[i].path, sizeof(g_files[i].path),
+                                     "out/romfs_image.bin");
+                            slot = &g_files[i];
+                            opened = 1;
+                            if (g_log) printf("[fs] SelfNCCH-Image geoeffnet (%ld Byte)\n", isz);
+                            break;
+                        }
+                    }
+                    if (!opened) fclose(img);
+                }
+            }
+            if (!opened && path[0]) opened = open_guest_file(path, &slot);
             if (!opened) {
                 /* Kein/leerer Pfad: als Archiv-Wurzel (Sentinel) bedienen. */
                 for (int i = 0; i < MAX_FILES; i++) {
