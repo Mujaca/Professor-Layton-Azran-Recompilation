@@ -1385,6 +1385,22 @@ static void ptm_command(Ipc *r, uint32_t *p) {
 
 static void dsp_command(Ipc *r, uint32_t *p) {
     switch (r->cmd) {
+        case 0x0010: { /* ReadPipeIfPossible(ch, peer, size + StaticBuffer) */
+            uint32_t dsc_flags = 0, dsc_addr = 0;
+            if (r->translate >= 2) {
+                dsc_flags = p[r->normal];
+                dsc_addr = p[r->normal + 1];
+            }
+            /* Dummy + Result + length_read(0) + Buffer-Echo */
+            ipc_begin(r, 0x0010, 3, 2);
+            ipc_put(r, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 0);
+            ipc_put(r, dsc_flags);
+            ipc_put(r, dsc_addr);
+            if (g_log) printf("[dsp] ReadPipeIfPossible ch=%u size=%u -> 0\n", p[0], p[2]);
+            break;
+        }
         case 0x0011: { /* LoadComponent: (u32 size, u16 prog, u16 data, MappedBuffer) */
             uint32_t dsc_flags = 0, dsc_addr = 0;
             if (r->translate >= 2) {
@@ -1469,9 +1485,10 @@ static void dsp_command(Ipc *r, uint32_t *p) {
             uint32_t ev = (uint32_t)alloc_handle(SVC_OTHER, "dsp-ev");
             Handle *hh = get_handle(ev);
             if (hh) hh->signaled = 1;
-            ipc_begin(r, 0x0016, 1, 2);
-            ipc_put(r, 0);
-            ipc_put_handle(r, ev);
+            ipc_begin(r, 0x0016, 1, 3);
+            ipc_put(r, 0);          /* Dummy (Header-Slot) */
+            ipc_put(r, 0);          /* Result -> cmdbuf[1] */
+            ipc_put_handle(r, ev);  /* Descriptor+Handle -> cmdbuf[2],[3] */
             if (g_log) printf("[dsp] GetSemaphoreEventHandle -> %u\n", ev);
             break;
         }
