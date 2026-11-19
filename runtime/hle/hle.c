@@ -732,7 +732,7 @@ static void apt_command(Ipc *r, uint32_t *p) {
                 } else {
                     ipc_begin(r, r->cmd, 1, 0);
                     /* Result(NoData=1007, Applet=51, InvalidState=5, Status=25) */
-                    ipc_put(r, 0xC8A0CFEFu);
+                    ipc_put(r, 0xC8A303EFu);   /* Result(NoData=1007, Applet=51, InvalidState=5, Status=25) */
                 }
             }
             break;
