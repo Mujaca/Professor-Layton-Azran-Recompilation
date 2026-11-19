@@ -711,13 +711,21 @@ static void apt_command(Ipc *r, uint32_t *p) {
                 rx_calls++;
                 if (!g_apt_wakeup_sent && rx_calls >= wake_at) {
                     if (r->cmd == 0x000D) g_apt_wakeup_sent = 1;
-                    ipc_begin(r, r->cmd, 4, r->translate >= 2 ? 2 : 0);
+                    /* Header belegt cmdbuf[0]; ein Dummy-Wort sorgt dafuer,
+                       dass Result/Sender/Signal/Groesse auf cmdbuf[1..4] liegen. */
+                    ipc_begin(r, r->cmd, 9, r->translate >= 2 ? 2 : 0);
+                    ipc_put(r, 0);          /* Dummy (Header-Slot) */
                     ipc_put(r, 0);          /* ResultSuccess */
                     ipc_put(r, getenv("HLE_APT_SENDER")
                                 ? (uint32_t)strtoul(getenv("HLE_APT_SENDER"), NULL, 0) : 0x101u);
                     ipc_put(r, getenv("HLE_APT_SIG")
                                 ? (uint32_t)strtoul(getenv("HLE_APT_SIG"), NULL, 0) : 0x11u);
-                    ipc_put(r, 0);          /* Parameter-Groesse */
+                    ipc_put(r, 0x10u);      /* Parameter-Groesse */
+                    /* Launch-Parameter-Payload (16 Byte, Nullwerte) */
+                    ipc_put(r, 0);
+                    ipc_put(r, 0);
+                    ipc_put(r, 0);
+                    ipc_put(r, 0);
                     if (r->translate >= 2) {
                         ipc_put(r, dsc_flags);
                         ipc_put(r, dsc_addr);
@@ -1797,7 +1805,7 @@ static DWORD WINAPI vblank_thread(LPVOID p) {
             /* Nur Handles wecken, auf die wirklich gewartet wird. */
             if (g_handles[k].used &&
                 (getenv("HLE_VB_ONLY") == NULL || g_wait_seen[k]) &&
-                !(getenv("HLE_APT_ONLY") != NULL &&
+                !((getenv("HLE_APT_ONLY") == NULL || getenv("HLE_APT_ONLY")[0] != '0') &&
                   (strcmp(g_handles[k].name, "apt-param") == 0 ||
                    strcmp(g_handles[k].name, "apt-notif") == 0)))
                 g_handles[k].signaled = 1;
