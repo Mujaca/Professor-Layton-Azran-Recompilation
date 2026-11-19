@@ -1742,7 +1742,8 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
         memcpy(c->mem + 0x3D9200u, &st, 4);
         printf("[hle] GSP-State 0x3D9200 = 6 gesetzt\n");
     }
-    if (getenv("HLE_FS_HANDLE") == NULL || getenv("HLE_FS_HANDLE")[0] != '0') {
+    if (getenv("HLE_FS_PRESET") != NULL &&
+        (getenv("HLE_FS_HANDLE") == NULL || getenv("HLE_FS_HANDLE")[0] != '0')) {
         /* Client-Handle-Slot 0x3D91D0 (Setter fn_00107AD4 wird nie gerufen):
            gueltigen fs:USER-Handle eintragen, sonst laufen alle "rom:"-
            Zugriffe mit Handle 0 und werfen FatalError. */
