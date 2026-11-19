@@ -1403,13 +1403,19 @@ static void y2r_command(Ipc *r, uint32_t *p) {
             ipc_put(r, 0);
             break;
         }
-        case 0x000F: { /* GetTransferEndEvent -> Result + MoveHandle(Event) */
+        case 0x000D: { /* SetTransferEndInterrupt -> (Result, enabled) */
+            ipc_begin(r, 0x000D, 2, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x000F: { /* GetTransferEndEvent -> (Result) + CopyObject(Event) */
             uint32_t ev = (uint32_t)alloc_handle(SVC_OTHER, "y2r-ev");
             Handle *hh = get_handle(ev);
             if (hh) hh->signaled = 1;
             ipc_begin(r, 0x000F, 1, 2);
             ipc_put(r, 0);
-            ipc_put_handle(r, ev);
+            ipc_put_handle_copy(r, ev);
             if (g_log) printf("[y2r] GetTransferEndEvent -> %u\n", ev);
             break;
         }
