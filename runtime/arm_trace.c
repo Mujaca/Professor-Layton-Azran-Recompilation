@@ -219,6 +219,21 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         }
     }
 
+    /* Diagnose: den gesuchten Hash in den synthetischen Namespace-Eintrag
+       schreiben, damit 0x24FD74 ihn garantiert findet. */
+    if (c != NULL && pc == 0x0024FD74u && getenv("HLE_REG_ENABLE") &&
+        c->r[1] == 0x00403000u) {
+        uint32_t h = c->r[0];
+        memcpy(c->mem + 0x00403100u, &h, 4);
+    }
+
+    /* Diagnose: Kind-Ebene des FA-Baums ebenfalls auf den gesuchten Hash
+       biegen (Block 0x22ADE4 hat den Hash in r11). */
+    if (c != NULL && pc == 0x0022ADE4u && getenv("HLE_REG_ENABLE")) {
+        uint32_t h2 = c->r[11];
+        memcpy(c->mem + 0x00403200u, &h2, 4);
+    }
+
     /* Diagnose: FA-Resolver immer als "gefunden" behandeln, damit die Engine
        anschliessend die Datei ueber fs:USER oeffnen muss. */
     if (c != NULL && pc == 0x0036C600u && getenv("HLE_FA_FAKE_OK"))
