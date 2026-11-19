@@ -300,6 +300,13 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         } else if (pc == 0x00289858u) {
             printf("[queue-start] elems=%lu batchsize(r8)=%u\n", q_el, c->r[8]);
             fflush(stdout);
+        } else if (pc == 0x001233C4u) {
+            static unsigned long dn = 0;
+            dn++;
+            if ((dn % 50u) == 0) {
+                printf("[dtor] n=%lu r4=%u\n", dn, c->r[4]);
+                fflush(stdout);
+            }
         }
     }
 
