@@ -1351,10 +1351,10 @@ static void dsp_command(Ipc *r, uint32_t *p) {
             ipc_put(r, 0);
             break;
         }
-        case 0x0001: { /* RecvData -> Result + Wert */
+        case 0x0001: { /* RecvData -> Result + Wert (1 = DSP-Finalize-Quittung) */
             ipc_begin(r, 0x0001, 2, 0);
             ipc_put(r, 0);
-            ipc_put(r, 0);
+            ipc_put(r, 1);
             break;
         }
         case 0x0002: case 0x0004: case 0x000B: { /* RecvDataIsReady/IsEmpty/CheckSemaphore */
