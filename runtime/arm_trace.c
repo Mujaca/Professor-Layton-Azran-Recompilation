@@ -6,6 +6,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <windows.h>
 
 uint32_t arm_last_block = 0;
 void (*arm_pump_hook)(void) = NULL;
@@ -121,13 +122,65 @@ int arm_trace_is_open(void) {
 }
 
 
+/* Env-Flags einmal cachen: getenv() pro Block war der Hauptbremsklotz
+   (7 Lookups je ausgefuehrtem Block). */
+typedef struct {
+    int init;
+    int fa_debug, reg_enable, reg_debug, asset_trace, queue_log;
+    int fa_reg_ok, fa_fake_ok, fa_always, blklogf, force_asset;
+    int dump_fatal, dump_r3, watch_pool, perf, rm_adv;
+    uint32_t blklog_lo;
+} TraceEnv;
+static TraceEnv g_te;
+
+static int envset(const char *n) { return getenv(n) != NULL; }
+
+static void trace_env_init(void) {
+    const char *v;
+    memset(&g_te, 0, sizeof(g_te));
+    g_te.init = 1;
+    g_te.fa_debug = envset("HLE_FA_DEBUG");
+    g_te.reg_enable = envset("HLE_REG_ENABLE");
+    g_te.reg_debug = envset("HLE_REG_DEBUG");
+    g_te.asset_trace = envset("HLE_ASSET_TRACE");
+    g_te.queue_log = envset("HLE_QUEUE_LOG");
+    g_te.fa_reg_ok = envset("HLE_FA_REG_OK");
+    g_te.fa_fake_ok = envset("HLE_FA_FAKE_OK");
+    g_te.fa_always = envset("HLE_FA_ALWAYS");
+    g_te.force_asset = envset("HLE_FORCE_ASSET");
+    g_te.dump_fatal = envset("HLE_DUMP_FATAL");
+    g_te.dump_r3 = envset("HLE_DUMP_R3");
+    g_te.watch_pool = envset("ARM_WATCH_POOL");
+    g_te.perf = envset("HLE_PERF");
+    g_te.rm_adv = envset("HLE_RM_ADV");
+    v = getenv("HLE_BLKLOGF");
+    if (v != NULL && *v != 0) {
+        g_te.blklogf = 1;
+        g_te.blklog_lo = (uint32_t)strtoul(v, NULL, 16);
+    }
+}
+
 void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
+    if (!g_te.init) trace_env_init();
     arm_last_block = pc;
+    if (g_te.perf) {
+        static unsigned long long nb = 0, next = 1000000ULL;
+        static unsigned long long t0 = 0;
+        nb++;
+        if (t0 == 0) t0 = (unsigned long long)GetTickCount64();
+        if (nb >= next) {
+            unsigned long long now = (unsigned long long)GetTickCount64();
+            printf("[perf] %llu blocks in %llu ms (%.0f/s)\n", nb,
+                   now - t0, (double)nb * 1000.0 / (double)(now - t0));
+            fflush(stdout);
+            next += 1000000ULL;
+        }
+    }
     /* Kalibrierte SDK-Busy-Wait-Verzoegerung sofort beenden: ohne echte
        Tick-Zaehlung spinnt sie zig-tausend Runden und blockiert den
        kooperativen Scheduler (Thread 2 blieb dort haengen). */
     if (c != NULL && pc == 0x0011A818u) c->r[0] = 0;
-    if (c != NULL && pc == 0x0022ADE4u && getenv("HLE_FA_DEBUG")) {
+    if (c != NULL && pc == 0x0022ADE4u && g_te.fa_debug) {
         static int nl2 = 0;
         if (nl2 < 8) {
             nl2++;
@@ -136,7 +189,7 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
             fflush(stdout);
         }
     }
-    if (c != NULL && pc == 0x0024FD74u && getenv("HLE_FA_DEBUG")) {
+    if (c != NULL && pc == 0x0024FD74u && g_te.fa_debug) {
         static int nfamax = 0;
         if (nfamax < 12) {
             nfamax++;
@@ -148,7 +201,7 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
     /* Asset-Registry synthetisch bestuecken: Deskriptor {basis,stride,count}
        plus Eintraege. Layout laut 0x2B95F8: [+0x14] != 0 (aktiv),
        [+0x1C] = Zeiger auf den Dateinamen. */
-    if (c != NULL && getenv("HLE_REG_ENABLE") &&
+    if (c != NULL && g_te.reg_enable &&
         (pc == 0x00104E44u || pc == 0x0036C54Cu)) {
         static const uint32_t names[4] = { 0x001015F8u, 0x00101608u,
                                            0x00101618u, 0x00101628u };
@@ -190,14 +243,14 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         memcpy(c->mem + 0x00401004u, &d1, 4);
         memcpy(c->mem + 0x00401008u, &d2, 4);
         memcpy(c->mem + 0x3ECA5Cu, &g, 4);
-        if (getenv("HLE_REG_DEBUG")) {
+        if (g_te.reg_debug) {
             printf("[regfill] pc=%08X desc=%08X cnt=%u name0=%08X\n",
                    pc, d0, d2, names[0]);
             fflush(stdout);
         }
     }
     /* Diagnose: beim FA-Scan den Request-Struct zeigen, den 0x2B95F8 parst. */
-    if (c != NULL && pc == 0x002B9664u && getenv("HLE_REG_DEBUG")) {
+    if (c != NULL && pc == 0x002B9664u && g_te.reg_debug) {
         static int dbg = 0;
         if (dbg < 3) {
             dbg++;
@@ -210,7 +263,7 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         }
     }
     /* Diagnose: Asset-Kette (Registrierung -> Dispatcher) mitzaehlen. */
-    if (c != NULL && getenv("HLE_ASSET_TRACE")) {
+    if (c != NULL && g_te.asset_trace) {
         if (pc == 0x001013F0u || pc == 0x001014D4u || pc == 0x00291A88u ||
             pc == 0x002919DCu || pc == 0x00291AA0u) {
             printf("[asset-trace] pc=%08X r0=%08X r1=%08X r2=%08X r3=%08X\n",
@@ -219,8 +272,38 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         }
     }
 
+    /* Diagnose: Resource-Manager-Zaehler weiterschalten, damit die
+       Warteschleife fn_0028F250 (Zustand 0x400) verlaesst. */
+    if (c != NULL && g_te.rm_adv && pc == 0x0028F284u) {
+        uint32_t v = 0;
+        memcpy(&v, c->mem + 0x0040B4C4u, 4);
+        v++;
+        memcpy(c->mem + 0x0040B4C4u, &v, 4);
+    }
+
+    /* Diagnose: Fortschritt der Asset-Queue (fn_002895D0, Elemente 0x28 Byte).
+       0x28992C = ein Element wird gepusht, 0x289928 = Batch fertig. */
+    if (c != NULL && g_te.queue_log) {
+        static unsigned long q_el = 0, q_batch = 0;
+        if (pc == 0x0028992Cu) {
+            q_el++;
+            if ((q_el % 500u) == 0) {
+                printf("[queue] elems=%lu batches=%lu\n", q_el, q_batch);
+                fflush(stdout);
+            }
+        } else if (pc == 0x00289928u) {
+            q_batch++;
+            printf("[queue-batch] #%lu after %lu elems (r0=%u)\n",
+                   q_batch, q_el, c->r[0]);
+            fflush(stdout);
+        } else if (pc == 0x00289858u) {
+            printf("[queue-start] elems=%lu batchsize(r8)=%u\n", q_el, c->r[8]);
+            fflush(stdout);
+        }
+    }
+
     /* Diagnose: Ergebnis der Archiv-Query in der Asset-Registrierung zeigen. */
-    if (c != NULL && pc == 0x00103BD8u && getenv("HLE_FA_DEBUG")) {
+    if (c != NULL && pc == 0x00103BD8u && g_te.fa_debug) {
         uint32_t out1 = arm_mem_read(c, c->r[13] + 0x10u, 4);
         uint32_t out2 = arm_mem_read(c, c->r[13] + 0x0Cu, 4);
         printf("[assetreg] r0=%08X r7=%08X out10=%08X out0C=%08X\n",
@@ -228,7 +311,7 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         fflush(stdout);
     }
     /* Diagnose: der Registrierung einen gueltigen Eintrag/Offset liefern. */
-    if (c != NULL && pc == 0x00103BD8u && getenv("HLE_FA_REG_OK")) {
+    if (c != NULL && pc == 0x00103BD8u && g_te.fa_reg_ok) {
         uint32_t ent = 0x00403200u, off = 0x00000000u;
         memcpy(c->mem + ((c->r[13] + 0x10u) & 0x1FFFFFFFu), &ent, 4);
         memcpy(c->mem + ((c->r[13] + 0x0Cu) & 0x1FFFFFFFu), &off, 4);
@@ -236,7 +319,7 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
 
     /* Diagnose: den gesuchten Hash in den synthetischen Namespace-Eintrag
        schreiben, damit 0x24FD74 ihn garantiert findet. */
-    if (c != NULL && pc == 0x0024FD74u && getenv("HLE_REG_ENABLE") &&
+    if (c != NULL && pc == 0x0024FD74u && g_te.reg_enable &&
         c->r[1] == 0x00403000u) {
         uint32_t h = c->r[0];
         memcpy(c->mem + 0x00403100u, &h, 4);
@@ -244,32 +327,32 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
 
     /* Diagnose: Kind-Ebene des FA-Baums ebenfalls auf den gesuchten Hash
        biegen (Block 0x22ADE4 hat den Hash in r11). */
-    if (c != NULL && pc == 0x0022ADE4u && getenv("HLE_REG_ENABLE")) {
+    if (c != NULL && pc == 0x0022ADE4u && g_te.reg_enable) {
         uint32_t h2 = c->r[11];
         memcpy(c->mem + 0x00403200u, &h2, 4);
     }
 
     /* Diagnose: FA-Resolver immer als "gefunden" behandeln, damit die Engine
        anschliessend die Datei ueber fs:USER oeffnen muss. */
-    if (c != NULL && pc == 0x0036C5CCu && getenv("HLE_FA_FAKE_OK")) {
+    if (c != NULL && pc == 0x0036C5CCu && g_te.fa_fake_ok) {
         /* Nicht-leeren Namen vortaeuschen, damit der movne/bne-Zweig nach
            0x36C600 fuehrt (dort wird r0=1 erzwungen). */
         uint8_t one_byte = 1;
         if ((c->r[4] & 0x1FFFFFFFu) + 1u <= c->mem_size)
             memcpy(c->mem + (c->r[4] & 0x1FFFFFFFu), &one_byte, 1);
     }
-    if (c != NULL && pc == 0x0036C600u && getenv("HLE_FA_FAKE_OK"))
+    if (c != NULL && pc == 0x0036C600u && g_te.fa_fake_ok)
         c->r[0] = 1;
 
     /* Diagnose: Hash-Vergleich im FA-Verzeichnis immer "gleich" (die Suche
        findet damit jeden Namen im ersten Eintrag). */
-    if (c != NULL && pc == 0x00390C98u && getenv("HLE_FA_ALWAYS"))
+    if (c != NULL && pc == 0x00390C98u && g_te.fa_always)
         c->r[1] = c->r[0];
 
     /* Diagnose: Blockpfad in [lo, lo+0x4000) protokollieren. */
-    if (c != NULL && getenv("HLE_BLKLOGF")) {
+    if (c != NULL && g_te.blklogf) {
         static uint32_t last = 0xFFFFFFFFu;
-        uint32_t lo = (uint32_t)strtoul(getenv("HLE_BLKLOGF"), NULL, 16);
+        uint32_t lo = g_te.blklog_lo;
         if (pc >= lo && pc < lo + 0x4000u) {
             if (pc != last) {
                 last = pc;
@@ -282,14 +365,14 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
 
     /* 0x101364 bl 0x1034F4 -> bei 0x101370 wird sonst die gesamte
        Asset-Registrierung (0x1013F0) uebersprungen. */
-    if (c != NULL && getenv("HLE_FORCE_ASSET") &&
+    if (c != NULL && g_te.force_asset &&
         (pc == 0x00101368u || pc == 0x00101370u || pc == 0x00101374u)) {
         static int fc2 = 0;
         if (fc2 < 5) { fc2++; printf("[forceasset] pc=%08X r0=%08X\n", pc, c->r[0]); }
         c->r[0] = 1;
     }
     /* Diagnose: an den Datei-Open-Fatal-Sites die Register zeigen. */
-    if (c != NULL && getenv("HLE_DUMP_FATAL") &&
+    if (c != NULL && g_te.dump_fatal &&
         (pc == 0x00107A4Cu || pc == 0x00107B34u)) {
         printf("[fatal-site] pc=%08X r0=%08X r1=%08X r2=%08X r3=%08X "
                "r4=%08X r5=%08X r6=%08X r7=%08X\n",
@@ -299,7 +382,7 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
     }
 
     /* Diagnose: beim "rom:"-Open-Wrapper die Struktur hinter r3 zeigen. */
-    if (c != NULL && pc == 0x00107AE4u && getenv("HLE_DUMP_R3")) {
+    if (c != NULL && pc == 0x00107AE4u && g_te.dump_r3) {
         uint32_t a = c->r[3] & 0x1FFFFFFFu;
         printf("[r3] r1=%08X r2=%08X r3=%08X:", c->r[1], c->r[2], c->r[3]);
         for (int i = 0; i < 8 && a + i * 4 + 4 <= c->mem_size; i++) {
@@ -344,7 +427,7 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
                         (unsigned)arm_mem_read(c, a + 8, 4), (unsigned)arm_mem_read(c, a + 12, 4));
             }
         }
-        if (getenv("ARM_WATCH_POOL")) {
+        if (g_te.watch_pool) {
             uint32_t a = 0x004080C8u;
             fprintf(stderr, "[watch]   pool:");
             for (int i = 0; i < 16; i++)
