@@ -1765,6 +1765,12 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     /* Asset-Registry-Guard: [0x3EC028+0xA34] = 0x3ECA5C. Ist er 0,
        verwirft 0x2919DC jede .fa-Registrierung (Sprung nach 0x291A7C).
        Der Setter 0x285038 laeuft bei uns nicht -> Guard vorbelegen. */
+    /* Diagnose: Frame-Callback-Slot des Pacing-Loops (0x3D7C74) vorbelegen. */
+    if (getenv("HLE_FRAME_CB")) {
+        uint32_t cb = (uint32_t)strtoul(getenv("HLE_FRAME_CB"), NULL, 16);
+        memcpy(c->mem + 0x3D7C74u, &cb, 4);
+        printf("[hle] Frame-Callback 0x3D7C74 = %08X\n", cb);
+    }
     if (getenv("HLE_REG_ENABLE")) {
         /* Deskriptor {basis, stride, count} + Eintragsarray synthetisch anlegen. */
         uint32_t desc[3];
