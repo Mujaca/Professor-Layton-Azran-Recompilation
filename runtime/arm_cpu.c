@@ -91,6 +91,17 @@ uint32_t arm_mem_read(ArmCpu *c, uint32_t addr, int size) {
 
 void arm_mem_write(ArmCpu *c, uint32_t addr, int size, uint32_t val) {
     if (addr >= 0x20000000u) addr &= 0x1FFFFFFFu;
+    /* Diagnose: Schreibzugriffe auf einen bestimmten WERT protokollieren
+       (z. B. den String-Zeiger "arc/lt6_a.fa" = 0x1015F8). */
+    if (size == 4 && getenv("HLE_MEMWATCHVAL")) {
+        static uint32_t want = 0xFFFFFFFFu;
+        if (want == 0xFFFFFFFFu)
+            want = (uint32_t)strtoul(getenv("HLE_MEMWATCHVAL"), NULL, 16);
+        if (val == want) {
+            printf("[mwval] %08X <- %08X pc=%08X\n", addr, val, arm_last_block);
+            fflush(stdout);
+        }
+    }
     /* Diagnose: das Spiel setzt den FS-Session-Slot 0x3D67C4 selbst auf 0
        (fs-Close); der folgende Datei-Open scheitert dann lokal. */
     if ((getenv("HLE_KEEP_SLOT") == NULL || getenv("HLE_KEEP_SLOT")[0] != '0') &&

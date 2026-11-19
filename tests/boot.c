@@ -32,6 +32,48 @@ static DWORD WINAPI watchdog(LPVOID unused) {
                    g_cpu_view->r[15], g_cpu_view->r[13], g_cpu_view->r[14]);
             { int tc = 0; unsigned long long tk = 0; hle_tick_stats(&tc, &tk);
               printf("[wd] tickcalls=%d tick=%llu\n", tc, tk); }
+            if (getenv("HLE_DUMP_RANGE")) {
+                static int rd = 0;
+                if (!rd) {
+                    const char *spec = getenv("HLE_DUMP_RANGE");
+                    unsigned lo = 0, hi = 0;
+                    if (sscanf(spec, "%x,%x", &lo, &hi) == 2 && hi > lo) {
+                        rd = 1;
+                        for (unsigned a = lo; a + 4 <= hi; a += 4) {
+                            uint32_t w = 0;
+                            memcpy(&w, g_mem + (a & 0x1FFFFFFFu), 4);
+                            printf("[range] %08X = %08X\n", a, w);
+                        }
+                    }
+                }
+            }
+            if (getenv("HLE_DUMP_REG")) {
+                static int found = 0;
+                if (!found) {
+                    static const char needle[] = "arc/lt6_a.fa";
+                    const size_t nl = sizeof(needle) - 1;
+                    static const uint32_t ranges[6] = { 0x3E0000u, 0x420000u,
+                                                        0x08000000u, 0x10000000u,
+                                                        0x14000000u, 0x1C000000u };
+                    for (int r = 0; r < 6; r += 2) {
+                        for (uint32_t a = ranges[r]; a + nl < ranges[r + 1]; a++) {
+                            if (memcmp(g_mem + (a & 0x1FFFFFFFu), needle, nl) != 0)
+                                continue;
+                            printf("[reg-found] %08X:", a);
+                            for (int k = 0; k < 8; k++) {
+                                uint32_t w = 0;
+                                uint32_t o = a - 32 + k * 4;
+                                memcpy(&w, g_mem + (o & 0x1FFFFFFFu), 4);
+                                printf(" %08X", w);
+                            }
+                            printf("\n");
+                            found = 1;
+                            break;
+                        }
+                        if (found) break;
+                    }
+                }
+            }
             if (getenv("HLE_DUMPIDLE")) {
                 static const unsigned addrs[] = { 0x40B370u, 0x40B4E8u, 0x40B4E0u,
                                                   0x40B4ECu, 0x40B378u, 0x40B374u,
