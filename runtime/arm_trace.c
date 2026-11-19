@@ -154,11 +154,20 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
                                            0x00101618u, 0x00101628u };
         uint32_t d0 = 0x00400000u, d1 = 0x000000C0u, d2 = 4u, g = 0x00401000u;
         uint32_t one = 1u;
+        /* Beim Resolver-Aufruf (0x36C54C) zeigt r1 auf den gesuchten Namen.
+           Alle Eintraege bekommen diesen Zeiger, damit der Namensvergleich
+           (Pointer-Gleichheit in 0x22AE54) garantiert erfolgreich ist. */
+        uint32_t name_ptrs[4];
+        name_ptrs[0] = names[0]; name_ptrs[1] = names[1];
+        name_ptrs[2] = names[2]; name_ptrs[3] = names[3];
+        if (pc == 0x0036C54Cu && c->r[1] >= 0x00100000u && c->r[1] < 0x20000000u) {
+            name_ptrs[0] = name_ptrs[1] = name_ptrs[2] = name_ptrs[3] = c->r[1];
+        }
         for (int i = 0; i < 4; i++) {
             uint32_t e = 0x00400000u + (uint32_t)i * 0xC0u;
             uint32_t ns = 0x00403000u;
             memcpy(c->mem + e + 0x14u, &ns, 4);
-            memcpy(c->mem + e + 0x1Cu, &names[i], 4);
+            memcpy(c->mem + e + 0x1Cu, &name_ptrs[i], 4);
         }
         /* Fake-Namespace (2 Ebenen) fuer 0x24FD74:
            ns 0x403000 {+4=0x100 Eintraege, +12=0x200 Kindtabelle, +24=1}
@@ -209,6 +218,16 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
             fflush(stdout);
         }
     }
+
+    /* Diagnose: FA-Resolver immer als "gefunden" behandeln, damit die Engine
+       anschliessend die Datei ueber fs:USER oeffnen muss. */
+    if (c != NULL && pc == 0x0036C600u && getenv("HLE_FA_FAKE_OK"))
+        c->r[0] = 1;
+
+    /* Diagnose: Hash-Vergleich im FA-Verzeichnis immer "gleich" (die Suche
+       findet damit jeden Namen im ersten Eintrag). */
+    if (c != NULL && pc == 0x00390C98u && getenv("HLE_FA_ALWAYS"))
+        c->r[1] = c->r[0];
 
     /* Diagnose: Blockpfad in [lo, lo+0x4000) protokollieren. */
     if (c != NULL && getenv("HLE_BLKLOGF")) {
