@@ -1365,7 +1365,8 @@ static void dsp_command(Ipc *r, uint32_t *p) {
             dsp_calls++;
             ipc_begin(r, r->cmd, 2, 0);
             ipc_put(r, 0);
-            ipc_put(r, (warm && dsp_calls <= warm) ? 0u : 1u);
+            ipc_put(r, getenv("HLE_DSP_ZERO") ? 0u
+                        : ((warm && dsp_calls <= warm) ? 0u : 1u));
             break;
         }
         case 0x0003: case 0x0005: case 0x0007: case 0x0009:
