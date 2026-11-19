@@ -467,7 +467,7 @@ typedef struct {
     int init;
     int fa_debug, reg_enable, reg_debug, asset_trace, queue_log;
     int fa_reg_ok, fa_fake_ok, fa_always, blklogf, force_asset;
-    int dump_fatal, dump_r3, watch_pool, perf, rm_adv, romfs_log, romfs_force;
+    int dump_fatal, dump_r3, watch_pool, perf, rm_adv, romfs_log, romfs_force, heap_seed;
     int perfmap, hooks;
     uint32_t blklog_lo;
 } TraceEnv;
@@ -495,6 +495,10 @@ static void trace_env_init(void) {
     g_te.rm_adv = envset("HLE_RM_ADV");
     g_te.romfs_log = envset("HLE_ROMFS_LOG");
     g_te.romfs_force = envset("HLE_ROMFS_FORCE");
+    {
+        const char *hs = getenv("HLE_HEAP_SEED");
+        g_te.heap_seed = !(hs != NULL && hs[0] == '0');
+    }
     g_te.perfmap = envset("HLE_PERFMAP") || (getenv("HLE_PERFMAP_FILE") != NULL);
     g_te.hooks = (getenv("HLE_HOOK") != NULL);
     if (g_te.perfmap) perfmap_init();
@@ -634,6 +638,29 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
 
     /* Diagnose: RomFS-Archive-Mount fn_00284D24 (schreibt den Guard
        [archive+0xA34] bei 0x285038). */
+    /* Diagnose: Scene-Heap-Header (arch+0xD8) vorbelegen, damit der
+       Allokator 0x284AA8 Speicher liefert (sonst bleibt base=0 und
+       fn_00284D24 gibt 0 zurueck). */
+    if (c != NULL && g_te.heap_seed && pc == 0x00284D80u) {
+        uint32_t base = 0x0B000000u, cap = 0x02000000u, used = 0u;
+        memcpy(c->mem + 0x3EC120u, &base, 4);   /* +0x20 Basis   */
+        memcpy(c->mem + 0x3EC128u, &cap, 4);    /* +0x28 Kapaz.  */
+        memcpy(c->mem + 0x3EC12Cu, &used, 4);   /* +0x2C belegt  */
+        c->mem[0x3EC132u] = 2;                  /* +0x32 Align   */
+        c->mem[0x3EC133u] = 0;                  /* +0x33 Flags   */
+    }
+
+    if (c != NULL && g_te.romfs_log &&
+        (pc == 0x00284DD8u || pc == 0x00284EA0u || pc == 0x0012BC58u ||
+         pc == 0x00284D80u)) {
+        printf("[heap] pc=%08X base=%08X cap=%08X used=%08X req=%08X\n",
+               pc,
+               arm_mem_read(c, 0x003EC120u, 4),
+               arm_mem_read(c, 0x003EC128u, 4),
+               arm_mem_read(c, 0x003EC12Cu, 4),
+               c->r[2]);
+        fflush(stdout);
+    }
     if (c != NULL && g_te.romfs_log && pc == 0x0012BC58u) {
         uint32_t sc = c->r[1];
         printf("[scene] %08X E0..108:", sc);

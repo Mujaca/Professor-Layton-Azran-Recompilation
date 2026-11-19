@@ -1407,6 +1407,30 @@ static void ndm_command(Ipc *r, uint32_t *p) {
     }
 }
 
+static void boss_command(Ipc *r, uint32_t *p) {
+    (void)p;
+    switch (r->cmd) {
+        case 0x0001:   /* InitializeSession(program_id) -> Result */
+        case 0x0006: { /* RegisterPrivateClientCert -> Result */
+            ipc_begin(r, r->cmd, 2, 0);
+            ipc_put(r, 0);      /* Dummy (Header-Slot) */
+            ipc_put(r, 0);      /* ResultSuccess */
+            if (g_log) printf("[boss] cmd 0x%04X -> ok\n", r->cmd);
+            break;
+        }
+        case 0x000A: { /* GetOptoutFlag -> Result + u8 flag */
+            ipc_begin(r, 0x000A, 3, 0);
+            ipc_put(r, 0);      /* Dummy */
+            ipc_put(r, 0);      /* ResultSuccess */
+            ipc_put(r, 0);      /* output_flag = 0 */
+            break;
+        }
+        default:
+            generic_command(r, SVC_BOSS);
+            break;
+    }
+}
+
 static void ptm_command(Ipc *r, uint32_t *p) {
     (void)p;
     switch (r->cmd) {
@@ -1855,6 +1879,9 @@ static void dispatch_ipc(uint32_t handle) {
             break;
         case SVC_NDM:
             ndm_command(&r, params);
+            break;
+        case SVC_BOSS:
+            boss_command(&r, params);
             break;
         case SVC_GSP_GPU:
             gsp_command(&r, params);
