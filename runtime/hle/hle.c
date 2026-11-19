@@ -1918,19 +1918,17 @@ static DWORD WINAPI vblank_thread(LPVOID p) {
         /* GSP-Interrupt-Relay-Queue: das Spiel mappt sie an 0x10002000.
            Ohne VBlank-Eintrag dort wartet die Render-Schleife ewig. */
         if (g_cpu != NULL && getenv("HLE_GSP_IRQ")) {
-            uint32_t base = 0x10002000u & 0x1FFFFFFFu;
-            if (base + 0x10 <= 0x20000000u) {
-                static uint32_t irq_n = 0;
-                uint32_t hdr = 0;
-                irq_n++;
-                memcpy(g_cpu->mem + base + 0x00, &hdr, 4);   /* header  */
-                memcpy(g_cpu->mem + base + 0x04, &hdr, 4);   /* index   */
-                memcpy(g_cpu->mem + base + 0x08, &irq_n, 4); /* count   */
-                /* Die Engine liest das Flag-Byte bei 0x10002001 (per
-                   ARM_MEMWATCHRD gemessen) -> VBlank/PDC melden. */
-                g_cpu->mem[base + 0x01] = 1;
-                { uint32_t st = 0x00000100u; memcpy(g_cpu->mem + base, &st, 4); }
-                g_cpu->mem[base + 0x00] = 1;
+            /* Interrupt-Relay-Queue liegt bei SharedMem+0x1000 (Citra/Azahar:
+               GetInterruptRelayQueue = 0x1000 + thread_id*0x40).
+               Layout: index(u8), count(u8), error(u8), config(u8),
+               missed_PDC0(u32), missed_PDC1(u32), slots[0x34] (InterruptId). */
+            uint32_t base = (0x10002000u + 0x1000u) & 0x1FFFFFFFu;
+            if (base + 0x10 <= g_cpu->mem_size) {
+                g_cpu->mem[base + 0x00] = 0;   /* index */
+                g_cpu->mem[base + 0x01] = 1;   /* number_interrupts */
+                g_cpu->mem[base + 0x02] = 0;   /* error_code */
+                g_cpu->mem[base + 0x03] = 0;   /* config */
+                g_cpu->mem[base + 0x0C] = 0x02; /* slot[0] = PDC0 (VBlank) */
             }
         }
         /* HID-Shared-Memory: das Spiel mappt den Block an 0x10000000
