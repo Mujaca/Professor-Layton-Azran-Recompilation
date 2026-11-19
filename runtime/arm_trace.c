@@ -227,6 +227,12 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
                c->r[0], c->r[7], out1, out2);
         fflush(stdout);
     }
+    /* Diagnose: der Registrierung einen gueltigen Eintrag/Offset liefern. */
+    if (c != NULL && pc == 0x00103BD8u && getenv("HLE_FA_REG_OK")) {
+        uint32_t ent = 0x00403200u, off = 0x00000000u;
+        memcpy(c->mem + ((c->r[13] + 0x10u) & 0x1FFFFFFFu), &ent, 4);
+        memcpy(c->mem + ((c->r[13] + 0x0Cu) & 0x1FFFFFFFu), &off, 4);
+    }
 
     /* Diagnose: den gesuchten Hash in den synthetischen Namespace-Eintrag
        schreiben, damit 0x24FD74 ihn garantiert findet. */
@@ -245,6 +251,13 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
 
     /* Diagnose: FA-Resolver immer als "gefunden" behandeln, damit die Engine
        anschliessend die Datei ueber fs:USER oeffnen muss. */
+    if (c != NULL && pc == 0x0036C5CCu && getenv("HLE_FA_FAKE_OK")) {
+        /* Nicht-leeren Namen vortaeuschen, damit der movne/bne-Zweig nach
+           0x36C600 fuehrt (dort wird r0=1 erzwungen). */
+        uint8_t one_byte = 1;
+        if ((c->r[4] & 0x1FFFFFFFu) + 1u <= c->mem_size)
+            memcpy(c->mem + (c->r[4] & 0x1FFFFFFFu), &one_byte, 1);
+    }
     if (c != NULL && pc == 0x0036C600u && getenv("HLE_FA_FAKE_OK"))
         c->r[0] = 1;
 
