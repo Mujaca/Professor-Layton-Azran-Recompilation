@@ -1339,6 +1339,28 @@ static void cfg_command(Ipc *r, uint32_t *p) {
     }
 }
 
+static void ndm_command(Ipc *r, uint32_t *p) {
+    (void)p;
+    switch (r->cmd) {
+        case 0x0006:   /* SuspendDaemons(bit_mask) -> Result */
+        case 0x0007:   /* ResumeDaemons */
+        case 0x0014:   /* OverrideDefaultDaemons */
+        case 0x0015:   /* ResetDefaultDaemons */
+        case 0x0001:   /* EnterExclusiveState */
+        case 0x0002:   /* LeaveExclusiveState */
+        case 0x0004: case 0x0005:   /* LockState / UnlockState */
+        case 0x0008: case 0x0009: { /* SuspendScheduler / ResumeScheduler */
+            ipc_begin(r, r->cmd, 2, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        default:
+            generic_command(r, SVC_OTHER);
+            break;
+    }
+}
+
 static void ptm_command(Ipc *r, uint32_t *p) {
     (void)p;
     switch (r->cmd) {
@@ -1739,6 +1761,9 @@ static void dispatch_ipc(uint32_t handle) {
             break;
         case SVC_PTM_U:
             ptm_command(&r, params);
+            break;
+        case SVC_NDM:
+            ndm_command(&r, params);
             break;
         case SVC_GSP_GPU:
             gsp_command(&r, params);
