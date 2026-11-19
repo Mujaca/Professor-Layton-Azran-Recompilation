@@ -113,6 +113,11 @@ void arm_mem_write(ArmCpu *c, uint32_t addr, int size, uint32_t val) {
        Deskriptor {basis, stride, count} (siehe 0x287FF8). */
     if (getenv("HLE_REG_ENABLE") && size == 4 && addr == 0x3ECA5Cu && val == 0)
         val = 0x00401000u;
+    /* FS-Objektzeiger: die App setzt [0x3D8D8C] auf 0, der Fehlerhelfer
+       0x28EDCC liefert dann 0xE0A046DB. Wert offen halten. */
+    if ((getenv("HLE_FS_OBJ") == NULL || getenv("HLE_FS_OBJ")[0] != '0') &&
+        size == 4 && addr == 0x3D8D8Cu && val == 0)
+        val = 0x00408000u;
     if (g_memwatch != 0 &&
         ((g_memwatch_end != 0) ? (addr >= g_memwatch && addr < g_memwatch_end)
                                : ((addr & ~3u) == g_memwatch)) &&

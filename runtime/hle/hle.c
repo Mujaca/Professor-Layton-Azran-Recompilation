@@ -1940,6 +1940,15 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
         memcpy(c->mem + 0x3ECA5Cu, &g, 4);
         printf("[hle] Asset-Registry-Deskriptor 0x00401000 {0x00400000,0xC0,8}, Guard=0x401000\n");
     }
+    /* Diagnose: FS-Fehlerhelfer 0x28EDCC liefert 0xE0A046DB, solange
+       [0x3D8D8C] == 0. Objektzeiger vorbelegen, damit echte Resultate
+       zurueckkommen. */
+    if (getenv("HLE_FS_OBJ") == NULL || getenv("HLE_FS_OBJ")[0] != '0') {
+        uint32_t obj = 0x00408000u;
+        memset(c->mem + obj, 0, 0x40);
+        memcpy(c->mem + 0x3D8D8Cu, &obj, 4);
+        printf("[hle] FS-Objektzeiger 0x3D8D8C = %08X\n", obj);
+    }
     if (getenv("HLE_GSP_CLIENT")) {
         /* GSP-Client-Objekt 0x3D91E8 vorinitialisieren: Statusfeld +0x18 = 6 und
          * ein echter gsp::Gpu-Handle in +0x10, damit die Spiel-Renderlogik den
