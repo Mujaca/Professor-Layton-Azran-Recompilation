@@ -624,7 +624,7 @@ static void apt_command(Ipc *r, uint32_t *p) {
                0 ist der Azahar-Referenzwert, laesst die App aber in der
                APT-Warteschleife stehen (HLE_APT_STATE=0 erzwingt ihn). */
             ipc_put(r, getenv("HLE_APT_STATE")
-                        ? (uint32_t)strtoul(getenv("HLE_APT_STATE"), NULL, 0) : 1u);
+                        ? (uint32_t)strtoul(getenv("HLE_APT_STATE"), NULL, 0) : 0u);
             ipc_put_handle_copy(r, lock);
             break;
         }
@@ -705,21 +705,23 @@ static void apt_command(Ipc *r, uint32_t *p) {
                (HLE_APT_WAKE_AT, Default 40 Aufrufe), danach NoData. */
             {
                 static unsigned rx_calls = 0;
-                unsigned wake_at = 40u;
+                unsigned wake_at = 1u;   /* Referenz: Parameter liegt schon bei Initialize in der Queue */
                 const char *wa = getenv("HLE_APT_WAKE_AT");
                 if (wa != NULL && *wa != 0) wake_at = (unsigned)strtoul(wa, NULL, 0);
                 rx_calls++;
                 if (!g_apt_wakeup_sent && rx_calls >= wake_at) {
                     if (r->cmd == 0x000D) g_apt_wakeup_sent = 1;
-                    /* Referenz (Azahar-Trace): sender=0, signal=1 (Wakeup),
-                       Groesse 0. Layout: 宝贵的4 Normalwoerter + Translate-Echo. */
-                    ipc_begin(r, r->cmd, 4, r->translate >= 2 ? 2 : 0);
-                    ipc_put(r, 0);          /* ResultSuccess */
+                    /* Referenz: sender=0, signal=1 (Wakeup), Groesse=0.
+                       Der Header belegt cmdbuf[0] -> Dummy-Wort, damit
+                       Result/Sender/Signal/Groesse auf cmdbuf[1..4] liegen. */
+                    ipc_begin(r, r->cmd, 5, r->translate >= 2 ? 2 : 0);
+                    ipc_put(r, 0);          /* Dummy (Header-Slot) */
+                    ipc_put(r, 0);          /* Result   -> cmdbuf[1] */
                     ipc_put(r, getenv("HLE_APT_SENDER")
                                 ? (uint32_t)strtoul(getenv("HLE_APT_SENDER"), NULL, 0) : 0u);
                     ipc_put(r, getenv("HLE_APT_SIG")
                                 ? (uint32_t)strtoul(getenv("HLE_APT_SIG"), NULL, 0) : 1u);
-                    ipc_put(r, 0);          /* Parameter-Groesse */
+                    ipc_put(r, 0);          /* Parameter-Groesse -> cmdbuf[4] */
                     if (r->translate >= 2) {
                         ipc_put(r, dsc_flags);
                         ipc_put(r, dsc_addr);
@@ -1071,6 +1073,19 @@ static void fs_command(Ipc *r, uint32_t *p) {
                Setter im Spiel laeuft nie, sonst werfen Dateizugriffe E0A046DA. */
             if (h != 0 && g_cpu != NULL && (0x3D66C4u & 0x1FFFFFFFu) + 4 <= g_cpu->mem_size)
                 memcpy(g_cpu->mem + 0x3D66C4u, &h, 4);
+            break;
+        }
+        case 0x0861: case 0x0862: { /* InitializeWithSdkVersion / SetPriority -> Result */
+            ipc_begin(r, r->cmd, 2, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x0863: { /* GetPriority -> Result + Priority */
+            ipc_begin(r, 0x0863, 3, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 0);
             break;
         }
         case 0x080C: { /* OpenArchive */
