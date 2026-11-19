@@ -94,7 +94,7 @@ uint32_t arm_mem_read(ArmCpu *c, uint32_t addr, int size) {
 void arm_mem_write(ArmCpu *c, uint32_t addr, int size, uint32_t val) {
     /* Env-Lookups einmalig cachen: getenv() pro Speicherzugriff war der
        groesste Bremsklotz (der Gast kopiert Daten in den Linear-Heap). */
-    static int s_init = 0, s_mwval_on = 0, s_keep = 1, s_reg = 0, s_fsobj = 1;
+    static int s_init = 0, s_mwval_on = 0, s_keep = 1, s_reg = 0, s_fsobj = 1, s_gkeep = 1;
     static uint32_t s_want = 0;
     if (!s_init) {
         const char *v;
@@ -106,6 +106,8 @@ void arm_mem_write(ArmCpu *c, uint32_t addr, int size, uint32_t val) {
         s_reg = getenv("HLE_REG_ENABLE") != NULL;
         v = getenv("HLE_FS_OBJ");
         s_fsobj = !(v != NULL && v[0] == '0');
+        v = getenv("HLE_GUARD_KEEP");
+        s_gkeep = !(v != NULL && v[0] == '0');
     }
     if (addr >= 0x20000000u) addr &= 0x1FFFFFFFu;
     if (s_mwval_on && size == 4 && val == s_want) {
@@ -117,6 +119,13 @@ void arm_mem_write(ArmCpu *c, uint32_t addr, int size, uint32_t val) {
             val = 1;
         if (s_reg && addr == 0x3ECA5Cu && val == 0)
             val = 0x00401000u;
+        /* Asset-Registry-Guard nicht wieder auf 0 zuruecksetzen, wenn er
+           bereits gesetzt wurde (die Engine raeumt ihn beim Teardown). */
+        if (s_gkeep && addr == 0x3ECA5Cu && val == 0) {
+            uint32_t cur = 0;
+            memcpy(&cur, c->mem + addr, 4);
+            if (cur != 0) val = cur;
+        }
         if (s_fsobj && addr == 0x3D8D8Cu && val == 0)
             val = 0x00408000u;
     }
