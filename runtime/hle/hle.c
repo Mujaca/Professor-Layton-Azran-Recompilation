@@ -74,13 +74,11 @@ static void guest_lock_leave(void) {
 static void guest_lock_reacquire(void) {
     if (!g_guest_lock_init || g_no_lock) return;
     if (t_lock_owned) return;
-    /* Kurz schlafen, damit wartende Gast-Threads wirklich zum Zug kommen
-       (Sleep(0) laesst den Aufrufer sonst sofort wieder gewinnen). */
+    /* Kurz schlafen und dann BLOCKIEREND eintreten: so bekommt ein wartender
+       Gast-Thread garantiert den Lock (faire Uebergabe statt TryEnter-Rennen). */
     Sleep(1);
-    for (int i = 0; ; i++) {
-        if (TryEnterCriticalSection(&g_guest_lock)) { t_lock_owned = 1; return; }
-        if (i < 2000) Sleep(0); else Sleep(1);
-    }
+    EnterCriticalSection(&g_guest_lock);
+    t_lock_owned = 1;
 }
 /* Wird bei jedem Gast-Block aufgerufen: verhindert, dass rein
  * CPU-gebundene Gast-Schleifen (ohne SVC) den kooperativen Lock
@@ -621,9 +619,11 @@ static void apt_command(Ipc *r, uint32_t *p) {
             ipc_begin(r, 1, 3, 2);
             put_result(r);
             ipc_put(r, attrs);
-            /* state: Azahar liefert 0; per HLE_APT_STATE zur Diagnose aenderbar. */
+            /* state: 1 = vollstaendiger Init-Pfad (8 Threads, FS, GSP-Init).
+               0 ist der Azahar-Referenzwert, laesst die App aber in der
+               APT-Warteschleife stehen (HLE_APT_STATE=0 erzwingt ihn). */
             ipc_put(r, getenv("HLE_APT_STATE")
-                        ? (uint32_t)strtoul(getenv("HLE_APT_STATE"), NULL, 0) : 0u);
+                        ? (uint32_t)strtoul(getenv("HLE_APT_STATE"), NULL, 0) : 1u);
             ipc_put_handle_copy(r, lock);
             break;
         }
@@ -1947,9 +1947,9 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     if (!g_guest_lock_init) {
         InitializeCriticalSection(&g_guest_lock);
         g_guest_lock_init = 1;
-        /* Default: ohne Guest-Lock (mehr Thread-Fortschritt). HLE_THREAD_LOCK=1
-           aktiviert den (jetzt bilanzierten, fairen) Lock. */
-        g_no_lock = (getenv("HLE_THREAD_LOCK") == NULL);
+        /* Default: Guest-Lock AN (deterministisch, Speicher konsistent).
+           HLE_NO_THREAD_LOCK=1 schaltet ihn ab. */
+        g_no_lock = getenv("HLE_NO_THREAD_LOCK") != NULL;
         if (!g_no_lock) guest_lock_enter();
     }
     g_main_cpu = c;
