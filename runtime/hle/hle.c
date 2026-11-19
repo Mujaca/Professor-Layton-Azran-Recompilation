@@ -1834,6 +1834,8 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
             cs = (uint32_t)strtoul(getenv("HLE_GPU_TEST_SIZE"), NULL, 16);
         {
             int nops2 = gpu_run_command_list(c, ca, cs);
+            g_cmdlist_addr = ca;
+            g_cmdlist_size = cs;   /* fuer spaetere TriggerCmdReqQueue */
             printf("[gputest2] addr=%08X size=%X ops=%d\n", ca, cs, nops2);
         }
     }
