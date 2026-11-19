@@ -1171,9 +1171,8 @@ static void file_command(Ipc *r, uint32_t *p) {
                     if (done) memset(g_cur_mem + (addr & 0x1FFFFFFFu), 0, done);
                 }
             }
-            if (g_log) printf("[file] Read %s off=0x%llX len=0x%X p0=%08X p1=%08X p2=%08X p3=%08X -> %u\n",
-                              f->path, (unsigned long long)offset, length,
-                              p[0], p[1], p[2], p[3], done);
+            if (g_log) printf("[file] Read %s off=0x%llX len=0x%X p0=%08X addr=%08X -> %u\n",
+                              f->path, (unsigned long long)offset, length, p[0], addr, done);
             /* Azahar: MakeBuilder(2,2) + PushMappedBuffer -> Descriptor-Echo */
             ipc_begin(r, 0x0802, 2, 2);
             ipc_put(r, 0);

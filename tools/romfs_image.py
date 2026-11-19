@@ -45,3 +45,17 @@ with open(ROM, "rb") as f, open(OUT, "wb") as g:
         left -= len(chunk)
 
 print("geschrieben:", OUT)
+
+# Der Port-Parser liest die IVFC-Groessen als u32 bei 0x10/0x18/0x20,
+# im Image stehen sie als u64 bei 0x14/0x24/0x34. Level-1/2-Groessen
+# an die erwarteten Stellen spiegeln (Level 3 bleibt offen).
+with open(OUT, "r+b") as f:
+    f.seek(0x14)
+    l1 = struct.unpack("<Q", f.read(8))[0]
+    f.seek(0x24)
+    l2 = struct.unpack("<Q", f.read(8))[0]
+    f.seek(0x10)
+    f.write(struct.pack("<I", l1))
+    f.seek(0x18)
+    f.write(struct.pack("<I", l2))
+print("IVFC-Groessen gespiegelt: L1=0x%X L2=0x%X" % (l1, l2))
