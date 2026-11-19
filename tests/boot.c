@@ -9,6 +9,7 @@
 #include <string.h>
 #include <windows.h>
 #include "hle.h"
+#include "gpu.h"
 
 #define MEM_SIZE 0x30000000u   /* 768 MiB: FCRAM + VRAM (bis 0x20500000) + MMIO */
 
@@ -185,6 +186,27 @@ int main(int argc, char **argv) {
     CreateThread(NULL, 0, watchdog, NULL, 0, NULL);
     hle_init(&c, romfs);
     arm_set_svc_handler(hle_svc);
+
+    /* GPU-Selbsttest: synthetische PICA-Kommandoliste ausfuehren und
+       pruefen, dass Pixel im Framebuffer landen. */
+    if (getenv("HLE_GPU_TEST")) {
+        uint32_t cl = 0x08001000u, n = 0;
+        uint32_t list[7];
+        list[0] = 0x0400FF00u;      /* ClearColor = 0x00FF00 (gruen) */
+        list[1] = 0x050FFFFFu;       /* FillRect, Anzahl folgt */
+        list[2] = 4u;
+        list[3] = 0u;  list[4] = 0u; list[5] = 400u; list[6] = 240u;
+        memcpy(g_mem + (cl & 0x1FFFFFFFu), list, sizeof(list));
+        n = (uint32_t)gpu_run_command_list(&c, cl, (uint32_t)sizeof(list));
+        printf("[gputest] ops=%u\n", n);
+        printf("[gputest] fb[0]=%02X%02X%02X\n",
+               g_mem[0x1F380000u + 2], g_mem[0x1F380000u + 1],
+               g_mem[0x1F380000u + 0]);
+        printf("[gputest] fb[last]=%02X%02X%02X\n",
+               g_mem[0x1F380000u + 3u * (400u * 240u - 1u) + 2],
+               g_mem[0x1F380000u + 3u * (400u * 240u - 1u) + 1],
+               g_mem[0x1F380000u + 3u * (400u * 240u - 1u) + 0]);
+    }
 
     printf("boot: entry 0x00100000, romfs=%s\n", romfs);
 

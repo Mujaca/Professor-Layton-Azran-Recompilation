@@ -97,6 +97,7 @@ def main():
            os.path.join(ROOT, "build", "gen_boot.c"),
            os.path.join(ROOT, "runtime", "arm_cpu.c"),
            os.path.join(ROOT, "runtime", "arm_trace.c"),
+           os.path.join(ROOT, "runtime", "gpu.c"),
            os.path.join(ROOT, "runtime", "hle", "hle.c"),
            os.path.join(ROOT, "runtime", "platform", "window.c"),
            "-o", os.path.join(ROOT, "out", "port.exe"),

@@ -6,6 +6,7 @@
  *   bits 16-31 : command_id
  */
 #include "hle.h"
+#include "../gpu.h"
 #include "../arm_trace.h"
 
 void arm_trace_thread_dump(int ti, unsigned n);
@@ -452,6 +453,9 @@ static void file_command(Ipc *r, uint32_t *p);
 static void cfg_command(Ipc *r, uint32_t *p);
 static void dsp_command(Ipc *r, uint32_t *p);
 static void gsp_command(Ipc *r, uint32_t *p);
+static uint32_t g_cmdlist_addr = 0;
+static uint32_t g_cmdlist_size = 0;
+
 static void y2r_command(Ipc *r, uint32_t *p);
 
 
@@ -1334,7 +1338,16 @@ static void gsp_command(Ipc *r, uint32_t *p) {
             ipc_put(r, 0);
             break;
         }
-        case 0x0006: case 0x0007: { /* SetCommandList / RequestDma */
+        case 0x0006: { /* SetCommandList(addr, size, flags) */
+            g_cmdlist_addr = p[0];
+            g_cmdlist_size = p[1];
+            if (g_log) printf("[gsp] SetCommandList addr=0x%08X size=0x%X\n",
+                              g_cmdlist_addr, g_cmdlist_size);
+            ipc_begin(r, 0x0006, 1, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x0007: { /* RequestDma */
             ipc_begin(r, r->cmd, (r->cmd == 0x0007) ? 2 : 1, 0);
             ipc_put(r, 0);
             if (r->cmd == 0x0007) ipc_put(r, 0);
@@ -1346,7 +1359,11 @@ static void gsp_command(Ipc *r, uint32_t *p) {
             ipc_put(r, 0);
             break;
         }
-        case 0x000C: { /* TriggerCmdReqQueue */
+        case 0x000C: { /* TriggerCmdReqQueue -> Liste ausfuehren */
+            if (g_cmdlist_addr != 0 && g_cmdlist_size != 0 && g_cpu != NULL) {
+                int nops = gpu_run_command_list(g_cpu, g_cmdlist_addr, g_cmdlist_size);
+                if (g_log) printf("[gsp] TriggerCmdReqQueue -> %d Ops\n", nops);
+            }
             ipc_begin(r, 0x000C, 1, 0);
             ipc_put(r, 0);
             break;
