@@ -127,20 +127,27 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
        Tick-Zaehlung spinnt sie zig-tausend Runden und blockiert den
        kooperativen Scheduler (Thread 2 blieb dort haengen). */
     if (c != NULL && pc == 0x0011A818u) c->r[0] = 0;
-    /* Asset-Registry-Deskriptor kurz vor dem Insert frisch setzen, weil der
-       BSS-Clear des Loaders ihn sonst wieder auf 0 zieht. */
-    if (c != NULL && pc == 0x00104E44u && getenv("HLE_REG_ENABLE")) {
-        uint32_t d0 = 0x00400000u, d1 = 0x000000C0u, d2 = 8u, g = 0x00401000u;
+    /* Asset-Registry synthetisch bestuecken: Deskriptor {basis,stride,count}
+       plus Eintraege. Layout laut 0x2B95F8: [+0x14] != 0 (aktiv),
+       [+0x1C] = Zeiger auf den Dateinamen. */
+    if (c != NULL && getenv("HLE_REG_ENABLE") &&
+        (pc == 0x00104E44u || pc == 0x0036C54Cu)) {
+        static const uint32_t names[4] = { 0x001015F8u, 0x00101608u,
+                                           0x00101618u, 0x00101628u };
+        uint32_t d0 = 0x00400000u, d1 = 0x000000C0u, d2 = 4u, g = 0x00401000u;
+        uint32_t one = 1u;
+        for (int i = 0; i < 4; i++) {
+            uint32_t e = 0x00400000u + (uint32_t)i * 0xC0u;
+            memcpy(c->mem + e + 0x14u, &one, 4);
+            memcpy(c->mem + e + 0x1Cu, &names[i], 4);
+        }
         memcpy(c->mem + 0x00401000u, &d0, 4);
         memcpy(c->mem + 0x00401004u, &d1, 4);
         memcpy(c->mem + 0x00401008u, &d2, 4);
         memcpy(c->mem + 0x3ECA5Cu, &g, 4);
-        {
-            uint32_t rb0 = 0, rb2 = 0, rg = 0;
-            memcpy(&rb0, c->mem + 0x00401000u, 4);
-            memcpy(&rb2, c->mem + 0x00401008u, 4);
-            memcpy(&rg, c->mem + 0x3ECA5Cu, 4);
-            printf("[regdesc] desc0=%08X count=%08X guard=%08X\n", rb0, rb2, rg);
+        if (getenv("HLE_REG_DEBUG")) {
+            printf("[regfill] pc=%08X desc=%08X cnt=%u name0=%08X\n",
+                   pc, d0, d2, names[0]);
             fflush(stdout);
         }
     }
