@@ -14,6 +14,61 @@ void (*arm_tick_hook)(struct ArmCpu *c) = NULL;
 uint32_t arm_watch_pc = 0;
 static int g_watch_hits = 0;
 
+/* ------------------------------------------------------------------ *
+ * perfmap: Block-Histogramm pro Thread/Funktion und Rueckwaertskanten.
+ * Nur aktiv mit HLE_PERFMAP=1 oder HLE_PERFMAP_FILE=<pfad>. Kein
+ * printf pro Block; der Speicher wird periodisch als Textdatei
+ * geschrieben und einmal pro Dump als Marker ausgegeben.
+ * ------------------------------------------------------------------ */
+#define PM_SLOTS (1u << 20)
+#define PM_EDGES 1024
+typedef struct {
+    uint32_t key;      /* pc ^ (thread << 28), 0 = frei */
+    uint32_t pad;
+    uint64_t count;
+} PmSlot;
+typedef struct {
+    uint32_t from, to;
+    uint64_t count;
+} PmEdge;
+static PmSlot *g_pm_slots = NULL;
+static PmEdge g_pm_edges[16][PM_EDGES];
+static uint64_t g_pm_total = 0;
+static uint64_t g_pm_thread_total[16];
+static uint32_t g_pm_last_pc[16];
+static int g_pm_on = 0;
+static unsigned g_pm_dump_ms = 2000;
+static char g_pm_path[512];
+static uint64_t g_pm_last_dump_ms = 0;
+static unsigned g_pm_dumps = 0;
+
+/* ------------------------------------------------------------------ *
+ * hotpatch: Adresse -> C-Callback, registrierbar per
+ *   HLE_HOOK=28F284=count_fields,134818=log
+ * Gueltige Callback-Namen: count_fields/count, regs/dump_regs,
+ * mem/dump_mem, log/pc, set_r0 (mit HLE_HOOK_VALUE=<hex>).
+ * ------------------------------------------------------------------ */
+#define HOOK_MAX 16
+enum { HK_COUNT = 0, HK_REGS, HK_MEM, HK_LOG, HK_SET_R0 };
+typedef struct {
+    uint32_t addr;
+    int kind;
+    uint32_t max;
+    uint64_t hits;
+    char name[32];
+} HookEntry;
+static HookEntry g_hooks[HOOK_MAX];
+static int g_hook_count = 0;
+static int g_hooks_on = 0;
+static uint32_t g_hook_value = 0;
+
+void arm_perfmap_report(void);
+void arm_hook_report(void);
+static void perfmap_sample(ArmCpu *c, uint32_t pc);
+static void hook_hit(ArmCpu *c, uint32_t pc);
+static void perfmap_init(void);
+static void hook_init(void);
+
 /* Ringpuffer der zuletzt ausgefuehrten Bloecke (Diagnose bei Abbruch). */
 #define PC_RING 65536
 static uint32_t g_pc_ring[PC_RING];
@@ -122,6 +177,289 @@ int arm_trace_is_open(void) {
     return g_file != NULL;
 }
 
+/* ---------------- perfmap ---------------- */
+
+static uint32_t pm_hash(uint32_t key)
+{
+    return (key * 2654435761u) & (PM_SLOTS - 1u);
+}
+
+static void perfmap_init(void)
+{
+    const char *p;
+    if (g_pm_on) return;
+    p = getenv("HLE_PERFMAP_FILE");
+    if (p != NULL && *p != 0)
+        snprintf(g_pm_path, sizeof(g_pm_path), "%s", p);
+    else
+        snprintf(g_pm_path, sizeof(g_pm_path), "out/perfmap.txt");
+    p = getenv("HLE_PERFMAP_DUMP_MS");
+    if (p != NULL && *p != 0) g_pm_dump_ms = (unsigned)strtoul(p, NULL, 0);
+    if (g_pm_dump_ms < 100) g_pm_dump_ms = 100;
+    g_pm_slots = (PmSlot *)calloc(PM_SLOTS, sizeof(PmSlot));
+    if (g_pm_slots == NULL) return;
+    memset(g_pm_edges, 0, sizeof(g_pm_edges));
+    memset(g_pm_thread_total, 0, sizeof(g_pm_thread_total));
+    memset(g_pm_last_pc, 0, sizeof(g_pm_last_pc));
+    g_pm_total = 0;
+    g_pm_on = 1;
+    g_pm_last_dump_ms = (uint64_t)GetTickCount64();
+}
+
+static void perfmap_sample(ArmCpu *c, uint32_t pc)
+{
+    static unsigned poll = 0;
+    uint32_t ti = (uint32_t)((c->tpidruro >> 12) & 0xFu);
+    uint32_t key = pc ^ (ti << 28);
+    uint32_t h = pm_hash(key);
+    uint32_t last;
+    int inserted = 0;
+    if (!g_pm_on || g_pm_slots == NULL) return;
+
+    for (unsigned i = 0; i < 32u; i++) {
+        uint32_t slot = (h + i) & (PM_SLOTS - 1u);
+        if (g_pm_slots[slot].key == 0) {
+            g_pm_slots[slot].key = key;
+            g_pm_slots[slot].count = 1;
+            inserted = 1;
+            break;
+        }
+        if (g_pm_slots[slot].key == key) {
+            g_pm_slots[slot].count++;
+            inserted = 1;
+            break;
+        }
+    }
+    (void)inserted;
+    g_pm_total++;
+    g_pm_thread_total[ti]++;
+
+    /* Rueckwaertskante = pc springt innerhalb von 64 KiB rueckwaerts.
+       Das ist die billigste, verlaessliche Spin-Loop-Erkennung. */
+    last = g_pm_last_pc[ti];
+    if (last != 0 && pc < last && (last - pc) < 0x10000u) {
+        uint32_t eh = ((last * 2654435761u) ^ (pc * 2246822519u)) & (PM_EDGES - 1u);
+        for (unsigned i = 0; i < 16u; i++) {
+            PmEdge *e = &g_pm_edges[ti][(eh + i) & (PM_EDGES - 1u)];
+            if (e->count == 0) {
+                e->from = last;
+                e->to = pc;
+                e->count = 1;
+                break;
+            }
+            if (e->from == last && e->to == pc) {
+                e->count++;
+                break;
+            }
+        }
+    }
+    g_pm_last_pc[ti] = pc;
+
+    if ((++poll & 0x1FFFu) == 0) {
+        uint64_t now = (uint64_t)GetTickCount64();
+        if (now - g_pm_last_dump_ms >= (uint64_t)g_pm_dump_ms) {
+            g_pm_last_dump_ms = now;
+            g_pm_dumps++;
+            {
+                FILE *f = fopen(g_pm_path, "w");
+                if (f != NULL) {
+                    unsigned entries = 0, edges = 0;
+                    fprintf(f, "PERFMAP 1\n");
+                    fprintf(f, "# total %llu\n",
+                            (unsigned long long)g_pm_total);
+                    for (int t = 0; t < 16; t++)
+                        fprintf(f, "# thread %d %llu\n", t,
+                                (unsigned long long)g_pm_thread_total[t]);
+                    for (int t = 0; t < 16; t++)
+                        for (int i = 0; i < PM_EDGES; i++)
+                            if (g_pm_edges[t][i].count != 0) {
+                                fprintf(f, "# back %d %08X %08X %llu\n", t,
+                                        g_pm_edges[t][i].from,
+                                        g_pm_edges[t][i].to,
+                                        (unsigned long long)g_pm_edges[t][i].count);
+                                edges++;
+                            }
+                    for (unsigned i = 0; i < PM_SLOTS; i++) {
+                        if (g_pm_slots[i].key == 0) continue;
+                        fprintf(f, "pc %08X %u %llu\n",
+                                g_pm_slots[i].key & 0x0FFFFFFFu,
+                                g_pm_slots[i].key >> 28,
+                                (unsigned long long)g_pm_slots[i].count);
+                        entries++;
+                    }
+                    fclose(f);
+                    printf("[perfmap] dump #%u entries=%u edges=%u total=%llu\n",
+                           g_pm_dumps, entries, edges,
+                           (unsigned long long)g_pm_total);
+                    fflush(stdout);
+                }
+            }
+        }
+    }
+}
+
+void arm_perfmap_report(void)
+{
+    if (!g_pm_on) return;
+    /* Letzten Stand sicher schreiben (ohne Marker-Rauschen). */
+    {
+        FILE *f = fopen(g_pm_path, "w");
+        if (f != NULL) {
+            unsigned entries = 0, edges = 0;
+            fprintf(f, "PERFMAP 1\n");
+            fprintf(f, "# total %llu\n", (unsigned long long)g_pm_total);
+            for (int t = 0; t < 16; t++)
+                fprintf(f, "# thread %d %llu\n", t,
+                        (unsigned long long)g_pm_thread_total[t]);
+            for (int t = 0; t < 16; t++)
+                for (int i = 0; i < PM_EDGES; i++)
+                    if (g_pm_edges[t][i].count != 0) {
+                        fprintf(f, "# back %d %08X %08X %llu\n", t,
+                                g_pm_edges[t][i].from, g_pm_edges[t][i].to,
+                                (unsigned long long)g_pm_edges[t][i].count);
+                        edges++;
+                    }
+            for (unsigned i = 0; i < PM_SLOTS; i++) {
+                if (g_pm_slots[i].key == 0) continue;
+                fprintf(f, "pc %08X %u %llu\n",
+                        g_pm_slots[i].key & 0x0FFFFFFFu,
+                        g_pm_slots[i].key >> 28,
+                        (unsigned long long)g_pm_slots[i].count);
+                entries++;
+            }
+            fclose(f);
+            printf("[perfmap] report entries=%u edges=%u total=%llu\n",
+                   entries, edges, (unsigned long long)g_pm_total);
+            fflush(stdout);
+        }
+    }
+    if (g_pm_slots != NULL) {
+        free(g_pm_slots);
+        g_pm_slots = NULL;
+    }
+    g_pm_on = 0;
+}
+
+/* ---------------- hotpatch ---------------- */
+
+static int hook_kind(const char *name)
+{
+    if (strcmp(name, "count_fields") == 0 || strcmp(name, "count") == 0)
+        return HK_COUNT;
+    if (strcmp(name, "regs") == 0 || strcmp(name, "dump_regs") == 0)
+        return HK_REGS;
+    if (strcmp(name, "mem") == 0 || strcmp(name, "dump_mem") == 0)
+        return HK_MEM;
+    if (strcmp(name, "log") == 0 || strcmp(name, "pc") == 0)
+        return HK_LOG;
+    if (strcmp(name, "set_r0") == 0)
+        return HK_SET_R0;
+    return -1;
+}
+
+static void hook_init(void)
+{
+    const char *spec = getenv("HLE_HOOK");
+    const char *mx = getenv("HLE_HOOK_MAX");
+    const char *val = getenv("HLE_HOOK_VALUE");
+    char buf[512];
+    char *tok;
+    uint32_t maxhits = 20;
+    if (g_hooks_on || spec == NULL || *spec == 0) return;
+    if (mx != NULL && *mx != 0) maxhits = (uint32_t)strtoul(mx, NULL, 0);
+    if (val != NULL && *val != 0) g_hook_value = (uint32_t)strtoul(val, NULL, 16);
+    snprintf(buf, sizeof(buf), "%s", spec);
+    for (tok = strtok(buf, ",;"); tok != NULL; tok = strtok(NULL, ",;")) {
+        char *eq = strchr(tok, '=');
+        int kind;
+        if (eq == NULL || g_hook_count >= HOOK_MAX) continue;
+        *eq = 0;
+        kind = hook_kind(eq + 1);
+        if (kind < 0) {
+            fprintf(stderr, "[hook] unbekannter Callback: %s\n", eq + 1);
+            continue;
+        }
+        g_hooks[g_hook_count].addr = (uint32_t)strtoul(tok, NULL, 16);
+        g_hooks[g_hook_count].kind = kind;
+        g_hooks[g_hook_count].max = maxhits;
+        g_hooks[g_hook_count].hits = 0;
+        snprintf(g_hooks[g_hook_count].name,
+                 sizeof(g_hooks[g_hook_count].name), "%s", eq + 1);
+        g_hook_count++;
+    }
+    if (g_hook_count > 0) {
+        g_hooks_on = 1;
+        printf("[hook] %d Adresse(n) registriert (HLE_HOOK)\n", g_hook_count);
+        fflush(stdout);
+    }
+}
+
+static void hook_hit(ArmCpu *c, uint32_t pc)
+{
+    for (int i = 0; i < g_hook_count; i++) {
+        HookEntry *h = &g_hooks[i];
+        if (h->addr != pc || c == NULL) continue;
+        h->hits++;
+        switch (h->kind) {
+        case HK_COUNT:
+            if (h->hits == 1 || h->hits == 2 || h->hits == 4 ||
+                h->hits == 8 || (h->hits % 1000u) == 0) {
+                printf("[hook] %s addr=%08X hits=%llu\n", h->name, pc,
+                       (unsigned long long)h->hits);
+                fflush(stdout);
+            }
+            break;
+        case HK_REGS:
+            if (h->hits <= h->max) {
+                printf("[hook] %s addr=%08X hits=%llu r0=%08X r1=%08X r2=%08X "
+                       "r3=%08X r4=%08X sp=%08X lr=%08X\n", h->name, pc,
+                       (unsigned long long)h->hits, c->r[0], c->r[1], c->r[2],
+                       c->r[3], c->r[4], c->r[13], c->r[14]);
+                fflush(stdout);
+            }
+            break;
+        case HK_MEM:
+            if (h->hits <= h->max) {
+                uint32_t a = c->r[0] & ~3u;
+                printf("[hook] %s addr=%08X hits=%llu mem@%08X:", h->name,
+                       pc, (unsigned long long)h->hits, a);
+                for (int k = 0; k < 8; k++)
+                    printf(" %08X", (unsigned)arm_mem_read(c, a + (uint32_t)k * 4u, 4));
+                printf("\n");
+                fflush(stdout);
+            }
+            break;
+        case HK_LOG:
+            if (h->hits <= h->max) {
+                printf("[hook] %s addr=%08X hits=%llu lr=%08X r0=%08X r1=%08X\n",
+                       h->name, pc, (unsigned long long)h->hits, c->r[14],
+                       c->r[0], c->r[1]);
+                fflush(stdout);
+            }
+            break;
+        case HK_SET_R0:
+            c->r[0] = g_hook_value;
+            if (h->hits <= h->max) {
+                printf("[hook] %s addr=%08X hits=%llu -> r0=%08X\n", h->name,
+                       pc, (unsigned long long)h->hits, g_hook_value);
+                fflush(stdout);
+            }
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+void arm_hook_report(void)
+{
+    for (int i = 0; i < g_hook_count; i++) {
+        if (g_hooks[i].hits == 0) continue;
+        printf("[hook-final] %s addr=%08X hits=%llu\n", g_hooks[i].name,
+               g_hooks[i].addr, (unsigned long long)g_hooks[i].hits);
+        fflush(stdout);
+    }
+}
 
 /* Env-Flags einmal cachen: getenv() pro Block war der Hauptbremsklotz
    (7 Lookups je ausgefuehrtem Block). */
@@ -129,7 +467,8 @@ typedef struct {
     int init;
     int fa_debug, reg_enable, reg_debug, asset_trace, queue_log;
     int fa_reg_ok, fa_fake_ok, fa_always, blklogf, force_asset;
-    int dump_fatal, dump_r3, watch_pool, perf, rm_adv;
+    int dump_fatal, dump_r3, watch_pool, perf, rm_adv, romfs_log, romfs_force;
+    int perfmap, hooks;
     uint32_t blklog_lo;
 } TraceEnv;
 static TraceEnv g_te;
@@ -154,6 +493,12 @@ static void trace_env_init(void) {
     g_te.watch_pool = envset("ARM_WATCH_POOL");
     g_te.perf = envset("HLE_PERF");
     g_te.rm_adv = envset("HLE_RM_ADV");
+    g_te.romfs_log = envset("HLE_ROMFS_LOG");
+    g_te.romfs_force = envset("HLE_ROMFS_FORCE");
+    g_te.perfmap = envset("HLE_PERFMAP") || (getenv("HLE_PERFMAP_FILE") != NULL);
+    g_te.hooks = (getenv("HLE_HOOK") != NULL);
+    if (g_te.perfmap) perfmap_init();
+    if (g_te.hooks) hook_init();
     v = getenv("HLE_BLKLOGF");
     if (v != NULL && *v != 0) {
         g_te.blklogf = 1;
@@ -164,6 +509,8 @@ static void trace_env_init(void) {
 void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
     if (!g_te.init) trace_env_init();
     arm_last_block = pc;
+    if (g_te.perfmap && c != NULL) perfmap_sample(c, pc);
+    if (g_te.hooks && c != NULL) hook_hit(c, pc);
     if (g_te.perf) {
         static unsigned long long nb = 0, next = 1000000ULL;
         static unsigned long long t0 = 0;
@@ -280,6 +627,24 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         memcpy(&v, c->mem + 0x0040B4C4u, 4);
         v++;
         memcpy(c->mem + 0x0040B4C4u, &v, 4);
+    }
+
+    /* Diagnose: RomFS-Mount als erfolgreich behandeln (fn_0011B98C liefert 0). */
+    if (c != NULL && g_te.romfs_force && pc == 0x00284D64u) c->r[0] = 1;
+
+    /* Diagnose: RomFS-Archive-Mount fn_00284D24 (schreibt den Guard
+       [archive+0xA34] bei 0x285038). */
+    if (c != NULL && g_te.romfs_log &&
+        ((pc >= 0x00284D24u && pc < 0x002851ACu) ||
+         (pc >= 0x0011B98Cu && pc < 0x0011BAB4u) ||
+         (pc >= 0x0012BC58u && pc < 0x0012BEBCu))) {
+        static int rn = 0;
+        if (rn < 400) {
+            rn++;
+            printf("[romfs] %08X r0=%08X r1=%08X r2=%08X r3=%08X r4=%08X r6=%08X\n",
+                   pc, c->r[0], c->r[1], c->r[2], c->r[3], c->r[4], c->r[6]);
+            fflush(stdout);
+        }
     }
 
     /* Diagnose: Fortschritt der Asset-Queue (fn_002895D0, Elemente 0x28 Byte).

@@ -2166,8 +2166,11 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
         InitializeCriticalSection(&g_guest_lock);
         g_guest_lock_init = 1;
         /* Default: Guest-Lock AN (deterministisch, Speicher konsistent).
-           HLE_NO_THREAD_LOCK=1 schaltet ihn ab. */
+           HLE_NO_THREAD_LOCK=1 schaltet ihn ab. HLE_DET_SCHED=1 erzwingt
+           festes Round-Robin (fuer reproduzierbare A/B-Matrizen). */
         g_no_lock = getenv("HLE_NO_THREAD_LOCK") != NULL;
+        g_det_sched = getenv("HLE_DET_SCHED") != NULL;
+        if (g_det_sched) g_turn = 1;   /* erster Gast-Thread ist id 1 */
         if (!g_no_lock) guest_lock_enter();
     }
     g_main_cpu = c;
@@ -2181,6 +2184,8 @@ void hle_tick_stats(int *calls, unsigned long long *tick) {
 
 void hle_report(void) {
     printf("[hle] ipc=%d ticks=%llu tickcalls=%d\n", g_ipc_count, (unsigned long long)g_tick, g_tick_calls);
+    arm_hook_report();
+    arm_perfmap_report();
     printf("[hle] letzte Ereignisse:\n");
     for (int i = 0; i < HLE_EV_RING; i++) {
         int idx = (g_ev_pos + i) % HLE_EV_RING;

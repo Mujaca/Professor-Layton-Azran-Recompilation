@@ -46,19 +46,8 @@ with open(ROM, "rb") as f, open(OUT, "wb") as g:
 
 print("geschrieben:", OUT)
 
-# Der Port-Parser liest die IVFC-Groessen als u32 bei 0x10/0x18/0x20 und
-# die Bereiche SEQUENZIELL. Das echte Layout: Hash-Tabelle 0x208..0x1000,
-# danach die RomFS-Metadaten ab 0x1000. Also L1 = 0x1000-0x208, L2 = 0,
-# L3 = Groesse der Metadaten (file_data_offset aus dem Metadaten-Header).
-with open(OUT, "r+b") as f:
-    f.seek(0x1000)
-    meta = struct.unpack("<10I", f.read(0x28))
-    l3 = meta[9]                      # file_data_offset == Metadaten-Groesse
-    l1 = 0x1000 - 0x208
-    f.seek(0x10)
-    f.write(struct.pack("<I", l1))
-    f.seek(0x18)
-    f.write(struct.pack("<I", 0))
-    f.seek(0x20)
-    f.write(struct.pack("<I", l3))
-print("IVFC-Groessen gesetzt: L1=0x%X L2=0 L3=0x%X (Metadaten)" % (l1, l3))
+# Hinweis: Der IVFC-Header bleibt UNVERAENDERT (Original aus dem ROM).
+# Frueher wurden hier die Groessen bei 0x10/0x18/0x20 ueberschrieben; das
+# hat den Mount der Engine nicht verbessert (fn_0012BC58 liefert weiter 0),
+# daher ist der originale Header die ehrlichere Variante.
+

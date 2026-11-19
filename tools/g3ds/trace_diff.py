@@ -89,7 +89,10 @@ _CMD_MAP = {
     ("gsp::Gpu", 0x0005): "setbufferswap",
     ("gsp::Gpu", 0x0006): "setcommandlist",
     ("gsp::Gpu", 0x000C): "triggercmdreqqueue",
+    ("gsp::Gpu", 0x0010): "setaxiconfigqosmode",
     ("gsp::Gpu", 0x0013): "registerinterruptrelayqueue",
+    ("gsp::Gpu", 0x0016): "acquiregpuright",
+    ("gsp::Gpu", 0x001E): "setinternalpriorities",
     ("APT:U", 0x0001): "getlockhandle",
     ("APT:U", 0x0002): "initialize",
     ("APT:U", 0x0003): "enable",
@@ -141,9 +144,12 @@ def parse_reference(path: Path) -> Trace:
     events: List[Event] = []
     services: List[str] = []
     idx = 0
-    with path.open("r", encoding="utf-8", errors="replace") as f:
-        for line_no, line in enumerate(f, 1):
-            line = line.rstrip("\n")
+    for line_no, line in enumerate(
+            common.read_text_auto(path).splitlines(), 1):
+            # Azahar stellt jedem Ereignis "[   1.467578] " voran. Ohne
+            # diesen Schritt matcht nur _SRV_REF_RE (search); alle
+            # Service-Methodenzeilen gingen verloren.
+            line = _TS_RE.sub("", line, count=1)
             m = _SRV_REF_RE.search(line)
             if m:
                 name = m.group(1)
@@ -193,9 +199,8 @@ def parse_port(path: Path) -> Trace:
         if name.lower() not in [s.lower() for s in services]:
             services.append(name)
 
-    with path.open("r", encoding="utf-8", errors="replace") as f:
-        for line_no, line in enumerate(f, 1):
-            line = line.rstrip("\n")
+    for line_no, line in enumerate(
+            common.read_text_auto(path).splitlines(), 1):
             m = _PORT_SRV_RE.match(line)
             if m:
                 name = m.group(1)

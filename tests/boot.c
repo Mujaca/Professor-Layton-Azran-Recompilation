@@ -143,6 +143,11 @@ static void load_code(ArmCpu *c) {
     if (0x212CC0u + 4 <= 0x300000u) {
         *(uint32_t *)(g_mem + 0x212CC0) = 0xE1A00000u;
         *(uint32_t *)(g_mem + 0x212FCC) = 0xE1A00000u;
+        /* Diagnose: RomFS-Mount (fn_00284D24) nicht frueh aussteigen lassen
+           (beq 0x285188 nach fn_0011B98C) -> der Guard [archive+0xA34] wird
+           gesetzt und der Archiv-Resolver 0x36C54C findet Dateien. */
+        if (getenv("HLE_ROMFS_FORCE"))
+            *(uint32_t *)(g_mem + 0x284D68) = 0xE1A00000u;
         /* 0x33E1B0: "str r0,[r4]" im Session-Destruktor -> NOP,
            damit das statische Session-Objekt nie Handle 0 bekommt. */
         *(uint32_t *)(g_mem + 0x33E1B0) = 0xE1A00000u;

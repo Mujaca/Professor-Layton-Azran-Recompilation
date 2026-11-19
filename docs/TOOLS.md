@@ -185,9 +185,112 @@ Der Test prueft gegen verifizierte Fakten:
 * fehlende Dateien liefern Exit-Code 2 mit `FEHLER:`,
 * `docs/TOOLS.md` und der Skill `.opencode/skills/3ds-hle/SKILL.md` existieren.
 
-## 7. Fuer neue Agenten
+## 7. where — Warteschleifen und Felder
 
-Skill lesen: `.opencode/skills/3ds-hle/SKILL.md`. Er enthaelt die
+`where` startet den Port mit `HLE_PERFMAP`, liest Block-Histogramm und
+Rueckwaertskanten und nennt pro Thread die heisse Funktion, die
+Spin-Schleife, die gelesenen globalen Felder und deren Schreiber
+(statisch per `callgraph`, optional dynamisch per `ARM_MEMWATCH`).
+
+```powershell
+python tools\where.py --run --thread 2
+python tools\where.py --perfmap tools\out\where_perfmap.txt --no-dynamic
+```
+
+Akzeptanzfall: `Thread 2 wartet in fn_0028F250 auf Feld 0x0040B4C4;
+letzter Schreiber: fn_00134818 (Tick-Task Slot 2 der Tabelle 0x003D7C50)`.
+
+## 8. callgraph — statische Programmdatenbank
+
+Einmalig indexieren (`tools/out/callgraph.json`), dann abfragen:
+
+```powershell
+python tools\callgraph.py callers 0x28F250
+python tools\callgraph.py literals 0x134818
+python tools\callgraph.py writers 0x40B4C4
+python tools\callgraph.py readers 0x40B4C4
+python tools\callgraph.py strings "boss:U"
+python tools\callgraph.py fn 0x28F250
+python tools\callgraph.py stats
+```
+
+Der Index enthaelt Funktionen, BL/BLX-Kanten, LDR-Literale (Literal ->
+Code-Stelle), basis-symbolisch aufgeloeste globale Loads/Stores und
+String-Verwender. `--rebuild` erzwingt einen Neuaufbau.
+
+## 9. diff_trace — Referenz ab einem Anker
+
+```powershell
+python tools\diff_trace.py --port tools\fixtures\port_boot_20261119.log
+python tools\diff_trace.py --kind all --after "gsp.*001E" --limit 20
+```
+
+Behebt die alte Parser-Luecke: Azahar-Zeitstempel werden entfernt, daher
+werden auch GSP/DSP/FS/Y2R-Methodenzeilen gelesen. Ausgabe: erste fehlende
+Referenzaktion nach `gsp 0x001E`, Kontext und die Liste fehlender
+Ereignisse. Wiederholungen werden standardmaessig zusammengefasst.
+
+## 10. matrix — A/B-Runner
+
+```powershell
+python tools\matrix.py --matrix "HLE_RM_ADV=0|1" --timeout 15 --jobs 2
+python tools\matrix.py --matrix "HLE_TICK_MS=2|8" --repeat 2 --deterministic
+```
+
+Startet jede Kombination, wertet `milestones` aus, zeigt `M1..M9` als
+`+`/`.` und nennt den besten Lauf. `--repeat` prueft die Determinismus-
+Signatur. `--deterministic` setzt `HLE_DET_SCHED=1` und `HLE_TICK_MS=2`.
+
+## 11. milestones — Fortschrittskette
+
+```powershell
+python tools\milestones.py --log out\boot_log.txt
+python tools\milestones.py --run --timeout 20
+```
+
+Kette: APT -> FS/RomFS -> DSP -> GSP-Init -> boss:U -> SaveData/head.lt6 ->
+`gsp 0x000C` -> VRAM-Writes -> echter Frame. Jede Zeile mit `✅`/`❌` und
+Beweiszeile; Exit-Code 1, wenn eine Stufe fehlt.
+
+## 12. hotpatch — Hooks ohne Rebuild
+
+Runtime: `HLE_HOOK=ADRESSE=CALLBACK[,ADRESSE=CALLBACK]`. Verfuegbar sind
+`count_fields`/`count`, `regs`/`dump_regs`, `mem`/`dump_mem`, `log`/`pc`
+und `set_r0` (mit `HLE_HOOK_VALUE`).
+
+```powershell
+python tools\hotpatch.py list
+python tools\hotpatch.py run --hook 134818=count --timeout 5
+python tools\hotpatch.py run --hook 28F284=regs,28F284=mem --timeout 5
+```
+
+## 13. perfmap — Block-Histogramm und Rate
+
+```powershell
+python tools\perfmap.py run --timeout 12 --top 8
+python tools\perfmap.py report --perfmap tools\out\perfmap.txt --seconds 3.0
+```
+
+Aggregiert Bloecke pro Funktion/Thread, zeigt Top-Rueckwaertskanten und
+schaetzt emulierte Sekunden pro Wandsekunde (268,111 MHz, Blocklaenge
+statisch bis zum naechsten Sprung).
+
+## 14. framecheck — Screenshot vs. Referenz
+
+```powershell
+python tools\framecheck.py
+python tools\framecheck.py --fail-on-placeholder --json-out tools\out\frame.json
+```
+
+Liest BMP und PNG mit der Standardbibliothek, vergleicht 96x54-Downscales,
+zeigt dominante Farben/Perzentile und meldet den Port-Platzhalter
+(288.054 Byte = 400x240 ohne Spiel-Render).
+
+## 15. Fuer neue Agenten
+
+Skill lesen: `.opencode/skills/3ds-hle/SKILL.md` fuer IPC/HLE-Details und
+`.opencode/skills/3ds-port/SKILL.md` bzw. `docs/SKILL.md` fuer die
+Messrezepte. Der 3ds-hle-Skill enthaelt die
 IPC-/Reply-Fallen, die verifizierten Dienst-Cmd-IDs, das RomFS/IVFC-Layout,
 GSP-Shared-Memory-Details, libctru-Referenzen und die bekannten Sackgassen.
 Die Werkzeuge sind dort mit ihren Aufrufen verlinkt; damit findet ein neuer

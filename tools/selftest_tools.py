@@ -130,15 +130,73 @@ def test_failures():
 def test_docs_skill():
     docs = ROOT / "docs" / "TOOLS.md"
     skill = ROOT / ".opencode" / "skills" / "3ds-hle" / "SKILL.md"
+    new_skill = ROOT / ".opencode" / "skills" / "3ds-port" / "SKILL.md"
     need(docs.is_file(), "docs/TOOLS.md fehlt")
     need(skill.is_file(), ".opencode/skills/3ds-hle/SKILL.md fehlt")
+    need(new_skill.is_file(), ".opencode/skills/3ds-port/SKILL.md fehlt")
+    need((ROOT / "docs" / "SKILL.md").is_file(), "docs/SKILL.md fehlt")
     text = docs.read_text(encoding="utf-8")
-    for name in ("trace-diff", "guest-refs", "guest-run", "guest-watch", "guest-exp"):
+    for name in ("trace-diff", "guest-refs", "guest-run", "guest-watch",
+                 "guest-exp", "where", "callgraph", "diff_trace",
+                 "milestones", "matrix", "perfmap", "hotpatch", "framecheck"):
         need(name in text, "%s fehlt in docs/TOOLS.md" % name)
     st = skill.read_text(encoding="utf-8")
     for needle in ("cmdbuf[0]", "0x10", "0x18", "0x20", "ReceiveParameter",
                    "InterruptRelayQueue", "ndspInit", "aptMainLoop"):
         need(needle in st, "Skill ohne %r" % needle)
+
+
+def test_callgraph():
+    out = OUT / "cg.json"
+    p = run(["callgraph", "writers", "0x40B4C4", "--json-out", str(out)])
+    need(p.returncode == 0, "callgraph writers: %s\n%s" % (p.stdout, p.stderr))
+    data = load_json(out)
+    sites = {e["site"] for e in data}
+    need("0x00134850" in sites, "writer 0x00134850 fehlt: %s" % sorted(sites))
+    p = run(["callgraph", "literals", "0x134818"])
+    need("0x00128934" in p.stdout and "fn_001287E0" in p.stdout,
+         "Tick-Registrierungs-Literal fehlt: %s" % p.stdout[:500])
+
+
+def test_diff_trace():
+    out = OUT / "dt.json"
+    p = run(["diff-trace", "--ref", "reports/azahar_trace.txt", "--port",
+             "tools/fixtures/port_boot_20261119.log", "--kind", "all",
+             "--json-out", str(out)])
+    need(p.returncode == 1, "diff-trace Exit %d\n%s" % (p.returncode, p.stdout))
+    data = load_json(out)
+    need(data["anchor"] and "SetInternalPriorities" in data["anchor"],
+         "Anker nicht erkannt: %s" % data.get("anchor"))
+    need(data["missing"], "keine fehlenden Referenzereignisse")
+
+
+def test_milestones():
+    out = OUT / "ms.json"
+    p = run(["milestones", "--log", "tools/fixtures/port_boot_20261119.log",
+             "--json-out", str(out)])
+    need(p.returncode == 1, "milestones Exit %d" % p.returncode)
+    data = load_json(out)
+    got = {c["id"]: c["ok"] for c in data["checks"]}
+    need(got.get("apt") and got.get("fs") and got.get("dsp")
+         and got.get("gsp_init"), "fruehe Meilensteine fehlen: %s" % got)
+    need(not got.get("boss") and not got.get("frame"),
+         "spaete Meilensteine falsch: %s" % got)
+
+
+def test_framecheck():
+    out = OUT / "frame.json"
+    p = run(["framecheck", "--json-out", str(out)])
+    need(p.returncode == 0, "framecheck Exit %d\n%s" % (p.returncode, p.stdout))
+    data = load_json(out)
+    need(data["placeholder"] is True, "Platzhalter nicht erkannt")
+    need(data["shot_bytes"] == 288054, "Screenshotgroesse: %s" % data["shot_bytes"])
+
+
+def test_hotpatch_list():
+    p = run(["hotpatch", "list"])
+    need(p.returncode == 0, "hotpatch list Exit %d" % p.returncode)
+    for name in ("count_fields", "regs", "mem", "log", "set_r0"):
+        need(name in p.stdout, "Callback %s fehlt" % name)
 
 
 TESTS = [
@@ -148,7 +206,12 @@ TESTS = [
     ("guest-watch 0x40B4C4", test_guest_watch),
     ("guest-exp --repeat 2", test_guest_exp),
     ("klare Fehlermeldungen", test_failures),
-    ("docs/TOOLS.md + Skill 3ds-hle", test_docs_skill),
+    ("docs/TOOLS.md + Skills", test_docs_skill),
+    ("callgraph writers/literals", test_callgraph),
+    ("diff-trace Anker + Missing", test_diff_trace),
+    ("milestones Fixture", test_milestones),
+    ("framecheck Platzhalter", test_framecheck),
+    ("hotpatch list", test_hotpatch_list),
 ]
 
 

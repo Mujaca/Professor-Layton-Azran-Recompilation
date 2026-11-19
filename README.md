@@ -29,6 +29,22 @@ python tools\exheader.py       # CodeSetInfo + Service-Access-Liste
 python tools\assetfmt.py       # Asset-Header (ARC0 / CSAR / CSTM / MOFLEX)
 ```
 
+## Diagnose-Werkzeuge
+
+```powershell
+python tools\where.py --run --thread 2      # Warteschleife + Feld + Schreiber
+python tools\callgraph.py writers 0x40B4C4  # statische Programmdatenbank
+python tools\diff_trace.py                  # Referenz vs. Port ab gsp 0x001E
+python tools\milestones.py                  # Fortschrittskette mit Beweisen
+python tools\matrix.py --matrix "HLE_RM_ADV=0|1"
+python tools\perfmap.py run --timeout 12
+python tools\hotpatch.py run --hook 134818=count --timeout 5
+python tools\framecheck.py
+```
+
+Rezepte und Fallstricke: [`docs/SKILL.md`](docs/SKILL.md), Details:
+[`docs/TOOLS.md`](docs/TOOLS.md).
+
 ## Recompiler-MVP (Phase 1)
 
 `tools/recomp/` übersetzt das ARM11-`code.bin` statisch nach C; `runtime/arm_cpu.c`

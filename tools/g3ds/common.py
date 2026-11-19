@@ -50,6 +50,19 @@ def warn(message: str) -> None:
     print("WARNUNG: %s" % message, file=sys.stderr)
 
 
+def read_text_auto(path: Path) -> str:
+    """Logtext lesen: UTF-8, UTF-16 (PowerShell-Redirect) oder cp1252."""
+    raw = Path(path).read_bytes()
+    if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+        return raw.decode("utf-16", errors="replace")
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return raw.decode("utf-8-sig", errors="replace")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("cp1252", errors="replace")
+
+
 def check_file(path: Path, what: str, hint: str = "") -> Path:
     if not path.is_file():
         msg = "%s fehlt: %s" % (what, path)

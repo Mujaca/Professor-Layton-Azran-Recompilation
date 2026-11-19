@@ -30,6 +30,11 @@ void arm_trace_frame(void);
 void arm_trace_event(uint32_t kind, uint32_t a, uint32_t b);
 void arm_trace_pc_ring_dump(unsigned count);
 
+/* Diagnose ohne Rebuild: Block-Histogramm (HLE_PERFMAP_FILE) und
+   Adresse->Callback-Tabelle (HLE_HOOK). Beide sind env-gated. */
+void arm_perfmap_report(void);
+void arm_hook_report(void);
+
 #ifdef __cplusplus
 }
 #endif

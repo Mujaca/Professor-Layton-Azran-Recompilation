@@ -432,6 +432,14 @@ def _add_run_args(sp):
 
 def main(argv: Optional[List[str]] = None) -> int:
     argv = list(argv) if argv is not None else sys.argv[1:]
+    # Neue Werkzeuge haben eigene Parser (inkl. --help); g3ds reicht nur durch.
+    if argv:
+        name = argv[0].replace("_", "-")
+        if name in ("callgraph", "diff-trace", "milestones", "matrix",
+                    "where", "perfmap", "hotpatch", "framecheck"):
+            from importlib import import_module
+            mod = import_module("g3ds." + name.replace("-", "_"))
+            return mod.main(argv[1:])
     parser = build_parser()
     args = parser.parse_args(argv)
     return args.func(args)
