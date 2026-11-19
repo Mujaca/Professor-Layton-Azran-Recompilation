@@ -9,6 +9,7 @@
 #include "../gpu.h"
 
 static uint32_t g_hle_gsp_handle;
+static uint32_t g_apt_param_ev = 0;
 static void dispatch_ipc(uint32_t handle);
 #include "../arm_trace.h"
 
@@ -630,6 +631,7 @@ static void apt_command(Ipc *r, uint32_t *p) {
         case 2: { /* Initialize -> { CopyHandle x2, h1, h2 } */
             uint32_t ev1 = (uint32_t)alloc_handle(SVC_OTHER, "apt-notif");
             uint32_t ev2 = (uint32_t)alloc_handle(SVC_OTHER, "apt-param");
+            g_apt_param_ev = ev2;
             ipc_begin(r, 2, 1, 3);
             put_result(r);
             if (getenv("HLE_APT_3H")) {
@@ -719,6 +721,10 @@ static void apt_command(Ipc *r, uint32_t *p) {
                     if (r->translate >= 2) {
                         ipc_put(r, dsc_flags);
                         ipc_put(r, dsc_addr);
+                    }
+                    if (g_apt_param_ev != 0) {
+                        Handle *ph = get_handle(g_apt_param_ev);
+                        if (ph != NULL) ph->signaled = 1;
                     }
                     if (g_log) printf("[apt] ReceiveParameter -> Wakeup (#%u)\n", rx_calls);
                 } else {
@@ -1790,7 +1796,10 @@ static DWORD WINAPI vblank_thread(LPVOID p) {
         for (int k = 1; k < MAX_HANDLES; k++) {
             /* Nur Handles wecken, auf die wirklich gewartet wird. */
             if (g_handles[k].used &&
-                (getenv("HLE_VB_ONLY") == NULL || g_wait_seen[k]))
+                (getenv("HLE_VB_ONLY") == NULL || g_wait_seen[k]) &&
+                !(getenv("HLE_APT_ONLY") != NULL &&
+                  (strcmp(g_handles[k].name, "apt-param") == 0 ||
+                   strcmp(g_handles[k].name, "apt-notif") == 0)))
                 g_handles[k].signaled = 1;
         }
         /* GSP-Interrupt-Relay-Queue: das Spiel mappt sie an 0x10002000.
