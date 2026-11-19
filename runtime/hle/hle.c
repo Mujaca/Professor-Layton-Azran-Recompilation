@@ -790,22 +790,49 @@ static void ensure_savedata(void) {
 
 /* Sucht eine Datei zuerst in out/savedata, dann in out/romfs. */
 static int open_guest_file(const char *guest_path, FileSlot **slot_out) {
-    char path[256];
-    const char *q = guest_path;
-    if (strncmp(q, "romfs:", 6) == 0) q += 6;
+    char q[256];
+    char sd[320];
+    const char *src = guest_path;
+    if (strncmp(src, "romfs:", 6) == 0) src += 6;
     /* Das Spiel adressiert RomFS-Dateien mit dem Praefix "rom:"
        (Literal 0x1023AC), nicht "romfs:". */
-    else if (strncmp(q, "rom:", 4) == 0) q += 4;
-    while (*q == '/') q++;
-    char base1[256];
-    snprintf(base1, sizeof(base1), "out/savedata/%s", q);
-    for (char *c = base1; *c; c++) if (*c == '/') *c = '\\';
-    snprintf(path, sizeof(path), "%s", base1);
-    FILE *fp = fopen(path, "rb");
+    else if (strncmp(src, "rom:", 4) == 0) src += 4;
+    while (*src == '/') src++;
+    snprintf(q, sizeof(q), "%s", src);
+    for (char *c = q; *c; c++) if (*c == '/') *c = '\\';
+    snprintf(sd, sizeof(sd), "out/savedata/%s", q);
+
+    FILE *fp = fopen(sd, "r+b");
+    const char *used_path = sd;
     if (!fp) {
-        snprintf(path, sizeof(path), "%s/%s", g_romfs, q);
-        for (char *c = path; *c; c++) if (*c == '/') *c = '\\';
-        fp = fopen(path, "rb");
+        char rom[320];
+        snprintf(rom, sizeof(rom), "%s\\%s", g_romfs, q);
+        FILE *rf = fopen(rom, "rb");
+        if (rf) {
+            fseek(rf, 0, SEEK_END);
+            long rsz = ftell(rf);
+            fseek(rf, 0, SEEK_SET);
+            if (rsz <= 0x40000) {
+                /* Kleine Datei (Save/Settings): in out/savedata spiegeln,
+                   damit Schreibzugriffe und erneutes Oeffnen persistent sind. */
+                FILE *wf = fopen(sd, "wb");
+                if (wf) {
+                    char buf[4096];
+                    size_t got;
+                    while ((got = fread(buf, 1, sizeof(buf), rf)) > 0)
+                        fwrite(buf, 1, got, wf);
+                    fclose(wf);
+                }
+                fclose(rf);
+                fp = fopen(sd, "r+b");
+            } else {
+                fp = rf;
+                used_path = rom;
+            }
+        } else {
+            /* Unbekannter Pfad: als neue, leere Datei anlegen. */
+            fp = fopen(sd, "w+b");
+        }
     }
     if (!fp) return 0;
     fseek(fp, 0, SEEK_END);
@@ -814,7 +841,7 @@ static int open_guest_file(const char *guest_path, FileSlot **slot_out) {
     for (int i = 0; i < MAX_FILES; i++) {
         if (!g_files[i].used) {
             g_files[i].used = 1;
-            snprintf(g_files[i].path, sizeof(g_files[i].path), "out/savedata/save_%d.sav", i);
+            snprintf(g_files[i].path, sizeof(g_files[i].path), "%s", used_path);
             g_files[i].fp = fp;
             g_files[i].size = (uint32_t)sz;
             *slot_out = &g_files[i];
@@ -1057,11 +1084,11 @@ static void file_command(Ipc *r, uint32_t *p) {
     if (h == NULL || h->file < 0) {
         /* Richtige Reply-Form auch ohne Datei, sonst wertet die SDK
            "0 Bytes gelesen" als Fehler (F96047A2). */
-        if (r->cmd == 0x0801 || r->cmd == 0x0802) {
+        if (r->cmd == 0x0802 || r->cmd == 0x0803) {
             ipc_begin(r, r->cmd, 2, 0);
             ipc_put(r, 0);
             ipc_put(r, 0);
-        } else if (r->cmd == 0x0803) {
+        } else if (r->cmd == 0x0804) {
             ipc_begin(r, r->cmd, 3, 0);
             ipc_put(r, 0);
             ipc_put(r, 0);
@@ -1074,22 +1101,16 @@ static void file_command(Ipc *r, uint32_t *p) {
     }
     FileSlot *f = &g_files[h->file];
     switch (r->cmd) {
-        case 0x0801: { /* Read: SDK sendet (offset low, offset high, size) */
-            uint64_t offset;
-            uint32_t length;
-            if (!(p[0] == 0 && p[1] == 0 && p[2] != 0)) {
+        case 0x0802: { /* Read: (offset u64, size) + MappedBuffer */
+            uint64_t offset = (uint64_t)p[0] | ((uint64_t)p[1] << 32);
+            uint32_t length = p[2];
+            if (length > 0x01000000u) { /* Fallback: vertauschte Reihenfolge */
+                offset = 0;
                 length = p[0];
-                offset = (uint64_t)p[1] | ((uint64_t)p[2] << 32);
-            } else {
-                offset = (uint64_t)p[0] | ((uint64_t)p[1] << 32);
-                length = p[2];
             }
             uint32_t addr = 0;
-            int nn = r->normal;
-            for (int i = 0; i < 8; i++) {
-                uint32_t w = p[nn + i];
-                if (w >= 0x00001000u && w < 0x30000000u) { addr = w; break; }
-            }
+            /* Translate-Deskriptor: {size|flags, adresse} -> Adresse ist das ZWEITE Wort. */
+            if (r->translate >= 2) addr = p[r->normal + 1];
             uint32_t done = 0;
             if (addr && length) {
                 if (f->fp) {
@@ -1105,32 +1126,26 @@ static void file_command(Ipc *r, uint32_t *p) {
             if (g_log) printf("[file] Read %s off=0x%llX len=0x%X size=0x%X -> %u\n",
                               f->path, (unsigned long long)offset, length, f->size, done);
             /* Azahar: MakeBuilder(2,2) + PushMappedBuffer -> Descriptor-Echo */
-            ipc_begin(r, 0x0801, 2, 2);
+            ipc_begin(r, 0x0802, 2, 2);
             ipc_put(r, 0);
             ipc_put(r, done);
             ipc_put(r, p[r->normal]);
             ipc_put(r, p[r->normal + 1]);
             break;
         }
-        case 0x0802: { /* Write: SDK sendet (offset low, offset high, size) */
-            uint64_t offset;
-            uint32_t length;
-            if (!(p[0] == 0 && p[1] == 0 && p[2] != 0)) {
+        case 0x0803: { /* Write: (offset u64, size) + MappedBuffer */
+            uint64_t offset = (uint64_t)p[0] | ((uint64_t)p[1] << 32);
+            uint32_t length = p[2];
+            if (length > 0x01000000u) { /* Fallback */
+                offset = 0;
                 length = p[0];
-                offset = (uint64_t)p[1] | ((uint64_t)p[2] << 32);
-            } else {
-                offset = (uint64_t)p[0] | ((uint64_t)p[1] << 32);
-                length = p[2];
             }
             uint32_t addr = 0;
-            int nn = r->normal;
-            for (int i = 0; i < 8; i++) {
-                uint32_t w = p[nn + i];
-                if (w >= 0x00001000u && w < 0x30000000u) { addr = w; break; }
-            }
+            /* Translate-Deskriptor: {size|flags, adresse} -> Adresse ist das ZWEITE Wort. */
+            if (r->translate >= 2) addr = p[r->normal + 1];
             uint32_t done = 0;
             if (addr && length) {
-                if (f->fp == NULL) f->fp = fopen(f->path, "wb");
+                if (f->fp == NULL) f->fp = fopen(f->path, "w+b");
                 if (f->fp) {
                     fseek(f->fp, (long)offset, SEEK_SET);
                     done = (uint32_t)fwrite(g_cur_mem + (addr & 0x1FFFFFFFu), 1, length, f->fp);
@@ -1141,47 +1156,47 @@ static void file_command(Ipc *r, uint32_t *p) {
             if (g_log) printf("[file] Write off=0x%llX len=0x%X addr=%08X -> %u\n",
                               (unsigned long long)offset, length, addr, done);
             /* Azahar: MakeBuilder(2,2) + PushMappedBuffer -> Descriptor-Echo */
-            ipc_begin(r, 0x0802, 2, 2);
+            ipc_begin(r, 0x0803, 2, 2);
             ipc_put(r, 0);
             ipc_put(r, done);
             ipc_put(r, p[r->normal]);
             ipc_put(r, p[r->normal + 1]);
             break;
         }
-        case 0x0803: { /* GetSize -> Result + u64 */
-            ipc_begin(r, 0x0803, 3, 0);
+        case 0x0804: { /* GetSize -> Result + u64 */
+            ipc_begin(r, 0x0804, 3, 0);
             ipc_put(r, 0);
             ipc_put(r, f->size);
             ipc_put(r, 0);
             break;
         }
-        case 0x0804: { /* SetSize(size u64) */
+        case 0x0805: { /* SetSize(size u64) */
             uint32_t lo = p[0], hi = p[1];
             f->size = lo;
             (void)hi;
-            ipc_begin(r, 0x0804, 1, 0);
-            ipc_put(r, 0);
-            break;
-        }
-        case 0x0805: { /* Close */
-            if (f->fp) fclose(f->fp);
-            f->used = 0;
-            f->fp = NULL;
-            h->file = -1;
             ipc_begin(r, 0x0805, 1, 0);
             ipc_put(r, 0);
             break;
         }
-        case 0x0806: { /* Flush */
+        case 0x0808: { /* Close */
+            if (f->fp) fclose(f->fp);
+            f->used = 0;
+            f->fp = NULL;
+            h->file = -1;
+            ipc_begin(r, 0x0808, 1, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x0809: { /* Flush */
             if (f->fp) fflush(f->fp);
-            ipc_begin(r, 0x0806, 1, 0);
+            ipc_begin(r, 0x0809, 1, 0);
             ipc_put(r, 0);
             break;
         }
         default:
             if (g_log) printf("[file] cmd 0x%04X -> 0\n", r->cmd);
-            if (r->cmd == 0x0808) { /* SetPriority -> Result + Priority */
-                ipc_begin(r, 0x0808, 2, 0);
+            if (r->cmd == 0x080A) { /* SetPriority -> Result + Priority */
+                ipc_begin(r, 0x080A, 2, 0);
                 ipc_put(r, 0);
                 ipc_put(r, 0);
                 break;
