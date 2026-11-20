@@ -704,11 +704,19 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
     }
 
     /* Diagnose: Registerzustand im Archiv-Dateilader. */
-    if (c != NULL && g_te.queue_log && pc == 0x0027656Cu &&
-        c->r[13] >= 0x0FFEF7D8u && c->r[13] <= 0x0FFEF7F0u) {
-        printf("[m56c] sp=%08X lr=%08X r0=%08X r1=%08X r2=%08X r3=%08X\n",
-               c->r[13], c->r[14], c->r[0], c->r[1], c->r[2], c->r[3]);
+    if (c != NULL && g_te.queue_log && pc == 0x00269AACu && c->r[14] == 0x00276594u) {
+        printf("[aac] r3=%08X sp=%08X lr=%08X r0=%08X r1=%08X r2=%08X r4=%08X\n",
+               c->r[3], c->r[13], c->r[14], c->r[0], c->r[1], c->r[2], c->r[4]);
         fflush(stdout);
+    }
+    if (c != NULL && g_te.queue_log && pc == 0x0027656Cu) {
+        static unsigned long sn = 0;
+        sn++;
+        if ((c->r[13] + 0x1Cu) >= 0x0FFEF7D0u && (c->r[13] + 0x1Cu) <= 0x0FFEF7F8u) {
+            printf("[m56c] sn=%lu sp=%08X arg3=%08X lr=%08X\n",
+                   sn, c->r[13], c->r[13] + 0x1Cu, c->r[14]);
+            fflush(stdout);
+        }
     }
     if (c != NULL && g_te.queue_log &&
         (pc == 0x0026F130u || pc == 0x002808A8u || pc == 0x00280914u ||
