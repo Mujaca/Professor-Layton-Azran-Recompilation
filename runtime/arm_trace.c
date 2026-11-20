@@ -703,6 +703,32 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         memcpy(c->mem + (0x003EE16Cu & 0x1FFFFFFFu), &one, 2);
     }
 
+    /* Diagnose: fuehrendes '/' aus dem RomFS-Pfad entfernen. Die Engine
+       splittet "rom:/lt6/..." und liefert als erste Komponente "" (len 0). */
+    if (c != NULL && pc == 0x0033D8B8u && getenv("HLE_PATH_FIX")) {
+        uint32_t a;
+        for (a = 0x0FFEE000u; a + 10u < 0x0FFF0000u; a += 2u) {
+            const uint8_t *p2 = c->mem + (a & 0x1FFFFFFFu);
+            if (p2[0] == 'r' && p2[1] == 0 && p2[2] == 'o' && p2[3] == 0 &&
+                p2[4] == 'm' && p2[5] == 0 && p2[6] == ':' && p2[7] == 0 &&
+                p2[8] == '/' && p2[9] == 0) {
+
+                uint32_t len = 0;
+                while (len < 200u) {
+                    uint16_t ch = 0;
+                    memcpy(&ch, c->mem + ((a + 10u + len * 2u) & 0x1FFFFFFFu), 2);
+                    len++;
+                    if (ch == 0) break;
+                }
+                memmove(c->mem + ((a + 8u) & 0x1FFFFFFFu),
+                        c->mem + ((a + 10u) & 0x1FFFFFFFu), len * 2u);
+                printf("[pathfix] '%s' -> tail um 1 Zeichen gekuerzt\n", "");
+                fflush(stdout);
+                break;
+            }
+        }
+    }
+
     /* Diagnose: Registerzustand im Archiv-Dateilader. */
     if (c != NULL && g_te.queue_log &&
         (pc == 0x00130220u || pc == 0x0013A080u)) {
@@ -749,6 +775,15 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
                     uint32_t v = 0;
                     memcpy(&v, c->mem + ((c->r[0] + (uint32_t)q * 4u) & 0x1FFFFFFFu), 4);
                     printf(" d%d=%08X", q, v);
+                }
+                for (int side = 0; side < 3; side++) {
+                    uint32_t p = (side == 0) ? c->r[1] : (side == 1 ? c->r[2] : c->r[3]);
+                    uint32_t w0 = 0, w1 = 0, w2 = 0, w3 = 0;
+                    memcpy(&w0, c->mem + (p & 0x1FFFFFFFu), 4);
+                    memcpy(&w1, c->mem + ((p + 4u) & 0x1FFFFFFFu), 4);
+                    memcpy(&w2, c->mem + ((p + 8u) & 0x1FFFFFFFu), 4);
+                    memcpy(&w3, c->mem + ((p + 12u) & 0x1FFFFFFFu), 4);
+                    printf(" a%d[%08X]=%08X,%08X,%08X,%08X", side, p, w0, w1, w2, w3);
                 }
             }
             if (pc == 0x0021077Cu) {
