@@ -793,8 +793,17 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         } else if (pc == 0x00205858u) {
             static unsigned long hn = 0;
             hn++;
-            if ((hn % 2000u) == 0) {
-                printf("[hash] n=%lu r0=%08X r2=%08X\n", hn, c->r[0], c->r[2]);
+            if (hn <= 6u || (hn % 2000u) == 0) {
+                uint32_t sa = c->r[0] & 0x1FFFFFFFu;
+                char buf[26];
+                int k;
+                for (k = 0; k < 24 && sa + (uint32_t)k < c->mem_size; k++) {
+                    char ch = (char)c->mem[sa + (uint32_t)k];
+                    buf[k] = (ch >= 32 && ch < 127) ? ch : '.';
+                }
+                buf[k] = 0;
+                printf("[hash] n=%lu r0=%08X r1=%08X r6=%08X '%s'\n",
+                       hn, c->r[0], c->r[1], c->r[6], buf);
                 fflush(stdout);
             }
         } else if (pc == 0x00283418u) {
