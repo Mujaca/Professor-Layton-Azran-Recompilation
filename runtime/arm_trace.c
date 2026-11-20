@@ -699,15 +699,18 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
     /* Diagnose: Registerzustand im Archiv-Dateilader. */
     if (c != NULL && g_te.queue_log &&
         (pc == 0x0026F130u || pc == 0x002808A8u || pc == 0x00280914u ||
-         pc == 0x0026F164u || pc == 0x0026F17Cu)) {
+         pc == 0x0026F164u || pc == 0x0026F17Cu ||
+         pc == 0x00280904u || pc == 0x0028090Cu)) {
         printf("[clob] pc=%08X r6=%08X r8=%08X\n", pc, c->r[6], c->r[8]);
         fflush(stdout);
     }
-    if (c != NULL && g_te.queue_log && (pc == 0x0027A750u || pc == 0x0027A6E8u)) {
+    if (c != NULL && g_te.queue_log &&
+        (pc == 0x0027A750u || pc == 0x0027A6E8u ||
+         pc == 0x00280904u || pc == 0x0028090Cu)) {
         printf("[pop] pc=%08X r6=%08X r8=%08X sp=%08X", pc, c->r[6], c->r[8], c->r[13]);
         for (int q = 0; q < 8; q++) {
             uint32_t v = 0;
-            memcpy(&v, c->mem + ((c->r[13] + 0xC4u + (uint32_t)q * 4u) & 0x1FFFFFFFu), 4);
+            memcpy(&v, c->mem + ((c->r[13] + (uint32_t)q * 4u) & 0x1FFFFFFFu), 4);
             printf(" %08X", v);
         }
         printf("\n");
