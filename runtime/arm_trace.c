@@ -657,6 +657,17 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         memcpy(c->mem + ((c->r[1] + 0xF4u) & 0x1FFFFFFFu), &wr, 4);
     }
 
+    /* Diagnose: Lade-Auftrag vortaeuschen, damit fn_001213E8 den Enqueue
+       (0x2879B4) aufruft: [obj+0x1D]=1 (Flag) und [obj+0x20]=1 (Anzahl). */
+    if (c != NULL && g_te.load_task && pc == 0x001215C0u) {
+        uint32_t one = 1u;
+        uint32_t o = c->r[4] & 0x1FFFFFFFu;
+        c->mem[o + 0x1Du] = 1;
+        memcpy(c->mem + o + 0x20u, &one, 4);
+        printf("[loadtask] obj=%08X -> f1d=1 cnt=1\n", c->r[4]);
+        fflush(stdout);
+    }
+
     /* Diagnose: Guard-Byte [0x3E7771] vor fn_001213E8 loeschen - es
        verhindert sonst das Einstellen des Lade-Tasks (fn_002879B4). */
     if (c != NULL && g_te.load_task && pc == 0x001213E8u) {
@@ -798,8 +809,10 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
             static unsigned long ln3 = 0;
             ln3++;
             if (ln3 <= 40u) {
-                printf("[loadpath] pc=%08X r0=%08X r5=%08X n=%lu\n",
-                       pc, c->r[0], c->r[5], ln3);
+                printf("[loadpath] pc=%08X r0=%08X r4=%08X f1d=%02X cnt=%08X n=%lu\n",
+                       pc, c->r[0], c->r[4],
+                       arm_mem_read(c, c->r[4] + 0x1Du, 1),
+                       arm_mem_read(c, c->r[4] + 0x20u, 4), ln3);
                 fflush(stdout);
             }
         } else if (pc == 0x00289E48u || pc == 0x00289E34u || pc == 0x00289DB8u) {
