@@ -750,9 +750,9 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
             memcpy(&k1, c->mem + ((c->r[0] + 4u) & 0x1FFFFFFFu), 4);
             memcpy(&k2, c->mem + ((c->r[0] + 8u) & 0x1FFFFFFFu), 1);
             {
-                char kb[30];
+                char kb[64];
                 int qi;
-                for (qi = 0; qi < 28; qi++) {
+                for (qi = 0; qi < 60; qi++) {
                     char ch = (char)c->mem[((c->r[0] + (uint32_t)qi) & 0x1FFFFFFFu)];
                     kb[qi] = (ch >= 32 && ch < 127) ? ch : 0;
                     if (ch == 0) break;
