@@ -468,7 +468,7 @@ typedef struct {
     int fa_debug, reg_enable, reg_debug, asset_trace, queue_log;
     int fa_reg_ok, fa_fake_ok, fa_always, blklogf, force_asset;
     int dump_fatal, dump_r3, watch_pool, perf, rm_adv, romfs_log, romfs_force, heap_seed;
-    int fast_memcpy;
+    int fast_memcpy, fake_asset;
     int perfmap, hooks;
     uint32_t blklog_lo;
 } TraceEnv;
@@ -504,6 +504,7 @@ static void trace_env_init(void) {
         const char *fm = getenv("HLE_FAST_MEMCPY");
         g_te.fast_memcpy = !(fm != NULL && fm[0] == '0');
     }
+    g_te.fake_asset = envset("HLE_FAKE_ASSET");
     g_te.perfmap = envset("HLE_PERFMAP") || (getenv("HLE_PERFMAP_FILE") != NULL);
     g_te.hooks = (getenv("HLE_HOOK") != NULL);
     if (g_te.perfmap) perfmap_init();
@@ -650,6 +651,26 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         uint32_t wr = 0x00600000u;      /* _M_Wrk-Objekt: 6 MB (passt in 8 MB) */
         memcpy(c->mem + ((c->r[1] + 0xF0u) & 0x1FFFFFFFu), &sz, 4);
         memcpy(c->mem + ((c->r[1] + 0xF4u) & 0x1FFFFFFFu), &wr, 4);
+    }
+
+    /* Diagnose: dem Scene-Descriptor einen synthetischen Asset-Eintrag geben,
+       damit die Einfuege-Schleife in fn_00284D24 laeuft und 0x282364 einen
+       Namen eintraegt. Eintrag: stride 0x18, Name[0x14] @+0, u32 @+0x10,
+       u8 @+0x16. */
+    if (c != NULL && g_te.fake_asset && pc == 0x00284D80u) {
+        uint32_t sc = c->r[7];
+        uint32_t n = 1u, list = 0x0E000000u;
+        if (sc >= 0x00100000u && sc < 0x20000000u) {
+            memcpy(c->mem + ((sc + 0x104u) & 0x1FFFFFFFu), &n, 4);
+            memcpy(c->mem + ((sc + 0x108u) & 0x1FFFFFFFu), &list, 4);
+            memset(c->mem + list, 0, 0x18);
+            memcpy(c->mem + list, "fix.xr", 7);
+            { uint32_t sz = 0x1000u;
+              memcpy(c->mem + list + 0x10u, &sz, 4); }
+            c->mem[list + 0x16u] = 1;
+            printf("[fake-asset] scene=%08X count=1 name=fix.xr\n", sc);
+            fflush(stdout);
+        }
     }
 
     /* Diagnose: Scene-Heap-Header (arch+0xD8) vorbelegen, damit der
