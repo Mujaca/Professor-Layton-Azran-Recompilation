@@ -704,6 +704,12 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
     }
 
     /* Diagnose: Registerzustand im Archiv-Dateilader. */
+    if (c != NULL && g_te.queue_log &&
+        (pc == 0x00130220u || pc == 0x0013A080u)) {
+        printf("[obj] pc=%08X r0=%08X sp=%08X lr=%08X\n",
+               pc, c->r[0], c->r[13], c->r[14]);
+        fflush(stdout);
+    }
     if (c != NULL && g_te.queue_log && pc == 0x0013A154u) {
         uint32_t a = c->r[6] & 0x1FFFFFFFu;
         char b0 = (a < c->mem_size) ? (char)c->mem[a] : 0;
