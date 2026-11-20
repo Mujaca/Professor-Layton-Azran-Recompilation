@@ -790,7 +790,7 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
          (pc >= 0x0012BC58u && pc < 0x0012BEBCu) ||
          (pc >= 0x00289AA0u && pc < 0x00289C00u))) {
         static int rn = 0;
-        if (rn < 400) {
+        if (rn < 4000) {
             rn++;
             printf("[romfs] %08X r0=%08X r1=%08X r2=%08X r3=%08X r4=%08X r6=%08X\n",
                    pc, c->r[0], c->r[1], c->r[2], c->r[3], c->r[4], c->r[6]);
@@ -836,7 +836,9 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
                    pc == 0x001013D8u || pc == 0x001014D4u || pc == 0x001014ECu ||
                    pc == 0x00101508u || pc == 0x0010151Cu || pc == 0x00101540u ||
                    pc == 0x00101194u || pc == 0x00101230u || pc == 0x001013F0u ||
-                   pc == 0x0010123Cu) {
+                   pc == 0x0010123Cu ||
+                   pc == 0x0011E494u || pc == 0x00280034u || pc == 0x0012493Cu ||
+                   pc == 0x0027FFF0u) {
             static unsigned long bn = 0;
             bn++;
             printf("[branch] pc=%08X r0=%08X n=%lu\n", pc, c->r[0], bn);
