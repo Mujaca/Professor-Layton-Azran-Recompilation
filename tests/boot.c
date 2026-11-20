@@ -148,6 +148,11 @@ static void load_code(ArmCpu *c) {
            gesetzt und der Archiv-Resolver 0x36C54C findet Dateien. */
         if (getenv("HLE_ROMFS_FORCE"))
             *(uint32_t *)(g_mem + 0x284D68) = 0xE1A00000u;
+        /* Diagnose: den Archiv-Dateilader fn_0011E494 als Erfolg behandeln
+           (0x2850AC "movs r8,r0" -> "mov r8,#1"), damit der Mount ueber
+           0x2850B8 weiterlaeuft. */
+        if (getenv("HLE_MOUNT_FORCE"))
+            *(uint32_t *)(g_mem + 0x2850AC) = 0xE3A08001u;
         /* 0x33E1B0: "str r0,[r4]" im Session-Destruktor -> NOP,
            damit das statische Session-Objekt nie Handle 0 bekommt. */
         *(uint32_t *)(g_mem + 0x33E1B0) = 0xE1A00000u;
