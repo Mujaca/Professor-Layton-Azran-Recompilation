@@ -650,6 +650,19 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         c->mem[0x3EC133u] = 0;                  /* +0x33 Flags   */
     }
 
+    /* Diagnose: Registry-Descriptor beim Asset-Lookup zeigen. */
+    if (c != NULL && g_te.romfs_log &&
+        (pc == 0x00103B7Cu || pc == 0x002B95F8u)) {
+        printf("[registry] pc=%08X desc: %08X %08X %08X %08X (count=%u)\n",
+               pc,
+               arm_mem_read(c, 0x003ECA5Cu, 4),
+               arm_mem_read(c, 0x003ECA60u, 4),
+               arm_mem_read(c, 0x003ECA64u, 4),
+               arm_mem_read(c, 0x003ECA68u, 4),
+               arm_mem_read(c, 0x003ECA64u, 4));
+        fflush(stdout);
+    }
+
     if (c != NULL && g_te.romfs_log &&
         (pc == 0x00284DD8u || pc == 0x00284EA0u || pc == 0x0012BC58u ||
          pc == 0x00284D80u)) {
