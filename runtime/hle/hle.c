@@ -1257,7 +1257,16 @@ static void file_command(Ipc *r, uint32_t *p) {
             uint32_t done = 0;
             if (addr && length) {
                 if (f->fp) {
-                    fseek(f->fp, (long)offset, SEEK_SET);
+                    /* Das SelfNCCH-Image enthaelt ein 0x1000-Byte-IVFC-Praefix.
+                       Die Engine parst die RomFS-Metadaten aber ab Offset 0
+                       (Header @0, Hash-Tabellen @0x28/0x160, Metadaten @0x4C/
+                       0xAF4, Dateidaten @0xDD80). */
+                    long foff = (long)offset;
+                    if (f->path != NULL && strstr(f->path, "romfs_image.bin") != NULL &&
+                        getenv("HLE_ROMFS_NO_STRIP") == NULL) {
+                        foff += 0x1000;
+                    }
+                    fseek(f->fp, foff, SEEK_SET);
                     done = (uint32_t)fread(g_cur_mem + (addr & 0x1FFFFFFFu), 1, length, f->fp);
                 } else {
                     /* Synthetische Datei: Nullen liefern (SDK prueft >0 Bytes) */

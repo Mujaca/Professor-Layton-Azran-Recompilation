@@ -724,6 +724,9 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         getenv("HLE_HASH_FIX")) {
         /* Der Hash-Cursor ([r0]=Tabellen-Offset im Metadaten-Stream,
            [r0+8]=Bucket-Anzahl) ist im Port nicht initialisiert. */
+        if (pc == 0x00212E3Cu && c->r[0] < 0x00100000u) {
+            c->r[0] = 0x003D6988u;
+        }
         uint32_t base = c->r[0] & 0x1FFFFFFFu;
         uint32_t off = (pc == 0x00212CD0u) ? 0x28u : 0x160u;
         uint32_t cnt = (pc == 0x00212CD0u) ? 9u : 613u;
@@ -735,11 +738,12 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
     if (c != NULL && g_te.queue_log &&
         (pc == 0x00212CD0u || pc == 0x00212E3Cu || pc == 0x0021077Cu ||
          pc == 0x0033D8B8u || pc == 0x003991DCu || pc == 0x002808F4u ||
-         pc == 0x00212DFCu || pc == 0x00212F6Cu)) {
+         pc == 0x00212DFCu || pc == 0x00212F6Cu ||
+         pc == 0x00212D3Cu || pc == 0x00212FA4u)) {
         static unsigned long ln = 0;
         if (ln < 300) {
-            printf("[lf] pc=%08X r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X",
-                   pc, c->r[0], c->r[1], c->r[2], c->r[3], c->r[14]);
+            printf("[lf] pc=%08X r0=%08X r1=%08X r2=%08X r3=%08X r4=%08X r5=%08X lr=%08X",
+                   pc, c->r[0], c->r[1], c->r[2], c->r[3], c->r[4], c->r[5], c->r[14]);
             if (pc == 0x00212E3Cu) {
                 for (int q = 0; q < 8; q++) {
                     uint32_t v = 0;
