@@ -940,6 +940,57 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         c->mem[0x3EC133u] = 0;                  /* +0x33 Flags   */
     }
 
+    /* Diagnose: zu grosse Arena-Anforderung in einen freien Bereich umlenken. */
+    if (c != NULL && pc == 0x00284AA8u && getenv("HLE_BIGARENA")) {
+        uint32_t ab = c->r[0] & 0x1FFFFFFFu;
+        uint32_t capv = 0;
+        memcpy(&capv, c->mem + ((ab + 0x28u) & 0x1FFFFFFFu), 4);
+        if (c->r[1] > capv && c->r[1] >= 0x00100000u) {
+            uint32_t nb = 0x18000000u, nc = 0x04000000u, z = 0;
+            memcpy(c->mem + ((ab + 0x20u) & 0x1FFFFFFFu), &nb, 4);
+            memcpy(c->mem + ((ab + 0x28u) & 0x1FFFFFFFu), &nc, 4);
+            memcpy(c->mem + ((ab + 0x2Cu) & 0x1FFFFFFFu), &z, 4);
+
+            printf("[bigarena] obj=%08X size=%08X cap=%08X -> base=%08X cap=%08X\n",
+                   c->r[0], c->r[1], capv, nb, nc);
+            fflush(stdout);
+        }
+    }
+
+    /* Diagnose: Arena-Allokationen mitschreiben. */
+    if (c != NULL && getenv("HLE_ALLOC_LOG") &&
+        (pc == 0x00284AA8u || pc == 0x00284B68u || pc == 0x00284B7Cu)) {
+        static unsigned long an = 0;
+        if (an < 300) {
+            uint32_t ab = c->r[0] & 0x1FFFFFFFu;
+            uint32_t base = 0, cap = 0, used = 0;
+            memcpy(&base, c->mem + ((ab + 0x20u) & 0x1FFFFFFFu), 4);
+            memcpy(&cap, c->mem + ((ab + 0x28u) & 0x1FFFFFFFu), 4);
+            memcpy(&used, c->mem + ((ab + 0x2Cu) & 0x1FFFFFFFu), 4);
+            printf("[alloc] pc=%08X obj=%08X size=%08X base=%08X cap=%08X used=%08X lr=%08X\n",
+                   pc, c->r[0], c->r[1], base, cap, used, c->r[14]);
+            fflush(stdout);
+        }
+        an++;
+    }
+
+    /* Diagnose: Arena fuer den Archiv-Puffer (0x284AA8) initialisieren. */
+    if (c != NULL && pc == 0x00284AA8u && getenv("HLE_ARENA_SEED")) {
+        uint32_t ab = c->r[0] & 0x1FFFFFFFu;
+        uint32_t cur = 0;
+        memcpy(&cur, c->mem + ((ab + 0x20u) & 0x1FFFFFFFu), 4);
+        if (cur == 0) {
+            uint32_t b = 0x18000000u, cap = 0x03000000u, z = 0;
+            memcpy(c->mem + ((ab + 0x20u) & 0x1FFFFFFFu), &b, 4);
+            memcpy(c->mem + ((ab + 0x28u) & 0x1FFFFFFFu), &cap, 4);
+            memcpy(c->mem + ((ab + 0x2Cu) & 0x1FFFFFFFu), &z, 4);
+            c->mem[(ab + 0x32u) & 0x1FFFFFFFu] = 2;
+            c->mem[(ab + 0x33u) & 0x1FFFFFFFu] = 0;
+            printf("[arena-seed] obj=%08X base=%08X cap=%08X\n", c->r[0], b, cap);
+            fflush(stdout);
+        }
+    }
+
     if (c != NULL && g_te.romfs_log &&
         (pc == 0x00289C44u || pc == 0x00289C78u || pc == 0x00289C00u)) {
         printf("[wrk2] pc=%08X r0=%08X r1=%08X r2=%08X r5=%08X obj=%08X\n",
