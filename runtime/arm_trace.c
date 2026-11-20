@@ -781,17 +781,13 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         } else if (pc == 0x00289858u) {
             printf("[queue-start] elems=%lu batchsize(r8)=%u\n", q_el, c->r[8]);
             fflush(stdout);
-        } else if (pc == 0x00212D28u || pc == 0x00212D7Cu ||
+        } else if (pc == 0x00212D28u || pc == 0x00212D7Cu || pc == 0x00212DB8u ||
                    pc == 0x00212DB0u || pc == 0x00212DFCu) {
             static unsigned long ln2 = 0;
             ln2++;
             if (ln2 <= 8u || (ln2 % 500u) == 0) {
-                printf("[lookup] pc=%08X r0=%08X r1=%08X r2=%08X r3=%08X "
-                       "stream=%08X/%08X/%08X n=%lu\n",
-                       pc, c->r[0], c->r[1], c->r[2], c->r[3],
-                       arm_mem_read(c, 0x003D69C0u, 4),
-                       arm_mem_read(c, 0x003D69C4u, 4),
-                       arm_mem_read(c, 0x003D69C8u, 4), ln2);
+                printf("[lookup] pc=%08X r0=%08X r1=%08X r2=%08X r3=%08X sb=%08X r7=%08X n=%lu\n",
+                       pc, c->r[0], c->r[1], c->r[2], c->r[3], c->r[9], c->r[7], ln2);
                 fflush(stdout);
             }
         } else if (pc == 0x00205858u) {
