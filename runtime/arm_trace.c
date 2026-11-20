@@ -829,7 +829,14 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
                        arm_mem_read(c, c->r[4] + 0x20u, 4), ln3);
                 fflush(stdout);
             }
-        } else if (pc == 0x00103BD8u || pc == 0x00103C0Cu || pc == 0x001015D0u) {
+        } else if (pc == 0x00103BD8u || pc == 0x00103C0Cu || pc == 0x001015D0u ||
+                   pc == 0x00101744u || pc == 0x001014E4u || pc == 0x001016B8u ||
+                   pc == 0x001036B4u || pc == 0x00103B48u || pc == 0x00103684u ||
+                   pc == 0x001035D8u || pc == 0x00103610u ||
+                   pc == 0x001013D8u || pc == 0x001014D4u || pc == 0x001014ECu ||
+                   pc == 0x00101508u || pc == 0x0010151Cu || pc == 0x00101540u ||
+                   pc == 0x00101194u || pc == 0x00101230u || pc == 0x001013F0u ||
+                   pc == 0x0010123Cu) {
             static unsigned long bn = 0;
             bn++;
             printf("[branch] pc=%08X r0=%08X n=%lu\n", pc, c->r[0], bn);
