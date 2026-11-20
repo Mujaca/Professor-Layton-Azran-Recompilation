@@ -720,6 +720,51 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
                (unsigned char)b0, (unsigned char)b1, (unsigned char)b2);
         fflush(stdout);
     }
+    if (c != NULL && (pc == 0x00212CD0u || pc == 0x00212E3Cu) &&
+        getenv("HLE_HASH_FIX")) {
+        /* Der Hash-Cursor ([r0]=Tabellen-Offset im Metadaten-Stream,
+           [r0+8]=Bucket-Anzahl) ist im Port nicht initialisiert. */
+        uint32_t base = c->r[0] & 0x1FFFFFFFu;
+        uint32_t off = (pc == 0x00212CD0u) ? 0x28u : 0x160u;
+        uint32_t cnt = (pc == 0x00212CD0u) ? 9u : 613u;
+        uint32_t zero = 0;
+        memcpy(c->mem + base, &off, 4);
+        memcpy(c->mem + base + 4, &zero, 4);
+        memcpy(c->mem + base + 8, &cnt, 4);
+    }
+    if (c != NULL && g_te.queue_log &&
+        (pc == 0x00212CD0u || pc == 0x00212E3Cu || pc == 0x0021077Cu ||
+         pc == 0x0033D8B8u || pc == 0x003991DCu || pc == 0x002808F4u ||
+         pc == 0x00212DFCu || pc == 0x00212F6Cu)) {
+        static unsigned long ln = 0;
+        if (ln < 300) {
+            printf("[lf] pc=%08X r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X",
+                   pc, c->r[0], c->r[1], c->r[2], c->r[3], c->r[14]);
+            if (pc == 0x00212E3Cu) {
+                for (int q = 0; q < 8; q++) {
+                    uint32_t v = 0;
+                    memcpy(&v, c->mem + ((c->r[0] + (uint32_t)q * 4u) & 0x1FFFFFFFu), 4);
+                    printf(" d%d=%08X", q, v);
+                }
+            }
+            if (pc == 0x0021077Cu) {
+                for (int side = 0; side < 2; side++) {
+                    uint32_t p = (side == 0) ? c->r[0] : c->r[1];
+                    printf(" s%d='", side);
+                    for (int q = 0; q < 24; q++) {
+                        uint16_t ch = 0;
+                        memcpy(&ch, c->mem + ((p + (uint32_t)q * 2u) & 0x1FFFFFFFu), 2);
+                        if (ch == 0) break;
+                        printf("%c", (ch >= 32 && ch < 127) ? (char)ch : '?');
+                    }
+                    printf("'");
+                }
+            }
+            printf("\n");
+            fflush(stdout);
+        }
+        ln++;
+    }
     if (c != NULL && g_te.queue_log && pc == 0x00269AACu && c->r[14] == 0x00276594u) {
         printf("[aac] r3=%08X sp=%08X lr=%08X r0=%08X r1=%08X r2=%08X r4=%08X\n",
                c->r[3], c->r[13], c->r[14], c->r[0], c->r[1], c->r[2], c->r[4]);
