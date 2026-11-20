@@ -740,6 +740,23 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
          pc == 0x00280904u || pc == 0x0028090Cu || pc == 0x0026E674u)) {
         static unsigned long seq = 0;
         if (pc == 0x002808A8u) seq++;
+        if (pc == 0x0026F130u) {
+            uint32_t k0 = 0, k1 = 0, k2 = 0;
+            memcpy(&k0, c->mem + (c->r[0] & 0x1FFFFFFFu), 4);
+            memcpy(&k1, c->mem + ((c->r[0] + 4u) & 0x1FFFFFFFu), 4);
+            memcpy(&k2, c->mem + ((c->r[0] + 8u) & 0x1FFFFFFFu), 1);
+            {
+                char kb[30];
+                int qi;
+                for (qi = 0; qi < 28; qi++) {
+                    char ch = (char)c->mem[((c->r[0] + (uint32_t)qi) & 0x1FFFFFFFu)];
+                    kb[qi] = (ch >= 32 && ch < 127) ? ch : 0;
+                    if (ch == 0) break;
+                }
+                kb[qi] = 0;
+                printf("[key] obj=%08X '%s'\n", c->r[1], kb);
+            }
+        }
         printf("[clob] seq=%lu pc=%08X r4=%08X r5=%08X r6=%08X r8=%08X sp=%08X lr=%08X\n",
                seq, pc, c->r[4], c->r[5], c->r[6], c->r[8], c->r[13], c->r[14]);
         fflush(stdout);
