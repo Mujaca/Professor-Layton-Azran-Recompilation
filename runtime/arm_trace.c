@@ -698,7 +698,8 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
 
     /* Diagnose: Registerzustand im Archiv-Dateilader. */
     if (c != NULL && g_te.queue_log &&
-        (pc == 0x0026F130u || pc == 0x002808A8u || pc == 0x00280914u)) {
+        (pc == 0x0026F130u || pc == 0x002808A8u || pc == 0x00280914u ||
+         pc == 0x0026F164u || pc == 0x0026F17Cu)) {
         printf("[clob] pc=%08X r6=%08X r8=%08X\n", pc, c->r[6], c->r[8]);
         fflush(stdout);
     }
