@@ -1,0 +1,20 @@
+import re
+
+lines = open('build/gen_boot.c', encoding='utf-8').read().split('\n')
+start = None
+for i, l in enumerate(lines):
+    if l.startswith('void fn_0027A484(ArmCpu *c) {'):
+        start = i
+        break
+print('start', start)
+cur = None
+for i in range(start, min(start + 4000, len(lines))):
+    l = lines[i]
+    if l.startswith('void fn_') and i > start:
+        print('end at', i, l.strip())
+        break
+    m = re.search(r'arm_trace_block\(c, 0x([0-9A-F]+)u', l)
+    if m:
+        cur = m.group(1)
+    if '0x000083F0u' in l:
+        print('pop in block', cur, 'line', i)

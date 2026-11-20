@@ -690,6 +690,21 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
     }
 
     /* Diagnose: Registerzustand im Archiv-Dateilader. */
+    if (c != NULL && g_te.queue_log &&
+        (pc == 0x0026F130u || pc == 0x002808A8u || pc == 0x00280914u)) {
+        printf("[clob] pc=%08X r6=%08X r8=%08X\n", pc, c->r[6], c->r[8]);
+        fflush(stdout);
+    }
+    if (c != NULL && g_te.queue_log && (pc == 0x0027A750u || pc == 0x0027A6E8u)) {
+        printf("[pop] pc=%08X r6=%08X r8=%08X sp=%08X", pc, c->r[6], c->r[8], c->r[13]);
+        for (int q = 0; q < 8; q++) {
+            uint32_t v = 0;
+            memcpy(&v, c->mem + ((c->r[13] + 0xC4u + (uint32_t)q * 4u) & 0x1FFFFFFFu), 4);
+            printf(" %08X", v);
+        }
+        printf("\n");
+        fflush(stdout);
+    }
     if (c != NULL && pc == 0x0012493Cu) {
         g_mwk_r0 = c->r[0];
         g_mwk_r1 = c->r[1];
@@ -858,7 +873,9 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
                    pc == 0x0011E494u || pc == 0x00280034u || pc == 0x0012493Cu ||
                    pc == 0x0027FFF0u || pc == 0x0013C46Cu || pc == 0x00284AA8u ||
                    pc == 0x00289F30u || pc == 0x00289F20u || pc == 0x0026F130u ||
-                   pc == 0x00130220u || pc == 0x0013A080u || pc == 0x002690A4u) {
+                   pc == 0x00130220u || pc == 0x0013A080u || pc == 0x002690A4u ||
+                   pc == 0x0027A4BCu || pc == 0x0027A4E0u || pc == 0x0027A544u ||
+                   pc == 0x0027A574u || pc == 0x0027A4E8u) {
             static unsigned long bn = 0;
             bn++;
             printf("[branch] pc=%08X r0=%08X r1=%08X r2=%08X lr=%08X n=%lu\n",
