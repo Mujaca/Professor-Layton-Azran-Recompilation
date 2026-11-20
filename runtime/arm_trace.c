@@ -659,6 +659,13 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         c->mem[0x3EC133u] = 0;                  /* +0x33 Flags   */
     }
 
+    if (c != NULL && g_te.romfs_log && pc == 0x00289B48u) {
+        uint32_t ar = c->r[1];
+        printf("[arena] pc=%08X base=%08X cap=%08X used=%08X req=%08X obj=%08X\n",
+               pc, arm_mem_read(c, ar + 0x20u, 4), arm_mem_read(c, ar + 0x28u, 4),
+               arm_mem_read(c, ar + 0x2Cu, 4), c->r[2], c->r[0]);
+        fflush(stdout);
+    }
     /* Diagnose: Registry-Descriptor beim Asset-Lookup zeigen. */
     if (c != NULL && g_te.romfs_log &&
         (pc == 0x00103B7Cu || pc == 0x002B95F8u)) {
