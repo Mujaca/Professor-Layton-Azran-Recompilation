@@ -20,18 +20,20 @@ import struct
 
 PATH = 'out/exefs/code_decomp.bin'
 BASE = 0x100000
-ADDR = 0x00212DF0
+ADDRS = [0x00212DF0, 0x00212F60]
 CMP_R4_0 = 0xE3540000
 
 with open(PATH, 'rb') as f:
     data = bytearray(f.read())
 
-off = ADDR - BASE
-old = struct.unpack_from('<I', data, off)[0]
-if old == CMP_R4_0:
-    print('bereits gepatcht: 0x%X ist cmp r4,#0' % ADDR)
-else:
-    print('patche 0x%X: %08X -> %08X' % (ADDR, old, CMP_R4_0))
-    struct.pack_into('<I', data, off, CMP_R4_0)
-    with open(PATH, 'wb') as f:
-        f.write(data)
+for addr in ADDRS:
+    off = addr - BASE
+    old = struct.unpack_from('<I', data, off)[0]
+    if old == CMP_R4_0:
+        print('bereits gepatcht: 0x%X ist cmp r4,#0' % addr)
+    else:
+        print('patche 0x%X: %08X -> %08X' % (addr, old, CMP_R4_0))
+        struct.pack_into('<I', data, off, CMP_R4_0)
+
+with open(PATH, 'wb') as f:
+    f.write(data)
