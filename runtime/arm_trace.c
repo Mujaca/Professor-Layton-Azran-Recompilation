@@ -758,6 +758,13 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         } else if (pc == 0x00289858u) {
             printf("[queue-start] elems=%lu batchsize(r8)=%u\n", q_el, c->r[8]);
             fflush(stdout);
+        } else if (pc == 0x00205858u) {
+            static unsigned long hn = 0;
+            hn++;
+            if ((hn % 2000u) == 0) {
+                printf("[hash] n=%lu r0=%08X r2=%08X\n", hn, c->r[0], c->r[2]);
+                fflush(stdout);
+            }
         } else if (pc == 0x00283418u) {
             static unsigned long an = 0;
             an++;
