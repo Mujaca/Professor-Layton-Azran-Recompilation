@@ -785,9 +785,13 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
                    pc == 0x00212DB0u || pc == 0x00212DFCu) {
             static unsigned long ln2 = 0;
             ln2++;
-            if (ln2 <= 12u || (ln2 % 500u) == 0) {
-                printf("[lookup] pc=%08X r0=%08X r5=%08X n=%lu\n",
-                       pc, c->r[0], c->r[5], ln2);
+            if (ln2 <= 8u || (ln2 % 500u) == 0) {
+                printf("[lookup] pc=%08X r0=%08X r1=%08X r2=%08X r3=%08X "
+                       "stream=%08X/%08X/%08X n=%lu\n",
+                       pc, c->r[0], c->r[1], c->r[2], c->r[3],
+                       arm_mem_read(c, 0x003D69C0u, 4),
+                       arm_mem_read(c, 0x003D69C4u, 4),
+                       arm_mem_read(c, 0x003D69C8u, 4), ln2);
                 fflush(stdout);
             }
         } else if (pc == 0x00205858u) {
