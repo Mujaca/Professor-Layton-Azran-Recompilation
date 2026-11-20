@@ -469,7 +469,7 @@ typedef struct {
     int fa_debug, reg_enable, reg_debug, asset_trace, queue_log;
     int fa_reg_ok, fa_fake_ok, fa_always, blklogf, force_asset;
     int dump_fatal, dump_r3, watch_pool, perf, rm_adv, romfs_log, romfs_force, heap_seed;
-    int fast_memcpy, fake_asset, load_task;
+    int fast_memcpy, fake_asset, load_task, scene_ready;
     int perfmap, hooks;
     uint32_t blklog_lo;
 } TraceEnv;
@@ -506,6 +506,7 @@ static void trace_env_init(void) {
         g_te.fast_memcpy = !(fm != NULL && fm[0] == '0');
     }
     g_te.fake_asset = envset("HLE_FAKE_ASSET");
+    g_te.scene_ready = envset("HLE_SCENE_READY");
     {
         const char *lt = getenv("HLE_LOAD_TASK");
         g_te.load_task = (lt != NULL && lt[0] != '0');
@@ -687,6 +688,12 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
             printf("[budget] set to %08X\n", c->r[0]);
             fflush(stdout);
         }
+    }
+
+    /* Diagnose: Szene-/Ladezustand als fertig markieren (Objekt 0x3EC028+0x2144). */
+    if (c != NULL && g_te.scene_ready && pc == 0x00101508u) {
+        uint16_t one = 1;
+        memcpy(c->mem + (0x003EE16Cu & 0x1FFFFFFFu), &one, 2);
     }
 
     /* Diagnose: Registerzustand im Archiv-Dateilader. */
