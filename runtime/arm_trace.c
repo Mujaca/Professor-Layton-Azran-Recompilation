@@ -740,6 +740,10 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
          pc == 0x00280904u || pc == 0x0028090Cu || pc == 0x0026E674u)) {
         static unsigned long seq = 0;
         if (pc == 0x002808A8u) seq++;
+        if (pc == 0x0026F130u && getenv("HLE_KEY_FIX")) {
+            const char *fk = "rom:/lt6/snd/uk/product.bcsar";
+            memcpy(c->mem + ((c->r[0]) & 0x1FFFFFFFu), fk, 30);
+        }
         if (pc == 0x0026F130u) {
             uint32_t k0 = 0, k1 = 0, k2 = 0;
             memcpy(&k0, c->mem + (c->r[0] & 0x1FFFFFFFu), 4);
