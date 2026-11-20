@@ -684,7 +684,7 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
     }
     /* Diagnose: memcpy-Beschleunigung (fn_00291B60 ist auf `bx lr` gepatcht,
        siehe tools/patch_fast_memcpy.py). r0=Ziel, r1=Quelle, r2=Groesse. */
-    if (c != NULL && g_te.fast_memcpy && pc == 0x00291B60u) {
+    if (c != NULL && g_te.fast_memcpy && (pc == 0x00291B60u || pc == 0x0027D9B4u)) {
         uint32_t dst = c->r[0], src = c->r[1], n = c->r[2];
         if (n > 0x08000000u) n = 0x08000000u;
         if ((dst & 0x1FFFFFFFu) + (uint64_t)n <= c->mem_size &&
