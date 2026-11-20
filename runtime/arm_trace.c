@@ -694,7 +694,7 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
     /* Diagnose: 0x10 Luecke unter fn_002808A8, damit der Frame nicht
        von Schreibzugriffen ab sp ueberschrieben wird. */
     if (c != NULL && g_te.sp_gap && pc == 0x002808A8u) {
-        c->r[13] -= 0x10u;
+        c->r[13] -= 0x28u;
     }
 
     /* Diagnose: Szene-/Ladezustand als fertig markieren (Objekt 0x3EC028+0x2144). */
