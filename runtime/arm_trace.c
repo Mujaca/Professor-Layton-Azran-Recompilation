@@ -664,7 +664,10 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         uint32_t o = c->r[4] & 0x1FFFFFFFu;
         c->mem[o + 0x1Du] = 1;
         memcpy(c->mem + o + 0x20u, &one, 4);
-        printf("[loadtask] obj=%08X -> f1d=1 cnt=1\n", c->r[4]);
+        /* Das Ziel-Objekt 0x0042BB10 muss "bereit" sein, sonst bricht
+           fn_002879B4 bei [obj+0x1F6]==0 sofort ab (gemessen: Feld ist 0). */
+        c->mem[0x0042BB10u + 0x1F6u] = 1;
+        printf("[loadtask] obj=%08X -> f1d=1 cnt=1 ready=1\n", c->r[4]);
         fflush(stdout);
     }
 
