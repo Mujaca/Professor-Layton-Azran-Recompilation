@@ -701,7 +701,10 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         (pc == 0x0026F130u || pc == 0x002808A8u || pc == 0x00280914u ||
          pc == 0x0026F164u || pc == 0x0026F17Cu ||
          pc == 0x00280904u || pc == 0x0028090Cu)) {
-        printf("[clob] pc=%08X r6=%08X r8=%08X sp=%08X\n", pc, c->r[6], c->r[8], c->r[13]);
+        static unsigned long seq = 0;
+        if (pc == 0x002808A8u) seq++;
+        printf("[clob] seq=%lu pc=%08X r4=%08X r5=%08X r6=%08X r8=%08X sp=%08X lr=%08X\n",
+               seq, pc, c->r[4], c->r[5], c->r[6], c->r[8], c->r[13], c->r[14]);
         fflush(stdout);
     }
     if (c != NULL && g_te.queue_log &&
