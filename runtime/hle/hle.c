@@ -148,6 +148,19 @@ static void hle_tick(ArmCpu *c) {
     sn = c->n; sz = c->z; sc = c->c; sv = c->v; st = c->t; sq = c->qflag;
     arm_call_guest_pub(c, 0x00134818u);
     arm_call_guest_pub(c, 0x0013485Cu);
+    if (getenv("HLE_TICK_LOG")) {
+        static uint32_t last_h1 = 0xFFFFFFFFu;
+        uint32_t h1 = 0, h2 = 0, c4 = 0, dl = 0;
+        memcpy(&h1, c->mem + 0x40B4CCu, 4);
+        memcpy(&h2, c->mem + 0x40B4D0u, 4);
+        memcpy(&c4, c->mem + 0x40B4C4u, 4);
+        memcpy(&dl, c->mem + 0x40B4E8u, 4);
+        if (h1 != last_h1) {
+            last_h1 = h1;
+            printf("[tick] c400=%08X h400=%08X h401=%08X dl=%08X\n", c4, h1, h2, dl);
+            fflush(stdout);
+        }
+    }
     memcpy(c->r, sr, sizeof(sr));
     c->n = sn; c->z = sz; c->c = sc; c->v = sv; c->t = st; c->qflag = sq;
     busy = 0;
