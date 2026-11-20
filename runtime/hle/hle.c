@@ -2597,10 +2597,24 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
         }
         case 0x28: { /* GetSystemTick -> 64 Bit in r0:r1 (echte Zeitbasis) */
             static uint64_t base_ms = 0;
+            static uint64_t last_frame = 0;
+            static int in_frame = 0;
             uint64_t now = GetTickCount64();
             if (base_ms == 0) base_ms = now;
             g_tick = (now - base_ms) * 268111ull;   /* ~268.111 MHz */
             g_tick_calls++;
+            /* Frame-Pump: die Engine fragt die Zeit in ihrer Frame-Schleife
+               dauerhaft ab. Genau dort treiben wir die registrierten
+               Tick-/Frame-Tasks (0x400/0x401) an, damit die Frame-Zustellung
+               nicht von einem bestimmten Gast-Thread abhaengt. */
+            if (!in_frame && !getenv("HLE_TICK_FROM_SVC0") &&
+                g_tick - last_frame >= 268111u / 60u) {
+                in_frame = 1;
+                last_frame = g_tick;
+                arm_call_guest_pub(c, 0x00134818u);
+                arm_call_guest_pub(c, 0x0013485Cu);
+                in_frame = 0;
+            }
             c->r[1] = (uint32_t)(g_tick >> 32);
             return (uint32_t)g_tick;
         }

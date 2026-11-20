@@ -677,6 +677,17 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         c->mem[0x003E7771u] = 0;
     }
 
+    /* Diagnose: Frame-Budget des Resource-Managers (0x40B4E8) ueberschreiben. */
+    if (c != NULL && pc == 0x00278374u) {
+        const char *fb = getenv("HLE_FRAME_BUDGET");
+        if (fb != NULL && *fb != 0) {
+            c->r[0] = (uint32_t)strtoul(fb, NULL, 0);
+            c->r[1] = 0;
+            printf("[budget] set to %08X\n", c->r[0]);
+            fflush(stdout);
+        }
+    }
+
     /* Diagnose: dem Scene-Descriptor einen synthetischen Asset-Eintrag geben,
        damit die Einfuege-Schleife in fn_00284D24 laeuft und 0x282364 einen
        Namen eintraegt. Eintrag: stride 0x18, Name[0x14] @+0, u32 @+0x10,
