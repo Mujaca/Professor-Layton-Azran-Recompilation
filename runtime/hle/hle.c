@@ -945,6 +945,14 @@ static int open_guest_file(const char *guest_path, FileSlot **slot_out) {
 }
 
 static void fs_command(Ipc *r, uint32_t *p) {
+    /* Der FS-Client der App prueft [0x003D91D0] auf != 0 und ruft sonst
+       svcBreak (Assertion in 0x2763B8). Wir hinterlegen dort den aktuellen
+       fs:USER-Handle, sobald die App irgendeinen FS-Befehl schickt. */
+    if (g_cpu != NULL && (0x3D91D0u & 0x1FFFFFFFu) + 4 <= g_cpu->mem_size) {
+        uint32_t hv = (uint32_t)g_cur_handle;
+        if (hv == 0) hv = 0x1000u;
+        memcpy(g_cpu->mem + 0x3D91D0u, &hv, 4);
+    }
     if (getenv("HLE_FS_PATHS")) {
         printf("[fscmd] cmd=0x%04X n=%d t=%d", r->cmd, r->normal, r->translate);
         for (int i = 0; i < r->normal && i < 8; i++) printf(" p%d=%08X", i, p[i]);
