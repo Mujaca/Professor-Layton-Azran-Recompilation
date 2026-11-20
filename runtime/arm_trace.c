@@ -779,7 +779,8 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
          pc == 0x00212DFCu || pc == 0x00212F6Cu ||
          pc == 0x00212D3Cu || pc == 0x00212FA4u ||
          pc == 0x001302F0u || pc == 0x00130294u || pc == 0x00130304u ||
-         pc == 0x00124C2Cu)) {
+         pc == 0x00124C2Cu ||
+         pc == 0x0013C46Cu || pc == 0x001302A8u)) {
         static unsigned long ln = 0;
         if (ln < 300) {
             printf("[lf] pc=%08X r0=%08X r1=%08X r2=%08X r3=%08X r4=%08X r5=%08X lr=%08X",
@@ -798,6 +799,13 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
                     memcpy(&w2, c->mem + ((p + 8u) & 0x1FFFFFFFu), 4);
                     memcpy(&w3, c->mem + ((p + 12u) & 0x1FFFFFFFu), 4);
                     printf(" a%d[%08X]=%08X,%08X,%08X,%08X", side, p, w0, w1, w2, w3);
+                }
+            }
+            if (pc == 0x0013C46Cu) {
+                for (int q = 0; q < 10; q++) {
+                    uint32_t v = 0;
+                    memcpy(&v, c->mem + ((c->r[0] + (uint32_t)q * 4u) & 0x1FFFFFFFu), 4);
+                    printf(" o%d=%08X", q, v);
                 }
             }
             if (pc == 0x0021077Cu) {
