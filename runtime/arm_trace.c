@@ -468,7 +468,7 @@ typedef struct {
     int fa_debug, reg_enable, reg_debug, asset_trace, queue_log;
     int fa_reg_ok, fa_fake_ok, fa_always, blklogf, force_asset;
     int dump_fatal, dump_r3, watch_pool, perf, rm_adv, romfs_log, romfs_force, heap_seed;
-    int fast_memcpy, fake_asset;
+    int fast_memcpy, fake_asset, load_task;
     int perfmap, hooks;
     uint32_t blklog_lo;
 } TraceEnv;
@@ -505,6 +505,10 @@ static void trace_env_init(void) {
         g_te.fast_memcpy = !(fm != NULL && fm[0] == '0');
     }
     g_te.fake_asset = envset("HLE_FAKE_ASSET");
+    {
+        const char *lt = getenv("HLE_LOAD_TASK");
+        g_te.load_task = (lt != NULL && lt[0] != '0');
+    }
     g_te.perfmap = envset("HLE_PERFMAP") || (getenv("HLE_PERFMAP_FILE") != NULL);
     g_te.hooks = (getenv("HLE_HOOK") != NULL);
     if (g_te.perfmap) perfmap_init();
@@ -651,6 +655,12 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         uint32_t wr = 0x00600000u;      /* _M_Wrk-Objekt: 6 MB (passt in 8 MB) */
         memcpy(c->mem + ((c->r[1] + 0xF0u) & 0x1FFFFFFFu), &sz, 4);
         memcpy(c->mem + ((c->r[1] + 0xF4u) & 0x1FFFFFFFu), &wr, 4);
+    }
+
+    /* Diagnose: Guard-Byte [0x3E7771] vor fn_001213E8 loeschen - es
+       verhindert sonst das Einstellen des Lade-Tasks (fn_002879B4). */
+    if (c != NULL && g_te.load_task && pc == 0x001213E8u) {
+        c->mem[0x003E7771u] = 0;
     }
 
     /* Diagnose: dem Scene-Descriptor einen synthetischen Asset-Eintrag geben,
