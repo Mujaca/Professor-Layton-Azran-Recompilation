@@ -469,7 +469,7 @@ typedef struct {
     int fa_debug, reg_enable, reg_debug, asset_trace, queue_log;
     int fa_reg_ok, fa_fake_ok, fa_always, blklogf, force_asset;
     int dump_fatal, dump_r3, watch_pool, perf, rm_adv, romfs_log, romfs_force, heap_seed;
-    int fast_memcpy, fake_asset, load_task, scene_ready;
+    int fast_memcpy, fake_asset, load_task, scene_ready, sp_gap;
     int perfmap, hooks;
     uint32_t blklog_lo;
 } TraceEnv;
@@ -507,6 +507,7 @@ static void trace_env_init(void) {
     }
     g_te.fake_asset = envset("HLE_FAKE_ASSET");
     g_te.scene_ready = envset("HLE_SCENE_READY");
+    g_te.sp_gap = envset("HLE_SP_GAP");
     {
         const char *lt = getenv("HLE_LOAD_TASK");
         g_te.load_task = (lt != NULL && lt[0] != '0');
@@ -688,6 +689,12 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
             printf("[budget] set to %08X\n", c->r[0]);
             fflush(stdout);
         }
+    }
+
+    /* Diagnose: 0x10 Luecke unter fn_002808A8, damit der Frame nicht
+       von Schreibzugriffen ab sp ueberschrieben wird. */
+    if (c != NULL && g_te.sp_gap && pc == 0x002808A8u) {
+        c->r[13] -= 0x10u;
     }
 
     /* Diagnose: Szene-/Ladezustand als fertig markieren (Objekt 0x3EC028+0x2144). */
