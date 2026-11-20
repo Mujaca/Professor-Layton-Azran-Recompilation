@@ -1929,7 +1929,7 @@ static void setup_config_mem(ArmCpu *c) {
     w32(c, 0x1FF80018u, 0x0000F450u);  /* ctr_sdk_ver */
     w32(c, 0x1FF80030u, 0u);           /* app_mem_type */
     w32(c, 0x1FF80040u, 0x08000000u);  /* app_mem_alloc = 128 MiB */
-    w32(c, 0x1FF80044u, 0x01000000u);  /* sys_mem_alloc */
+    w32(c, 0x1FF80044u, 0x04000000u);  /* app/sys_mem_alloc: 64 MiB (Port) */
     w32(c, 0x1FF80048u, 0x00800000u);  /* base_mem_alloc */
     p[0x61] = 0x3A;
     p[0x62] = 0x02;

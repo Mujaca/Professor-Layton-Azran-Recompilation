@@ -638,11 +638,20 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
 
     /* Diagnose: RomFS-Archive-Mount fn_00284D24 (schreibt den Guard
        [archive+0xA34] bei 0x285038). */
+    /* Diagnose: Heap-Anforderung des Loaders auf 8 MB reduzieren - er
+       fordert 0x00FF0000 (16,7 MB) an, der Heap ist aber nur 16 MB gross. */
+    if (c != NULL && g_te.heap_seed && pc == 0x0012BC58u) {
+        uint32_t sz = 0x00800000u;      /* Heap-Anforderung: 8 MB */
+        uint32_t wr = 0x00600000u;      /* _M_Wrk-Objekt: 6 MB (passt in 8 MB) */
+        memcpy(c->mem + ((c->r[1] + 0xF0u) & 0x1FFFFFFFu), &sz, 4);
+        memcpy(c->mem + ((c->r[1] + 0xF4u) & 0x1FFFFFFFu), &wr, 4);
+    }
+
     /* Diagnose: Scene-Heap-Header (arch+0xD8) vorbelegen, damit der
        Allokator 0x284AA8 Speicher liefert (sonst bleibt base=0 und
        fn_00284D24 gibt 0 zurueck). */
     if (c != NULL && g_te.heap_seed && pc == 0x00284D80u) {
-        uint32_t base = 0x0B000000u, cap = 0x02000000u, used = 0u;
+        uint32_t base = 0x0D000000u, cap = 0x02000000u, used = 0u;
         memcpy(c->mem + 0x3EC120u, &base, 4);   /* +0x20 Basis   */
         memcpy(c->mem + 0x3EC128u, &cap, 4);    /* +0x28 Kapaz.  */
         memcpy(c->mem + 0x3EC12Cu, &used, 4);   /* +0x2C belegt  */
