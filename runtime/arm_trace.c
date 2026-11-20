@@ -659,16 +659,18 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
        u8 @+0x16. */
     if (c != NULL && g_te.fake_asset && pc == 0x00284D80u) {
         uint32_t sc = c->r[7];
-        uint32_t n = 1u, list = 0x0E000000u;
+        uint32_t cnt = 1u, name = 0x0E000000u, sz = 0x1000u;
         if (sc >= 0x00100000u && sc < 0x20000000u) {
-            memcpy(c->mem + ((sc + 0x104u) & 0x1FFFFFFFu), &n, 4);
-            memcpy(c->mem + ((sc + 0x108u) & 0x1FFFFFFFu), &list, 4);
-            memset(c->mem + list, 0, 0x18);
-            memcpy(c->mem + list, "fix.xr", 7);
-            { uint32_t sz = 0x1000u;
-              memcpy(c->mem + list + 0x10u, &sz, 4); }
-            c->mem[list + 0x16u] = 1;
-            printf("[fake-asset] scene=%08X count=1 name=fix.xr\n", sc);
+            uint32_t b = sc & 0x1FFFFFFFu;
+            memcpy(c->mem + b + 0x104u, &cnt, 4);   /* Anzahl          */
+            memcpy(c->mem + b + 0x108u, &name, 4);  /* Eintrag+0: Name */
+            c->mem[b + 0x114u] = 0;                 /* +0x14 (s8)      */
+            memcpy(c->mem + b + 0x118u, &sz, 4);    /* +0x10: Groesse  */
+            c->mem[b + 0x11Du] = 0;                 /* +0x15 (s8)      */
+            c->mem[b + 0x11Eu] = 1;                 /* +0x16 (u8)      */
+            memset(c->mem + name, 0, 0x20);
+            memcpy(c->mem + name, "fix.xr", 7);
+            printf("[fake-asset] scene=%08X count=1 name@%08X size=%X\n", sc, name, sz);
             fflush(stdout);
         }
     }
