@@ -659,6 +659,17 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         c->mem[0x3EC133u] = 0;                  /* +0x33 Flags   */
     }
 
+    if (c != NULL && g_te.romfs_log &&
+        (pc == 0x00289C44u || pc == 0x00289C78u || pc == 0x00289C00u)) {
+        printf("[wrk2] pc=%08X r0=%08X r1=%08X r2=%08X r5=%08X obj=%08X\n",
+               pc, c->r[0], c->r[1], c->r[2], c->r[5], c->r[4]);
+        fflush(stdout);
+    }
+    if (c != NULL && g_te.romfs_log && pc == 0x00289C38u) {
+        printf("[wrk] buf=%08X size=%08X align=%08X obj=%08X\n",
+               c->r[5], c->r[7], c->r[6], c->r[4]);
+        fflush(stdout);
+    }
     if (c != NULL && g_te.romfs_log && pc == 0x00289B48u) {
         uint32_t ar = c->r[1];
         printf("[arena] pc=%08X base=%08X cap=%08X used=%08X req=%08X obj=%08X\n",
