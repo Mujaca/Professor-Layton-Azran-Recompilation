@@ -146,6 +146,11 @@ static void hle_tick(ArmCpu *c) {
     busy = 1;
     memcpy(sr, c->r, sizeof(sr));
     sn = c->n; sz = c->z; sc = c->c; sv = c->v; st = c->t; sq = c->qflag;
+    /* Eigener Stack fuer die Gast-Tasks: sonst ueberschreiben ihre push/pop
+       den Live-Frame des unterbrochenen Gast-Codes (belegt: 0x134818/0x13485C
+       schreiben nach 0FFEF7DC/7E0, mitten in fn_002808A8s gesicherten
+       Registern -> r6 0D4000BC wurde zu FFFFFFFF). */
+    c->r[13] = 0x0CF0F000u;
     arm_call_guest_pub(c, 0x00134818u);
     arm_call_guest_pub(c, 0x0013485Cu);
     if (getenv("HLE_TICK_LOG")) {
@@ -2617,10 +2622,13 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                nicht von einem bestimmten Gast-Thread abhaengt. */
             if (!in_frame && !getenv("HLE_TICK_FROM_SVC0") &&
                 g_tick - last_frame >= 268111u / 60u) {
+                uint32_t sp0 = c->r[13];
                 in_frame = 1;
                 last_frame = g_tick;
+                c->r[13] = 0x0CF0F000u;
                 arm_call_guest_pub(c, 0x00134818u);
                 arm_call_guest_pub(c, 0x0013485Cu);
+                c->r[13] = sp0;
                 in_frame = 0;
             }
             c->r[1] = (uint32_t)(g_tick >> 32);
