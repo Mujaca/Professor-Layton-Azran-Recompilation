@@ -139,7 +139,7 @@ static void hle_tick(ArmCpu *c) {
         if (p != NULL && *p != 0) period_ms = (uint32_t)strtoul(p, NULL, 0);
         init = 1;
     }
-    if (!on || busy || c == NULL || c != g_frame_cpu) return;
+    if (!on || busy || c == NULL) return;
     now = (uint64_t)GetTickCount64();
     if (now - last < (uint64_t)period_ms) return;
     last = now;
