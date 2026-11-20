@@ -468,6 +468,7 @@ typedef struct {
     int fa_debug, reg_enable, reg_debug, asset_trace, queue_log;
     int fa_reg_ok, fa_fake_ok, fa_always, blklogf, force_asset;
     int dump_fatal, dump_r3, watch_pool, perf, rm_adv, romfs_log, romfs_force, heap_seed;
+    int fast_memcpy;
     int perfmap, hooks;
     uint32_t blklog_lo;
 } TraceEnv;
@@ -498,6 +499,10 @@ static void trace_env_init(void) {
     {
         const char *hs = getenv("HLE_HEAP_SEED");
         g_te.heap_seed = !(hs != NULL && hs[0] == '0');
+    }
+    {
+        const char *fm = getenv("HLE_FAST_MEMCPY");
+        g_te.fast_memcpy = !(fm != NULL && fm[0] == '0');
     }
     g_te.perfmap = envset("HLE_PERFMAP") || (getenv("HLE_PERFMAP_FILE") != NULL);
     g_te.hooks = (getenv("HLE_HOOK") != NULL);
@@ -677,6 +682,18 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
                arm_mem_read(c, ar + 0x2Cu, 4), c->r[2], c->r[0]);
         fflush(stdout);
     }
+    /* Diagnose: memcpy-Beschleunigung (fn_00291B60 ist auf `bx lr` gepatcht,
+       siehe tools/patch_fast_memcpy.py). r0=Ziel, r1=Quelle, r2=Groesse. */
+    if (c != NULL && g_te.fast_memcpy && pc == 0x00291B60u) {
+        uint32_t dst = c->r[0], src = c->r[1], n = c->r[2];
+        if (n > 0x08000000u) n = 0x08000000u;
+        if ((dst & 0x1FFFFFFFu) + (uint64_t)n <= c->mem_size &&
+            (src & 0x1FFFFFFFu) + (uint64_t)n <= c->mem_size) {
+            memmove(c->mem + (dst & 0x1FFFFFFFu), c->mem + (src & 0x1FFFFFFFu), n);
+        }
+        c->r[0] = dst;   /* memcpy liefert das Ziel zurueck */
+    }
+
     /* Diagnose: Registry-Descriptor beim Asset-Lookup zeigen. */
     if (c != NULL && g_te.romfs_log &&
         (pc == 0x00103B7Cu || pc == 0x002B95F8u)) {
