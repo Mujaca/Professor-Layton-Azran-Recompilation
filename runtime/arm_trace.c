@@ -891,7 +891,8 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
                    pc == 0x00292300u || pc == 0x00292370u || pc == 0x00292650u ||
                    pc == 0x00292678u || pc == 0x002927B8u ||
                    pc == 0x00292656u || pc == 0x0029265Cu || pc == 0x00292670u ||
-                   pc == 0x00292664u || pc == 0x00292668u || pc == 0x001009E4u) {
+                   pc == 0x00292664u || pc == 0x00292668u || pc == 0x001009E4u ||
+                   pc == 0x001300C8u || pc == 0x0013C4ECu) {
             static unsigned long bn = 0;
             bn++;
             printf("[branch] pc=%08X r0=%08X r1=%08X r2=%08X lr=%08X n=%lu\n",
