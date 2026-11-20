@@ -12,6 +12,7 @@ uint32_t arm_last_block = 0;
 void (*arm_pump_hook)(void) = NULL;
 void (*arm_tick_hook)(struct ArmCpu *c) = NULL;
 uint32_t arm_watch_pc = 0;
+static uint32_t g_mwk_r0 = 0, g_mwk_r1 = 0;
 static int g_watch_hits = 0;
 
 /* ------------------------------------------------------------------ *
@@ -688,7 +689,24 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         }
     }
 
-    /* Diagnose: dem Scene-Descriptor einen synthetischen Asset-Eintrag geben,
+    /* Diagnose: Registerzustand im Archiv-Dateilader. */
+    if (c != NULL && pc == 0x0012493Cu) {
+        g_mwk_r0 = c->r[0];
+        g_mwk_r1 = c->r[1];
+    }
+    if (c != NULL && pc == 0x00124980u) {
+        if (getenv("HLE_MWK_FIX")) {
+            c->r[6] = g_mwk_r0;
+            c->r[8] = g_mwk_r1;
+        }
+        if (g_te.romfs_log) {
+            printf("[mwk] r6=%08X r8=%08X sp=%08X lr=%08X\n",
+                   c->r[6], c->r[8], c->r[13], c->r[14]);
+            fflush(stdout);
+        }
+    }
+
+    /* Diagnose: Dem Scene-Descriptor einen synthetischen Asset-Eintrag geben,
        damit die Einfuege-Schleife in fn_00284D24 laeuft und 0x282364 einen
        Namen eintraegt. Eintrag: stride 0x18, Name[0x14] @+0, u32 @+0x10,
        u8 @+0x16. */
@@ -838,10 +856,13 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
                    pc == 0x00101194u || pc == 0x00101230u || pc == 0x001013F0u ||
                    pc == 0x0010123Cu ||
                    pc == 0x0011E494u || pc == 0x00280034u || pc == 0x0012493Cu ||
-                   pc == 0x0027FFF0u) {
+                   pc == 0x0027FFF0u || pc == 0x0013C46Cu || pc == 0x00284AA8u ||
+                   pc == 0x00289F30u || pc == 0x00289F20u || pc == 0x0026F130u ||
+                   pc == 0x00130220u) {
             static unsigned long bn = 0;
             bn++;
-            printf("[branch] pc=%08X r0=%08X n=%lu\n", pc, c->r[0], bn);
+            printf("[branch] pc=%08X r0=%08X r1=%08X r2=%08X lr=%08X n=%lu\n",
+                   pc, c->r[0], c->r[1], c->r[2], c->r[14], bn);
             fflush(stdout);
         } else if (pc == 0x00289E48u || pc == 0x00289E34u || pc == 0x00289DB8u) {
             static unsigned long tn = 0;
