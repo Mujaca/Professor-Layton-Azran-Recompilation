@@ -699,8 +699,22 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
 
     /* Diagnose: Szene-/Ladezustand als fertig markieren (Objekt 0x3EC028+0x2144). */
     if (c != NULL && g_te.scene_ready && pc == 0x00101508u) {
-        uint16_t one = 1;
-        memcpy(c->mem + (0x003EE16Cu & 0x1FFFFFFFu), &one, 2);
+        const char *nm = getenv("HLE_SCENE_NAME");
+        uint32_t base = 0x003EE16Cu & 0x1FFFFFFFu;
+        if (nm != NULL && *nm != 0) {
+            int i;
+            for (i = 0; nm[i] != 0 && i < 0xFE; i++) {
+                uint16_t ch = (uint16_t)(unsigned char)nm[i];
+                memcpy(c->mem + base + (uint32_t)i * 2u, &ch, 2);
+            }
+            {
+                uint16_t z = 0;
+                memcpy(c->mem + base + (uint32_t)i * 2u, &z, 2);
+            }
+        } else {
+            uint16_t one = 1;
+            memcpy(c->mem + base, &one, 2);
+        }
     }
 
     /* Diagnose: fuehrendes '/' aus dem RomFS-Pfad entfernen. Die Engine
