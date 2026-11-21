@@ -523,3 +523,27 @@ Memwatch auf `0x40B4CC`: nur zwei Null-Writes (BSS-Clear `pc=0x100030`,
 `0x28EEE8`). Der Callback wird also **nie installiert** -> der Dispatcher
 ruft pro Frame nichts auf, und folglich entsteht kein Submit.
 Ein `STR #0x15C` existiert nicht; der Setzer arbeitet mit Register-Offset.
+
+### Frame-Dispatcher laeuft, Callback-Slot bleibt leer (neu)
+
+Memwatch auf `0x40B4C4/0x40B4C8` zeigt, dass der Dispatcher **jeden Frame**
+zaehlt (Werte 1,2,3,...; 400 Writes in 35 s ≈ 200 Frames):
+
+```
+[mw] 0040B4C4 <- 00000001 pc=00134818
+[mw] 0040B4C8 <- 00000001 pc=0013485C
+[mw] 0040B4C4 <- 00000002 pc=00134818
+...
+```
+
+Der Code selbst setzt den Callback nie:
+
+```
+0x134820  ldr r1,[r4,#0x15c]   ; bleibt 0
+0x134828  movne r0,#0x400
+0x13482C  blxne r1
+0x134830..0x134850  [r4+0x154]++ ; pop
+```
+
+Also: Frames werden gezaehlt, aber es gibt pro Frame **keine Arbeit**
+(Callback NULL). Der Installer liegt ausserhalb dieses Blocks.
