@@ -98,7 +98,10 @@ sich nicht). Reihenfolge/Adressen siehe `tools/apply_all_patches.py`.
   `0x12FD30 = mov r0,#1` laeuft der Lader weiter, erreicht `0x124C30` aber
   nicht in 120 s (Hauptthread idle bei `0x283488`, `sp=0x0CF0F000`).
   `HLE_FLAG_FIX` (Byte `0x3E7771`, gelesen von `0x139844`) aenderte daran
-  nichts.
+  nichts: der Wert ist bereits `1` (Wort `0x3E7770 = 0x00010100`), `0x139844`
+  liefert also 1 — der 0-Rueckweg von `0x12FD30` kommt aus einem spaeteren
+  Zweig. Auch mit Stub (0x12FD30 = mov r0,#1) bleibt der Lader nach `0x124AD8` in 240 s stecken
+  (`0x124C30` wird nicht erreicht, Watchdog `0x283488`).
 - Mit dem kurzen Pfad (`0x1249CC → 0x124C30`) bleibt der Mount-Erfolg
   reproduzierbar.
 - `boss:U`, `/head.lt6`, `SetBufferSwap (0x0005)` und ein echter Frame fehlen.
