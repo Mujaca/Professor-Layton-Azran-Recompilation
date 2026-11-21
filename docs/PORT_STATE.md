@@ -58,4 +58,11 @@
   `find_path` wertet sie nicht aus und liefert damit falsche/leere Daten.
 - Mit `HLE_SCENE_READY=1` erreicht die Engine die RM-Frame-Schleife
   (`0x288AF8/0x288B34`) und sendet `gsp 0x0006/0x000C` samt `[gpusubmit]`.
+- Der volle Loaderpfad (ohne Short-Circuit an `0x1249CC`) läuft über den
+  zweiten Größen-Accessor `0x13C4EC` (jetzt ebenfalls auf `0x00F3DE78`
+  gestubbt) in `fn_0028F324` → `0x118798` und hängt dort im **Virtuellen
+  Aufruf** `0x1187E8 blx ip` (Watchdog: `pc=0x28F35C`, `lr=0x1187EC`).
+  Ein Patch von `0x27E3C8` (vermuteter Wait) half nicht.
+- Mit dem kurzen Pfad (`0x1249CC → 0x124C30`) bleibt der Mount-Erfolg
+  reproduzierbar.
 - `boss:U`, `/head.lt6`, `SetBufferSwap (0x0005)` und ein echter Frame fehlen.
