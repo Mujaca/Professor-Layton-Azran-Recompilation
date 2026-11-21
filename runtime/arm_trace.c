@@ -825,7 +825,8 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         if (menu_log < 0) menu_log = (getenv("HLE_MENU_LOG") != NULL);
         if (menu_log && c != NULL &&
             (pc == 0x0028F7BCu || pc == 0x0028FCE8u ||
-             pc == 0x0028A164u || pc == 0x0028A1BCu)) {
+             pc == 0x0028A164u || pc == 0x0028A1BCu ||
+             pc == 0x001117A4u || pc == 0x002800C8u)) {
         printf("[menu] pc=%08X r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X",
                pc, c->r[0], c->r[1], c->r[2], c->r[3], c->r[14]);
         if (pc == 0x0028A164u) {

@@ -117,6 +117,31 @@ Es entstehen aber noch **keine Pixel**: `out/shot_menu.bmp` ist
 byte-identisch zum Platzhalter (`0` Byte Unterschied, beide 288.054 B),
 und `gsp::Gpu` sendet weiterhin nur `0x0006`/`0x000C` (kein `0x0005`).
 
+## Menü-Draw-Pfad (neu)
+
+Die Request-Kette des Menüs ist vollständig belegt:
+
+```
+0x28FCE8  menu_logo-Zweig
+0x28A164  getaggte Variante {Typ 8, [+4]=Namezeiger}
+0x28A1BC  Request einreihen  -> r0 = obj+0x2104 (= 0x003EE12C)
+0x1117A4  Consumer           -> 0x2800C8
+0x2800C8  Draw-Objekt bauen (r2=2, r3=Name-Variante)
+```
+
+Messung (60-s-Lauf mit `HLE_FRAME_LOOP=28F7BC`,
+`HLE_FRAME_ARG=3EC028,7D0,0,FFFFFFFF`):
+
+```
+[menu] pc=0028A1BC r0=003EC028 r1=0FFEFFD0 r2=000007D0
+[menu] pc=001117A4 r0=003EE12C r1=0FFEFF18 r2=0FFEFFD0 r3=000007D0
+[menu] pc=002800C8 r0=003EE12C r1=0FFEFEFC r2=00000002 r3=0FFEFFD0
+```
+
+-> **441 Draw-Objekte** fuer `menu_logo` werden gebaut. Es entstehen aber
+weiterhin keine Pixel (Screenshot byte-identisch), weil dem Draw-Objekt die
+geladenen Asset-Daten (Dimensionen/Textur) fehlen.
+
 ## Echter Loader ohne Short-Circuit (neu)
 
 `python tools/patch_real_loader.py` (nach `decomp.py` + `apply_all_patches.py`)
