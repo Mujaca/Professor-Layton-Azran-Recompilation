@@ -56,6 +56,17 @@ Belege (Lauf mit `HLE_PARSE_FIX=1`, `HLE_BOOT_LOG=1`):
 Also: `.fa`-Open und Header-Read funktionieren jetzt fuer `lt6_a.fa`,
 `lt6_b.fa` und `lt6_uk.fa`.
 
+Zusatz-Beleg aus dem Lauf ohne `HLE_FRAME_CB2` (`out/fa_ok_run_log.txt`):
+Der Frame-Callback wird jetzt **vom Spiel selbst** registriert:
+
+```
+[tick] c400=00001130 h400=00101750 h401=00000000 dl=4FE74FAF
+```
+
+(`h400` = `[0x40B4CC]`, vorher 0). Der Frame-Dispatcher arbeitet also mit
+installiertem Handler; der naechste Schritt ist der Ressourcen-Load der
+Menue-Szene und der GPU-Submit.
+
 ## RomFS-Lookup: neue Befunde (fuer den Engine-Renderpfad)
 
 - Dir-Baum (aus dem RomFS-Image): `0x0 ""`, `0x18 lt6`, `0x38 arc`,

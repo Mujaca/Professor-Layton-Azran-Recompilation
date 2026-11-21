@@ -25,6 +25,10 @@ static unsigned char g_official[FB_W * FB_H * 3];
 static int g_official_ok = 0;
 
 static void load_official_frame(void) {
+    if (getenv("PORT_NO_OFFICIAL") != NULL) {
+        printf("Referenz-Frame deaktiviert (PORT_NO_OFFICIAL)\n");
+        return;
+    }
     const char *paths[] = { "out/menu_official.bin", "reports/menu_official.bin" };
     for (unsigned pi = 0; pi < 2; pi++) {
         FILE *f = fopen(paths[pi], "rb");

@@ -842,6 +842,31 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
                 }
                 printf("' guard=%08X\n", g); fflush(stdout);
             }
+            if (pc == 0x00280744u && getenv("HLE_READ_OBJ")) {
+                static int onr = 0;
+                if (onr < 10) {
+                    uint32_t o = c->r[0], v0 = 0, v4 = 0, v8 = 0, ssz = 0, sptr = 0;
+                    memcpy(&v0, c->mem + (o & 0x1FFFFFFFu), 4);
+                    memcpy(&v4, c->mem + ((o + 4u) & 0x1FFFFFFFu), 4);
+                    memcpy(&v8, c->mem + ((o + 8u) & 0x1FFFFFFFu), 4);
+                    sptr = v0;
+                    if (sptr >= 0x08000000u && sptr < 0x20000000u)
+                        memcpy(&ssz, c->mem + ((sptr + 0x10u) & 0x1FFFFFFFu), 4);
+                    printf("[boot] readobj o=%08X v0=%08X v4=%08X v8=%08X stream=%08X ssz=%08X r2=%08X r3=%08X\n",
+                           o, v0, v4, v8, sptr, ssz, c->r[2], c->r[3]);
+                    fflush(stdout); onr++;
+                }
+            }
+            if (pc == 0x0032AFC4u) {
+                static int ons = 0;
+                if (ons < 8) {
+                    uint32_t sz = 0, fsz = 0;
+                    memcpy(&sz, c->mem + ((c->r[13] + 0x180u) & 0x1FFFFFFFu), 4);
+                    memcpy(&fsz, c->mem + ((c->r[4] + 0x10u) & 0x1FFFFFFFu), 4);
+                    printf("[boot] vfssize [sp+180]=%08X [obj+10]=%08X\n", sz, fsz);
+                    fflush(stdout); ons++;
+                }
+            }
             if (pc == 0x001113B8u) {
                 static int onm = 0;
                 if (onm < 8) {

@@ -160,14 +160,24 @@ static void hle_tick(ArmCpu *c) {
         if (dl < 0) dl = (getenv("HLE_DRAW_LIST") != NULL);
         if (dl) {
             uint32_t arr = 0x0CFF0000u;
-            uint16_t cnt = 0, cap = 0x100u, one = 1;
-            uint32_t cur = 0;
+            uint32_t pool = 0x0CFF1000u, obj = 0x0CFF2000u;
+            uint16_t cnt = 0, cap = 0x100u, one = 1, zero16 = 0;
+            uint32_t stride = 4u, cur = 0;
             memcpy(&cur, c->mem + 0x3EE198u, 4);
             if (cur == 0u) {
                 memcpy(c->mem + 0x3EE198u, &arr, 4);
                 memcpy(c->mem + 0x3EE1A0u, &cnt, 2);
                 memcpy(c->mem + 0x3EE1A2u, &cap, 2);
                 memcpy(c->mem + 0x3EE196u, &one, 2);
+            }
+            /* Pool an +0x5C: {array, stride, start, end}; array[0] -> Scratch-Objekt */
+            memcpy(&cur, c->mem + 0x3EE188u, 4);
+            if (cur == 0u) {
+                memcpy(c->mem + 0x3EE188u, &pool, 4);
+                memcpy(c->mem + 0x3EE18Cu, &stride, 4);
+                memcpy(c->mem + 0x3EE190u, &zero16, 2);
+                memcpy(c->mem + 0x3EE194u, &one, 2);
+                memcpy(c->mem + (pool & 0x1FFFFFFFu), &obj, 4);
             }
         }
     }
