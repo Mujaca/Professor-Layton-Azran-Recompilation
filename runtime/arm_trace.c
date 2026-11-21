@@ -940,6 +940,42 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         c->mem[0x3EC133u] = 0;                  /* +0x33 Flags   */
     }
 
+    /* Diagnose: Datei-Inhalt direkt aus dem RomFS-Image vorladen. */
+    if (c != NULL && getenv("HLE_FILE_PRELOAD") && pc == 0x001300C8u) {
+        uint32_t size = c->r[2];
+        uint32_t dst = c->r[1] & 0x1FFFFFFFu;
+        const uint32_t fbase = 0x09000ACCu;   /* file-meta-Tabelle */
+        const uint32_t ftotal = 0xD284u;
+        int32_t found = -1;
+        uint32_t off = 0;
+        while (off + 0x20u <= ftotal) {
+            uint32_t dsz_lo = 0, dsz_hi = 0, nlen = 0;
+            memcpy(&dsz_lo, c->mem + (fbase + off + 0x10u), 4);
+            memcpy(&dsz_hi, c->mem + (fbase + off + 0x14u), 4);
+            memcpy(&nlen, c->mem + (fbase + off + 0x1Cu), 4);
+            if (dsz_lo == size && dsz_hi == 0) { found = (int32_t)off; break; }
+            off += 0x20u + ((nlen + 3u) & ~3u);
+        }
+        if (found >= 0 && size > 0 && size <= 0x08000000u &&
+            dst + size <= c->mem_size) {
+            uint32_t doff_lo = 0, doff_hi = 0;
+            memcpy(&doff_lo, c->mem + (fbase + (uint32_t)found + 8u), 4);
+            memcpy(&doff_hi, c->mem + (fbase + (uint32_t)found + 0xCu), 4);
+            if (doff_hi == 0) {
+                FILE *fp = fopen("out/romfs_image.bin", "rb");
+                if (fp != NULL) {
+                    long fo = (long)(0x1000u + 0xDD80u + doff_lo);
+                    fseek(fp, fo, SEEK_SET);
+                    size_t got = fread(c->mem + dst, 1, size, fp);
+                    fclose(fp);
+                    printf("[preload] size=%08X dataOff=%08X dst=%08X got=%u\n",
+                           size, doff_lo, c->r[1], (unsigned)got);
+                    fflush(stdout);
+                }
+            }
+        }
+    }
+
     /* Diagnose: Stream-Reads (0x205858) mitschreiben. */
     if (c != NULL && getenv("HLE_STREAM_LOG") && pc == 0x00205858u) {
         static unsigned long sn = 0;
