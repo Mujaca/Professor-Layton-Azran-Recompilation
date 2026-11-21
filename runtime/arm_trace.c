@@ -967,7 +967,7 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
     }
 
     /* Diagnose: einmaliger Scan des Gast-RAM nach einem Zeigerwert. */
-    if (c != NULL && pc == 0x00283488u) {
+    if (c != NULL && pc == 0x00101508u) {
         static int scan_done = 0;
         if (!scan_done) {
             const char *v = getenv("HLE_SCAN_VAL");
