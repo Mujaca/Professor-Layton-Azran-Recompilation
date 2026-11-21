@@ -842,6 +842,24 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
                 }
                 printf("' guard=%08X\n", g); fflush(stdout);
             }
+            if (pc == 0x002804D4u) {
+                static int oni = 0;
+                if (oni < 12) {
+                    uint32_t h4 = 0, h8 = 0;
+                    memcpy(&h4, c->mem + ((c->r[13] + 0x0Cu) & 0x1FFFFFFFu), 4);
+                    memcpy(&h8, c->mem + ((c->r[13] + 0x10u) & 0x1FFFFFFFu), 4);
+                    printf("[boot] idxcopy r0=%08X r1=%08X r2=%08X r3=%08X h4=%08X h8=%08X\n",
+                           c->r[0], c->r[1], c->r[2], c->r[3], h4, h8);
+                    printf("[boot] hdrbuf:");
+                    for (uint32_t k = 0; k < 16; k++) {
+                        uint32_t w = 0;
+                        memcpy(&w, c->mem + (0x0FFEF740u + k * 4u), 4);
+                        printf(" %08X", w);
+                    }
+                    printf("\n");
+                    fflush(stdout); oni++;
+                }
+            }
             if (pc == 0x00280744u && getenv("HLE_READ_OBJ")) {
                 static int onr = 0;
                 if (onr < 10) {
@@ -852,8 +870,14 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
                     sptr = v0;
                     if (sptr >= 0x08000000u && sptr < 0x20000000u)
                         memcpy(&ssz, c->mem + ((sptr + 0x10u) & 0x1FFFFFFFu), 4);
-                    printf("[boot] readobj o=%08X v0=%08X v4=%08X v8=%08X stream=%08X ssz=%08X r2=%08X r3=%08X\n",
-                           o, v0, v4, v8, sptr, ssz, c->r[2], c->r[3]);
+                    uint32_t vt = 0, rdfn = 0;
+                    if (sptr >= 0x08000000u && sptr < 0x20000000u) {
+                        memcpy(&vt, c->mem + (sptr & 0x1FFFFFFFu), 4);
+                        if (vt >= 0x08000000u && vt < 0x20000000u)
+                            memcpy(&rdfn, c->mem + ((vt + 0x20u) & 0x1FFFFFFFu), 4);
+                    }
+                    printf("[boot] readobj o=%08X v0=%08X v4=%08X v8=%08X stream=%08X ssz=%08X vt=%08X rdfn=%08X r2=%08X r3=%08X\n",
+                           o, v0, v4, v8, sptr, ssz, vt, rdfn, c->r[2], c->r[3]);
                     fflush(stdout); onr++;
                 }
             }
