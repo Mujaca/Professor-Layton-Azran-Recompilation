@@ -34,6 +34,44 @@
 - Mount-Fehlerpfad verlassen: `[romfs] 002850B8` **und** `[romfs] 00285184` (Rückkehr über den Erfolgszweig).
 - GPU: `gsp::Gpu cmd=0x0006` und `0x000C`; `[gpusubmit] handle=42 list=00410000 size=28`.
 
+## Echter Loader ohne Short-Circuit (neu)
+
+`python tools/patch_real_loader.py` (nach `decomp.py` + `apply_all_patches.py`)
+nimmt den `0x1249CC`-Short-Circuit zurück und setzt die vier Stellen, die der
+echte Mount zusätzlich braucht:
+
+```
+0x1249CC  add r0,r6,#0x2DC        (Original)
+0x28F33C  mov r8,r3               (Copy meldet konsumierte Größe)
+0x28F340  b 0x28F39C
+0x1301C0  nop                     (consumed-Check)
+0x12FD30  mov r0,#1 ; bx lr       (0x139914-Ergebnis als Erfolg)
+```
+
+Runtime-Schalter: `HLE_OBJ_FIX=1 HLE_SPAN_FIX=1 HLE_REG_FIX=1`
+(plus `HLE_FILE_PRELOAD=1 HLE_BIGARENA=1`).
+
+Was die drei Schalter tun:
+
+| Schalter | Wirkung |
+|---|---|
+| `HLE_OBJ_FIX` | Scratch-Container `P=0x0CFFE000` (`[P]=1`, `[P+4]=1`, `[P+8]=1`, `[P+0x2C]=[P+0x34]=0`), `[[archive+0x1A4+4]+0x3C]=P`; macht `0x140140`/`0x14015C`/`0x1401B0` zu gültigen Count-/Info-Quellen |
+| `HLE_SPAN_FIX` | setzt die Span-Magic `[archive+0x724]=1`, ohne die `0x284A48` immer 0 liefert |
+| `HLE_REG_FIX` | stellt an `0x124B6C` `r7`/`sl` bereit (Span-Assign braucht `r1!=0 && r3!=0`) |
+
+Beleg (180-s-Lauf, `0x1249CC` original):
+
+```
+[chain] pc=00124AD8 r0=00000001
+[chain] pc=00124B6C r0=19E88EC0
+[chain] pc=00124C30 r0=00000001     <- fn_0012493C = Erfolg
+2850B8: 1   285184: 1   preload: 1
+```
+
+Damit ist `0x2850B8=1` **nicht mehr** vom Short-Circuit abhängig.
+Der Szene-Flag-Pfad (`0x3EE16C`) bleibt davon unberührt: er ist weiterhin 0,
+`boss:U`/`/head.lt6` und `.fa`-Reads folgen nicht.
+
 ## Mount-Rückgabekette (neu belegt)
 
 `0x2850A8: bl 0x11E494; movs r8,r0` → `0x2850B8` ist exakt der Rückgabewert

@@ -749,15 +749,22 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         uint32_t o = c->r[6] + 0x1A4u;
         uint32_t x = 0, cnt = 1, zero = 0;
         const uint32_t P = 0x0CFFE000u;
+        uint16_t one16 = 1;
         memcpy(&x, c->mem + ((o + 4u) & 0x1FFFFFFFu), 4);
         memcpy(c->mem + P, &cnt, 4);
         memcpy(c->mem + P + 0x2Cu, &zero, 4);
         memcpy(c->mem + P + 0x34u, &zero, 4);
-        { uint16_t one = 1;
-          memcpy(c->mem + P + 8u, &one, 2); }
+        memcpy(c->mem + P + 8u, &one16, 2);
+        memcpy(c->mem + P + 4u, &one16, 2);   /* 0x1401B0 -> struct+8 = count */
         memcpy(c->mem + ((x + 0x3Cu) & 0x1FFFFFFFu), &P, 4);
         if (getenv("HLE_FLAG_FIX")) {
             c->mem[0x003E7771u] = 1;   /* 0x139844: ldrsb [0x3E7770+1] */
+        }
+        if (getenv("HLE_SPAN_FIX")) {
+            uint32_t one = 1;
+            memcpy(c->mem + ((c->r[6] + 0x724u) & 0x1FFFFFFFu), &one, 4);
+            printf("[spanfix] archive=%08X [archive+724]=1\n", c->r[6]);
+            fflush(stdout);
         }
         printf("[objfix] o=%08X x=%08X P=%08X\n", o, x, P);
         fflush(stdout);
@@ -784,9 +791,31 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
 
     /* Diagnose: Erfolgskette von fn_0012493C ab 0x124A48. */
     if (c != NULL && getenv("HLE_CHAIN_LOG") &&
-        (pc == 0x00124AACu || pc == 0x00124C2Cu || pc == 0x00124AD8u || pc == 0x00124C30u)) {
+        (pc == 0x00124AACu || pc == 0x00124C2Cu || pc == 0x00124AD8u ||
+         pc == 0x00124C30u || pc == 0x00124B6Cu)) {
+        if (pc == 0x00124B6Cu) {
+            uint32_t e0 = 0, e1 = 0, m = 0;
+            memcpy(&e0, c->mem + (c->r[13] & 0x1FFFFFFFu), 4);
+            memcpy(&e1, c->mem + ((c->r[13] + 4u) & 0x1FFFFFFFu), 4);
+            memcpy(&m, c->mem + ((e0 + 4u) & 0x1FFFFFFFu), 4);
+            printf("[reg] span=%08X [span+4]=%08X arg=%08X r7=%08X sl=%08X\n",
+                   e0, m, e1, c->r[7], c->r[9]);
+            fflush(stdout);
+        }
         printf("[chain] pc=%08X r0=%08X r4=%08X r5=%08X r7=%08X r8=%08X sl=%08X fp=%08X lr=%08X\n",
                pc, c->r[0], c->r[4], c->r[5], c->r[7], c->r[8], c->r[9], c->r[11], c->r[14]);
+        fflush(stdout);
+    }
+
+    /* Diagnose: Register fuer den Span-Assign an 0x124B6C bereitstellen. */
+    if (c != NULL && getenv("HLE_REG_FIX") && pc == 0x00124B6Cu) {
+        if (c->r[7] == 0) {
+            c->r[7] = 0x1E000000u;
+        }
+        if (c->r[9] == 0) {
+            c->r[9] = 0x10u;
+        }
+        printf("[regfix] r7=%08X sl=%08X\n", c->r[7], c->r[9]);
         fflush(stdout);
     }
 
