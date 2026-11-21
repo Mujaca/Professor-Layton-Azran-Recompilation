@@ -819,6 +819,40 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         fflush(stdout);
     }
 
+    /* Diagnose: Menue-Szenen-Aufbau (fn_0028F7BC + Namens-/Sprite-Requests). */
+    {
+        static int menu_log = -1;
+        if (menu_log < 0) menu_log = (getenv("HLE_MENU_LOG") != NULL);
+        if (menu_log && c != NULL &&
+            (pc == 0x0028F7BCu || pc == 0x0028FCE8u ||
+             pc == 0x0028A164u || pc == 0x0028A1BCu)) {
+        printf("[menu] pc=%08X r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X",
+               pc, c->r[0], c->r[1], c->r[2], c->r[3], c->r[14]);
+        if (pc == 0x0028A164u) {
+            uint32_t p = c->r[1] & 0x1FFFFFFFu;
+            printf(" name='");
+            for (int i = 0; i < 24; i++) {
+                uint8_t ch = 0;
+                memcpy(&ch, c->mem + ((p + (uint32_t)i) & 0x1FFFFFFFu), 1);
+                if (ch == 0) break;
+                printf("%c", (ch >= 32 && ch < 127) ? (char)ch : '?');
+            }
+            printf("'");
+        }
+        printf("\n");
+        fflush(stdout);
+        }
+    }
+
+    /* Diagnose: Menue-Zustand im Szenen-Switch erzwingen (0x2BC = menu_logo). */
+    {
+        static int menu_force = -1;
+        if (menu_force < 0) menu_force = (getenv("HLE_MENU_FORCE") != NULL);
+        if (menu_force && c != NULL && pc == 0x0028F8E0u) {
+            c->r[0] = 0x2BCu;
+        }
+    }
+
     /* Diagnose: Queue-Objekt von 0x2834A8 (App-Framework-Polling). */
     if (c != NULL && getenv("HLE_Q_LOG") && pc == 0x002834A8u) {
         static int qn = 0;

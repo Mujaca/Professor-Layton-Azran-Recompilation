@@ -67,6 +67,56 @@ Da das Flag das **Längenfeld eines Wide-Strings** ist, schreibt es ein
 String-Assign (Bibliotheksfunktion), kein `STRH`. Genau deshalb half
 `HLE_SCENE_NAME` (setzt Länge+Zeichen) und `HLE_SCENE_READY`.
 
+## Menü-Szene: Zustand und Asset-Requests (neu)
+
+`fn_0028F7BC` ist das **Szenen-Update** (wird auch von der Init-Schleife
+über `0x10153C` aufgerufen). Es verteilt über `r4` (Zustands-ID) mit den
+Konstanten `0xCEE`, `0xBB9`, `0x834`, `0x69A` (Literal-Pool `0x28FF98…`).
+
+**Menü-Zustand = `r4 = 0x7D0`:**
+
+```
+0x28F894  cmp r4, 0x834          ; r4 < 0x834
+0x28F8A8  r1 = 0x834 - 0x320 = 0x514
+0x28F8B8  bgt 0x28F8E0           ; r4 > 0x514
+0x28F8E0  cmp r0, #0x2BC         ; r0 = r4 - 0x514
+0x28F8E4  beq 0x28FCE8           ; menu_logo
+```
+
+Daraus folgt `r4 = 0x514 + 0x2BC = 0x7D0`.
+
+Der `menu_logo`-Block (`0x28FCE8`) lädt den Namen aus der Tabelle
+(`0x28FFDC`, ASCII) und baut daraus eine getaggte Variante:
+
+```
+0x28FCE8  add r1, pc, #0x2EC     ; -> "menu_logo"
+0x28FCEC  r0 = sl + 0x30
+0x28FCF0  bl 0x28A164            ; Variante: Typ 8, [+4]=Namezeiger
+0x28FD20  bl 0x28A1BC            ; Ressourcen-Request einreihen (obj+0x914)
+```
+
+**Rezept zum Anstoßen (ohne Spiel-Eingaben):**
+
+```
+HLE_FRAME_LOOP=28F7BC
+HLE_FRAME_ARG=3EC028,7D0,0,FFFFFFFF
+HLE_MENU_LOG=1        # loggt 0x28F7BC / 0x28FCE8 / 0x28A164 (Name!) / 0x28A1BC
+HLE_MENU_FORCE=1      # setzt r0 an 0x28F8E0 auf 0x2BC
+```
+
+Beleg (90-s-Lauf):
+
+```
+[menu] pc=0028FCE8 r0=000002BC r1=00000514
+[menu] pc=0028A164 r0=0FFEFF80 r1=0028FFDC name='menu_logo'
+[menu] pc=0028A1BC r0=003EC028 r1=0FFEFFD0 r2=000007D0
+```
+
+Damit läuft der **echte Menü-Szenencode** und stellt `menu_logo` an.
+Es entstehen aber noch **keine Pixel**: `out/shot_menu.bmp` ist
+byte-identisch zum Platzhalter (`0` Byte Unterschied, beide 288.054 B),
+und `gsp::Gpu` sendet weiterhin nur `0x0006`/`0x000C` (kein `0x0005`).
+
 ## Echter Loader ohne Short-Circuit (neu)
 
 `python tools/patch_real_loader.py` (nach `decomp.py` + `apply_all_patches.py`)
