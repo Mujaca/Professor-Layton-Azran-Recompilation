@@ -227,6 +227,18 @@ Die Zuordnung ist verifiziert (`HLE_MAP_LOG`):
 Der GSP-Shared-Memory liegt also wirklich bei `0x10002000`; der Puffer ab
 `+0x800` ist korrekt adressiert, wird aber von keinem Spiel-Thread beschrieben.
 
+Memwatch-Beleg (`ARM_MEMWATCHRANGE=10002800,0x200`, 45 s): genau **ein**
+Schreibzugriff, naemlich das Nullsetzen des Headers:
+
+```
+[mw] 10002800 <- 00000000 size=4 pc=0014250C lr=0013EBC8 th=2
+```
+
+Danach wird nie ein Kommando eingetragen. Mit `HLE_GSP_IRQ=1` +
+`HLE_GSPQ_PUMP=1` + Menue-Zustand bleiben die GSP-Kommandos unveraendert
+(`0x0016/0x0013/0x0010/0x001E`), kein `0x000C`, kein `0x0005`, kein `[gspq]`.
+Der Render-/Submit-Thread laeuft also weiterhin nicht durch.
+
 ## Echter Loader ohne Short-Circuit (neu)
 
 `python tools/patch_real_loader.py` (nach `decomp.py` + `apply_all_patches.py`)
