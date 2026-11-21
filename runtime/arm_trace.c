@@ -697,6 +697,17 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         c->r[13] -= 0x28u;
     }
 
+    /* Diagnose: Variant-Copy fn_0028F324 zaehlen. */
+    if (c != NULL && getenv("HLE_COPY_LOG") && pc == 0x0028F324u) {
+        static unsigned long cn = 0;
+        cn++;
+        if (cn <= 40 || (cn % 1000u) == 0) {
+            printf("[copy] n=%lu r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X\n",
+                   cn, c->r[0], c->r[1], c->r[2], c->r[3], c->r[14]);
+            fflush(stdout);
+        }
+    }
+
     /* Diagnose: Vtable-Aufruf in 0x118798 mitschreiben. */
     if (c != NULL && getenv("HLE_VT_LOG") && pc == 0x001187E4u) {
         uint32_t ob = c->r[4] & 0x1FFFFFFFu;
