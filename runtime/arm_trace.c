@@ -966,6 +966,29 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         }
     }
 
+    /* Diagnose: einmaliger Scan des Gast-RAM nach einem Zeigerwert. */
+    if (c != NULL && pc == 0x00101508u) {
+        static int scan_done = 0;
+        if (!scan_done) {
+            const char *v = getenv("HLE_SCAN_VAL");
+            scan_done = 1;
+            if (v != NULL && *v != 0) {
+                uint32_t want = (uint32_t)strtoul(v, NULL, 16);
+                int found = 0;
+                for (uint32_t a = 0x00400000u; a + 4u < c->mem_size; a += 4u) {
+                    uint32_t w = 0;
+                    memcpy(&w, c->mem + a, 4);
+                    if (w == want) {
+                        printf("[scan] %08X\n", a);
+                        if (++found >= 12) break;
+                    }
+                }
+                printf("[scan] Wert %08X: %d Treffer\n", want, found);
+                fflush(stdout);
+            }
+        }
+    }
+
     /* Diagnose: Warte-Aufrufe 0x287B90 mit Thread-ID und Ruecksprungadresse. */
     {
         static int wait_log = -1;
