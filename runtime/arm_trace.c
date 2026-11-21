@@ -971,19 +971,33 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         static int scan_done = 0;
         if (!scan_done) {
             const char *v = getenv("HLE_SCAN_VAL");
+            const char *vs = getenv("HLE_SCAN_VALS");
             scan_done = 1;
-            if (v != NULL && *v != 0) {
-                uint32_t want = (uint32_t)strtoul(v, NULL, 16);
-                int found = 0;
-                for (uint32_t a = 0x00400000u; a + 4u < c->mem_size; a += 4u) {
-                    uint32_t w = 0;
-                    memcpy(&w, c->mem + a, 4);
-                    if (w == want) {
-                        printf("[scan] %08X\n", a);
-                        if (++found >= 12) break;
+            if ((v != NULL && *v != 0) || (vs != NULL && *vs != 0)) {
+                uint32_t want[4];
+                int nw = 0;
+                if (vs != NULL && *vs != 0) {
+                    const char *s = vs;
+                    while (s != NULL && *s != 0 && nw < 4) {
+                        want[nw++] = (uint32_t)strtoul(s, NULL, 16);
+                        const char *comma = strchr(s, ',');
+                        s = (comma != NULL) ? comma + 1 : NULL;
                     }
+                } else {
+                    want[nw++] = (uint32_t)strtoul(v, NULL, 16);
                 }
-                printf("[scan] Wert %08X: %d Treffer\n", want, found);
+                for (int k = 0; k < nw; k++) {
+                    int found = 0;
+                    for (uint32_t a = 0x00400000u; a + 4u < c->mem_size; a += 4u) {
+                        uint32_t w = 0;
+                        memcpy(&w, c->mem + a, 4);
+                        if (w == want[k]) {
+                            printf("[scan] %08X\n", a);
+                            if (++found >= 6) break;
+                        }
+                    }
+                    printf("[scan] Wert %08X: %d Treffer\n", want[k], found);
+                }
                 fflush(stdout);
             }
         }
