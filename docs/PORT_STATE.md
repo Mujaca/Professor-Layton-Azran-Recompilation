@@ -372,3 +372,20 @@ sich nicht). Reihenfolge/Adressen siehe `tools/apply_all_patches.py`.
 - Mit dem kurzen Pfad (`0x1249CC → 0x124C30`) bleibt der Mount-Erfolg
   reproduzierbar.
 - `boss:U`, `/head.lt6`, `SetBufferSwap (0x0005)` und ein echter Frame fehlen.
+
+### Screenshot-Timing (wichtig!)
+
+`tests/port.c` speicherte `--shot` frueher bei **Frame 3** (~48 ms) und brach
+bei Frame 6 ab. Das Spiel hat zu diesem Zeitpunkt noch nichts gerendert —
+alle bisherigen "288.054 B, 0 Unterschiede"-Befunde waren dadurch
+vorbestimmt. Neu: `PORT_SHOT_FRAMES=<n>` legt den Aufnahmezeitpunkt fest
+(Default 3). Beleg mit `HLE_GPU_SUBMIT=1` (synthetischer Frame):
+
+```
+PORT_SHOT_FRAMES=200 -> shot_late.bmp: 288054 B, Unterschiede: 284003
+```
+
+Damit ist bewiesen: die VRAM-Pixel werden korrekt in den Screenshot
+uebernommen, sobald sie existieren. Ohne Fremd-Submit (nur Spiel-Pixel)
+bleibt es bei 0 Unterschieden — das Spiel schreibt weiterhin nichts in den
+VRAM (siehe GSP-Kommandopuffer).

@@ -308,11 +308,20 @@ int main(int argc, char **argv) {
         }
         frames++;
         Sleep(16);
-        if (shot != NULL && frames == 3) {
-            save_bmp(shot);
-        }
-        if (shot != NULL && frames > 6) {
-            break;
+        {
+            static int shot_at = -1, shot_stop = -1;
+            if (shot_at < 0) {
+                const char *sf = getenv("PORT_SHOT_FRAMES");
+                shot_at = (sf != NULL && *sf != 0) ? atoi(sf) : 3;
+                if (shot_at < 3) shot_at = 3;
+                shot_stop = shot_at + 3;
+            }
+            if (shot != NULL && frames == shot_at) {
+                save_bmp(shot);
+            }
+            if (shot != NULL && frames > shot_stop) {
+                break;
+            }
         }
         if (g_halt && shot == NULL) {
             /* Fenster bleibt offen, bis es geschlossen wird */
