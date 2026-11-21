@@ -389,3 +389,18 @@ Damit ist bewiesen: die VRAM-Pixel werden korrekt in den Screenshot
 uebernommen, sobald sie existieren. Ohne Fremd-Submit (nur Spiel-Pixel)
 bleibt es bei 0 Unterschieden — das Spiel schreibt weiterhin nichts in den
 VRAM (siehe GSP-Kommandopuffer).
+
+### Langlauf ohne Submit (neu)
+
+300-s-Lauf mit `SCENE_READY` + `GSP_IRQ` + `GSPQ_PUMP` + Menue-Zustand:
+
+```
+gspq: 0
+gsp::Gpu cmd: 0x0016 x1, 0x0013 x1, 0x0010 x2, 0x001E x2
+kein 0x000C, kein 0x0005
+```
+
+Auch nach 5 Minuten wird also kein Kommando submitted. Nebenbefund: an
+`0x1292A8` (`blxne r0`) wird `[obj+0x170] = 0xF0` als Callback benutzt
+("unbekanntes call-Ziel 0x000000F0 von Block 0x001292BC") — ein korrupter
+Funktionszeiger, aber nicht fatal (der Lauf geht weiter).
