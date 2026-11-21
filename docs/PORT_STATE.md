@@ -192,6 +192,14 @@ Das sind PICA-Register-Schreibzugriffe (Init), **kein** `0x000C`
 fuehrt bei `0x000C` die Kommandoliste aus (`gpu_run_command_list`), es wird
 aber nie ausgeloest.
 
+Wichtig (Azahar-Referenz, `gsp_gpu.cpp:833`): `TriggerCmdReqQueue` arbeitet
+dort **nicht** mit `SetCommandList`, sondern mit dem Kommandopuffer im
+GSP-Shared-Memory (`GetCommandBuffer(thread_id)`), also einer Ringliste mit
+`SubmitCmdList`-Eintraegen. Unser HLE-Pfad (`g_cmdlist_addr` aus `0x0006`)
+ist daher zu einfach: das Spiel sendet `0x0006` gar nicht.
+**Naechster echter Schritt:** diesen Shared-Memory-Kommandopuffer parsen und
+bei `0x000C` die `SubmitCmdList`-Eintraege ausfuehren.
+
 ## Echter Loader ohne Short-Circuit (neu)
 
 `python tools/patch_real_loader.py` (nach `decomp.py` + `apply_all_patches.py`)
