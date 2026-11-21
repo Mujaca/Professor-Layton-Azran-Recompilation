@@ -417,3 +417,17 @@ Sie funktioniert (Log `[frameloop2]`, 176 Aufrufe in 90 s), aber der Test mit
 `0x13EAAC` beendet einen Thread (`pc=0x00000000`), und danach fehlen sogar die
 normalen gsp-Kommandos. Der Kandidat ist also zu invasiv; der GX-Submit-Pfad
 muss genauer bestimmt werden.
+
+### Wartende Threads (neu, `HLE_WAIT_LOG`)
+
+Sonde an `0x287B90` (Wait-Wrapper) mit Thread-ID und Ruecksprungadresse:
+
+```
+[wait] th=F83 lr=00108158 r0=0040EFF4    (Adapter/Warteschlange)
+[wait] th=F84 lr=00119DB0 r0=003D1FB8    (App-/Frame-Thread)
+```
+
+`0x00119DAC bl 0x287B90` wartet auf genau ein Handle mit Timeout -1
+(`mvn r0,#0`), danach laeuft der Code ab `0x119DB0` weiter (Byte-Flag `[r4]`,
+Aufruf `0x27CB3C`, Verzweigung `0x11A084`). Das ist der periodische
+App-Thread; er laeuft, stossen aber keinen GX-Flush an.

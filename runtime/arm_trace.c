@@ -885,6 +885,21 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         }
     }
 
+    /* Diagnose: Warte-Aufrufe 0x287B90 mit Thread-ID und Ruecksprungadresse. */
+    {
+        static int wait_log = -1;
+        if (wait_log < 0) wait_log = (getenv("HLE_WAIT_LOG") != NULL);
+        if (wait_log && c != NULL && pc == 0x00287B90u) {
+            static unsigned long wn = 0;
+            if (wn < 60) {
+                printf("[wait] th=%03X lr=%08X r0=%08X\n",
+                       (uint32_t)((c->tpidruro >> 12) & 0xFFFu), c->r[14], c->r[0]);
+                fflush(stdout);
+            }
+            wn++;
+        }
+    }
+
     /* Diagnose: Queue-Objekt von 0x2834A8 (App-Framework-Polling). */
     if (c != NULL && getenv("HLE_Q_LOG") && pc == 0x002834A8u) {
         static int qn = 0;
