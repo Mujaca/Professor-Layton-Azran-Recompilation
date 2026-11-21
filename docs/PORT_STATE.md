@@ -75,7 +75,7 @@ sich nicht). Reihenfolge/Adressen siehe `tools/apply_all_patches.py`.
   gestubbt) in `fn_0028F324` → `0x118798` und hängt dort im **Virtuellen
   Aufruf** `0x1187E8 blx ip` (Watchdog: `pc=0x28F35C`, `lr=0x1187EC`).
   Ein Patch von `0x27E3C8` (vermuteter Wait) half nicht.
-- **Neu (Sonden `[countfix]`/`[p132]`, `HLE_COUNT_FIX`):** Der echte Loader
+- **Neu (Sonde `[countfix]`/`[p132]`, `HLE_COUNT_FIX`):** Der echte Loader
   scheitert an `fn_00140140`. `0x132FF8(obj+0x334, obj+0x1A4)` ruft
   `0x140140(obj+0x1A4)`; das ist **kein** einfacher Getter, sondern die Kette
   `[obj+4] → [+0x3C] → call → [r0]` (Rohcode ab 0x140140: `ldr r0,[r0,#4]`,
@@ -88,6 +88,17 @@ sich nicht). Reihenfolge/Adressen siehe `tools/apply_all_patches.py`.
   scheitert. Mit `HLE_COUNT_FIX=1` kommt wieder 0x03FBFD4C, weil die echte
   Kette den Wert ueberschreibt. Zu fixen ist also das **Objekt
   `0x0D400260`** selbst (Feld `+4` = gueltige Listen-/Container-Instanz).
+- **Neu (`HLE_OBJ_FIX`):** Mit einer Scratch-Struktur `P = 0x0CFFE000`
+  (`[P]=1`, `[P+8]=1`, `[P+0x2C]=[P+0x34]=0`) und
+  `[[obj+4]+0x3C] = P` liefern `0x140140` **und** `0x14015C` einen Count von 1.
+  Ergebnis (voller Pfad, Copy-Bypass): alle vier Allocs gelingen
+  (`0x00F3DE78`, `0x00F3DE78`, `8`, `0x5E0`, `0xA000`) und der Lader erreicht
+  erstmals `0x124AD8` (hinter `0x12FD30`) — vorher brach er bei `0x124A28` ab.
+  `0x12FD30` selbst liefert 0 (Abbruch ueber `beq 0x124C30`); mit
+  `0x12FD30 = mov r0,#1` laeuft der Lader weiter, erreicht `0x124C30` aber
+  nicht in 120 s (Hauptthread idle bei `0x283488`, `sp=0x0CF0F000`).
+  `HLE_FLAG_FIX` (Byte `0x3E7771`, gelesen von `0x139844`) aenderte daran
+  nichts.
 - Mit dem kurzen Pfad (`0x1249CC → 0x124C30`) bleibt der Mount-Erfolg
   reproduzierbar.
 - `boss:U`, `/head.lt6`, `SetBufferSwap (0x0005)` und ein echter Frame fehlen.

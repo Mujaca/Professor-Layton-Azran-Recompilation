@@ -743,6 +743,26 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         fflush(stdout);
     }
 
+    /* Diagnose: Container-Kette von 0x140140/0x14015C mit einer
+       Scratch-Struktur versorgen ([obj+4]+0x3C -> P, [P]=count). */
+    if (c != NULL && getenv("HLE_OBJ_FIX") && pc == 0x00124A04u) {
+        uint32_t o = c->r[6] + 0x1A4u;
+        uint32_t x = 0, cnt = 1, zero = 0;
+        const uint32_t P = 0x0CFFE000u;
+        memcpy(&x, c->mem + ((o + 4u) & 0x1FFFFFFFu), 4);
+        memcpy(c->mem + P, &cnt, 4);
+        memcpy(c->mem + P + 0x2Cu, &zero, 4);
+        memcpy(c->mem + P + 0x34u, &zero, 4);
+        { uint16_t one = 1;
+          memcpy(c->mem + P + 8u, &one, 2); }
+        memcpy(c->mem + ((x + 0x3Cu) & 0x1FFFFFFFu), &P, 4);
+        if (getenv("HLE_FLAG_FIX")) {
+            c->mem[0x003E7771u] = 1;   /* 0x139844: ldrsb [0x3E7770+1] */
+        }
+        printf("[objfix] o=%08X x=%08X P=%08X\n", o, x, P);
+        fflush(stdout);
+    }
+
     /* Diagnose: Elementzahl des Objekts bei obj+0x1A4 setzen
        (0x132FF8/0x133018 lesen [obj+4] als count; dort steht ein Zeiger). */
     if (c != NULL && getenv("HLE_COUNT_FIX") && pc == 0x00124A04u) {
@@ -764,7 +784,7 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
 
     /* Diagnose: Erfolgskette von fn_0012493C ab 0x124A48. */
     if (c != NULL && getenv("HLE_CHAIN_LOG") &&
-        (pc == 0x00124AACu || pc == 0x00124C2Cu)) {
+        (pc == 0x00124AACu || pc == 0x00124C2Cu || pc == 0x00124AD8u || pc == 0x00124C30u)) {
         printf("[chain] pc=%08X r0=%08X r4=%08X r5=%08X r7=%08X r8=%08X sl=%08X fp=%08X lr=%08X\n",
                pc, c->r[0], c->r[4], c->r[5], c->r[7], c->r[8], c->r[9], c->r[11], c->r[14]);
         fflush(stdout);
