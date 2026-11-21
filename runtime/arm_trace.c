@@ -931,6 +931,26 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         }
     }
 
+    /* Diagnose: Dispatcher-Kontext (r4) und Callback-Slot. */
+    {
+        static int fdlog = -1;
+        if (fdlog < 0) fdlog = (getenv("HLE_FD_LOG") != NULL);
+        if (fdlog && c != NULL && pc == 0x00134818u) {
+            static uint32_t seenfd[4];
+            static int nfd = 0;
+            uint32_t o = c->r[4];
+            int known = 0;
+            for (int i = 0; i < nfd; i++) if (seenfd[i] == o) known = 1;
+            if (!known && nfd < 4) {
+                uint32_t cb = 0;
+                memcpy(&cb, c->mem + ((o + 0x15Cu) & 0x1FFFFFFFu), 4);
+                seenfd[nfd++] = o;
+                printf("[fdlog] ctx=%08X cb=%08X\n", o, cb);
+                fflush(stdout);
+            }
+        }
+    }
+
     /* Diagnose: Warte-Aufrufe 0x287B90 mit Thread-ID und Ruecksprungadresse. */
     {
         static int wait_log = -1;
