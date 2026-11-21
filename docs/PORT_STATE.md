@@ -175,6 +175,23 @@ Namens-Hash). Danach endet der Builder regulaer.
 (`0` Unterschiede von 288.054 Byte), und `gsp::Gpu` sendet kein `0x0003`/`0x0005`.
 Das heisst: die Draw-Objekte werden gebaut, aber **nicht submitted**.
 
+### GSP-Kommandos und ihre Absendestellen (neu)
+
+Der generische IPC-Logger (`[ipc] … blk=<guest-block>`) liefert die
+Aufrufstellen der GSP-Kommandos:
+
+```
+blk=0012F954  gsp::Gpu cmd=0x0016 n=1 t=2 p0=00000000
+blk=001427EC  gsp::Gpu cmd=0x0013 n=1 t=2 p0=00000001
+blk=0027604C  gsp::Gpu cmd=0x0010 n=1 t=0 p0=00000203
+blk=0027604C  gsp::Gpu cmd=0x001E n=2 t=0 p0=00000010 p1=00000011
+```
+
+Das sind PICA-Register-Schreibzugriffe (Init), **kein** `0x000C`
+(TriggerCmdReqQueue) und **kein** `0x0005` (SetBufferSwap). Unser HLE
+fuehrt bei `0x000C` die Kommandoliste aus (`gpu_run_command_list`), es wird
+aber nie ausgeloest.
+
 ## Echter Loader ohne Short-Circuit (neu)
 
 `python tools/patch_real_loader.py` (nach `decomp.py` + `apply_all_patches.py`)

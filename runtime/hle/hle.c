@@ -1681,8 +1681,9 @@ static void gsp_command(Ipc *r, uint32_t *p) {
         case 0x0006: { /* SetCommandList(addr, size, flags) */
             g_cmdlist_addr = p[0];
             g_cmdlist_size = p[1];
-            if (g_log) printf("[gsp] SetCommandList addr=0x%08X size=0x%X\n",
-                              g_cmdlist_addr, g_cmdlist_size);
+            if (g_log) printf("[gsp] SetCommandList addr=0x%08X size=0x%X lr=%08X\n",
+                              g_cmdlist_addr, g_cmdlist_size,
+                              g_cpu ? g_cpu->r[14] : 0);
             ipc_begin(r, 0x0006, 1, 0);
             ipc_put(r, 0);
             break;
@@ -1704,6 +1705,9 @@ static void gsp_command(Ipc *r, uint32_t *p) {
                 int nops = gpu_run_command_list(g_cpu, g_cmdlist_addr, g_cmdlist_size);
                 if (g_log) printf("[gsp] TriggerCmdReqQueue -> %d Ops\n", nops);
             }
+            if (g_log) printf("[gsp] Trigger lr=%08X addr=%08X size=%X\n",
+                              g_cpu ? g_cpu->r[14] : 0,
+                              g_cmdlist_addr, g_cmdlist_size);
             ipc_begin(r, 0x000C, 1, 0);
             ipc_put(r, 0);
             break;
