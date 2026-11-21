@@ -147,6 +147,34 @@ Zusatzmessung: der Menue-Zustand loest noch **keine** Archiv-Lookups aus —
 (nur Metadaten). Die Namensaufloesung fuer `menu_logo` passiert also erst
 im Ressourcen-Manager, der ohne geladene `.fa`-Tabelle nicht arbeitet.
 
+### Frueher Abbruch im Draw-Builder (neu)
+
+`0x2800C8` bricht sofort ab, wenn `[drawlist+0x6a] == 0`:
+
+```
+0x2800F0  ldrh r1, [r5, #0x6a]      ; r5 = 0x003EE12C
+0x280100  add  r6, r5, #0x44
+0x280108  movls r4, fp (=0)
+0x28010C  bls  0x2801CC
+0x2801CC  cmp  r4, #0
+0x2801D0  beq  0x280338            ; Abbruch
+```
+
+Mit `HLE_DRAW_FIX=1` (setzt `[obj+0x6a]=1`) laeuft der Builder weiter und
+der Map-Lookup wird erreicht:
+
+```
+[res] pc=00288960 r0=0FFEF714 r1=BF800000 r2=000000AC r3=00000002 map0=003EC93D
+[res] pc=0028031C r0=003EE198
+```
+
+`r1 = 0xBF800000` ist `-1.0f` (also ein Transform-/Material-Schluessel, kein
+Namens-Hash). Danach endet der Builder regulaer.
+
+**Aber:** `out/shot_drawfix.bmp` ist weiterhin byte-identisch zum Platzhalter
+(`0` Unterschiede von 288.054 Byte), und `gsp::Gpu` sendet kein `0x0003`/`0x0005`.
+Das heisst: die Draw-Objekte werden gebaut, aber **nicht submitted**.
+
 ## Echter Loader ohne Short-Circuit (neu)
 
 `python tools/patch_real_loader.py` (nach `decomp.py` + `apply_all_patches.py`)

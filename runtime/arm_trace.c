@@ -854,6 +854,37 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         }
     }
 
+    /* Diagnose: Ressourcen-Lookup + Abbruchpfade im Draw-Objekt-Bau. */
+    {
+        static int res_log = -1;
+        if (res_log < 0) res_log = (getenv("HLE_RES_LOG") != NULL);
+        if (res_log && c != NULL &&
+            (pc == 0x00288960u || pc == 0x0028030Cu || pc == 0x0028031Cu)) {
+            static unsigned long rn[4] = {0, 0, 0, 0};
+            int idx = (pc == 0x00288960u) ? 0 : (pc == 0x0028030Cu ? 1 : 2);
+            if (rn[idx] < 6) {
+                uint32_t w0 = 0;
+                if (pc == 0x00288960u) {
+                    memcpy(&w0, c->mem + (c->r[0] & 0x1FFFFFFFu), 4);
+                }
+                printf("[res] pc=%08X r0=%08X r1=%08X r2=%08X r3=%08X map0=%08X\n",
+                       pc, c->r[0], c->r[1], c->r[2], c->r[3], w0);
+                fflush(stdout);
+            }
+            rn[idx]++;
+        }
+    }
+
+    /* Diagnose: Draw-Listenzaehler [obj+0x6a] setzen (sonst frueher Abbruch). */
+    {
+        static int draw_fix = -1;
+        if (draw_fix < 0) draw_fix = (getenv("HLE_DRAW_FIX") != NULL);
+        if (draw_fix && c != NULL && pc == 0x002800C8u) {
+            uint16_t one = 1;
+            memcpy(c->mem + ((c->r[0] + 0x6Au) & 0x1FFFFFFFu), &one, 2);
+        }
+    }
+
     /* Diagnose: Queue-Objekt von 0x2834A8 (App-Framework-Polling). */
     if (c != NULL && getenv("HLE_Q_LOG") && pc == 0x002834A8u) {
         static int qn = 0;
