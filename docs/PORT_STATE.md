@@ -239,6 +239,19 @@ Danach wird nie ein Kommando eingetragen. Mit `HLE_GSP_IRQ=1` +
 (`0x0016/0x0013/0x0010/0x001E`), kein `0x000C`, kein `0x0005`, kein `[gspq]`.
 Der Render-/Submit-Thread laeuft also weiterhin nicht durch.
 
+Gast-Threads (`HLE_THR_LOG`): das Spiel erzeugt acht Threads, alle mit
+Entry `0x00123168` und eigenen Stacks:
+
+```
+handle=7  stack=0040F000  id=1     handle=34 stack=0040DB98 id=3
+handle=16 stack=003D1FE0  id=2     handle=35 stack=0040EB98 id=4
+handle=36 stack=0900F180  id=5     handle=48 stack=003D8C98 id=6
+handle=57 stack=14126040  id=7     handle=58 stack=1412C8E8 id=8
+```
+
+Die Threads existieren also; sie warten aber (Watchdog zeigt sie in
+Spin-/Wait-Helfern wie `0x287B90`) und stossen den GX-Flush nicht an.
+
 ## Echter Loader ohne Short-Circuit (neu)
 
 `python tools/patch_real_loader.py` (nach `decomp.py` + `apply_all_patches.py`)
