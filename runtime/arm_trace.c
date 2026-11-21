@@ -697,6 +697,11 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         c->r[13] -= 0x28u;
     }
 
+    /* Diagnose: Variant-Copy sofort als Erfolg beenden (r3=0 -> beq Ret). */
+    if (c != NULL && getenv("HLE_COPY_SKIP") && pc == 0x0028F324u) {
+        c->r[3] = 0;
+    }
+
     /* Diagnose: Variant-Copy fn_0028F324 zaehlen. */
     if (c != NULL && getenv("HLE_COPY_LOG") && pc == 0x0028F324u) {
         static unsigned long cn = 0;
