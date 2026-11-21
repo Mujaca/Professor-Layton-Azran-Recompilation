@@ -197,8 +197,25 @@ dort **nicht** mit `SetCommandList`, sondern mit dem Kommandopuffer im
 GSP-Shared-Memory (`GetCommandBuffer(thread_id)`), also einer Ringliste mit
 `SubmitCmdList`-Eintraegen. Unser HLE-Pfad (`g_cmdlist_addr` aus `0x0006`)
 ist daher zu einfach: das Spiel sendet `0x0006` gar nicht.
-**Naechster echter Schritt:** diesen Shared-Memory-Kommandopuffer parsen und
-bei `0x000C` die `SubmitCmdList`-Eintraege ausfuehren.
+
+**Implementiert (`runtime/hle/hle.c`):** `gsp_process_cmdqueue()` liest das
+Azahar-Layout
+
+```
+base  = GSP-Shmem + 0x800 + thread_id*0x200
++0x00 Header {index:8, number_commands:8, status:8, should_stop:8}
++0x20 Command[15] je 0x20 B; id 0x01 = SubmitCmdList
+       +0x04 Listenadresse, +0x08 Laenge
+```
+
+und fuehrt die Listen ueber `gpu_run_command_list` aus (Log `[gspq]`).
+Aufgerufen bei gsp-Cmd `0x000C` und optional im Frame-Pump (`HLE_GSPQ_PUMP=1`).
+
+**Messung:** Im Port ist der Bereich `0x10002800..` komplett null
+(`HLE_DUMP_RANGE=10002800,10003200` → alle Werte `00000000`), und es erscheint
+kein `[gspq]`. Das Spiel fuellt den Kommandopuffer also gar nicht — passend
+dazu, dass `0x000C` nie gesendet wird. Die eigentliche Ursache liegt damit
+weiterhin im Grafik-Flush des Spiels (Render-Thread/Frame-Pfad).
 
 ## Echter Loader ohne Short-Circuit (neu)
 

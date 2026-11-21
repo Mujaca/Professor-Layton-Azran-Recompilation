@@ -171,6 +171,8 @@ static void hle_tick(ArmCpu *c) {
     busy = 0;
 }
 
+static int gsp_process_cmdqueue(ArmCpu *c);
+
 void hle_pump(void) {
     /* Diagnose: Event-Queue (Objekt 0x408508) testweise als "1 Eintrag"
        markieren, damit die Warteschleife (0x28992C) sie verlaesst. */
@@ -185,6 +187,17 @@ void hle_pump(void) {
         }
     }
     if (getenv("HLE_GPU_SUBMIT")) hle_gpu_submit_once();
+    /* Diagnose: GSP-Shared-Memory-Kommandopuffer auch ohne 0x000C abarbeiten. */
+    if (g_frame_cpu != NULL) {
+        static int gspq_pump = -1;
+        if (gspq_pump < 0) gspq_pump = (getenv("HLE_GSPQ_PUMP") != NULL);
+        if (gspq_pump) {
+            static unsigned gspq_div = 0;
+            if ((++gspq_div & 0x3FFu) == 0) {
+                gsp_process_cmdqueue(g_frame_cpu);
+            }
+        }
+    }
     /* Diagnose: Frame-Aufbau periodisch aus dem Gast-Kontext aufrufen. */
     {
         static const char *fl_env = NULL;
@@ -1650,6 +1663,43 @@ static void dsp_command(Ipc *r, uint32_t *p) {
 static uint32_t g_gsp_fb_addr[3] = {0x1F000000u, 0x1F000000u, 0x1F000000u};
 static int g_gsp_last_screen = 0;
 
+/* Verarbeitet den GSP-Shared-Memory-Kommandopuffer (Azahar-Layout) und
+   fuehrt SubmitCmdList-Eintraege (id 0x01) ueber gpu_run_command_list aus. */
+static int gsp_process_cmdqueue(ArmCpu *c) {
+    int qops = 0;
+    if (c == NULL) return 0;
+    for (int tid = 0; tid < 8; tid++) {
+        uint32_t base = (0x10002000u + 0x800u +
+                         (uint32_t)tid * 0x200u) & 0x1FFFFFFFu;
+        if (base + 0x200u > c->mem_size) break;
+        uint32_t hdr = 0;
+        memcpy(&hdr, c->mem + base, 4);
+        uint32_t guard = 0;
+        while (((hdr >> 8) & 0xFFu) != 0u && guard++ < 0x20u) {
+            uint32_t idx = hdr & 0xFFu;
+            uint32_t cb = base + 0x20u + idx * 0x20u;
+            if (cb + 0x20u > c->mem_size) break;
+            uint32_t cmd = 0, addr = 0, size = 0;
+            memcpy(&cmd, c->mem + cb, 4);
+            memcpy(&addr, c->mem + cb + 4u, 4);
+            memcpy(&size, c->mem + cb + 8u, 4);
+            if ((cmd & 0xFFu) == 0x01u && addr != 0u && size != 0u &&
+                size <= 0x00100000u) {
+                int nops = gpu_run_command_list(c, addr, size);
+                qops += nops;
+                printf("[gspq] tid=%d idx=%u id=%u list=%08X size=%X ops=%d\n",
+                       tid, idx, cmd & 0xFFu, addr, size, nops);
+                fflush(stdout);
+            }
+            uint32_t ni = (idx + 1u) % 0xFu;
+            uint32_t nn = ((hdr >> 8) & 0xFFu) - 1u;
+            hdr = (ni & 0xFFu) | ((nn & 0xFFu) << 8) | (hdr & 0xFFFF0000u);
+            memcpy(c->mem + base, &hdr, 4);
+        }
+    }
+    return qops;
+}
+
 static void gsp_command(Ipc *r, uint32_t *p) {
     /* Kommandonummern wie auf echter Hardware / in Azahar (gsp_gpu.cpp),
      * NICHT die alte Citra-Nummerierung. */
@@ -1700,14 +1750,19 @@ static void gsp_command(Ipc *r, uint32_t *p) {
             ipc_put(r, 0);
             break;
         }
-        case 0x000C: { /* TriggerCmdReqQueue -> Liste ausfuehren */
+        case 0x000C: { /* TriggerCmdReqQueue -> Shared-Memory-Kommandopuffer */
+            /* Azahar (gsp_gpu.cpp): base = shmem + 0x800 + thread_id*0x200,
+               Header {index:8, number_commands:8, status:8, should_stop:8},
+               Command[15] ab +0x20 (je 0x20 B). id 0x01 = SubmitCmdList
+               (Adresse +0x04, Laenge +0x08). */
+            int qops = gsp_process_cmdqueue(g_cpu);
             if (g_cmdlist_addr != 0 && g_cmdlist_size != 0 && g_cpu != NULL) {
                 int nops = gpu_run_command_list(g_cpu, g_cmdlist_addr, g_cmdlist_size);
                 if (g_log) printf("[gsp] TriggerCmdReqQueue -> %d Ops\n", nops);
             }
-            if (g_log) printf("[gsp] Trigger lr=%08X addr=%08X size=%X\n",
+            if (g_log) printf("[gsp] Trigger lr=%08X addr=%08X size=%X qops=%d\n",
                               g_cpu ? g_cpu->r[14] : 0,
-                              g_cmdlist_addr, g_cmdlist_size);
+                              g_cmdlist_addr, g_cmdlist_size, qops);
             ipc_begin(r, 0x000C, 1, 0);
             ipc_put(r, 0);
             break;
