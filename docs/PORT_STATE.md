@@ -142,6 +142,11 @@ Messung (60-s-Lauf mit `HLE_FRAME_LOOP=28F7BC`,
 weiterhin keine Pixel (Screenshot byte-identisch), weil dem Draw-Objekt die
 geladenen Asset-Daten (Dimensionen/Textur) fehlen.
 
+Zusatzmessung: der Menue-Zustand loest noch **keine** Archiv-Lookups aus —
+`[key]` = 0, `[path]` nur `$coin:/gamecoin.dat`, `[file] Read` = 7
+(nur Metadaten). Die Namensaufloesung fuer `menu_logo` passiert also erst
+im Ressourcen-Manager, der ohne geladene `.fa`-Tabelle nicht arbeitet.
+
 ## Echter Loader ohne Short-Circuit (neu)
 
 `python tools/patch_real_loader.py` (nach `decomp.py` + `apply_all_patches.py`)
