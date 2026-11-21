@@ -29,6 +29,33 @@ Hinweis: der Frame wird derzeit als offizieller Referenz-Frame in den
 Host-Framebuffer geladen; die Engine laeuft parallel weiter. Sobald die Engine
 selbst in `0x1F000000` schreibt, bevorzugt `tests/port.c` diesen Inhalt.
 
+## RomFS-Lookup: .fa wird jetzt geoeffnet (Durchbruch)
+
+Ursache des bisherigen `PathNotFound`: Der RomFS-Pfadparser (`fn_003991DC`)
+liest fuer den **ersten** Pfadbestandteil das Startverzeichnis aus `[sp+0x1C]`,
+initialisiert diesen Slot aber nicht. Beim ersten Lookup (product.bcsar) ist
+der Stack zufaellig 0; bei den spaeteren `.fa`-Lookups steht dort `0xF0`
+(=`stream`). Dann wird `lt6` faelschlich in der Datei-Tabelle gesucht.
+
+Fix in `runtime/arm_trace.c` (Block `0x00399244`): wenn der erste
+Pfadbestandteil leer ist (absoluter Pfad mit fuehrendem `/`), wird
+`[sp+0x1C] = 0` (Root) gesetzt.
+
+Belege (Lauf mit `HLE_PARSE_FIX=1`, `HLE_BOOT_LOG=1`):
+
+```
+[parse] len=0 seed=00000000 ptr='/lt6/arc/lt6_a.fa'
+[parse] len=3 seed=00000000 ptr='lt6/arc/lt6_a.fa'
+[parse] len=3 seed=00000018 ptr='arc/lt6_a.fa'
+[lf] s0='lt6_a.fa' s1='lt6_a.fa' r3=00000038 r4=00000000
+[boot] vfs2 pc=002808F4 r0=00000001        <- VFS-Open Erfolg
+[boot] fileread r0=0D400014 len=0x48 lr=001113AC
+[boot] arcmagic=30435241 (want 30435241)   <- ARC0 gelesen!
+```
+
+Also: `.fa`-Open und Header-Read funktionieren jetzt fuer `lt6_a.fa`,
+`lt6_b.fa` und `lt6_uk.fa`.
+
 ## RomFS-Lookup: neue Befunde (fuer den Engine-Renderpfad)
 
 - Dir-Baum (aus dem RomFS-Image): `0x0 ""`, `0x18 lt6`, `0x38 arc`,

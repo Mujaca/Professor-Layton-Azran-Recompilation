@@ -842,6 +842,15 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
                 }
                 printf("' guard=%08X\n", g); fflush(stdout);
             }
+            if (pc == 0x001113B8u) {
+                static int onm = 0;
+                if (onm < 8) {
+                    uint32_t m = 0;
+                    memcpy(&m, c->mem + ((c->r[13] + 8u) & 0x1FFFFFFFu), 4);
+                    printf("[boot] arcmagic=%08X (want 30435241)\n", m);
+                    fflush(stdout); onm++;
+                }
+            }
             if (pc == 0x00104E44u || pc == 0x001112C4u || pc == 0x002808A8u) {
                 static int on = 0;
                 if (on < 40) {
@@ -1280,9 +1289,33 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
             }
         }
     }
-    if (c != NULL && pc == 0x0033D8B8u && getenv("HLE_OBJ_DUMP")) {
-        static int on8 = 0;
-        if (on8 < 8) {
+    if (c != NULL && pc == 0x00399244u) {
+        /* Startverzeichnis des RomFS-Parsers auf Root (0) setzen, wenn der
+           erste Pfadbestandteil leer ist (absoluter Pfad mit fuehrendem '/').
+           Der Slot [sp+0x1C] wird fuer den ersten Bestandteil gelesen, aber
+           nicht initialisiert -> stale Stack (z.B. 0xF0/'stream'). */
+        uint32_t flen = 0;
+        memcpy(&flen, c->mem + ((c->r[13] + 0x0Cu) & 0x1FFFFFFFu), 4);
+        if (flen == 0u) {
+            uint32_t z = 0;
+            memcpy(c->mem + ((c->r[13] + 0x1Cu) & 0x1FFFFFFFu), &z, 4);
+        }
+    }
+    if (c != NULL && getenv("HLE_PARSE_LOG") &&
+        (pc == 0x00399244u || pc == 0x003992E4u || pc == 0x00399354u)) {
+        static int onp = 0;
+        if (onp < 80) {
+            uint32_t len = 0, ptr = 0, seed = 0;
+            memcpy(&len, c->mem + ((c->r[13] + 0x0Cu) & 0x1FFFFFFFu), 4);
+            memcpy(&ptr, c->mem + ((c->r[13] + 0x10u) & 0x1FFFFFFFu), 4);
+            memcpy(&seed, c->mem + ((c->r[13] + 0x1Cu) & 0x1FFFFFFFu), 4);
+            printf("[parse] pc=%08X len=%u seed=%08X ptr=%08X '", pc, len, seed, ptr);
+            for (int k = 0; k < 20; k++) {
+                uint16_t ch = 0; memcpy(&ch, c->mem + ((ptr + (uint32_t)k * 2u) & 0x1FFFFFFFu), 2);
+                if (!ch) break;
+                printf("%c", (ch >= 32 && ch < 127) ? (char)ch : '?');
+            }
+            printf("'\n"); fflush(stdout); onp++;
         }
     }
     if (c != NULL && pc == 0x0033D8B8u && getenv("HLE_OBJ_DUMP")) {
@@ -1304,6 +1337,18 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
             for (uint32_t k = 0; k < 0x30u; k += 4) {
                 uint32_t w = 0;
                 memcpy(&w, c->mem + ((0x003D6988u + k) & 0x1FFFFFFFu), 4);
+                printf(" %08X", w);
+            }
+            printf("\n[objdump] sdir1:");
+            for (uint32_t k = 0; k < 0x28u; k += 4) {
+                uint32_t w = 0;
+                memcpy(&w, c->mem + ((0x003D69B0u + k) & 0x1FFFFFFFu), 4);
+                printf(" %08X", w);
+            }
+            printf("\n[objdump] sdir2:");
+            for (uint32_t k = 0; k < 0x28u; k += 4) {
+                uint32_t w = 0;
+                memcpy(&w, c->mem + ((0x003D69C0u + k) & 0x1FFFFFFFu), 4);
                 printf(" %08X", w);
             }
             printf("\n"); fflush(stdout); on9++;
