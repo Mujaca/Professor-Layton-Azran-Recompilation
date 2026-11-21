@@ -940,6 +940,22 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         c->mem[0x3EC133u] = 0;                  /* +0x33 Flags   */
     }
 
+    /* Diagnose: Stream-Reads (0x205858) mitschreiben. */
+    if (c != NULL && getenv("HLE_STREAM_LOG") && pc == 0x00205858u) {
+        static unsigned long sn = 0;
+        if (sn < 200) {
+            uint32_t b0 = 0, b1 = 0, s0 = 0, s1 = 0;
+            memcpy(&b0, c->mem + (c->r[0] & 0x1FFFFFFFu), 4);
+            memcpy(&b1, c->mem + ((c->r[0] + 4u) & 0x1FFFFFFFu), 4);
+            memcpy(&s0, c->mem + (c->r[13] & 0x1FFFFFFFu), 4);
+            memcpy(&s1, c->mem + ((c->r[13] + 4u) & 0x1FFFFFFFu), 4);
+            printf("[stream] obj=%08X base=%08X size=%08X off=%08X:%08X a0=%08X a1=%08X lr=%08X\n",
+                   c->r[0], b0, b1, c->r[2], c->r[3], s0, s1, c->r[14]);
+            fflush(stdout);
+        }
+        sn++;
+    }
+
     /* Diagnose: zu grosse Arena-Anforderung in einen freien Bereich umlenken. */
     if (c != NULL && pc == 0x00284AA8u && getenv("HLE_BIGARENA")) {
         uint32_t ab = c->r[0] & 0x1FFFFFFFu;
