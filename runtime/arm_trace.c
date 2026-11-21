@@ -790,6 +790,23 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         fflush(stdout);
     }
 
+    /* Diagnose: Queue-Objekt von 0x2834A8 (App-Framework-Polling). */
+    if (c != NULL && getenv("HLE_Q_LOG") && pc == 0x002834A8u) {
+        static int qn = 0;
+        if (qn < 6) {
+            uint32_t a = 0, b = 0;
+            uint16_t h1 = 0, h2 = 0;
+            memcpy(&a, c->mem + ((c->r[0] + 0x20u) & 0x1FFFFFFFu), 4);
+            memcpy(&h1, c->mem + ((c->r[0] + 0x30u) & 0x1FFFFFFFu), 2);
+            memcpy(&b, c->mem + ((c->r[0] + 0x24u) & 0x1FFFFFFFu), 4);
+            memcpy(&h2, c->mem + ((c->r[0] + 0x32u) & 0x1FFFFFFFu), 2);
+            printf("[queue] obj=%08X +20=%08X +24=%08X +30=%u +32=%u\n",
+                   c->r[0], a, b, (unsigned)h1, (unsigned)h2);
+            fflush(stdout);
+            qn++;
+        }
+    }
+
     /* Diagnose: fn_00130170 Zustand (r7=offset, r6=size, r5=req). */
     if (c != NULL && getenv("HLE_P17_LOG") && pc == 0x001301A0u) {
         printf("[p17] r4=%08X r5=%08X r6=%08X r7=%08X lr=%08X\n",

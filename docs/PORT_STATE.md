@@ -34,8 +34,19 @@
 - Mount-Fehlerpfad verlassen: `[romfs] 002850B8` **und** `[romfs] 00285184` (Rückkehr über den Erfolgszweig).
 - GPU: `gsp::Gpu cmd=0x0006` und `0x000C`; `[gpusubmit] handle=42 list=00410000 size=28`.
 
-## Reproduzierbarer Patch-Satz
+## Mount-Rückgabekette (neu belegt)
 
+`0x2850A8: bl 0x11E494; movs r8,r0` → `0x2850B8` ist exakt der Rückgabewert
+von `fn_0011E494`, und dieses gibt `r5` = Rückgabe von `fn_0012493C` zurück
+(`0x11E4EC bl 0x12493C`, `0x11E510 mov r0,r5`).
+
+`fn_0012493C` endet erfolgreich nur, wenn `0x284A48(obj+0x720, …) != 0`
+(`0x124C14 cmp r0,#0; 0x124C18 movne r0,#1`). Ist die Registrierung 0,
+läuft es über `0x124C28 bl 0x284BE4` und liefert deren Wert (bei uns 0).
+Damit ist klar: Mount-Erfolg = erfolgreiche **Registrierung des Datei-
+Eintrags**, nicht nur eine gelungene Größenrechnung.
+
+## Reproduzierbarer Patch-Satz
 `python tools/decomp.py` (Original aus `code.bin`) und danach
 
 ```
