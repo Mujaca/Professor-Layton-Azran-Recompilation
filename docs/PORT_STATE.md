@@ -461,3 +461,16 @@ Das sind Datenwerte in Callback-/Vtable-Feldern, also unvollstaendig
 initialisierte Objekte. Ein HLE-Schutz an `0x1292BC` (Sprung ueberspringen)
 erhoehte die Fehlerzahl von 13 auf 200 und brachte keinen Submit; wieder
 entfernt.
+
+### 180-s-Memwatch auf dem Kommandopuffer (neu)
+
+Mit Menue-Zustand + `HLE_FRAME_LOOP` + `GSPQ_PUMP` und
+`ARM_MEMWATCHRANGE=10002800,0x200` gibt es auch nach 180 s **genau einen**
+Schreibzugriff:
+
+```
+[mw] 10002800 <- 00000000 size=4 pc=0014250C lr=0013EBC8 th=2
+```
+
+Also nur der Null-Header. Kein Thread schreibt je ein `SubmitCmdList`.
+`[gspq]` bleibt 0.
