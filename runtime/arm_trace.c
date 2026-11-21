@@ -951,6 +951,21 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         }
     }
 
+    /* Diagnose: Argumente des Grafik-Kandidaten 0x13419C. */
+    {
+        static int cilog = -1;
+        if (cilog < 0) cilog = (getenv("HLE_CI_LOG") != NULL);
+        if (cilog && c != NULL && pc == 0x0013419Cu) {
+            static int nci = 0;
+            if (nci < 4) {
+                printf("[ci] r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X\n",
+                       c->r[0], c->r[1], c->r[2], c->r[3], c->r[14]);
+                fflush(stdout);
+            }
+            nci++;
+        }
+    }
+
     /* Diagnose: Warte-Aufrufe 0x287B90 mit Thread-ID und Ruecksprungadresse. */
     {
         static int wait_log = -1;
