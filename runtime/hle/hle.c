@@ -187,6 +187,41 @@ void hle_pump(void) {
         }
     }
     if (getenv("HLE_GPU_SUBMIT")) hle_gpu_submit_once();
+    /* Zweite Gastfunktion pro Tick (z. B. Menue-Szene + GX-Pfad). */
+    {
+        static const char *fl2_env = NULL;
+        static int in_fl2 = 0;
+        if (fl2_env == NULL) fl2_env = getenv("HLE_FRAME_LOOP2");
+        if (fl2_env != NULL && *fl2_env != 0 && !in_fl2 && g_frame_cpu != NULL) {
+            static unsigned fc2 = 0;
+            if ((++fc2 & 0xFFFu) == 0) {
+                uint32_t fsave[16];
+                uint32_t fa2 = (uint32_t)strtoul(fl2_env, NULL, 16);
+                in_fl2 = 1;
+                memcpy(fsave, g_frame_cpu->r, sizeof(fsave));
+                {
+                    const char *fa_arg2 = getenv("HLE_FRAME_ARG2");
+                    if (fa_arg2 != NULL && *fa_arg2 != 0) {
+                        char buf[128];
+                        char *pp = buf;
+                        int ri = 0;
+                        snprintf(buf, sizeof(buf), "%s", fa_arg2);
+                        while (pp != NULL && *pp != 0 && ri < 4) {
+                            char *comma = strchr(pp, ',');
+                            if (comma != NULL) *comma = 0;
+                            g_frame_cpu->r[ri++] = (uint32_t)strtoul(pp, NULL, 16);
+                            pp = (comma != NULL) ? comma + 1 : NULL;
+                        }
+                    }
+                }
+                printf("[frameloop2] call 0x%08X r0=%08X\n", fa2, g_frame_cpu->r[0]);
+                fflush(stdout);
+                arm_call_guest_pub(g_frame_cpu, fa2);
+                memcpy(g_frame_cpu->r, fsave, sizeof(fsave));
+                in_fl2 = 0;
+            }
+        }
+    }
     /* Diagnose: GSP-Shared-Memory-Kommandopuffer auch ohne 0x000C abarbeiten. */
     if (g_frame_cpu != NULL) {
         static int gspq_pump = -1;

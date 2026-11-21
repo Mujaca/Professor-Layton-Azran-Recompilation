@@ -404,3 +404,16 @@ Auch nach 5 Minuten wird also kein Kommando submitted. Nebenbefund: an
 `0x1292A8` (`blxne r0`) wird `[obj+0x170] = 0xF0` als Callback benutzt
 ("unbekanntes call-Ziel 0x000000F0 von Block 0x001292BC") — ein korrupter
 Funktionszeiger, aber nicht fatal (der Lauf geht weiter).
+
+### Zweite Gastfunktion pro Tick (`HLE_FRAME_LOOP2`, neu)
+
+`runtime/hle/hle.c` kennt jetzt eine zweite Aufrufstelle:
+
+```
+HLE_FRAME_LOOP2=13EAAC  HLE_FRAME_ARG2=3EE12C
+```
+
+Sie funktioniert (Log `[frameloop2]`, 176 Aufrufe in 90 s), aber der Test mit
+`0x13EAAC` beendet einen Thread (`pc=0x00000000`), und danach fehlen sogar die
+normalen gsp-Kommandos. Der Kandidat ist also zu invasiv; der GX-Submit-Pfad
+muss genauer bestimmt werden.
