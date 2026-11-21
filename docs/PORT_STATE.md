@@ -34,6 +34,39 @@
 - Mount-Fehlerpfad verlassen: `[romfs] 002850B8` **und** `[romfs] 00285184` (Rückkehr über den Erfolgszweig).
 - GPU: `gsp::Gpu cmd=0x0006` und `0x000C`; `[gpusubmit] handle=42 list=00410000 size=28`.
 
+## Menü-Assets und Szenen-Strings (neu)
+
+Im Code liegt ab `0x28FFDC` eine ASCII-Namensliste der Menü-Ressourcen:
+
+```
+0028FFDC  menu_logo
+0028FFF4  menu_title
+00290000  menu_name
+00290018  menu_finish
+00290024  menu_bag
+00290030  menu_invest
+0029003C  menu_fukamaru
+0029004C  menu_jiten
+```
+
+Wichtig: **kein** `ldr [pc]`-Literal zeigt auf diese Adressen (geprüft über
+alle LDR-Immediates und alle 32-Bit-Wörter im Image). Die Namen werden also
+indirekt (Manifest-/Offset-Tabelle) ausgewertet, nicht als C-Strings benutzt.
+
+Szenen-Verwaltung: `0x3EC028` ist das globale Szenen-Objekt. Zugriffe:
+
+| Adresse | Bedeutung |
+|---|---|
+| `0x10F188` | `base+0x2000+0x104`, `ldrh [.+0x40]` → **`0x3EE16C`** (Warteflag) |
+| `0x287694` | `base+0x2104` (Szenen-Unterobjekt) |
+| `0x2876A0` | liest `[.+0x40]` und `[.+0x38]` (Getter) |
+| `0x28F7BC` | Szenen-Update (virtueller Call über `[obj]→[+0x40]`) |
+| `fn_00115C18` | `base+0x2000`, `+0x144`, `0x28EED0` (0x200 Byte nullen = Reset) |
+
+Da das Flag das **Längenfeld eines Wide-Strings** ist, schreibt es ein
+String-Assign (Bibliotheksfunktion), kein `STRH`. Genau deshalb half
+`HLE_SCENE_NAME` (setzt Länge+Zeichen) und `HLE_SCENE_READY`.
+
 ## Echter Loader ohne Short-Circuit (neu)
 
 `python tools/patch_real_loader.py` (nach `decomp.py` + `apply_all_patches.py`)
