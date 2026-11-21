@@ -36,7 +36,13 @@
 
 ## Offen
 
-- Nur EIN `[key]`-Lookup; danach bleibt der Hauptthread in der Dir-Hash-Kette
-  (`0x212D70`/`0x212DA0`) stehen. Weitere Dateien (Fonts/Assets, `head.lt6`)
-  werden nicht geladen.
+- Die Init-Schleife `0x101508`/`0x10151C` wartet auf `*(u16*)(0x3EC028+0x2144)`
+  (= `0x3EE16C`). Memwatch zeigt: **nur** BSS-Clear und ein Write von `0`
+  (`pc=0x288398`, `lr=0x2BA728`) — der Loader setzt das Flag nie auf 1.
+  In 90 s läuft die Schleife ~6400×, `0x101540` wird nie erreicht.
+- Mit `HLE_SCENE_READY=1` (setzt das Flag künstlich) erreicht die Engine die
+  RM-Frame-Schleife (`0x288AF8/0x288B34`) und sendet `gsp 0x0006/0x000C`
+  samt `[gpusubmit]`.
 - `boss:U`, `/head.lt6`, `SetBufferSwap (0x0005)` und ein echter Frame fehlen.
+- `.fa`-Geräte werden registriert und ihre Pfade aufgelöst, aber es folgt
+  kein Daten-Read (alle `[file] Read` enden bei `0xED80`).
