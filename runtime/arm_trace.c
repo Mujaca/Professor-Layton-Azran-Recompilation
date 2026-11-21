@@ -699,6 +699,13 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
 
     /* Diagnose: Variant-Copy sofort als Erfolg beenden (r3=0 -> beq Ret). */
     if (c != NULL && getenv("HLE_COPY_SKIP") && pc == 0x0028F324u) {
+        uint32_t dst = c->r[1] & 0x1FFFFFFFu;
+        uint32_t sz = c->r[3];
+        if (sz > 0u && sz <= 0x02000000u && (uint64_t)dst + sz <= c->mem_size) {
+            memcpy(c->mem + dst, c->mem + 0x18000000u, sz);
+            printf("[copyhost] dst=%08X size=%08X\n", c->r[1], sz);
+            fflush(stdout);
+        }
         c->r[3] = 0;
     }
 
