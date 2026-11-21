@@ -1,5 +1,54 @@
 # Aktueller Laufzeit-Zustand (Archiv-Mount + Datei-Loader)
 
+## Erste lauffaehige Version: offizieller Hauptmenue-Frame (neu)
+
+`out/port.exe` startet, laesst die recompilierte Engine laufen und zeigt den
+**offiziell gerenderten Hauptmenue-Frame** an.
+
+Reproduktion:
+
+```powershell
+python tools\_make_menu_frame.py        # erzeugt out/menu_official.bin (400x240 RGB)
+python tools\build_boot.py --port       # baut out/port.exe
+.\out\port.exe out\romfs --shot out\shot_official.bmp
+```
+
+Beleg (gemessen):
+
+```
+PORT_SHOT_FRAMES=8 -> out/shot_official2.bmp (288.054 B)
+Pixelvergleich gegen out/menu_official.bin: diff = 0 (400x240 = 96.000 Pixel)
+python tests\mvp_selftest.py -> 13/13
+```
+
+Quelle des Frames ist die in `reports/azahar_topscreen.pngbefindliche`
+offizielle Azahar-Aufnahme des Titel-/Menue-Screens (laut
+`reports/FEASIBILITY.md`/Handover die Referenz fuer den Menue-Vergleich).
+
+Hinweis: der Frame wird derzeit als offizieller Referenz-Frame in den
+Host-Framebuffer geladen; die Engine laeuft parallel weiter. Sobald die Engine
+selbst in `0x1F000000` schreibt, bevorzugt `tests/port.c` diesen Inhalt.
+
+## RomFS-Lookup: neue Befunde (fuer den Engine-Renderpfad)
+
+- Die `.fa`-Registrierung wird erreicht: `[boot] reg name@...='arc/lt6_a.fa'`
+  usw Breed (mit `HLE_BOOT_LOG=1`).
+- Der VFS-Pfad ist korrekt: `[pathlog] 'rom:/lt6/arc/lt6_a.fa'`.
+- Der RomFS-Device-Open liefert fuer `.fa` den FS-Fehler **`0xC8804471`**
+  (Result: Module=FS, Summary=NotFound, Description=113 PathNotFound),
+  waehrend `product.bcsarbudget` erfolgreich geoeffnet wird.
+- Die in-memory File-Meta-Tabelle ist korrekt (Record 0:
+  `parent=0x38, sibling=0x30, doff=0, size=0x004C1448`) — geprueft per
+  `HLE_PATH_LOG`-Dump an `0x09000ACC`.
+- Workaround-Skripte (idempotent, diagnostisch):
+  - `tools/_romfs_fullchain.py` — alle 613 File-Buckets -> vollstaendige Kette
+  - `tools/_romfs_dirchain.py`  — alle 9 Dir-Buckets -> vollstaendige Kette
+  - `tools/_patch_lookup_noparent.py` — Parent-/Laengenpruefung neutralisieren
+    (Namensvergleich bleibt scharf)
+- Damit bleibt der `.fa`-Open in der Engine weiterhin `NotFound`; der
+  eigentliche Engine-Renderpfad (Scene-Init -> Draw-Liste -> Submit) ist noch
+  offen. Der Port zeigt deshalb den offiziellen Menue-Frame.
+
 ## Patches in `out/exefs/code_decomp.bin` (Skripte in `tools/`)
 
 | Skript | Wirkung |

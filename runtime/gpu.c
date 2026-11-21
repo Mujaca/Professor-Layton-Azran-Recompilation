@@ -84,6 +84,26 @@ int gpu_run_command_list(ArmCpu *c, uint32_t addr, uint32_t size)
     uint32_t end = addr + size;
     int ops = 0;
 
+    /* Diagnose: Kommandoliste roh ausgeben (Format unbekannt -> lernen). */
+    {
+        static int log_n = -2;
+        if (log_n == -2) {
+            const char *e = getenv("GPU_LIST_LOG");
+            log_n = (e != NULL && *e != 0) ? atoi(e) : 0;
+        }
+        if (log_n > 0) {
+            static int cnt = 0;
+            if (cnt < log_n) {
+                printf("[gpulist] addr=%08X size=%X:", addr, size);
+                for (uint32_t i = 0; i < 48u && i * 4u < size; i++)
+                    printf(" %08X", (unsigned)*(const uint32_t *)(c->mem + ((addr + i * 4u) & 0x1FFFFFFFu)));
+                printf("\n");
+                fflush(stdout);
+                cnt++;
+            }
+        }
+    }
+
     while (a + 4u <= end) {
         uint32_t w = 0;
         uint32_t off = a & 0x1FFFFFFFu;

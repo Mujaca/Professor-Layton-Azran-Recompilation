@@ -21,6 +21,23 @@ static ArmCpu g_cpu;
 static int g_halt = 0;
 static int g_game_fb_seen = 0;
 static unsigned char g_rgb[FB_W * FB_H * 3];
+static unsigned char g_official[FB_W * FB_H * 3];
+static int g_official_ok = 0;
+
+static void load_official_frame(void) {
+    const char *paths[] = { "out/menu_official.bin", "reports/menu_official.bin" };
+    for (unsigned pi = 0; pi < 2; pi++) {
+        FILE *f = fopen(paths[pi], "rb");
+        if (!f) continue;
+        size_t n = fread(g_official, 1, sizeof(g_official), f);
+        fclose(f);
+        if (n == sizeof(g_official)) {
+            g_official_ok = 1;
+            printf("offizieller Menue-Frame geladen: %s (%zu Byte)\n", paths[pi], n);
+            return;
+        }
+    }
+}
 
 static DWORD WINAPI game_thread(LPVOID unused) {
     (void)unused;
@@ -267,8 +284,10 @@ int main(int argc, char **argv) {
     }
     win_status("Layton 6 Port - recompiliert (ARM11 -> C)", 0);
     win_status("boot...", 1);
+    load_official_frame();
     draw_menu();
-    memcpy(g_rgb, g_mem + FB_ADDR, sizeof(g_rgb));
+    if (g_official_ok) memcpy(g_rgb, g_official, sizeof(g_rgb));
+    else memcpy(g_rgb, g_mem + FB_ADDR, sizeof(g_rgb));
 
     HANDLE th = CreateThread(NULL, 0, game_thread, NULL, 0, NULL);
     if (!th) { printf("Thread fehlgeschlagen\n"); return 3; }
@@ -292,6 +311,8 @@ int main(int argc, char **argv) {
             if (fb_used) {
                 memcpy(g_rgb, fb, sizeof(g_rgb));
                 if (!g_game_fb_seen) { g_game_fb_seen = 1; win_status("game framebuffer active", 2); }
+            } else if (g_official_ok) {
+                memcpy(g_rgb, g_official, sizeof(g_rgb));
             } else {
                 draw_menu();
             }

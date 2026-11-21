@@ -140,6 +140,50 @@ static void hle_tick(ArmCpu *c) {
         init = 1;
     }
     if (!on || busy || c == NULL) return;
+    /* HLE_FRAME_CB2: Slot nach dem BSS-Clear (erneut) belegen. */
+    {
+        static uint32_t cb2 = 0xFFFFFFFFu;
+        if (cb2 == 0xFFFFFFFFu) {
+            const char *e2 = getenv("HLE_FRAME_CB2");
+            cb2 = (e2 != NULL && *e2 != 0) ? (uint32_t)strtoul(e2, NULL, 16) : 0u;
+        }
+        if (cb2 != 0u) {
+            uint32_t cur = 0;
+            memcpy(&cur, c->mem + 0x40B4CCu, 4);
+            if (cur == 0u) memcpy(c->mem + 0x40B4CCu, &cb2, 4);
+        }
+    }
+    /* Diagnose: Draw-Liste der Menue-Szene synthetisch initialisieren,
+       damit 0x2800C8 die Objekte wirklich ablegt (statt nach Adresse 0). */
+    {
+        static int dl = -1;
+        if (dl < 0) dl = (getenv("HLE_DRAW_LIST") != NULL);
+        if (dl) {
+            uint32_t arr = 0x0CFF0000u;
+            uint16_t cnt = 0, cap = 0x100u, one = 1;
+            uint32_t cur = 0;
+            memcpy(&cur, c->mem + 0x3EE198u, 4);
+            if (cur == 0u) {
+                memcpy(c->mem + 0x3EE198u, &arr, 4);
+                memcpy(c->mem + 0x3EE1A0u, &cnt, 2);
+                memcpy(c->mem + 0x3EE1A2u, &cap, 2);
+                memcpy(c->mem + 0x3EE196u, &one, 2);
+            }
+        }
+    }
+    /* HLE_REG_ENABLE: Asset-Registry-Guard nach dem BSS-Clear erneut setzen. */
+    {
+        static int re = -1;
+        if (re < 0) re = (getenv("HLE_REG_ENABLE") != NULL);
+        if (re) {
+            uint32_t g = 0;
+            memcpy(&g, c->mem + 0x3ECA5Cu, 4);
+            if (g == 0u) {
+                uint32_t v = 0x00401000u;
+                memcpy(c->mem + 0x3ECA5Cu, &v, 4);
+            }
+        }
+    }
     now = (uint64_t)GetTickCount64();
     if (now - last < (uint64_t)period_ms) return;
     last = now;
@@ -2268,6 +2312,13 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
         uint32_t cb = (uint32_t)strtoul(getenv("HLE_FRAME_CB"), NULL, 16);
         memcpy(c->mem + 0x3D7C74u, &cb, 4);
         printf("[hle] Frame-Callback 0x3D7C74 = %08X\n", cb);
+    }
+    /* Diagnose: RM-Frame-Callback [0x40B370+0x15C] = [0x40B4CC] setzen.
+       Wird von fn_00134818 (Tick-Slot 2) mit r0=0x400 aufgerufen. */
+    if (getenv("HLE_FRAME_CB2")) {
+        uint32_t cb = (uint32_t)strtoul(getenv("HLE_FRAME_CB2"), NULL, 16);
+        memcpy(c->mem + 0x40B4CCu, &cb, 4);
+        printf("[hle] RM-Frame-Callback 0x40B4CC = %08X\n", cb);
     }
     if (getenv("HLE_REG_ENABLE")) {
         /* Deskriptor {basis, stride, count} + Eintragsarray synthetisch anlegen. */

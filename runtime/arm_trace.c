@@ -819,6 +819,97 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         fflush(stdout);
     }
 
+    /* Diagnose: Boot-Gate in fn_00100F98 / fn_0016B8 und .fa-Registrierung. */
+    {
+        static int boot_log = -1;
+        if (boot_log < 0) boot_log = (getenv("HLE_BOOT_LOG") != NULL);
+        if (boot_log && c != NULL) {
+            if (pc == 0x00101028u || pc == 0x001036B4u || pc == 0x00103B48u ||
+                pc == 0x00103684u || pc == 0x001035D8u || pc == 0x00103610u ||
+                pc == 0x001019D0u) {
+                printf("[boot] pc=%08X r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X\n",
+                       pc, c->r[0], c->r[1], c->r[2], c->r[3], c->r[14]);
+                fflush(stdout);
+            }
+            if (pc == 0x002919DCu) {
+                uint32_t p = c->r[2], i, g = 0;
+                memcpy(&g, c->mem + 0x3ECA5Cu, 4);
+                printf("[boot] reg name@%08X='", p);
+                for (i = 0; i < 32; i++) {
+                    uint8_t ch = 0; memcpy(&ch, c->mem + ((p + i) & 0x1FFFFFFFu), 1);
+                    if (ch == 0) break;
+                    printf("%c", (ch >= 32 && ch < 127) ? (char)ch : '?');
+                }
+                printf("' guard=%08X\n", g); fflush(stdout);
+            }
+            if (pc == 0x00104E44u || pc == 0x001112C4u || pc == 0x002808A8u) {
+                static int on = 0;
+                if (on < 40) {
+                    printf("[boot] pc=%08X r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X\n",
+                           pc, c->r[0], c->r[1], c->r[2], c->r[3], c->r[14]);
+                    fflush(stdout);
+                    on++;
+                }
+            }
+            if (pc == 0x001113ACu) {
+                static int on2 = 0;
+                if (on2 < 8) {
+                    uint32_t m = 0;
+                    memcpy(&m, c->mem + (((c->r[13] + 8u)) & 0x1FFFFFFFu), 4);
+                    printf("[boot] arcread ret=%08X magic=%08X\n", c->r[0], m);
+                    fflush(stdout); on2++;
+                }
+            }
+            if (pc == 0x00280744u) {
+                static int on3 = 0;
+                if (on3 < 8) {
+                    printf("[boot] fileread r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X\n",
+                           c->r[0], c->r[1], c->r[2], c->r[3], c->r[14]);
+                    fflush(stdout); on3++;
+                }
+            }
+            if (pc == 0x002808CCu || pc == 0x002808D0u) {
+                static int on4 = 0;
+                if (on4 < 12) {
+                    uint32_t p = c->r[5];
+                    printf("[boot] vfs pc=%08X r0=%08X r5='", pc, c->r[0]);
+                    for (int k = 0; k < 24; k++) {
+                        uint8_t ch = 0;
+                        memcpy(&ch, c->mem + ((p + (uint32_t)k) & 0x1FFFFFFFu), 1);
+                        if (ch == 0) break;
+                        printf("%c", (ch >= 32 && ch < 127) ? (char)ch : '?');
+                    }
+                    printf("'\n"); fflush(stdout); on4++;
+                }
+            }
+            if (pc == 0x002808DCu || pc == 0x002808ECu ||
+                pc == 0x002808F4u || pc == 0x00280904u) {
+                static int on5 = 0;
+                if (on5 < 24) {
+                    uint32_t vt = 0, fn = 0;
+                    memcpy(&vt, c->mem + (c->r[0] & 0x1FFFFFFFu), 4);
+                    if (vt >= 0x100000u && vt < 0x20000000u)
+                        memcpy(&fn, c->mem + ((vt + 0x10u) & 0x1FFFFFFFu), 4);
+                    printf("[boot] vfs2 pc=%08X r0=%08X r1=%08X r2=%08X vt=%08X fn=%08X\n",
+                           pc, c->r[0], c->r[1], c->r[2], vt, fn);
+                    fflush(stdout); on5++;
+                }
+            }
+            if (pc == 0x00212E3Cu) {
+                static int on6 = 0;
+                if (on6 < 30) {
+                    uint32_t w[6] = {0,0,0,0,0,0};
+                    for (int k = 0; k < 6; k++)
+                        memcpy(&w[k], c->mem + ((c->r[1] + (uint32_t)k * 4u) & 0x1FFFFFFFu), 4);
+                    printf("[boot] hash r0=%08X r1=%08X r2=%08X r3=%08X d=%08X,%08X,%08X,%08X,%08X,%08X\n",
+                           c->r[0], c->r[1], c->r[2], c->r[3],
+                           w[0], w[1], w[2], w[3], w[4], w[5]);
+                    fflush(stdout); on6++;
+                }
+            }
+        }
+    }
+
     /* Diagnose: Menue-Szenen-Aufbau (fn_0028F7BC + Namens-/Sprite-Requests). */
     {
         static int menu_log = -1;
@@ -842,6 +933,51 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         }
         printf("\n");
         fflush(stdout);
+        }
+    }
+
+    /* Diagnose: fertig gebautes Draw-Objekt + Draw-Liste dumpen. */
+    {
+        static int mdump = -1;
+        if (mdump < 0) mdump = (getenv("HLE_MENU_DUMP") != NULL);
+        if (mdump && c != NULL && pc == 0x00280338u) {
+            static int mn = 0;
+            if (mn < 6) {
+                uint32_t obj = c->r[4], list = c->r[5], i;
+                printf("[mdump] obj=%08X list=%08X\n", obj, list);
+                for (i = 0; i < 20; i++) {
+                    uint32_t w = 0;
+                    memcpy(&w, c->mem + ((obj + i * 4u) & 0x1FFFFFFFu), 4);
+                    printf("[mdump]   obj+%02X = %08X\n", i * 4u, w);
+                }
+                for (i = 0; i < 40; i++) {
+                    uint32_t w = 0;
+                    memcpy(&w, c->mem + ((list + i * 4u) & 0x1FFFFFFFu), 4);
+                    printf("[mdump]   list+%03X = %08X\n", i * 4u, w);
+                }
+                {
+                    uint32_t arr = 0;
+                    uint16_t cnt = 0, cap = 0;
+                    memcpy(&arr, c->mem + ((list + 0x6cu) & 0x1FFFFFFFu), 4);
+                    memcpy(&cnt, c->mem + ((list + 0x74u) & 0x1FFFFFFFu), 2);
+                    memcpy(&cap, c->mem + ((list + 0x76u) & 0x1FFFFFFFu), 2);
+                    printf("[mdump]   drawlist arr=%08X count=%u cap=%u\n", arr, cnt, cap);
+                    for (i = 0; i < 4 && i < cnt; i++) {
+                        uint32_t op = 0;
+                        memcpy(&op, c->mem + ((arr + i * 4u) & 0x1FFFFFFFu), 4);
+                        printf("[mdump]   entry[%u]=%08X\n", i, op);
+                        if (op != 0) {
+                            for (uint32_t k = 0; k < 16; k++) {
+                                uint32_t w = 0;
+                                memcpy(&w, c->mem + ((op + k * 4u) & 0x1FFFFFFFu), 4);
+                                printf("[mdump]     +%02X = %08X\n", k * 4u, w);
+                            }
+                        }
+                    }
+                }
+                fflush(stdout);
+                mn++;
+            }
         }
     }
 
@@ -1119,6 +1255,63 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
 
     /* Diagnose: fuehrendes '/' aus dem RomFS-Pfad entfernen. Die Engine
        splittet "rom:/lt6/..." und liefert als erste Komponente "" (len 0). */
+    if (c != NULL && pc == 0x0033D8B8u && getenv("HLE_PATH_LOG")) {
+        uint32_t a;
+        for (a = 0x0FFEE000u; a + 10u < 0x0FFF0000u; a += 2u) {
+            const uint8_t *p2 = c->mem + (a & 0x1FFFFFFFu);
+            if (p2[0] == 'r' && p2[1] == 0 && p2[2] == 'o' && p2[3] == 0 &&
+                p2[4] == 'm' && p2[5] == 0 && p2[6] == ':' && p2[7] == 0) {
+                printf("[pathlog] @%08X '", a);
+                for (int i = 0; i < 60; i++) {
+                    uint16_t ch = 0;
+                    memcpy(&ch, c->mem + ((a + (uint32_t)i * 2u) & 0x1FFFFFFFu), 2);
+                    if (ch == 0) break;
+                    printf("%c", (ch >= 32 && ch < 127) ? (char)ch : '?');
+                }
+                printf("'\n"); fflush(stdout);
+                {
+                    uint32_t w[6];
+                    for (int k = 0; k < 6; k++)
+                        memcpy(&w[k], c->mem + (0x09000ACCu + (uint32_t)k * 4u), 4);
+                    printf("[pathlog] fm=%08X,%08X,%08X,%08X,%08X,%08X\n",
+                           w[0], w[1], w[2], w[3], w[4], w[5]);
+                }
+                break;
+            }
+        }
+    }
+    if (c != NULL && pc == 0x0033D8B8u && getenv("HLE_DIR_RESET")) {
+        uint32_t base = 0x003D6940u;
+        int hits = 0;
+        for (uint32_t k = 0; k < 0x80u; k += 4) {
+            uint32_t w = 0, a = (base + k) & 0x1FFFFFFFu;
+            memcpy(&w, c->mem + a, 4);
+            if (w == 0x000000F0u) {
+                uint32_t z = 0;
+                memcpy(c->mem + a, &z, 4);
+                hits++;
+            }
+        }
+        if (hits) { printf("[dirreset] %d stale Cursor(en) -> 0\n", hits); fflush(stdout); }
+    }
+    if (c != NULL && pc == 0x0033D8B8u && getenv("HLE_PATH_SKIP")) {
+        uint32_t dp = c->r[2];
+        uint32_t typ = 0, ptr = 0;
+        if (dp >= 0x08000000u && dp < 0x20000000u) {
+            memcpy(&typ, c->mem + (dp & 0x1FFFFFFFu), 4);
+            memcpy(&ptr, c->mem + ((dp + 4u) & 0x1FFFFFFFu), 4);
+            if (typ == 4u && ptr >= 0x08000000u && ptr < 0x20000000u) {
+                uint16_t ch = 0;
+                memcpy(&ch, c->mem + (ptr & 0x1FFFFFFFu), 2);
+                if (ch == '/') {
+                    ptr += 2u;
+                    memcpy(c->mem + ((dp + 4u) & 0x1FFFFFFFu), &ptr, 4);
+                    printf("[pathskip] leading '/' entfernt -> ptr=%08X\n", ptr);
+                    fflush(stdout);
+                }
+            }
+        }
+    }
     if (c != NULL && pc == 0x0033D8B8u && getenv("HLE_PATH_FIX")) {
         uint32_t a;
         for (a = 0x0FFEE000u; a + 10u < 0x0FFF0000u; a += 2u) {
@@ -1175,17 +1368,20 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
     if (c != NULL && (pc == 0x00212CD0u || pc == 0x00212E3Cu) &&
         getenv("HLE_HASH_FIX")) {
         /* Der Hash-Cursor ([r0]=Tabellen-Offset im Metadaten-Stream,
-           [r0+8]=Bucket-Anzahl) ist im Port nicht initialisiert. */
+           [r0+8]=Bucket-Anzahl) ist im Port nicht initialisiert. Dir- und
+           File-Tabelle sind getrennte Objekte (0x3D6960 / 0x3D6988). */
         if (pc == 0x00212E3Cu && c->r[0] < 0x00100000u) {
             c->r[0] = 0x003D6988u;
         }
-        uint32_t base = c->r[0] & 0x1FFFFFFFu;
-        uint32_t off = (pc == 0x00212CD0u) ? 0x28u : 0x160u;
-        uint32_t cnt = (pc == 0x00212CD0u) ? 9u : 613u;
-        uint32_t zero = 0;
-        memcpy(c->mem + base, &off, 4);
-        memcpy(c->mem + base + 4, &zero, 4);
-        memcpy(c->mem + base + 8, &cnt, 4);
+        {
+            uint32_t base = c->r[0] & 0x1FFFFFFFu;
+            uint32_t off = (base == (0x003D6960u & 0x1FFFFFFFu)) ? 0x28u : 0x160u;
+            uint32_t cnt = (base == (0x003D6960u & 0x1FFFFFFFu)) ? 9u : 613u;
+            uint32_t zero = 0;
+            memcpy(c->mem + base, &off, 4);
+            memcpy(c->mem + base + 4, &zero, 4);
+            memcpy(c->mem + base + 8, &cnt, 4);
+        }
     }
     if (c != NULL && g_te.queue_log &&
         (pc == 0x00212CD0u || pc == 0x00212E3Cu || pc == 0x0021077Cu ||
