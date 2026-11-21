@@ -431,3 +431,19 @@ Sonde an `0x287B90` (Wait-Wrapper) mit Thread-ID und Ruecksprungadresse:
 (`mvn r0,#0`), danach laeuft der Code ab `0x119DB0` weiter (Byte-Flag `[r4]`,
 Aufruf `0x27CB3C`, Verzweigung `0x11A084`). Das ist der periodische
 App-Thread; er laeuft, stossen aber keinen GX-Flush an.
+
+### App-Thread-Block per Loop2 getaktet (neu)
+
+`fn_00119D48` (enthaelt den Warteaufruf `0x119DAC`, Argumente werden nicht
+benutzt, nur Literale/Globals) wurde ueber
+`HLE_FRAME_LOOP2=119D48` zusaetzlich getaktet. Ergebnis nach 90 s:
+
+```
+[frameloop2] 41 Aufrufe
+[gspq] 0
+keine gsp-Kommandos (auch nicht 0x0016/0x0013/...)
+kein Schreibzugriff auf 0x10002800
+```
+
+Der zusaetzliche Aufruf bremst den Boot stark (nur 41 Ticks) und erzeugt
+keinen Submit. Der GX-Flush liegt also nicht in diesem Block.
