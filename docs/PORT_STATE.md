@@ -40,9 +40,15 @@
   (= `0x3EE16C`). Memwatch zeigt: **nur** BSS-Clear und ein Write von `0`
   (`pc=0x288398`, `lr=0x2BA728`) — der Loader setzt das Flag nie auf 1.
   In 90 s läuft die Schleife ~6400×, `0x101540` wird nie erreicht.
-- Mit `HLE_SCENE_READY=1` (setzt das Flag künstlich) erreicht die Engine die
-  RM-Frame-Schleife (`0x288AF8/0x288B34`) und sendet `gsp 0x0006/0x000C`
-  samt `[gpusubmit]`.
+- Ein `STR [Rn,#0x2144]` existiert im Image nicht (auch kein `ADD #0x2144`);
+  der Setter muss den Offset anders bilden oder das Flag per Kopie/DMA schreiben.
+- `.fa`-Dateien werden **nicht über FS** geöffnet: `HLE_FS_PATHS` zeigt nur
+  SelfNCCH, `OpenArchive id=7`, `/gamecoin.dat` und drei `file 0x0802`-Reads.
+  Die `.fa`-Geräte bekommen also entweder leere Synthese-Dateien oder werden
+  gar nicht geöffnet.
+- Die `0x0802`-Reads tragen **Binärpfade** (Azahar: `NCCHFilePath`, 0x14 Byte:
+  `{open_type, content_index, filepath_type, exefs_filepath[8]}`) — unser
+  `find_path` wertet sie nicht aus und liefert damit falsche/leere Daten.
+- Mit `HLE_SCENE_READY=1` erreicht die Engine die RM-Frame-Schleife
+  (`0x288AF8/0x288B34`) und sendet `gsp 0x0006/0x000C` samt `[gpusubmit]`.
 - `boss:U`, `/head.lt6`, `SetBufferSwap (0x0005)` und ein echter Frame fehlen.
-- `.fa`-Geräte werden registriert und ihre Pfade aufgelöst, aber es folgt
-  kein Daten-Read (alle `[file] Read` enden bei `0xED80`).
