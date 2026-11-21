@@ -498,3 +498,28 @@ Sonde armt am Block `0x119D90` (der Warteaufruf selbst ist kein Blockstart;
 
 Damit ist der Frame-Dispatcher `0x134818/0x13485C` im App-Thread belegt.
 Er laeuft, erzeugt aber keinen Submit (Puffer bleibt leer).
+
+### Frame-Dispatcher: Callback ist NULL (neu)
+
+`0x134818` (Frame-Dispatcher im App-Thread) arbeitet mit dem globalen
+Kontext `0x0040B370`:
+
+```
+0x134818  ldr r4, [pc]          ; = 0x0040B370
+0x134820  ldr r1, [r4, #0x15c]  ; Frame-Callback
+0x134828  movne r0, #0x400
+0x13482C  blxne r1
+```
+
+Runtime-Dump (`HLE_DUMP_RANGE=40B4C0,40B4D8`):
+
+```
+[range] 0040B4C4 = 00000645   (+0x154)
+[range] 0040B4C8 = 00000645   (+0x158)
+[range] 0040B4CC = 00000000   (+0x15C)  <- Callback fehlt
+```
+
+Memwatch auf `0x40B4CC`: nur zwei Null-Writes (BSS-Clear `pc=0x100030`,
+`0x28EEE8`). Der Callback wird also **nie installiert** -> der Dispatcher
+ruft pro Frame nichts auf, und folglich entsteht kein Submit.
+Ein `STR #0x15C` existiert nicht; der Setzer arbeitet mit Register-Offset.
