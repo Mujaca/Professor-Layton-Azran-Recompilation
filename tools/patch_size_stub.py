@@ -29,6 +29,7 @@ def main():
         (CAVE + 0x0, 0xE59F0000),   # ldr r0,[pc]
         (CAVE + 0x4, 0xE12FFF1E),   # bx lr
         (CAVE + 0x8, SIZE),
+        (0x0013C4EC, 0xEA097693),   # zweiter Groessen-Accessor -> gleiche Cave
     ]
     for addr, val in words:
         o = addr - BASE
