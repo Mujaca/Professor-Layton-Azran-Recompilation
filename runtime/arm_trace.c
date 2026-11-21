@@ -885,6 +885,27 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         }
     }
 
+    /* Diagnose: korruptes Callback-Objekt an 0x1292BC benennen. */
+    {
+        static int cblog = -1;
+        if (cblog < 0) cblog = (getenv("HLE_CBLOG") != NULL);
+        if (cblog && c != NULL && pc == 0x001292BCu) {
+            static uint32_t seen[8];
+            static int nseen = 0;
+            uint32_t obj = c->r[4];
+            int known = 0;
+            for (int i = 0; i < nseen; i++) if (seen[i] == obj) known = 1;
+            if (!known && nseen < 8) {
+                uint32_t cb = 0;
+                memcpy(&cb, c->mem + ((obj + 0x170u) & 0x1FFFFFFFu), 4);
+                seen[nseen++] = obj;
+                printf("[cblog] obj=%08X [obj+170]=%08X r0=%08X\n",
+                       obj, cb, c->r[0]);
+                fflush(stdout);
+            }
+        }
+    }
+
     /* Diagnose: Warte-Aufrufe 0x287B90 mit Thread-ID und Ruecksprungadresse. */
     {
         static int wait_log = -1;
