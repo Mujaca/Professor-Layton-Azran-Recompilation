@@ -41,7 +41,14 @@
   (`pc=0x288398`, `lr=0x2BA728`) — der Loader setzt das Flag nie auf 1.
   In 90 s läuft die Schleife ~6400×, `0x101540` wird nie erreicht.
 - Ein `STR [Rn,#0x2144]` existiert im Image nicht (auch kein `ADD #0x2144`);
-  der Setter muss den Offset anders bilden oder das Flag per Kopie/DMA schreiben.
+  gefunden wurde nur **ein** Paar `ADD #0x2000` + `ADD #0x144`
+  (`0x115D8C`/`0x115D90`, `fn_00115C18`) — dort wird das 0x200-Byte-Objekt
+  bei `scene+0x2144` per `0x28EED0` **genullt** (Reset, nicht Setter).
+  Zusätzlich 20 Stellen `add #0x2000` + `STR [.,#0x144]` (u. a. `0x21B408`,
+  `0x2FE1CC`) — Kandidaten für den Setter, aber Index-/Array-Stores.
+- Es gibt **keinen** gespeicherten Zeiger auf `0x3EE16C` im Scene-Bereich
+  (Dump 0x3EC028..0x3EE200, kein Wert `003EE16C`) — der Setter muss die
+  Adresse selbst bilden.
 - `.fa`-Dateien werden **nicht über FS** geöffnet: `HLE_FS_PATHS` zeigt nur
   SelfNCCH, `OpenArchive id=7`, `/gamecoin.dat` und drei `file 0x0802`-Reads.
   Die `.fa`-Geräte bekommen also entweder leere Synthese-Dateien oder werden
