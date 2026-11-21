@@ -447,3 +447,17 @@ kein Schreibzugriff auf 0x10002800
 
 Der zusaetzliche Aufruf bremst den Boot stark (nur 41 Ticks) und erzeugt
 keinen Submit. Der GX-Flush liegt also nicht in diesem Block.
+
+### Korrupte Callback-Zeiger (neu)
+
+`arm: unbekanntes call-Ziel` nennt zwei Sorten:
+
+```
+0x000000F0 (von Block 0x001292BC)        -> [obj+0x170] = 0xF0
+0x3F800000 (von 0x002801D4/0x0028031C)   -> float 1.0 als Funktionszeiger
+```
+
+Das sind Datenwerte in Callback-/Vtable-Feldern, also unvollstaendig
+initialisierte Objekte. Ein HLE-Schutz an `0x1292BC` (Sprung ueberspringen)
+erhoehte die Fehlerzahl von 13 auf 200 und brachte keinen Submit; wieder
+entfernt.
