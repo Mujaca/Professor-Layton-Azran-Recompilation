@@ -940,6 +940,20 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         c->mem[0x3EC133u] = 0;                  /* +0x33 Flags   */
     }
 
+    /* Diagnose: Pfad-Parser 0x287D10 mitschreiben (Wide-String bei r1). */
+    if (c != NULL && getenv("HLE_PATH_LOG") && pc == 0x00287D10u) {
+        uint32_t p = c->r[1] & 0x1FFFFFFFu;
+        printf("[path] r0=%08X '", c->r[0]);
+        for (int i = 0; i < 60; i++) {
+            uint16_t ch = 0;
+            memcpy(&ch, c->mem + ((p + (uint32_t)i * 2u) & 0x1FFFFFFFu), 2);
+            if (ch == 0) break;
+            printf("%c", (ch >= 32 && ch < 127) ? (char)ch : '?');
+        }
+        printf("' lr=%08X\n", c->r[14]);
+        fflush(stdout);
+    }
+
     /* Diagnose: Datei-Inhalt direkt aus dem RomFS-Image vorladen. */
     if (c != NULL && getenv("HLE_FILE_PRELOAD") && pc == 0x001300C8u) {
         uint32_t size = c->r[2];
