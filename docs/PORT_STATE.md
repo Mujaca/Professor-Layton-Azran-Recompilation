@@ -474,3 +474,27 @@ Schreibzugriff:
 
 Also nur der Null-Header. Kein Thread schreibt je ein `SubmitCmdList`.
 `[gspq]` bleibt 0.
+
+### Aufrufkette des App-Threads (neu, `HLE_CALL_LOG`)
+
+Sonde armt am Block `0x119D90` (der Warteaufruf selbst ist kein Blockstart;
+`0x119DB0` liegt innerhalb des Blocks) und loggt neue Ziele von Thread F84:
+
+```
+1 pc=00119D90 lr=00291BF3   <- Block-Eintritt
+2 pc=00287B90 lr=00119DB0   <- Wait
+3 pc=00119DC8 lr=00119DB0
+4 pc=00134818 lr=00119DB0   <- Frame-Dispatcher
+5 pc=0013485C lr=00119DB0
+6 pc=0027CB3C lr=00119DD0
+7 pc=0027CB80 lr=00119DD0
+8 pc=00119DDC lr=00119DD0
+9 pc=0028796C lr=00119DFC   <- Zeit-/Tick-Vergleiche
+10 pc=00287980 lr=00119DFC
+11 pc=0011A818 lr=00119DFC
+12 pc=0011A824 lr=00119DFC
+13 pc=0011A078 lr=00119DFC
+```
+
+Damit ist der Frame-Dispatcher `0x134818/0x13485C` im App-Thread belegt.
+Er laeuft, erzeugt aber keinen Submit (Puffer bleibt leer).
