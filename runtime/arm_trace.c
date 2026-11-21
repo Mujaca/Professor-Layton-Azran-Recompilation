@@ -743,6 +743,33 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         fflush(stdout);
     }
 
+    /* Diagnose: Elementzahl des Objekts bei obj+0x1A4 setzen
+       (0x132FF8/0x133018 lesen [obj+4] als count; dort steht ein Zeiger). */
+    if (c != NULL && getenv("HLE_COUNT_FIX") && pc == 0x00124A04u) {
+        const char *cv = getenv("HLE_COUNT_FIX");
+        uint32_t cnt = (uint32_t)strtoul(cv, NULL, 0);
+        uint32_t ad = (c->r[6] + 0x1A8u) & 0x1FFFFFFFu;
+        memcpy(c->mem + ad, &cnt, 4);
+        printf("[countfix] obj=%08X [obj+1A8]=%u\n", c->r[6] + 0x1A4u, (unsigned)cnt);
+        fflush(stdout);
+    }
+
+    /* Diagnose: Eingang von 0x132FF8 (Groessenrechner) pruefen. */
+    if (c != NULL && getenv("HLE_COUNT_FIX") && pc == 0x00132FF8u) {
+        uint32_t f = 0;
+        memcpy(&f, c->mem + ((c->r[1] + 4u) & 0x1FFFFFFFu), 4);
+        printf("[p132] r1=%08X [r1+4]=%08X\n", c->r[1], f);
+        fflush(stdout);
+    }
+
+    /* Diagnose: Erfolgskette von fn_0012493C ab 0x124A48. */
+    if (c != NULL && getenv("HLE_CHAIN_LOG") &&
+        (pc == 0x00124AACu || pc == 0x00124C2Cu)) {
+        printf("[chain] pc=%08X r0=%08X r4=%08X r5=%08X r7=%08X r8=%08X sl=%08X fp=%08X lr=%08X\n",
+               pc, c->r[0], c->r[4], c->r[5], c->r[7], c->r[8], c->r[9], c->r[11], c->r[14]);
+        fflush(stdout);
+    }
+
     /* Diagnose: fn_00130170 Zustand (r7=offset, r6=size, r5=req). */
     if (c != NULL && getenv("HLE_P17_LOG") && pc == 0x001301A0u) {
         printf("[p17] r4=%08X r5=%08X r6=%08X r7=%08X lr=%08X\n",

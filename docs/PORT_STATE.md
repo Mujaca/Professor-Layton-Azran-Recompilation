@@ -34,6 +34,18 @@
 - Mount-Fehlerpfad verlassen: `[romfs] 002850B8` **und** `[romfs] 00285184` (Rückkehr über den Erfolgszweig).
 - GPU: `gsp::Gpu cmd=0x0006` und `0x000C`; `[gpusubmit] handle=42 list=00410000 size=28`.
 
+## Reproduzierbarer Patch-Satz
+
+`python tools/decomp.py` (Original aus `code.bin`) und danach
+
+```
+python tools/apply_all_patches.py            # inkl. Diagnose-Caves
+python tools/apply_all_patches.py --no-retprobe
+```
+
+spielt alle produktiven Patches in fester Reihenfolge auf (Caves ueberlappen
+sich nicht). Reihenfolge/Adressen siehe `tools/apply_all_patches.py`.
+
 ## Offen
 
 - Die Init-Schleife `0x101508`/`0x10151C` wartet auf `*(u16*)(0x3EC028+0x2144)`
@@ -63,6 +75,19 @@
   gestubbt) in `fn_0028F324` → `0x118798` und hängt dort im **Virtuellen
   Aufruf** `0x1187E8 blx ip` (Watchdog: `pc=0x28F35C`, `lr=0x1187EC`).
   Ein Patch von `0x27E3C8` (vermuteter Wait) half nicht.
+- **Neu (Sonden `[countfix]`/`[p132]`, `HLE_COUNT_FIX`):** Der echte Loader
+  scheitert an `fn_00140140`. `0x132FF8(obj+0x334, obj+0x1A4)` ruft
+  `0x140140(obj+0x1A4)`; das ist **kein** einfacher Getter, sondern die Kette
+  `[obj+4] → [+0x3C] → call → [r0]` (Rohcode ab 0x140140: `ldr r0,[r0,#4]`,
+  `nop`, `push {r4,lr}`, `ldr r0,[r0,#0x3C]`, `bl …`, `ldr r0,[r0]`).
+  Für unser Archiv-Objekt `0x0D400260` (`[+4]=0x0D400398`, nicht
+  initialisiert) liefert sie `0x00FEFF52` → Groesse `0x03FBFD4C` (64 MB)
+  → `0x284AA8` scheitert → Fehlerrueckkehr nach `0x124C2C`.
+  Mit `HLE_COUNT_FIX=0` (schreibt `[obj+0x1A8]=0`) wird die Groesse 4 und
+  `0x12FC24` laeuft echt durch; danach liefert `0x133018` 0 → Alloc(0)
+  scheitert. Mit `HLE_COUNT_FIX=1` kommt wieder 0x03FBFD4C, weil die echte
+  Kette den Wert ueberschreibt. Zu fixen ist also das **Objekt
+  `0x0D400260`** selbst (Feld `+4` = gueltige Listen-/Container-Instanz).
 - Mit dem kurzen Pfad (`0x1249CC → 0x124C30`) bleibt der Mount-Erfolg
   reproduzierbar.
 - `boss:U`, `/head.lt6`, `SetBufferSwap (0x0005)` und ein echter Frame fehlen.
