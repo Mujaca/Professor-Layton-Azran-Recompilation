@@ -915,8 +915,8 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         if (call_log < 0) call_log = (getenv("HLE_CALL_LOG") != NULL);
         if (call_log && c != NULL) {
             uint32_t th = (uint32_t)((c->tpidruro >> 12) & 0xFFFu);
-            if (th == 0xF84u) {
-                if (pc == 0x00119D90u) armed = 1;
+            if (th == 0xF84u || th == 0xF82u) {
+                if (pc == 0x00119D90u || pc == 0x002850B8u) armed = 1;
                 if (armed && nseenpc < 160) {
                     int known = 0;
                     for (int i = 0; i < nseenpc; i++)
