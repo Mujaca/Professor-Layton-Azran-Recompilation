@@ -697,6 +697,34 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         c->r[13] -= 0x28u;
     }
 
+    /* Diagnose: Vtable-Aufruf in 0x287D10 (Pfad-Parser) mitschreiben. */
+    if (c != NULL && getenv("HLE_VT_LOG") && pc == 0x00287D50u) {
+        uint32_t o6 = c->r[6] & 0x1FFFFFFFu;
+        uint32_t o4 = c->r[4] & 0x1FFFFFFFu;
+        uint32_t vt = 0, a0 = 0, a1 = 0, a2 = 0, a3 = 0;
+        memcpy(&vt, c->mem + o4, 4);
+        memcpy(&a0, c->mem + (c->r[13] & 0x1FFFFFFFu), 4);
+        memcpy(&a1, c->mem + ((c->r[13] + 4u) & 0x1FFFFFFFu), 4);
+        memcpy(&a2, c->mem + ((c->r[13] + 8u) & 0x1FFFFFFFu), 4);
+        memcpy(&a3, c->mem + ((c->r[13] + 12u) & 0x1FFFFFFFu), 4);
+        printf("[pvt] obj=%08X this=%08X vt=%08X a0=%08X a1=%08X a2=%08X a3=%08X r7=%08X r8=%08X lr=%08X\n",
+               c->r[6], c->r[4], vt, a0, a1, a2, a3, c->r[7], c->r[8], c->r[14]);
+        fflush(stdout);
+    }
+    if (c != NULL && getenv("HLE_VT_LOG") && pc == 0x00287D98u) {
+        uint32_t o = c->r[6] & 0x1FFFFFFFu;
+        uint32_t q0 = 0, q1 = 0, q2 = 0, q3 = 0, q4 = 0, q5 = 0;
+        memcpy(&q0, c->mem + o, 4);
+        memcpy(&q1, c->mem + ((o + 4u) & 0x1FFFFFFFu), 4);
+        memcpy(&q2, c->mem + ((o + 8u) & 0x1FFFFFFFu), 4);
+        memcpy(&q3, c->mem + ((o + 12u) & 0x1FFFFFFFu), 4);
+        memcpy(&q4, c->mem + ((o + 16u) & 0x1FFFFFFFu), 4);
+        memcpy(&q5, c->mem + ((o + 20u) & 0x1FFFFFFFu), 4);
+        printf("[pvr] obj=%08X q=%08X,%08X,%08X,%08X,%08X,%08X\n",
+               c->r[6], q0, q1, q2, q3, q4, q5);
+        fflush(stdout);
+    }
+
     /* Diagnose: Varianten-Objekt von fn_0028F324 dumpen. */
     if (c != NULL && getenv("HLE_COPY_LOG") && pc == 0x0028F344u) {
         uint32_t ob = c->r[7] & 0x1FFFFFFFu;
