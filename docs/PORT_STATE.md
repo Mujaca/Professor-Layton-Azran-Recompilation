@@ -31,23 +31,21 @@ selbst in `0x1F000000` schreibt, bevorzugt `tests/port.c` diesen Inhalt.
 
 ## RomFS-Lookup: neue Befunde (fuer den Engine-Renderpfad)
 
-- Die `.fa`-Registrierung wird erreicht: `[boot] reg name@...='arc/lt6_a.fa'`
-  usw Breed (mit `HLE_BOOT_LOG=1`).
-- Der VFS-Pfad ist korrekt: `[pathlog] 'rom:/lt6/arc/lt6_a.fa'`.
-- Der RomFS-Device-Open liefert fuer `.fa` den FS-Fehler **`0xC8804471`**
-  (Result: Module=FS, Summary=NotFound, Description=113 PathNotFound),
-  waehrend `product.bcsarbudget` erfolgreich geoeffnet wird.
-- Die in-memory File-Meta-Tabelle ist korrekt (Record 0:
-  `parent=0x38, sibling=0x30, doff=0, size=0x004C1448`) — geprueft per
-  `HLE_PATH_LOG`-Dump an `0x09000ACC`.
-- Workaround-Skripte (idempotent, diagnostisch):
-  - `tools/_romfs_fullchain.py` — alle 613 File-Buckets -> vollstaendige Kette
-  - `tools/_romfs_dirchain.py`  — alle 9 Dir-Buckets -> vollstaendige Kette
+- Dir-Baum (aus dem RomFS-Image): `0x0 ""`, `0x18 lt6`, `0x38 arc`,
+  `0x58 ctr`, `0x78 mov`, `0x98 snd`, `0xB8 uk`, `0xD4 uk`, `0xF0 stream`.
+- Der `.fa`-Lookup sucht „lt6" faelschlich in der **Datei**-Tabelle, weil der
+  leere erste Pfadbestandteil (fuehrendes `/`) als `stream` (0xF0) aufgeloest
+  wird; der erste Lookup (`product.bcsar`) funktioniert noch.
+- Werkzeuge (idempotent):
+  - `tools/_romfs_fullchain.py`  — alle File-Buckets -> vollstaendige Kette
+  - `tools/_romfs_dirchain.py`   — alle Dir-Buckets -> vollstaendige Kette
+  - `tools/_romfs_rootbucket.py` — Bucket 0 -> Root-Record 0
   - `tools/_patch_lookup_noparent.py` — Parent-/Laengenpruefung neutralisieren
-    (Namensvergleich bleibt scharf)
-- Damit bleibt der `.fa`-Open in der Engine weiterhin `NotFound`; der
-  eigentliche Engine-Renderpfad (Scene-Init -> Draw-Liste -> Submit) ist noch
-  offen. Der Port zeigt deshalb den offiziellen Menue-Frame.
+- Laufzeit-Schalter: `HLE_HASH_FIX` (Dir-/File-Cursor getrennt),
+  `HLE_PATH_SKIPabs` (fuehrendes `/` inkl. Laenge entfernen), `HLE_DIR_RESET`.
+- Ergebnis: der `.fa`-Device-Open liefert weiterhin FS `PathNotFound`
+  (`0xC8804471`); der Engine-eigene Renderpfad (Scene-Init -> Draw-Liste ->
+  Submit) ist noch offen. Der Port zeigt daher den offiziellen Menue-Frame.
 
 ## Patches in `out/exefs/code_decomp.bin` (Skripte in `tools/`)
 
