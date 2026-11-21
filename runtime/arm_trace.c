@@ -1280,6 +1280,35 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
             }
         }
     }
+    if (c != NULL && pc == 0x0033D8B8u && getenv("HLE_OBJ_DUMP")) {
+        static int on8 = 0;
+        if (on8 < 8) {
+        }
+    }
+    if (c != NULL && pc == 0x0033D8B8u && getenv("HLE_OBJ_DUMP")) {
+        static int on9 = 0;
+        if (on9 < 6) {
+            printf("[objdump] dev:");
+            for (uint32_t k = 0; k < 0x30u; k += 4) {
+                uint32_t w = 0;
+                memcpy(&w, c->mem + ((0x003D6940u + k) & 0x1FFFFFFFu), 4);
+                printf(" %08X", w);
+            }
+            printf("\n[objdump] dir:");
+            for (uint32_t k = 0; k < 0x30u; k += 4) {
+                uint32_t w = 0;
+                memcpy(&w, c->mem + ((0x003D6960u + k) & 0x1FFFFFFFu), 4);
+                printf(" %08X", w);
+            }
+            printf("\n[objdump] file:");
+            for (uint32_t k = 0; k < 0x30u; k += 4) {
+                uint32_t w = 0;
+                memcpy(&w, c->mem + ((0x003D6988u + k) & 0x1FFFFFFFu), 4);
+                printf(" %08X", w);
+            }
+            printf("\n"); fflush(stdout); on9++;
+        }
+    }
     if (c != NULL && pc == 0x0033D8B8u && getenv("HLE_DIR_RESET")) {
         int hits = 0;
         for (uint32_t a0 = 0x003D6800u; a0 < 0x003D6C00u; a0 += 4u) {
