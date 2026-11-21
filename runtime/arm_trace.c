@@ -697,6 +697,23 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         c->r[13] -= 0x28u;
     }
 
+    /* Diagnose: Vtable-Aufruf in 0x118798 mitschreiben. */
+    if (c != NULL && getenv("HLE_VT_LOG") && pc == 0x001187E4u) {
+        uint32_t ob = c->r[4] & 0x1FFFFFFFu;
+        uint32_t vt = 0, ipv = 0, f0 = 0, f4 = 0, f8 = 0;
+        memcpy(&vt, c->mem + ob, 4);
+        if (vt >= 0x00100000u && vt < 0x1F000000u) {
+            memcpy(&ipv, c->mem + (vt & 0x1FFFFFFFu), 4);
+            memcpy(&ipv, c->mem + (vt & 0x1FFFFFFFu), 4);
+        }
+        memcpy(&f0, c->mem + ((ob + 4u) & 0x1FFFFFFFu), 4);
+        memcpy(&f4, c->mem + ((ob + 8u) & 0x1FFFFFFFu), 4);
+        memcpy(&f8, c->mem + ((ob + 12u) & 0x1FFFFFFFu), 4);
+        printf("[vt] obj=%08X vt=%08X ip=%08X r0=%08X r1=%08X r2=%08X r3=%08X f4=%08X f8=%08X fC=%08X lr=%08X\n",
+               c->r[4], vt, c->r[12], c->r[0], c->r[1], c->r[2], c->r[3], f0, f4, f8, c->r[14]);
+        fflush(stdout);
+    }
+
     /* Diagnose: Szene-/Ladezustand als fertig markieren (Objekt 0x3EC028+0x2144). */
     if (c != NULL && g_te.scene_ready && pc == 0x00101508u) {
         const char *nm = getenv("HLE_SCENE_NAME");
