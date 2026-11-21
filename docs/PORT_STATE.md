@@ -217,6 +217,16 @@ kein `[gspq]`. Das Spiel fuellt den Kommandopuffer also gar nicht — passend
 dazu, dass `0x000C` nie gesendet wird. Die eigentliche Ursache liegt damit
 weiterhin im Grafik-Flush des Spiels (Render-Thread/Frame-Pfad).
 
+Die Zuordnung ist verifiziert (`HLE_MAP_LOG`):
+
+```
+[map] svc=1F r0=0000001C r1=10000000 ...   (HID-Shmem)
+[map] svc=1F r0=00000000 r1=10002000 ...   (GSP-Shmem)
+```
+
+Der GSP-Shared-Memory liegt also wirklich bei `0x10002000`; der Puffer ab
+`+0x800` ist korrekt adressiert, wird aber von keinem Spiel-Thread beschrieben.
+
 ## Echter Loader ohne Short-Circuit (neu)
 
 `python tools/patch_real_loader.py` (nach `decomp.py` + `apply_all_patches.py`)
