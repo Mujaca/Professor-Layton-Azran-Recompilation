@@ -1281,32 +1281,35 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         }
     }
     if (c != NULL && pc == 0x0033D8B8u && getenv("HLE_DIR_RESET")) {
-        uint32_t base = 0x003D6940u;
         int hits = 0;
-        for (uint32_t k = 0; k < 0x80u; k += 4) {
-            uint32_t w = 0, a = (base + k) & 0x1FFFFFFFu;
+        for (uint32_t a0 = 0x003D6800u; a0 < 0x003D6C00u; a0 += 4u) {
+            uint32_t w = 0, a = a0 & 0x1FFFFFFFu;
             memcpy(&w, c->mem + a, 4);
             if (w == 0x000000F0u) {
                 uint32_t z = 0;
+                printf("[dirreset] @%08X = 000000F0 -> 0\n", a0);
                 memcpy(c->mem + a, &z, 4);
                 hits++;
             }
         }
-        if (hits) { printf("[dirreset] %d stale Cursor(en) -> 0\n", hits); fflush(stdout); }
+        if (hits) fflush(stdout);
     }
     if (c != NULL && pc == 0x0033D8B8u && getenv("HLE_PATH_SKIP")) {
         uint32_t dp = c->r[2];
-        uint32_t typ = 0, ptr = 0;
+        uint32_t typ = 0, ptr = 0, len = 0;
         if (dp >= 0x08000000u && dp < 0x20000000u) {
             memcpy(&typ, c->mem + (dp & 0x1FFFFFFFu), 4);
             memcpy(&ptr, c->mem + ((dp + 4u) & 0x1FFFFFFFu), 4);
+            memcpy(&len, c->mem + ((dp + 8u) & 0x1FFFFFFFu), 4);
             if (typ == 4u && ptr >= 0x08000000u && ptr < 0x20000000u) {
                 uint16_t ch = 0;
                 memcpy(&ch, c->mem + (ptr & 0x1FFFFFFFu), 2);
                 if (ch == '/') {
                     ptr += 2u;
+                    if (len >= 2u) len -= 2u;
                     memcpy(c->mem + ((dp + 4u) & 0x1FFFFFFFu), &ptr, 4);
-                    printf("[pathskip] leading '/' entfernt -> ptr=%08X\n", ptr);
+                    memcpy(c->mem + ((dp + 8u) & 0x1FFFFFFFu), &len, 4);
+                    printf("[pathskip] '/' entfernt -> ptr=%08X len=%08X\n", ptr, len);
                     fflush(stdout);
                 }
             }

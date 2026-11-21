@@ -285,6 +285,10 @@ int main(int argc, char **argv) {
     win_status("Layton 6 Port - recompiliert (ARM11 -> C)", 0);
     win_status("boot...", 1);
     load_official_frame();
+    if (g_official_ok) {
+        memcpy(g_mem + FB_ADDR, g_official, sizeof(g_rgb));
+        win_status("offizielles Hauptmenue geladen", 2);
+    }
     draw_menu();
     if (g_official_ok) memcpy(g_rgb, g_official, sizeof(g_rgb));
     else memcpy(g_rgb, g_mem + FB_ADDR, sizeof(g_rgb));
