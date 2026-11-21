@@ -743,6 +743,13 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         fflush(stdout);
     }
 
+    /* Diagnose: fn_00130170 Zustand (r7=offset, r6=size, r5=req). */
+    if (c != NULL && getenv("HLE_P17_LOG") && pc == 0x001301A0u) {
+        printf("[p17] r4=%08X r5=%08X r6=%08X r7=%08X lr=%08X\n",
+               c->r[4], c->r[5], c->r[6], c->r[7], c->r[14]);
+        fflush(stdout);
+    }
+
     /* Diagnose: gemessenes Container-Layout in obj+0x118 schreiben. */
     if (c != NULL && getenv("HLE_VARIANT_FIX") && pc == 0x001300C8u) {
         uint32_t o = (c->r[0] + 0x118u) & 0x1FFFFFFFu;
@@ -759,8 +766,8 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         fflush(stdout);
     }
 
-    /* Diagnose: Variant-Copy sofort als Erfolg beenden (r3=0 -> beq Ret). */
-    if (c != NULL && getenv("HLE_COPY_SKIP") && pc == 0x0028F324u) {
+    /* Diagnose: Variant-Copy als Erfolg behandeln (Host-Kopie optional). */
+    if (c != NULL && getenv("HLE_COPY_SKIP") && getenv("HLE_COPY_HOST") && pc == 0x0028F324u) {
         uint32_t dst = c->r[1] & 0x1FFFFFFFu;
         uint32_t sz = c->r[3];
         if (sz > 0u && sz <= 0x02000000u && (uint64_t)dst + sz <= c->mem_size) {
@@ -768,7 +775,6 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
             printf("[copyhost] dst=%08X size=%08X\n", c->r[1], sz);
             fflush(stdout);
         }
-        c->r[3] = 0;
     }
 
     /* Diagnose: Variant-Copy fn_0028F324 zaehlen. */
