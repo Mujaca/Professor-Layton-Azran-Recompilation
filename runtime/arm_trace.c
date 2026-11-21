@@ -743,6 +743,22 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         fflush(stdout);
     }
 
+    /* Diagnose: gemessenes Container-Layout in obj+0x118 schreiben. */
+    if (c != NULL && getenv("HLE_VARIANT_FIX") && pc == 0x001300C8u) {
+        uint32_t o = (c->r[0] + 0x118u) & 0x1FFFFFFFu;
+        uint32_t z = 0, size = 0x00F3DE78u, ff = 0xFFFFFFFFu, vt = 0x003C9B18u, ptr = 0x18000000u;
+        memcpy(c->mem + o, &z, 4);
+        memcpy(c->mem + ((o + 4u) & 0x1FFFFFFFu), &ptr, 4);
+        memcpy(c->mem + ((o + 8u) & 0x1FFFFFFFu), &z, 4);
+        memcpy(c->mem + ((o + 12u) & 0x1FFFFFFFu), &size, 4);
+        memcpy(c->mem + ((o + 16u) & 0x1FFFFFFFu), &ff, 4);
+        memcpy(c->mem + ((o + 20u) & 0x1FFFFFFFu), &z, 4);
+        memcpy(c->mem + ((o + 24u) & 0x1FFFFFFFu), &vt, 4);
+        memcpy(c->mem + ((o + 28u) & 0x1FFFFFFFu), &z, 4);
+        printf("[vfix] obj+118=%08X size=%08X ptr=%08X\n", c->r[0] + 0x118u, size, ptr);
+        fflush(stdout);
+    }
+
     /* Diagnose: Variant-Copy sofort als Erfolg beenden (r3=0 -> beq Ret). */
     if (c != NULL && getenv("HLE_COPY_SKIP") && pc == 0x0028F324u) {
         uint32_t dst = c->r[1] & 0x1FFFFFFFu;
