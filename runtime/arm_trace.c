@@ -697,6 +697,24 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         c->r[13] -= 0x28u;
     }
 
+    /* Diagnose: Varianten-Objekt von fn_0028F324 dumpen. */
+    if (c != NULL && getenv("HLE_COPY_LOG") && pc == 0x0028F344u) {
+        uint32_t ob = c->r[7] & 0x1FFFFFFFu;
+        uint32_t w0 = 0, w1 = 0, w2 = 0, w3 = 0, w4 = 0;
+        uint32_t s0 = 0, s1 = 0, s2 = 0;
+        memcpy(&w0, c->mem + ob, 4);
+        memcpy(&w1, c->mem + ((ob + 4u) & 0x1FFFFFFFu), 4);
+        memcpy(&w2, c->mem + ((ob + 8u) & 0x1FFFFFFFu), 4);
+        memcpy(&w3, c->mem + ((ob + 12u) & 0x1FFFFFFFu), 4);
+        memcpy(&w4, c->mem + ((ob + 16u) & 0x1FFFFFFFu), 4);
+        memcpy(&s0, c->mem + (c->r[13] & 0x1FFFFFFFu), 4);
+        memcpy(&s1, c->mem + ((c->r[13] + 4u) & 0x1FFFFFFFu), 4);
+        memcpy(&s2, c->mem + ((c->r[13] + 8u) & 0x1FFFFFFFu), 4);
+        printf("[var] obj=%08X w0=%08X w1=%08X w2=%08X w3=%08X w4=%08X sp0=%08X sp1=%08X sp2=%08X\n",
+               c->r[7], w0, w1, w2, w3, w4, s0, s1, s2);
+        fflush(stdout);
+    }
+
     /* Diagnose: Variant-Copy sofort als Erfolg beenden (r3=0 -> beq Ret). */
     if (c != NULL && getenv("HLE_COPY_SKIP") && pc == 0x0028F324u) {
         uint32_t dst = c->r[1] & 0x1FFFFFFFu;
