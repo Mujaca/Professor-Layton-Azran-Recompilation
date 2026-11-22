@@ -13,6 +13,7 @@ extern "C" {
 #endif
 
 extern uint32_t arm_last_block;
+int hle_fa_read(struct ArmCpu *c);
 extern void (*arm_pump_hook)(void);
 /* Pro Block mit der laufenden CPU aufgerufen: dient als VBlank-/Frame-
    Dispatcher (die Engine registriert ihre Tick-Tasks in 0x3D7C50). */

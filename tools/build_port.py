@@ -30,6 +30,12 @@ def main():
     # aber nur <= 8 und bricht sonst ohne Request ab.
     gpath = os.path.join(ROOT, "build", "gen_boot.c")
     txt = open(gpath, encoding="utf-8").read()
+    # .fa-Streams direkt aus out/romfs/lt6/arc/lt6_*.fa bedienen: der
+    # CFile-Stream liefert sonst nur 4 Bytes (Header/Index unvollstaendig).
+    keyfa = "void fn_00280744(ArmCpu *c) {\n  goto"
+    if keyfa in txt and "hle_fa_read(c)" not in txt:
+        txt = txt.replace(keyfa,
+                          "void fn_00280744(ArmCpu *c) {\n  if (hle_fa_read(c) >= 0) return;\n  goto", 1)
     key = "void fn_0028EE00(ArmCpu *c) {"
     i = txt.find(key)
     if i >= 0:

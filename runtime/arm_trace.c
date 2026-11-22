@@ -9,6 +9,44 @@
 #include <windows.h>
 
 uint32_t arm_last_block = 0;
+
+/* Host-Read fuer die .fa-Streams: Die Engine liest den ARC0-Header/Index ueber
+ * fn_00280744 aus einem CFile-Objekt, dessen Stream nur 4 Bytes liefert. Hier
+ * werden die Daten direkt aus out/romfs/lt6/arc/lt6_*.fa gelesen. Rueckgabe
+ * >=0 = behandelt (Bytes), -1 = Originalpfad. */
+int hle_fa_read(ArmCpu *c) {
+    uint32_t fob, stream = 0, pos = 0, size = 0, want, dst, npos;
+    const char *path = NULL;
+    static FILE *fp[3] = { NULL, NULL, NULL };
+    int idx = -1;
+    size_t n;
+    if (c == NULL) return -1;
+    fob = c->r[0];
+    if (fob < 0x08000000u || fob >= 0x20000000u) return -1;
+    memcpy(&stream, c->mem + (fob & 0x1FFFFFFFu), 4);
+    if (stream < 0x08000000u || stream >= 0x20000000u) return -1;
+    memcpy(&pos, c->mem + ((fob + 4u) & 0x1FFFFFFFu), 4);
+    memcpy(&size, c->mem + ((stream + 0x10u) & 0x1FFFFFFFu), 4);
+    if (size == 0x004C1448u) { path = "out/romfs/lt6/arc/lt6_a.fa"; idx = 0; }
+    else if (size == 0x108BDFB8u) { path = "out/romfs/lt6/arc/lt6_b.fa"; idx = 1; }
+    else if (size == 0x09BD69CCu) { path = "out/romfs/lt6/arc/lt6_uk.fa"; idx = 2; }
+    if (path == NULL) return -1;
+    want = c->r[2];
+    dst = c->r[1];
+    if (want == 0u) return -1;
+    if (fp[idx] == NULL) fp[idx] = fopen(path, "rb");
+    if (fp[idx] == NULL) return -1;
+    if (pos > size) pos = size;
+    if (want > size - pos) want = size - pos;
+    if (fseek(fp[idx], (long)pos, SEEK_SET) != 0) return -1;
+    if ((uint64_t)(dst & 0x1FFFFFFFu) + want > c->mem_size) return -1;
+    n = fread(c->mem + (dst & 0x1FFFFFFFu), 1, want, fp[idx]);
+    npos = pos + (uint32_t)n;
+    memcpy(c->mem + ((fob + 4u) & 0x1FFFFFFFu), &npos, 4);
+    c->r[0] = (uint32_t)n;
+    return (int)n;
+}
+
 void (*arm_pump_hook)(void) = NULL;
 void (*arm_tick_hook)(struct ArmCpu *c) = NULL;
 uint32_t arm_watch_pc = 0;
