@@ -9,6 +9,7 @@
 #include <windows.h>
 
 uint32_t arm_last_block = 0;
+int arm_fa_ready = 0;
 
 /* Host-Read fuer die .fa-Streams: Die Engine liest den ARC0-Header/Index ueber
  * fn_00280744 aus einem CFile-Objekt, dessen Stream nur 4 Bytes liefert. Hier
@@ -1445,6 +1446,13 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
                 }
                 break;
             }
+        }
+    }
+    /* Menue-Loop erst nach der .fa-Registrierung (alle drei Archive). */
+    {
+        static int fa_reg_n = 0;
+        if (c != NULL && pc == 0x002919DCu) {
+            if (++fa_reg_n >= 3) arm_fa_ready = 1;
         }
     }
     if (c != NULL && pc == 0x00399244u) {

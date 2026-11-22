@@ -322,6 +322,8 @@ void hle_pump(void) {
         if (fl_env != NULL && *fl_env != 0 && !in_frame_call && g_frame_cpu != NULL) {
             static unsigned fc = 0;
             if ((++fc & 0xFFFu) == 0) {
+                extern int arm_fa_ready;
+                if (arm_fa_ready) {
                 uint32_t fsave[16];
                 uint32_t fa = (uint32_t)strtoul(fl_env, NULL, 16);
                 in_frame_call = 1;
