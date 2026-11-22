@@ -11,6 +11,7 @@
 static uint32_t g_hle_gsp_handle;
 static uint32_t g_apt_param_ev = 0;
 static void dispatch_ipc(uint32_t handle);
+static int gsp_process_cmdqueue(ArmCpu *c);
 #include "../arm_trace.h"
 
 void arm_trace_thread_dump(int ti, unsigned n);
@@ -162,6 +163,24 @@ static void hle_menu_gpu_submit(void)
         list[k++] = W;       /* srcW */
         list[k++] = H;       /* srcH */
         memcpy(g_frame_cpu->mem + cl, list, sizeof(list));
+
+        /* Zusaetzlich als SubmitCmdList-Eintrag in den GSP-Shared-Memory-Ring
+           (Azahar-Layout, 0x10002800) legen und abarbeiten. */
+        {
+            uint32_t base = 0x10002800u;
+            uint32_t hdr = 1u << 8;              /* index=0, number_commands=1 */
+            uint32_t cslot = base + 0x20u;
+            uint8_t id = 0x01u;
+            uint32_t sz = (uint32_t)sizeof(list);
+            memcpy(g_frame_cpu->mem + base, &hdr, 4);
+            memcpy(g_frame_cpu->mem + cslot, &id, 1);
+            memcpy(g_frame_cpu->mem + cslot + 4u, &cl, 4);
+            memcpy(g_frame_cpu->mem + cslot + 8u, &sz, 4);
+            {
+                int q = gsp_process_cmdqueue(g_frame_cpu);
+                printf("[menugpu] SubmitCmdList(ring) -> %d Ops\n", q);
+            }
+        }
 
         buf = (uint32_t *)(g_frame_cpu->mem + g_frame_cpu->tpidruro + 0x80u);
         buf[0] = (0x0006u << 16) | (3u << 6);   /* SetCommandList */

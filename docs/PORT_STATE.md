@@ -8,11 +8,17 @@ Kommandoliste und schickt sie durch dieselben gsp-Handler wie das Spiel:
 
 ```
 [menugpu] offizieller Frame in Gast-RAM @1E000000 geladen
+[gspq] tid=0 idx=0 id=1 list=08002000 size=40 ops=2
+[menugpu] SubmitCmdList(ring) -> 2 Ops
 [gsp] SetCommandList addr=0x08002000 size=0x40
 [gsp] TriggerCmdReqQueue -> 2 Ops
 [gsp] SetBufferSwap screen=0 fb=0x1F000000
 [menugpu] SubmitCmdList+Trigger+SetBufferSwap ausgefuehrt (fb=1F000000)
 ```
+
+Damit sind beide Wege belegt: der **SubmitCmdList**-Ring-Eintrag im
+GSP-Shared-Memory (id 1) und **SetCommandList/TriggerCmdReqQueue/SetBufferSwap**
+ueber die gsp-IPC-Handler.
 
 Die Liste nutzt `ClearColor` + `FillRect` + das neue `BlitRGB`-Kommando
 (`runtime/gpu.c`, 0x07: x,y,w,h,src,srcW,srcH) und schreibt die Pixel real in
