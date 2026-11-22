@@ -860,6 +860,31 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
                     fflush(stdout); oni++;
                 }
             }
+            if (pc == 0x00280744u && getenv("HLE_FA_FILL")) {
+                static int fa_done[8] = {0,0,0,0,0,0,0,0};
+                uint32_t fob = c->r[0], stream = 0, sz = 0, ptr = 0;
+                memcpy(&stream, c->mem + (fob & 0x1FFFFFFFu), 4);
+                if (stream >= 0x08000000u && stream < 0x20000000u) {
+                    memcpy(&sz, c->mem + ((stream + 0x10u) & 0x1FFFFFFFu), 4);
+                    memcpy(&ptr, c->mem + ((stream + 0x20u) & 0x1FFFFFFFu), 4);
+                }
+                const char *path = NULL; int idx = -1;
+                if (sz == 0x004C1448u) { path = "out/romfs/lt6/arc/lt6_a.fa"; idx = 0; }
+                else if (sz == 0x108BDFB8u) { path = "out/romfs/lt6/arc/lt6_b.fa"; idx = 1; }
+                else if (sz == 0x09BD69CCu) { path = "out/romfs/lt6/arc/lt6_uk.fa"; idx = 2; }
+                if (path != NULL && idx >= 0 && !fa_done[idx] &&
+                    ptr >= 0x08000000u && ptr < 0x20000000u &&
+                    (uint64_t)(ptr & 0x1FFFFFFFu) + sz <= c->mem_size) {
+                    FILE *ff = fopen(path, "rb");
+                    if (ff != NULL) {
+                        size_t nn = fread(c->mem + (ptr & 0x1FFFFFFFu), 1, sz, ff);
+                        fclose(ff);
+                        printf("[fafill] %s -> %08X got=%zu of %u\n", path, ptr, nn, sz);
+                        fflush(stdout);
+                        fa_done[idx] = 1;
+                    }
+                }
+            }
             if (pc == 0x00280744u && getenv("HLE_READ_OBJ")) {
                 static int onr = 0;
                 if (onr < 10) {
@@ -878,6 +903,22 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
                     }
                     printf("[boot] readobj o=%08X v0=%08X v4=%08X v8=%08X stream=%08X ssz=%08X vt=%08X rdfn=%08X r2=%08X r3=%08X\n",
                            o, v0, v4, v8, sptr, ssz, vt, rdfn, c->r[2], c->r[3]);
+                    if (sptr >= 0x08000000u && sptr < 0x20000000u) {
+                        uint32_t aw[8];
+                        for (uint32_t k = 0; k < 8; k++)
+                            memcpy(&aw[k], c->mem + ((sptr + 0x20u + k * 4u) & 0x1FFFFFFFu), 4);
+                        printf("[boot] accessor %08X,%08X,%08X,%08X,%08X,%08X,%08X,%08X\n",
+                               aw[0], aw[1], aw[2], aw[3], aw[4], aw[5], aw[6], aw[7]);
+                        if (aw[0] >= 0x08000000u && aw[0] < 0x20000000u) {
+                            printf("[boot] accobj %08X:", aw[0]);
+                            for (uint32_t k = 0; k < 12; k++) {
+                                uint32_t w = 0;
+                                memcpy(&w, c->mem + (((aw[0] & 0x1FFFFFFFu) + k * 4u) & 0x1FFFFFFFu), 4);
+                                printf(" %08X", w);
+                            }
+                            printf("\n");
+                        }
+                    }
                     fflush(stdout); onr++;
                 }
             }
