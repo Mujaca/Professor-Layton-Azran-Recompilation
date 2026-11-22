@@ -76,12 +76,16 @@ Details: [`reports/RECOMPILER_MVP.md`](reports/RECOMPILER_MVP.md)
 ## Erste lauffähige Version (Phase 2)
 
 `out\port.exe` startet ein natives Fenster, lädt den recompilierten Code und führt ihn
-mit der HLE-Schicht aus (SDK-Init bis `srv:`, Framebuffer-Ansicht, Spiel-Icon als
-Startscreen). Status und offene Punkte bis zum Menü: [`reports/PORT.md`](reports/PORT.md).
+mit der HLE-Schicht aus. Das **offiziell gerenderte Hauptmenü** wird über den echten
+GPU-Pfad angezeigt: `runtime/hle/hle.c` reicht eine Kommandoliste als
+`SubmitCmdList`/`SetCommandList` + `TriggerCmdReqQueue` + `SetBufferSwap` durch die
+gsp-Handler, `runtime/gpu.c` führt sie aus und schreibt real nach `0x1F000000`
+(0 Pixel Unterschied zum Referenzframe, ohne Host-`memcpy`). Details:
+[`reports/PORT.md`](reports/PORT.md), [`docs/PORT_STATE.md`](docs/PORT_STATE.md).
 
 ```powershell
 python tools\build_port.py
-.\out\port.exe out\romfs
+.\out\port.exe out\romfs --shot out\shot_engine.bmp
 ```
 
 ## Trace-Harness (Phase 1b)
