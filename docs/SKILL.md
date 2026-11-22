@@ -18,13 +18,24 @@ python tools\build_boot.py                  # -> out\boot.exe (headless)
 # Headless-Boot (ohne Fenster); beendet sich nach ~10 s selbst
 .\out\boot.exe out\romfs
 
-# Port mit Screenshot
+# Referenzframes (Top 400x240 + Bottom 320x240) erzeugen
+python tools\_make_menu_frame.py
+
+# Port mit Screenshot (GPU-/gsp-Pfad ist Default)
 .\out\port.exe out\romfs --shot out\shot.bmp
+python tools\_cmp_shot.py out\shot.bmp reports\menu_official.bin   # diff_pixels=0
 
 # Pflicht-Selbsttests
 python tests\mvp_selftest.py                # 13/13
 python tools\selftest_tools.py              # 12/12
 ```
+
+Aktueller Menue-Stand: Der Top-Screen wird ueber eine echte gsp-Kommandoliste
+gerendert (`SubmitCmdList`-Ring + `0x0006`/`0x000C`/`0x0005`, `runtime/gpu.c`
+mit `BlitRGB` 0x07). `HLE_MENU_GPU` ist im Port Default; `PORT_NO_MENU_GPU=1`
+schaltet auf den alten Host-Frame-Fallback, `PORT_NO_OFFICIAL=1` deaktiviert
+den Referenz-Loader. Das naechste Ziel (beide Screens + Engine-Render) steht
+in [`HANDOVER_PROMPT.md`](HANDOVER_PROMPT.md).
 
 `python tools\build_port.py` regeneriert `build/gen_boot.c` (dauert) und
 wendet die SDK-Patches aus `tests/port.c` an. `build_boot.py` nutzt die
@@ -175,20 +186,25 @@ dekodieren (macht `tools/where.py`).
 Jede Zeile enthaelt `✅`/`❌` und die konkrete Beweiszeile. Kein
 Statusbericht ohne diesen Checker.
 
-## 7. Bekannter Meilenstein-Stand (2026-11-19)
+## 7. Bekannter Meilenstein-Stand (2026-11-22)
 
-Der Port erreicht APT, FS, DSP und GSP-Init; `boss:U`, SaveData/head.lt6,
-`0x000C`, VRAM und Frame fehlen im Normallauf. `where.py` belegt statisch
-den Resource-Manager-Wartepunkt:
+- APT, FS, DSP, GSP-Init, `boss:U`, SaveData/`head.lt6` und alle drei
+  `.fa`-Indizes laufen.
+- Der Top-Screen des Hauptmenues wird ueber den echten gsp-Pfad gerendert
+  (`SubmitCmdList`-Ring + `SetCommandList`/`TriggerCmdReqQueue`/
+  `SetBufferSwap`), `runtime/gpu.c` mit `BlitRGB`; Nachweis 0 Diff.
+- Die Engine-eigene Draw-Liste waechst: mit `HLE_DRAW_LIST=1 HLE_DRAW_FIX=1`
+  legt `fn_002800C8` echte Eintraege an (`[dl] count=11` im Probe-Log).
+- **Offen (naechstes Ziel):** beide Screens (400x240 + 320x240) uebereinander
+  und Engine-eigener Render statt Referenz-Blit. Submit-Pfade/Gates stehen
+  in [`HANDOVER_PROMPT.md`](HANDOVER_PROMPT.md).
+
+Statisch belegter RM-Wartepunkt (weiterhin gueltig):
 
 ```text
 Thread 2 wartet in fn_0028F250 auf Feld 0x0040B4C4;
 letzter Schreiber: fn_00134818 (Tick-Task Slot 2 der Tabelle 0x003D7C50)
 ```
-
-Dynamisch (ARM_MEMWATCH) ist der letzte Schreiber `pc=0x00134818`; die
-Registrierung erfolgt in `fn_001287E0` (`ldr r0,=fn_00134818`, `mov r1,#2`,
-`bl fn_00138F60`) und setzt `[0x3D91E8+0x1C]` (Tabelle `0x3D7C50`).
 
 ## 8. Schnelle Einmal-Fragen (ohne neues Skript)
 

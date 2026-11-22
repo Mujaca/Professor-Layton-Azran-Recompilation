@@ -85,8 +85,16 @@ gsp-Handler, `runtime/gpu.c` führt sie aus und schreibt real nach `0x1F000000`
 
 ```powershell
 python tools\build_port.py
-.\out\port.exe out\romfs --shot out\shot_engine.bmp
+python tools\_make_menu_frame.py          # Top- und Bottom-Referenz erzeugen
+.\out\port.exe out\romfs --shot out\shot.bmp
+python tools\_cmp_shot.py out\shot.bmp reports\menu_official.bin   # diff_pixels=0
 ```
+
+**Nächstes Ziel:** oberen und unteren 3DS-Screen (400x240 + 320x240)
+übereinander anzeigen und beide aus dem Engine-eigenen Buffer rendern
+(`SetBufferSwap screen=0/1`). Der Bottom-Referenzframe liegt als
+`reports/menu_official_bottom.bin` bereit; der vollständige Auftrag steht in
+[`docs/HANDOVER_PROMPT.md`](docs/HANDOVER_PROMPT.md).
 
 ## Trace-Harness (Phase 1b)
 
@@ -110,18 +118,26 @@ Für Emulator-Traces liegt `patches/azahar-trace.patch` bereit (Hook in
 tools/          Analyse, Extraktion, Recompiler (Python)
 runtime/        ARM11-CPU-Runtime fuer den generierten C-Code
 tests/          Semantik-Selbsttests (keystone + zig cc)
-reports/        Machbarkeitsbericht, MVP-Bericht, Statistiken
+reports/        Machbarkeitsbericht, MVP-Bericht, Statistiken, Referenzframes
+docs/           Messrezepte, Werkzeuge, Handoff-Prompt
 out/            extrahierte Daten / Testartefakte (nicht versioniert)
+  out/logs/     Mess-Logs (Historie)
+  out/shots/    Screenshots
+  out/probes/   Probe-/Alt-Binaries
+  out/pdb/      Debug-Symbole
+  out/artifacts/ Traces, .o, .raw
 build/          generierter C-Code, Objektdateien (nicht versioniert)
 ```
 
 ## Nächste Schritte
 
-1. **Azahar bauen + Patch anwenden**, einmal durchspielen → Trace → `scan --trace`
-   (hebt die Coverage von 71,5 % auf >95 %).
-2. **Dispatcher + Speicher-Map** (Adresstabelle, FCRAM/VRAM, SVC-/Service-Shims)
-   → Boot bis Hauptmenü.
-3. **GPU-Shim** (2D-first), Audio (BCSTM), Saves; danach Differenztests pro Funktion.
+1. **Beide Screens:** 400x480-Fenster, Top 400x240 + Bottom 320x240
+   uebereinander; `SetBufferSwap screen=0/1` und getrennte Framebuffer.
+2. **Engine-Render:** die Spiel-Engine baut die Szene und submitted ihre
+   Kommandoliste selbst (Draw-Liste `fn_002800C8` → `fn_001B9938`/
+   `fn_001196AC` → `0x0006`/`0x000C`/`0x0005`); Gates und Adressen stehen im
+   [`docs/HANDOVER_PROMPT.md`](docs/HANDOVER_PROMPT.md).
+3. Danach: Audio (BCSTM), Saves, Input; Differenztests pro Funktion.
 
 ## Rechtliches
 

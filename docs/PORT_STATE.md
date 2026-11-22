@@ -1,5 +1,34 @@
 # Aktueller Laufzeit-Zustand (Archiv-Mount + Datei-Loader)
 
+## Naechstes Ziel: beide 3DS-Screens + Engine-eigener Render (offen)
+
+Aktuell rendert der Port den **oberen Screen** (400x240) ueber den GPU-/gsp-Pfad
+und zeigt ihn korrekt (0 Diff). Naechster Auftrag (vollstaendig in
+[`HANDOVER_PROMPT.md`](HANDOVER_PROMPT.md)):
+
+1. **Oben + unten uebereinander** in einem 400x480-Fenster:
+   Top bei `y=0` (400x240), Bottom bei `y=240`, horizontal zentriert (`x=40`,
+   320x240). Der 3DS hat zwei getrennte Framebuffer; `SetBufferSwap(screen=0)`
+   und `SetBufferSwap(screen=1)` liefern die Adressen. In `tests/port.c` sind
+   aktuell `FB_W=400`, `FB_H=240`, `FB_ADDR=0x1F000000`; `g_gsp_fb_addr[3]`
+   in `runtime/hle/hle.c` ist noch `static` und muss fuer den Port lesbar werden.
+2. **Engine-eigener Render** statt Referenz-Blit: die Spiel-Engine baut die
+   Szene und submitted ihre Kommandoliste ueber `gsp::Gpu`. Die Draw-Liste
+   waechst bereits (`fn_002800C8`, Objekt `0x003EE12C`): nach dem Pool-Fix in
+   `HLE_DRAW_LIST` entstehen echte Eintraege (`[dl] count=11` in `probe4_log`).
+   Vorher brach der Builder bei `0x280338` ab, weil `fn_00284A38` auf einen
+   leeren Pool-Slot zeigte. Die Submit-Pfade und Gates sind im Handoff-Prompt
+   tabelliert (`fn_001196AC`/`fn_00120CFC`/`fn_00120DA0`, `fn_001B9938`/
+   `fn_0034B97C`, `fn_001263B8`, `fn_00275B24`; Gates `[0x3EE16C]`,
+   `[0x40B354]`, `[0x3D8D5D]`, `[obj+0x6A]`, `[obj+0x74]`,
+   `[renderer+0x15A3]`, `[0x40B4E0]`).
+3. **Referenzen:** der Top-Frame bleibt `reports/menu_official.bin`
+   (400x240 RGB). Der Bottom-Frame wird jetzt von
+   `python tools\_make_menu_frame.py` erzeugt:
+   `reports/menu_official_bottom.bin` (320x240 RGB) aus
+   `reports/azahar_bottomscreen.png` (Capture 432x223, aktiver Screen
+   `x=56..375`, fehlende 17 Zeilen schwarz).
+
 ## Erste lauffaehige Version: offizieller Menue-Frame ueber die GPU (neu)
 
 Der Menue-Frame wird jetzt **vom Port-GPU-Pfad gerendert**, nicht mehr per

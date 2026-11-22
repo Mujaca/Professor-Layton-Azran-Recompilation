@@ -296,3 +296,33 @@ GSP-Shared-Memory-Details, libctru-Referenzen und die bekannten Sackgassen.
 Die Werkzeuge sind dort mit ihren Aufrufen verlinkt; damit findet ein neuer
 Agent ohne Vorwissen zuerst `guest-refs`/`trace-diff` und dann die richtige
 Messung.
+
+## 16. Hilfsskripte (Projekt-Wurzel, nicht `g3ds`)
+
+| Skript | Zweck |
+|---|---|
+| `tools\_make_menu_frame.py` | erzeugt `out/menu_official.bin` (Top 400x240) und `reports/menu_official_bottom.bin` (Bottom 320x240) aus den Azahar-Captures |
+| `tools\_cmp_shot.py` | Pixeldiff BMP/PNG gegen `reports/menu_official*.bin` (`diff_pixels`, `maxdiff`) |
+| `tools\_analyze_screens.py` | Capture-Geometrie (aktiver Screen, Bounding-Box, Grob-Raster) |
+| `tools\_tidy_out.ps1` | raeumt `out/` in `logs/`, `shots/`, `probes/`, `pdb/`, `artifacts/`, `backup/` auf |
+
+## 17. `out/`-Ablage (aufgeraeumt)
+
+```
+out/port.exe, out/boot.exe      aktuelle Binaries
+out/romfs/                      extrahierte RomFS (3 .fa, 566 BCSTM, 34 MOFLEX)
+out/exefs/code_decomp.bin       dekompilierter Code (Basis 0x100000)
+out/romfs_image.bin             gepatchtes SelfNCCH-Image (pristine)
+out/menu_official.bin           Top-Referenz (400x240 RGB)
+out/menu_official_bottom.bin    Bottom-Referenz (320x240 RGB)
+out/shot.bmp                    aktueller GPU-Screenshot
+out/logs/                       Mess-Logs (Historie)
+out/shots/                      weitere Screenshots
+out/probes/                     Probe-/Alt-Binaries
+out/pdb/                        Debug-Symbole
+out/artifacts/                  Traces, .o, .raw, missing_calls
+out/backup/                     romfs_image.hashpatch.bak
+```
+
+`out/` und `build/` sind nicht versioniert; die Referenzframes unter
+`reports/` schon.

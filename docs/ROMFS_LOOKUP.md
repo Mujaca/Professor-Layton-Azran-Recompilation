@@ -56,16 +56,29 @@ unerreichbar. `tools/patch_romfs_lookup.py` setzt das Bucket-Wort auf den
 Record und den HASHNEXT des Records auf den alten Kopf (sibling +4 bleibt).
 Offline-Check: 610/610 Dateien erreichbar.
 
-## Offen: leere erste Pfadkomponente
+## Fix 3 (erledigt): leere erste Pfadkomponente
 
 Der Pfad kommt als `/lt6/snd/uk/product.bcsar` (nach "rom:") an. Der
 Komponenten-Splitter liefert fuer das fuehrende `/` eine Komponente mit
-`lenChars = 0`, dadurch wird `""` gehasht und die Kette degeneriert.
-Messung an `0x212E3C`: Deskriptor `{seed=0, lenChars=0, ptr=/lt6/...}`,
-Vergleich mit leerem Key (`r0=0`), Record-Puffer = Muell.
+`lenChars = 0`; der Startverzeichnis-Slot `[sp+0x1C]` wird fuer den ersten
+Bestandteil gelesen, aber nicht initialisiert (stale Stack, z. B. `0xF0`
+= `stream`).
 
-In-place-Kuerzen des Strings an `0x33D8B8` (Sonde `HLE_PATH_FIX`) hilft
-nicht, weil das String-Objekt vorher gebaut wird.
+Fix in `runtime/arm_trace.c`, Block `0x00399244`: wenn der erste
+Pfadbestandteil leer ist (`[fp+0xC] == 0`), wird `[sp+0x1C] = 0` (Root)
+gesetzt.
+
+Beleg (Lauf mit `HLE_PARSE_FIX=1`, `HLE_BOOT_LOG=1`):
+
+```
+[parse] len=0 seed=00000000 ptr='/lt6/arc/lt6_a.fa'
+[parse] len=3 seed=00000000 ptr='lt6/arc/lt6_a.fa'
+[vfs2] pc=002808F4 r0=00000001
+[boot] arcmagic=30435241 (want 30435241)
+```
+
+Damit oeffnen `lt6_a.fa`, `lt6_b.fa` und `lt6_uk.fa`; die drei ARC0-Indizes
+werden ueber `hle_fa_read()` vollstaendig geladen.
 
 ## Sprache
 

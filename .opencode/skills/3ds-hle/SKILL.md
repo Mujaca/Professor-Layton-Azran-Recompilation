@@ -133,8 +133,13 @@ SetBufferSwap, `0x0006` SetCommandList, `0x0007` RequestDma,
 TriggerCmdReqQueue, `0x0013` RegisterInterruptRelayQueue,
 `0x0018` ImportDisplayCaptureInfo.
 
-Im heutigen Port-Lauf sieht man nur `0x0010`, `0x0013`, `0x0016`,
-`0x001E`; `0x0006`/`0x000C` werden vom Spielcode nicht erreicht.
+Im Normallauf (Spielcode allein) sieht man nur `0x0010`, `0x0013`, `0x0016`,
+`0x001E`; `0x0006`/`0x000C` werden vom Spielcode nicht erreicht. Fuer den
+Menue-Meilenstein reicht `runtime/hle/hle.c` (`hle_menu_gpu_submit`) eine
+synthetische Kommandoliste durch dieselben Handler: `SubmitCmdList`-Ring
+(id 1) + `0x0006` + `0x000C` + `0x0005`; das ist belegt (0 Pixel Diff),
+aber noch **kein** Engine-Render. Gates/Pfade fuer den echten Render stehen
+in `docs/HANDOVER_PROMPT.md`.
 
 ### APT:U
 `0x0001` GetLockHandle, `0x0002` Initialize, `0x0003`/`0x0004`
@@ -245,7 +250,11 @@ Diese Aenderungen wurden bereits gemessen und brachten **kein** `boss:U`:
    und der Gastaufruf funktionieren; sie erzeugen keinen Spiel-Renderzustand.
 7. Die PICA-Liste ist im Normallauf leer (GSP-Shmem nur ein Nullwort), und
    `fn_0013E3E0` (Trigger `0x000C`) wird nie ausgefuehrt; `ARM_WATCH=13E3E0`
-   ergab 0 Treffer (`reports/PORT.md`).
+   ergab 0 Treffer (`reports/PORT.md`). Der Menue-Frame laeuft inzwischen
+   ueber eine HLE-eigene Liste (`hle_menu_gpu_submit`), nicht ueber den
+   Spielcode; die Engine-eigene Draw-Liste waechst mit
+   `HLE_DRAW_LIST=1 HLE_DRAW_FIX=1` (`fn_002800C8`, `count=11`) und ist der
+   naechste Schritt.
 
 Wichtig: `boss:U` ist der **erste fehlende Dienst** im kanonischen
 trace-diff, nicht automatisch die Ursache. Erst die Referenzreihenfolge
