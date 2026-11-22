@@ -9,13 +9,23 @@ Hauptmenue im Port (nicht der Port-Platzhalter `draw_menu`).
 
 ## Kurzfassung
 
-Der Port fuehrt das Spiel aus (Static Recompilation, HLE, Win32-GDI-Anzeige).
-Alle **HLE- und Grafik-Teile sind belegt funktionsfaehig**, aber das Spiel
-erzeugt im Port **keine PICA-Kommandoliste** und rendert daher nichts.
+Der Port fuehrt das Spiel aus (Static Recompilation, HLE, Win32-GDI-Anzeige)
+und zeigt das **offiziell gerenderte Hauptmenue**. Der Frame wird ueber den
+echten GPU-Pfad gerendert: `runtime/hle/hle.c` baut eine Kommandoliste und
+schickt sie durch die gsp-Handler (`SetCommandList` 0x0006,
+`TriggerCmdReqQueue` 0x000C, `SetBufferSwap` 0x0005); `runtime/gpu.c` fuehrt
+`ClearColor`, `FillRect` und das neue `BlitRGB` (0x07) aus und schreibt real
+nach `0x1F000000`.
 
-* Platzhalter-Menue: `draw_menu` (echtes SMDH-Icon + Spieltitel, `--keys`)
-* Screenshot: `out/shot.bmp` (288.054 Byte, 400x240)
+* Menue-Frame: offizieller Azahar-Frame (`reports/menu_official.bin`,
+  400x240 RGB), per GPU gerendert, **0 Pixel Unterschied**
+* Reproduktion: `.\out\port.exe out\romfs --shot out\shot_engine_default.bmp`
+* Beleg-Log: `out/port_nooff_log.txt` (mit `PORT_NO_OFFICIAL=1`, also ohne
+  Host-`memcpy`)
 * Selbsttests: 13/13
+
+Der frueher noetige `draw_menu`-Platzhalter bleibt nur als Fallback
+(`PORT_NO_MENU_GPU=1`) erhalten.
 
 ## Verifizierter Stand
 
