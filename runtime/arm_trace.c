@@ -1455,6 +1455,26 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
             if (++fa_reg_n >= 3) arm_fa_ready = 1;
         }
     }
+    if (c != NULL && pc == 0x0028DE44u &&
+        (getenv("HLE_SCENE_RES") || getenv("HLE_SCENE_FORCE"))) {
+        static int onres = 0;
+        if (onres < 80) {
+            uint32_t r6 = c->r[6], obj = 0, res = 0, fl = 0;
+            memcpy(&obj, c->mem + (r6 & 0x1FFFFFFFu), 4);
+            if (obj >= 0x08000000u && obj < 0x20000000u)
+                memcpy(&res, c->mem + ((obj + 8u) & 0x1FFFFFFFu), 4);
+            if (res >= 0x08000000u && res < 0x20000000u)
+                memcpy(&fl, c->mem + ((res + 0x14u) & 0x1FFFFFFFu), 4);
+            if (res >= 0x08000000u && res < 0x20000000u &&
+                getenv("HLE_SCENE_FORCE") != NULL) {
+                uint32_t nf = fl | 1u;
+                memcpy(c->mem + ((res + 0x14u) & 0x1FFFFFFFu), &nf, 4);
+                fl = nf;
+            }
+            printf("[sceneres] entry=%08X obj=%08X res=%08X flag=%08X\n", r6, obj, res, fl);
+            fflush(stdout); onres++;
+        }
+    }
     if (c != NULL && pc == 0x00399244u) {
         /* Startverzeichnis des RomFS-Parsers auf Root (0) setzen, wenn der
            erste Pfadbestandteil leer ist (absoluter Pfad mit fuehrendem '/').
