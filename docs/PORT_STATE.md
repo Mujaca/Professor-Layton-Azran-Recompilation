@@ -67,6 +67,24 @@ Der Frame-Callback wird jetzt **vom Spiel selbst** registriert:
 installiertem Handler; der naechste Schritt ist der Ressourcen-Load der
 Menue-Szene und der GPU-Submit.
 
+### Alle drei .fa-Indizes laden (b/uk-Fix)
+
+- `hle_fa_read()` akzeptiert jetzt auch die synthetischen Guard-Objekte
+  (`fob >= 0x00100000`, b/uk bei `0x0040xxxx`) und mappt zusaetzlich die
+  Streams `0x08000090`->`lt6_b.fa`, `0x080000C8`->`lt6_uk.fa`.
+- Beleg (`out/buk4_log.txt`):
+
+```
+reg name='arc/lt6_b.fa' guard=00401000
+[faread] idx=1 pos=00000000 want=48 n=72
+idxcopy r0=004000C8 ... r3=00000200 h4=00000048 h8=00000248
+hdrbuf: 30435241 00000048 00000248 000002D0 0000544C 00006D24 ... 0000B2B0
+[faread] idx=1 pos=... 0x1000-Chunks
+[faread] idx=2 (lt6_uk): 19 Reads
+```
+
+Damit sind lt6_a, lt6_b und lt6_uk vollstaendig indexiert.
+
 ## RomFS-Lookup: neue Befunde (fuer den Engine-Renderpfad)
 
 - Dir-Baum (aus dem RomFS-Image): `0x0 ""`, `0x18 lt6`, `0x38 arc`,
