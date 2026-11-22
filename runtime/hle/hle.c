@@ -359,8 +359,13 @@ void hle_pump(void) {
             printf("[queuefake] 0x408508: count=1 pos=0\n");
         }
     }
-    if (getenv("HLE_GPU_SUBMIT")) hle_gpu_submit_once();
-    if (getenv("HLE_MENU_GPU")) hle_menu_gpu_submit();
+    {
+        static int gpu_submit_env = -1, menu_gpu_env = -1;
+        if (gpu_submit_env < 0) gpu_submit_env = (getenv("HLE_GPU_SUBMIT") != NULL);
+        if (menu_gpu_env < 0) menu_gpu_env = (getenv("HLE_MENU_GPU") != NULL);
+        if (gpu_submit_env) hle_gpu_submit_once();
+        if (menu_gpu_env) hle_menu_gpu_submit();
+    }
     /* Zweite Gastfunktion pro Tick (z. B. Menue-Szene + GX-Pfad). */
     {
         static const char *fl2_env = NULL;
@@ -451,7 +456,10 @@ void hle_pump(void) {
         }
     }
     /* Diagnose: Draw-Liste des Menue-Objekts 0x003EE12C dumpen. */
-    if (g_frame_cpu != NULL && getenv("HLE_DUMP_DRAWLIST")) {
+    {
+        static int dump_dl_env = -1;
+        if (dump_dl_env < 0) dump_dl_env = (getenv("HLE_DUMP_DRAWLIST") != NULL);
+    if (dump_dl_env && g_frame_cpu != NULL) {
         static unsigned dlc = 0;
         if ((++dlc & 0xFFFu) == 0) {
             uint32_t arr = 0, cnt = 0, cap = 0 /*, w = 0 */;
@@ -475,6 +483,7 @@ void hle_pump(void) {
             }
             fflush(stdout);
         }
+    }
     }
     }
     if (!g_guest_lock_init || g_no_lock) return;
