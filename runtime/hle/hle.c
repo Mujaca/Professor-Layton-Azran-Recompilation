@@ -243,7 +243,13 @@ static void hle_tick(ArmCpu *c) {
                 memcpy(c->mem + 0x3EE18Cu, &stride, 4);
                 memcpy(c->mem + 0x3EE190u, &zero16, 2);
                 memcpy(c->mem + 0x3EE194u, &one, 2);
-                memcpy(c->mem + (pool & 0x1FFFFFFFu), &obj, 4);
+                /* Pool-Slots mit Scratch-Objekten fuellen: fn_00284A38 liefert
+                   base+index*stride, und der Builder liest dort den Objektzeiger.
+                   Ohne gefuellte Slots bricht er bei 0x280338 ab. */
+                for (uint32_t i = 0; i < 0x100u; i++) {
+                    uint32_t o = obj + i * 0x100u;
+                    memcpy(c->mem + ((pool + i * 4u) & 0x1FFFFFFFu), &o, 4);
+                }
             }
         }
     }
