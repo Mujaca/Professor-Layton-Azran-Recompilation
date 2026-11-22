@@ -194,6 +194,29 @@ static void hle_tick(ArmCpu *c) {
             }
         }
     }
+    /* HLE_SCENE_NAME_INIT: Szenen-Wide-String setzen, falls der Init-Block
+       0x101508 nie erreicht wird. */
+    {
+        static int sn_init = -1;
+        if (sn_init < 0) sn_init = (getenv("HLE_SCENE_NAME_INIT") != NULL);
+        if (sn_init) {
+            const char *nm = getenv("HLE_SCENE_NAME_INIT");
+            if (nm != NULL && *nm != 0) {
+                uint32_t base = 0x003EE16Cu & 0x1FFFFFFFu;
+                uint16_t first = 0;
+                memcpy(&first, c->mem + base, 2);
+                if (first == 0u) {
+                    int i;
+                    for (i = 0; nm[i] != 0 && i < 0xFE; i++) {
+                        uint16_t ch = (uint16_t)(unsigned char)nm[i];
+                        memcpy(c->mem + base + (uint32_t)i * 2u, &ch, 2);
+                    }
+                    { uint16_t z = 0;
+                      memcpy(c->mem + base + (uint32_t)i * 2u, &z, 2); }
+                }
+            }
+        }
+    }
     now = (uint64_t)GetTickCount64();
     if (now - last < (uint64_t)period_ms) return;
     last = now;
