@@ -22,12 +22,13 @@ und zeigt ihn korrekt (0 Diff). Naechster Auftrag (vollstaendig in
    `fn_0034B97C`, `fn_001263B8`, `fn_00275B24`; Gates `[0x3EE16C]`,
    `[0x40B354]`, `[0x3D8D5D]`, `[obj+0x6A]`, `[obj+0x74]`,
    `[renderer+0x15A3]`, `[0x40B4E0]`).
-3. **Referenzen:** der Top-Frame bleibt `reports/menu_official.bin`
-   (400x240 RGB). Der Bottom-Frame wird jetzt von
-   `python tools\_make_menu_frame.py` erzeugt:
-   `reports/menu_official_bottom.bin` (320x240 RGB) aus
-   `reports/azahar_bottomscreen.png` (Capture 432x223, aktiver Screen
-   `x=56..375`, fehlende 17 Zeilen schwarz).
+3. **Referenzen (nur Vergleich, nicht Renderquelle):** Top
+   `reports/menu_official.bin` (400x240 RGB), Bottom
+   `reports/menu_official_bottom.bin` (320x240 RGB, erzeugt von
+   `python tools\_make_menu_frame.py` aus `reports/azahar_bottomscreen.png`;
+   Capture 432x223, aktiver Screen `x=56..375`, fehlende 17 Zeilen schwarz).
+   Der bisherige Referenz-Blit in `hle_menu_gpu_submit` wird im finalen Lauf
+   abgeschaltet.
 
 ## Erste lauffaehige Version: offizieller Menue-Frame ueber die GPU (neu)
 
