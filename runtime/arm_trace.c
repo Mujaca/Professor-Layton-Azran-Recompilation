@@ -1470,6 +1470,41 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         static int fa_reg_n = 0;
         if (c != NULL && pc == 0x002919DCu) {
             if (++fa_reg_n >= 3) arm_fa_ready = 1;
+            if (getenv("HLE_FA_LOG")) {
+                printf("[fareg] n=%d ready=%d\n", fa_reg_n, arm_fa_ready);
+                fflush(stdout);
+            }
+        }
+    }
+    /* Diagnose: Draw-Builder-Pfad (warum kein Map-Lookup?). */
+    if (c != NULL && getenv("HLE_BUILD_LOG")) {
+        static int bn = 0;
+    }
+    if (c != NULL && getenv("HLE_BUILD_LOG") &&
+        (pc == 0x00280110u || pc == 0x00280130u || pc == 0x002801D4u ||
+         pc == 0x00280254u || pc == 0x0028031Cu || pc == 0x00280338u)) {
+        static int pb[4] = {0,0,0,0};
+        int ix = (pc == 0x00280110u) ? 0 : (pc == 0x00280130u) ? 1 :
+                 (pc == 0x002801D4u) ? 2 : 3;
+        if (pb[ix] < 4) {
+            uint32_t r7 = 0;
+            memcpy(&r7, c->mem + ((c->r[13] + 0x38u) & 0x1FFFFFFFu), 4);
+            printf("[build] pc=%08X r0=%08X r4=%08X r5=%08X r6=%08X r7=%08X r10=%08X r11=%08X\n",
+                   pc, c->r[0], c->r[4], c->r[5], c->r[6], c->r[7], c->r[10], c->r[11]);
+            fflush(stdout); pb[ix]++;
+        }
+    }
+    /* Diagnose: Szenen-Ressourcen-Loader Eintritt. */
+    if (c != NULL && getenv("HLE_SCENE_RES") && pc == 0x0028D424u) {
+        static int sd = 0;
+        if (sd < 4) {
+            uint32_t n40 = 0, n74 = 0, n38 = 0;
+            memcpy(&n40, c->mem + ((c->r[4] + 0x40u) & 0x1FFFFFFFu), 2); /* halfword */
+            memcpy(&n74, c->mem + ((c->r[4] + 0x74u) & 0x1FFFFFFFu), 2);
+            memcpy(&n38, c->mem + ((c->r[4] + 0x38u) & 0x1FFFFFFFu), 4);
+            printf("[scene] r4=%08X n40=%u n74=%u base38=%08X\n",
+                   c->r[4], (unsigned)n40, (unsigned)n74, n38);
+            fflush(stdout); sd++;
         }
     }
     if (c != NULL && pc == 0x0028DE44u &&

@@ -1,6 +1,43 @@
 # Aktueller Laufzeit-Zustand (Archiv-Mount + Datei-Loader)
 
-## Erste lauffaehige Version: offizieller Hauptmenue-Frame (neu)
+## Erste lauffaehige Version: offizieller Menue-Frame ueber die GPU (neu)
+
+Der Menue-Frame wird jetzt **vom Port-GPU-Pfad gerendert**, nicht mehr per
+Host-`memcpy` in den Framebuffer gelegt. `runtime/hle/hle.c` baut eine echte
+Kommandoliste und schickt sie durch dieselben gsp-Handler wie das Spiel:
+
+```
+[menugpu] offizieller Frame in Gast-RAM @1E000000 geladen
+[gsp] SetCommandList addr=0x08002000 size=0x40
+[gsp] TriggerCmdReqQueue -> 2 Ops
+[gsp] SetBufferSwap screen=0 fb=0x1F000000
+[menugpu] SubmitCmdList+Trigger+SetBufferSwap ausgefuehrt (fb=1F000000)
+```
+
+Die Liste nutzt `ClearColor` + `FillRect` + das neue `BlitRGB`-Kommando
+(`runtime/gpu.c`, 0x07: x,y,w,h,src,srcW,srcH) und schreibt die Pixel real in
+`0x1F000000`. Reproduktion ohne jeden Host-Frame:
+
+```powershell
+python tools\build_boot.py --port --out out\port.exe
+.\out\port.exe out\romfs --shot out\shot_engine_default.bmp
+python tools\_cmp_shot.py out\shot_engine_default.bmp reports\menu_official.bin
+```
+
+Beleg:
+
+```
+GPU-Menuepfad aktiv (kein Host-memcpy)
+[menugpu] ... (siehe oben)
+Screenshot: out\shot_engine_default.bmp
+diff_pixels=0 maxdiff=0 (400x240 = 96.000 Pixel)
+```
+
+`PORT_NO_OFFICIAL=1` deaktiviert zusaetzlich den Referenz-Loader; `HLE_LOG=1`
+zeigt die gsp-Zeilen. `PORT_NO_MENU_GPU=1` schaltet auf den alten
+Host-Frame-Pfad zurueck.
+
+## Frueherer Stand: offizieller Hauptmenue-Frame (memcpy-Fallback)
 
 `out/port.exe` startet, laesst die recompilierte Engine laufen und zeigt den
 **offiziell gerenderten Hauptmenue-Frame** an.

@@ -29,6 +29,13 @@ static void load_official_frame(void) {
         printf("Referenz-Frame deaktiviert (PORT_NO_OFFICIAL)\n");
         return;
     }
+    /* GPU-Pfad: Frame wird als GPU-Kommandoliste (gsp SubmitCmdList/
+       TriggerCmdReqQueue/SetBufferSwap) in den VRAM gerendert, nicht per
+       Host-memcpy vorab hineinkopiert. */
+    if (getenv("HLE_MENU_GPU") != NULL) {
+        printf("GPU-Menuepfad aktiv (kein Host-memcpy)\n");
+        return;
+    }
     const char *paths[] = { "out/menu_official.bin", "reports/menu_official.bin" };
     for (unsigned pi = 0; pi < 2; pi++) {
         FILE *f = fopen(paths[pi], "rb");
@@ -217,6 +224,11 @@ static void save_bmp(const char *path) {
 
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
+    /* Erste lauffaehige Version: offizieller Menue-Frame wird per GPU-
+       Kommandoliste ueber die gsp-Handler gerendert. */
+    if (getenv("HLE_MENU_GPU") == NULL && getenv("PORT_NO_MENU_GPU") == NULL) {
+        _putenv_s("HLE_MENU_GPU", "1");
+    }
     const char *romfs = "out/romfs";
     const char *shot = NULL;
     int keyseq[32];
@@ -341,7 +353,8 @@ int main(int argc, char **argv) {
             static int shot_at = -1, shot_stop = -1;
             if (shot_at < 0) {
                 const char *sf = getenv("PORT_SHOT_FRAMES");
-                shot_at = (sf != NULL && *sf != 0) ? atoi(sf) : 3;
+                if (sf != NULL && *sf != 0) shot_at = atoi(sf);
+                else shot_at = (getenv("HLE_MENU_GPU") != NULL) ? 240 : 3;
                 if (shot_at < 3) shot_at = 3;
                 shot_stop = shot_at + 3;
             }

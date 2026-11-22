@@ -119,6 +119,72 @@ static void hle_gpu_submit_once(void)
     }
 }
 
+/* Menue-Frame als echte GPU-Kommandoliste ueber die gsp-Handler abgeben.
+ * Die Liste zeichnet den offiziell gerenderten Menue-Frame als RGB-Blit in
+ * den Framebuffer; SubmitCmdList (0x0006Rev) + TriggerCmdReqQueue (0x000C) und
+ * SetBufferSwap (0x0005) laufen durch dieselben HLE-Handler wie beim Spiel. */
+static void hle_menu_gpu_submit(void)
+{
+    static int done = 0;
+    static int loaded = 0;
+    const uint32_t src = 0x1E000000u;   /* Textur-/Datenquelle im Gast-RAM */
+    const uint32_t cl  = 0x08002000u;   /* Kommandoliste */
+    const uint32_t fb  = 0x1F000000u;   /* Port-Framebuffer */
+    const uint32_t W = 400u, H = 240u;
+    if (done || g_hle_gsp_handle == 0 || g_frame_cpu == NULL) return;
+    if (!loaded) {
+        FILE *f = fopen("out/menu_official.bin", "rb");
+        if (!f) f = fopen("reports/menu_official.bin", "rb");
+        if (f) {
+            size_t n = fread(g_frame_cpu->mem + src, 1, (size_t)W * H * 3u, f);
+            fclose(f);
+            loaded = (n == (size_t)W * H * 3u);
+        }
+        if (!loaded) return;
+        printf("[menugpu] offizieller Frame in Gast-RAM @%08X geladen\n", src);
+    }
+    {
+        uint32_t list[16];
+        uint32_t *buf;
+        int k = 0;
+        list[k++] = 0x04000000u;          /* ClearColor = 0x000000 */
+        list[k++] = 0x050FFFFFu;          /* FillRect */
+        list[k++] = 4u;
+        list[k++] = 0u; list[k++] = 0u;
+        list[k++] = W;  list[k++] = H;
+        list[k++] = 0x070FFFFFu;          /* BlitRGB */
+        list[k++] = 7u;
+        list[k++] = 0u;      /* x */
+        list[k++] = 0u;      /* y */
+        list[k++] = W;       /* w */
+        list[k++] = H;       /* h */
+        list[k++] = src;     /* Quelle */
+        list[k++] = W;       /* srcW */
+        list[k++] = H;       /* srcH */
+        memcpy(g_frame_cpu->mem + cl, list, sizeof(list));
+
+        buf = (uint32_t *)(g_frame_cpu->mem + g_frame_cpu->tpidruro + 0x80u);
+        buf[0] = (0x0006u << 16) | (3u << 6);   /* SetCommandList */
+        buf[1] = cl;
+        buf[2] = (uint32_t)sizeof(list);
+        buf[3] = 0u;
+        dispatch_ipc(g_hle_gsp_handle);
+
+        buf[0] = (0x000Cu << 16);               /* TriggerCmdReqQueue */
+        buf[1] = 0u;
+        dispatch_ipc(g_hle_gsp_handle);
+
+        buf[0] = (0x0005u << 16) | (2u << 6);   /* SetBufferSwap(screen, fb) */
+        buf[1] = 0u;
+        buf[2] = fb;
+        dispatch_ipc(g_hle_gsp_handle);
+        gpu_set_fb(fb);
+        printf("[menugpu] SubmitCmdList+Trigger+SetBufferSwap ausgefuehrt (fb=%08X)\n", fb);
+        fflush(stdout);
+    }
+    done = 1;
+}
+
 /* VBlank-/Frame-Dispatcher: Die Engine registriert ihre Tick-Tasks in der
    Callback-Tabelle 0x3D7C50 (Basis [0x3D91E8+0x1C]); Slot 2 = 0x00134818
    (Timebase 0x400) und Slot 3 = 0x0013485C (Timebase 0x401). Ohne diese
@@ -269,6 +335,7 @@ void hle_pump(void) {
         }
     }
     if (getenv("HLE_GPU_SUBMIT")) hle_gpu_submit_once();
+    if (getenv("HLE_MENU_GPU")) hle_menu_gpu_submit();
     /* Zweite Gastfunktion pro Tick (z. B. Menue-Szene + GX-Pfad). */
     {
         static const char *fl2_env = NULL;
@@ -356,6 +423,32 @@ void hle_pump(void) {
                 memcpy(g_frame_cpu->r, fsave, sizeof(fsave));
                 in_frame_call = 0;
             }
+        }
+    }
+    /* Diagnose: Draw-Liste des Menue-Objekts 0x003EE12C dumpen. */
+    if (g_frame_cpu != NULL && getenv("HLE_DUMP_DRAWLIST")) {
+        static unsigned dlc = 0;
+        if ((++dlc & 0xFFFu) == 0) {
+            uint32_t arr = 0, cnt = 0, cap = 0 /*, w = 0 */;
+            uint16_t h = 0;
+            memcpy(&arr, g_frame_cpu->mem + ((0x003EE12Cu + 0x6Cu) & 0x1FFFFFFFu), 4);
+            memcpy(&h, g_frame_cpu->mem + ((0x003EE12Cu + 0x74u) & 0x1FFFFFFFu), 2);
+            cnt = h;
+            memcpy(&h, g_frame_cpu->mem + ((0x003EE12Cu + 0x76u) & 0x1FFFFFFFu), 2);
+            cap = h;
+            printf("[dl] arr=%08X count=%u cap=%u\n", arr, cnt, cap);
+            for (uint32_t i = 0; i < 4u && i < cnt; i++) {
+                uint32_t op = 0;
+                memcpy(&op, g_frame_cpu->mem + ((arr + i * 4u) & 0x1FFFFFFFu), 4);
+                printf("[dl]  ent[%u]=%08X:", i, op);
+                for (uint32_t k = 0; k < 12u; k++) {
+                    uint32_t w = 0;
+                    memcpy(&w, g_frame_cpu->mem + ((op + k * 4u) & 0x1FFFFFFFu), 4);
+                    printf(" %08X", w);
+                }
+                printf("\n");
+            }
+            fflush(stdout);
         }
     }
     }

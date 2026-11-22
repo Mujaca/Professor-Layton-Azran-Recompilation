@@ -52,6 +52,29 @@ static void fill_rect(ArmCpu *c, int x, int y, int w, int h, uint32_t rgb)
             put_px(c, x + i, y + j, rgb);
 }
 
+/* Kopiert ein RGB24-Rechteck aus dem Gast-Speicher in den Framebuffer.
+   Parameter: x, y, w, h, src, srcW, srcH. Damit kann der Menue-Frame als
+   echte GPU-Operation (Textur-/Datenblit) gerendert werden. */
+static void blit_rgb(ArmCpu *c, int x, int y, int w, int h,
+                     uint32_t src, int srcW, int srcH)
+{
+    for (int j = 0; j < h; j++) {
+        int sy = j;
+        if (srcH > 0 && sy >= srcH) sy = srcH - 1;
+        for (int i = 0; i < w; i++) {
+            int sx = i;
+            if (srcW > 0 && sx >= srcW) sx = srcW - 1;
+            uint32_t off = (src & 0x1FFFFFFFu) +
+                           ((uint32_t)sy * (uint32_t)(srcW > 0 ? srcW : w) + (uint32_t)sx) * 3u;
+            if (off + 3u > c->mem_size) continue;
+            uint32_t rgb = ((uint32_t)c->mem[off + 0u]) |
+                           ((uint32_t)c->mem[off + 1u] << 8) |
+                           ((uint32_t)c->mem[off + 2u] << 16);
+            put_px(c, x + i, y + j, rgb);
+        }
+    }
+}
+
 static void draw_tri(ArmCpu *c, int x1, int y1, int x2, int y2, int x3, int y3,
                      uint32_t rgb)
 {
@@ -132,6 +155,13 @@ int gpu_run_command_list(ArmCpu *c, uint32_t addr, uint32_t size)
                     memcpy(&p[i], c->mem + ((a + i * 4u) & 0x1FFFFFFFu), 4);
                 draw_tri(c, (int)p[0], (int)p[1], (int)p[2], (int)p[3],
                          (int)p[4], (int)p[5], p[6]);
+                ops++;
+            } else if (cmd == 0x07u && cnt >= 7u) {
+                uint32_t p[7];
+                for (uint32_t i = 0; i < 7u; i++)
+                    memcpy(&p[i], c->mem + ((a + i * 4u) & 0x1FFFFFFFu), 4);
+                blit_rgb(c, (int)p[0], (int)p[1], (int)p[2], (int)p[3],
+                         p[4], (int)p[5], (int)p[6]);
                 ops++;
             }
             a += cnt * 4u;
