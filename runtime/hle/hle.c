@@ -206,13 +206,17 @@ static void hle_tick(ArmCpu *c) {
                 uint16_t first = 0;
                 memcpy(&first, c->mem + base, 2);
                 if (first == 0u) {
-                    int i;
-                    for (i = 0; nm[i] != 0 && i < 0xFE; i++) {
+                    int i, len = 0;
+                    uint16_t l16;
+                    while (nm[len] != 0 && len < 0xFE) len++;
+                    l16 = (uint16_t)len;
+                    memcpy(c->mem + base, &l16, 2);
+                    for (i = 0; i < len; i++) {
                         uint16_t ch = (uint16_t)(unsigned char)nm[i];
-                        memcpy(c->mem + base + (uint32_t)i * 2u, &ch, 2);
+                        memcpy(c->mem + base + 2u + (uint32_t)i * 2u, &ch, 2);
                     }
                     { uint16_t z = 0;
-                      memcpy(c->mem + base + (uint32_t)i * 2u, &z, 2); }
+                      memcpy(c->mem + base + 2u + (uint32_t)len * 2u, &z, 2); }
                 }
             }
         }
