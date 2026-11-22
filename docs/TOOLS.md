@@ -305,6 +305,7 @@ Messung.
 | `tools\_cmp_shot.py` | Pixeldiff BMP/PNG gegen `reports/menu_official*.bin` (`diff_pixels`, `maxdiff`) |
 | `tools\_analyze_screens.py` | Capture-Geometrie (aktiver Screen, Bounding-Box, Grob-Raster) |
 | `tools\_tidy_out.ps1` | raeumt `out/` in `logs/`, `shots/`, `probes/`, `pdb/`, `artifacts/`, `backup/` auf |
+| `tools\_check_doc_paths.py` | prueft `out/...`-Pfade in allen Markdown-Dokumenten auf Existenz |
 
 ## 17. `out/`-Ablage (aufgeraeumt)
 
