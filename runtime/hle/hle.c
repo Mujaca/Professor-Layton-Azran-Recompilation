@@ -346,7 +346,13 @@ void hle_pump(void) {
                 }
                 printf("[frameloop] call 0x%08X r0=%08X\n", fa, g_frame_cpu->r[0]);
                 fflush(stdout);
-                arm_call_guest_pub(g_frame_cpu, fa);
+                {
+                    uint16_t sv = 0, zz = 0;
+                    memcpy(&sv, g_frame_cpu->mem + 0x3EE16Cu, 2);
+                    memcpy(g_frame_cpu->mem + 0x3EE16Cu, &zz, 2);
+                    arm_call_guest_pub(g_frame_cpu, fa);
+                    memcpy(g_frame_cpu->mem + 0x3EE16Cu, &sv, 2);
+                }
                 memcpy(g_frame_cpu->r, fsave, sizeof(fsave));
                 in_frame_call = 0;
             }
