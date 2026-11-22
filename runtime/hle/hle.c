@@ -200,8 +200,9 @@ static void hle_tick(ArmCpu *c) {
         static int sn_init = -1;
         if (sn_init < 0) sn_init = (getenv("HLE_SCENE_NAME_INIT") != NULL);
         if (sn_init) {
+            extern int arm_fa_ready;
             const char *nm = getenv("HLE_SCENE_NAME_INIT");
-            if (nm != NULL && *nm != 0) {
+            if (arm_fa_ready && nm != NULL && *nm != 0) {
                 uint32_t base = 0x003EE16Cu & 0x1FFFFFFFu;
                 uint16_t first = 0;
                 memcpy(&first, c->mem + base, 2);
