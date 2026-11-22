@@ -22,11 +22,24 @@ int hle_fa_read(ArmCpu *c) {
     size_t n;
     if (c == NULL) return -1;
     fob = c->r[0];
-    if (fob < 0x08000000u || fob >= 0x20000000u) return -1;
+    if (fob < 0x00100000u || fob >= 0x20000000u) return -1;
     memcpy(&stream, c->mem + (fob & 0x1FFFFFFFu), 4);
     if (stream < 0x08000000u || stream >= 0x20000000u) return -1;
     memcpy(&pos, c->mem + ((fob + 4u) & 0x1FFFFFFFu), 4);
     memcpy(&size, c->mem + ((stream + 0x10u) & 0x1FFFFFFFu), 4);
+    /* Synthetischer HLE_REG_ENABLE-Archivguard: feste Objektadressen fuer
+       lt6_b.fa / lt6_uk.fa, deren Stream-Groesse 0 bleibt. */
+    if (size != 0x004C1448u && size != 0x108BDFB8u && size != 0x09BD69CCu) {
+        uint32_t forced = 0;
+        if (fob == 0x004000C8u) forced = 0x108BDFB8u;      /* lt6_b.fa */
+        else if (fob == 0x00400188u) forced = 0x09BD69CCu; /* lt6_uk.fa */
+        else if (stream == 0x08000090u) forced = 0x108BDFB8u; /* lt6_b.fa */
+        else if (stream == 0x080000C8u) forced = 0x09BD69CCu; /* lt6_uk.fa */
+        if (forced != 0u) {
+            size = forced;
+            memcpy(c->mem + ((stream + 0x10u) & 0x1FFFFFFFu), &forced, 4);
+        }
+    }
     if (size != 0x004C1448u && size != 0x108BDFB8u && size != 0x09BD69CCu) {
         uint32_t alt = 0;
         if ((fob & 0x1FFFFFFFu) >= 8u &&
@@ -55,6 +68,12 @@ int hle_fa_read(ArmCpu *c) {
     npos = pos + (uint32_t)n;
     memcpy(c->mem + ((fob + 4u) & 0x1FFFFFFFu), &npos, 4);
     c->r[0] = (uint32_t)n;
+    {
+        static int falog = -1;
+        if (falog < 0) falog = (getenv("HLE_FA_LOG") != NULL);
+        if (falog)
+            printf("[faread] idx=%d pos=%08X want=%08X n=%u\n", idx, pos, want, (unsigned)n);
+    }
     return (int)n;
 }
 
