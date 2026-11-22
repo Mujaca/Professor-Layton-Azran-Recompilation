@@ -351,6 +351,7 @@ void hle_pump(void) {
             }
         }
     }
+    }
     if (!g_guest_lock_init || g_no_lock) return;
     if ((++g_pump_count & 0x3FFFu) != 0) return;
     if (!t_lock_owned) return;
