@@ -1171,8 +1171,20 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
                 if (pc == 0x00288960u) {
                     memcpy(&w0, c->mem + (c->r[0] & 0x1FFFFFFFu), 4);
                 }
-                printf("[res] pc=%08X r0=%08X r1=%08X r2=%08X r3=%08X map0=%08X\n",
+                printf("[res] pc=%08X r0=%08X r1=%08X r2=%08X r3=%08X map0=%08X",
                        pc, c->r[0], c->r[1], c->r[2], c->r[3], w0);
+                if (pc == 0x00288960u && c->r[1] >= 0x00100000u && c->r[1] < 0x20000000u) {
+                    uint32_t p = c->r[1] & 0x1FFFFFFFu;
+                    printf(" name='");
+                    for (int k = 0; k < 20; k++) {
+                        uint8_t ch = 0;
+                        memcpy(&ch, c->mem + ((p + (uint32_t)k) & 0x1FFFFFFFu), 1);
+                        if (ch == 0) break;
+                        printf("%c", (ch >= 32 && ch < 127) ? (char)ch : '.');
+                    }
+                    printf("'");
+                }
+                printf("\n");
                 fflush(stdout);
             }
             rn[idx]++;
