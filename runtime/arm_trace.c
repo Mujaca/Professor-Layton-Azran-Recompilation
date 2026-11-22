@@ -27,6 +27,17 @@ int hle_fa_read(ArmCpu *c) {
     if (stream < 0x08000000u || stream >= 0x20000000u) return -1;
     memcpy(&pos, c->mem + ((fob + 4u) & 0x1FFFFFFFu), 4);
     memcpy(&size, c->mem + ((stream + 0x10u) & 0x1FFFFFFFu), 4);
+    if (size != 0x004C1448u && size != 0x108BDFB8u && size != 0x09BD69CCu) {
+        uint32_t alt = 0;
+        if ((fob & 0x1FFFFFFFu) >= 8u &&
+            ((fob - 8u) & 0x1FFFFFFFu) + 0x14u <= c->mem_size) {
+            memcpy(&alt, c->mem + (((fob - 8u) + 0x10u) & 0x1FFFFFFFu), 4);
+            if (alt == 0x004C1448u || alt == 0x108BDFB8u || alt == 0x09BD69CCu) {
+                size = alt;
+                memcpy(c->mem + ((stream + 0x10u) & 0x1FFFFFFFu), &alt, 4);
+            }
+        }
+    }
     if (size == 0x004C1448u) { path = "out/romfs/lt6/arc/lt6_a.fa"; idx = 0; }
     else if (size == 0x108BDFB8u) { path = "out/romfs/lt6/arc/lt6_b.fa"; idx = 1; }
     else if (size == 0x09BD69CCu) { path = "out/romfs/lt6/arc/lt6_uk.fa"; idx = 2; }
