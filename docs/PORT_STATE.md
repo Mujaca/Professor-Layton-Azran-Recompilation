@@ -4297,3 +4297,24 @@ die Liste wird **nicht mehr vom Node-Fill ueberschrieben**. Sie enthaelt
 allerdings nur den Count (4), keine `(value,header)`-Paare - die Eintraege
 liegen in den separaten Node-Puffern.
 
+
+### Node-/Item-Puffer gemessen: 0x0E905000 = Vtable 0x3C4F4C
+
+`guest-watch --range 0x0E900000,0x0E910000`:
+
+```
+0x0E902000 <- 0x00000004  (Count, 0x143F60)
+0x0E902004.. <- 00000000  (Emitter 0x12FCB0)
+0x0E905000 <- 0x003C4F4C  (Builder 0x288890 -> 0x297618)
+```
+
+Statische Vtable `0x3C4F4C`:
+
+```
++00=00285BEC  +08=0028EF3C (Unlink!)  +10=003C454C  +1C=001BD720
+```
+
+Also: Der Builder legt Draw-Items mit Vtable `0x3C4F4C` ab; deren
+`+8`-Methode ist erneut der Unlink-Pass `0x28EF3C`. Die eigentliche
+GPU-Uebersetzung (value,header) liegt hinter `+0x00`/`+0x10`.
+
