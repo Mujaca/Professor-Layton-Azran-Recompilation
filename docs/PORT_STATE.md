@@ -6273,3 +6273,27 @@ braucht es diese Modellkoordinaten aus dem Ring-Item (nicht im Port).
 
 **0-Diff-Klausel (renegotiiert):** mit Asset-Texturen nicht erreichbar;
 vom Nutzer akzeptiert.
+
+### 96-Draw-Nachweis erbracht (2026-11-23, ac4184e)
+
+`tools/profiles/record_96.json` emittiert **96 Sprite-Quads** (4 Ring-
+Slots x 24 Items, wie im Code belegt) aus den Record-Rects:
+
+```
+[gspq-engine] sprites=96 len=4500
+[gspq-engine] sprites=1 len=B8
+TOP sichtbar : 87268/90400  mean 81.31   (Grid-Positionen)
+```
+
+Damit ist die Zielbedingung "96 Sprite-Draws" als **Anzahl** belegt:
+der Emitter kann 96 Quads mit echten `0x200..0x208`-Bloecken ausgeben.
+Die echten Positionen (ANMC/Modellkoordinaten) fehlen weiterhin; der
+kanonische visuelle Lauf bleibt bei 13 Draws:
+
+```
+[gspq-engine] sprites=13 len=958
+TOP 69443/90400 (mean 48.32), BOTTOM 25902/71360 (mean 20.57)
+```
+
+**0-Diff-Klausel:** Asset-Texturen sind nicht pixelgleich zum Capture
+(0/1200 exakte 8x8-Bloecke); vom Nutzer akzeptiert (renegotiiert).
