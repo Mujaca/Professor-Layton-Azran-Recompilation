@@ -4372,3 +4372,24 @@ CommandBuffer.
 Der Wrapper endet also in einem **GSP-IPC-SVC (0x32)**. Beim Direktaufruf
 aus dem HLE-Kontext kehrt dieser Pfad nicht zurueck (IPC-/Reply-Wartepfad).
 
+
+### svc-0x32-Pfad gemessen: Wrapper laeuft in Trigger-Schleife
+
+`HLE_SVC32_LOG` beim Direktaufruf von `0x1196AC`:
+
+```
+[svc32] #1..#7  (u.a. #7 lr=0x2877FC blk=0x275AE0)
+```
+
+Danach Log-Tail:
+
+```
+ipc gsp::Gpu  cmd=0x000C   (TriggerCmdReqQueue)  (wiederholt)
+svc 0x32 r0=0x00000002 r1=0
+[sp] 0x0012FAA4 / 0x0026BF8C / 0x00101744 SP-Korrekturen
+```
+
+Der Wrapper kommt also bis zum GSP-IPC und laeuft dann in einer
+**Trigger- (0x000C) Warteschleife** mit SP-Korrekturen im Submit-Pfad -
+er kehrt nicht zurueck und schreibt `0x10002800` nicht.
+

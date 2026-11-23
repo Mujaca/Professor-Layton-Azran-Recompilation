@@ -4333,6 +4333,13 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             printf("[svcseen] 0x%02X\n", imm);
         }
     }
+    if (imm == 0x32 && getenv("HLE_SVC32_LOG") != NULL) {
+        static int n32 = 0;
+        if (n32++ < 30)
+            printf("[svc32] #%d r0=%08X r1=%08X lr=%08X blk=%08X\n",
+                   n32, c->r[0], c->r[1], c->r[14], arm_last_block);
+        fflush(stdout);
+    }
     g_cpu = c;
     ev(1, imm, c->r[0], c->r[1]);
     svc_trace(imm, c);
