@@ -382,7 +382,8 @@ def generate(res, path, max_funcs=None, trace=False, data=None):
         em = emit.Emitter(fn.addr, fn.thumb)
         em.block_labels = set(b.addr for b in fn.blocks)
         out.append("void fn_%08X(ArmCpu *c) {" % u32(fn.addr))
-        out.append("  goto %s;" % em.label(fn.blocks[0].addr))
+        _entry = fn.addr if any(b.addr == fn.addr for b in fn.blocks) else fn.blocks[0].addr
+        out.append("  goto %s;" % em.label(_entry))
         for blk in fn.blocks:
             out.append("%s:" % em.label(blk.addr))
             if u32(blk.addr) == 0x001079D0:

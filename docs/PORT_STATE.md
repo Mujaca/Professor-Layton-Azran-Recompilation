@@ -4513,3 +4513,54 @@ Der Slot `+0x78` des uebergebenen Objekts ist **0** (nicht konstruiert)
 bzw. `0xFF8001FF` (Fehlercode) -> `arm_call_guest` meldet unbekanntes Ziel.
 Damit fehlt erneut eine echte Objekt-/Vtable-Bindung, nicht der Code.
 
+
+### Recompiler-Einstieg gefixt + echter GSP-Submit-Ring (2026-11-23)
+
+Zwei konkrete Fehler gefunden und behoben:
+
+1. **Falscher Funktions-Einstieg.** `generate()` emittierte
+   `goto fn.blocks[0].addr`. Bei Funktionen, deren erster Block ein
+   Quer-/Tail-Ziel ist, sprang der Einstieg damit an die falsche Adresse.
+   Beispiel `fn_00381CE4` (Scene-Konstruktor):
+   vorher `goto L_00381CE4_00207A10;`, jetzt
+   `goto L_00381CE4_00381CE4;`. Folge: der Konstruktor lief vorher leer,
+   `[0x3EC028]` blieb 0. Jetzt:
+   `[engine] nach Konstruktor [scene]=003CA494 ab=0 W: 003CA494 ...`.
+   Zaehler im generierten Code: 17521 Funktionen, 0 mit falschem Einstieg.
+
+2. **SubmitCmdList -> Shared-Memory-Ring.** `gsp_command` Fall 0x0006
+   schreibt den Eintrag jetzt so, wie es die GSP-Firmware tut:
+   `hdr=1<<8` bei 0x10002800, `id=1`, `addr`, `size` bei 0x10002820..28.
+   Die synthetischen HLE_POKEs fuer 0x10002800/0x10002820..28 sind aus
+   `tools/profiles/chain.json` entfernt. Damit kommt `qops=1` aus der vom
+   Gast per SetCommandList uebergebenen Engine-Liste (0x0CFE6000, 0x24 B)
+   und aus `gpu_run_command_list` (ops=1), nicht aus `gsp_engine_desc`.
+
+Belege (`python tools\run_chain_direct.py`, out/logs/chain_direct.txt):
+
+```
+[gsp] SetCommandList addr=0x0CFE6000 size=0x24 lr=001ED9C8
+[gspq] tid=0 idx=0 id=1 list=0CFE6000 size=24 ops=1
+[gsp] Trigger lr=001ED9C8 addr=0CFE6000 size=24 qops=1
+```
+
+Liste (`GPU_LIST_LOG=4`):
+
+```
+[gpulist] addr=0CFE6000 size=24 070FFFFF 00000007 00000000 00000000 000000C8 00000078 1E000000 00000190 000000F0
+```
+
+Bild (`out/shot_chain_direct.bmp`, beide Screens ueber den GSP-Pfad):
+
+```
+TOP    == out/menu_top.bin    : 0/96000  Pixel >60
+BOTTOM == out/menu_bottom.bin : 0/76800  Pixel >60 (bei x-Offset 40 im 400er-Fenster)
+gegen reports/menu_official*.bin: TOP 90281/90400, BOTTOM 26091/71360
+```
+
+Noch offen: die Pixel kommen weiterhin aus den vorbereiteten Assets
+(0x1E000000/0x1E100000) und dem HLE-2D-Blit; die echte `.xq`-Menuekomposition
+ueber FA-Reader `0x280744`/Builder `0x2800C8` ist noch nicht angesteuert
+(0 Treffer), `0x28D424` laeuft nur ueber den HLE-Direktaufruf.
+Tests: 13/13, 12/12.
+

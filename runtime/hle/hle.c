@@ -844,7 +844,14 @@ static void hle_engine_frame(ArmCpu *c) {
             arm_call_guest_pub(c, 0x00381CE4u);
             memcpy(c->r, cs, sizeof(cs));
             memcpy(&sc, c->mem + 0x003EC028u, 4);
-            printf("[engine] nach Konstruktor [scene]=%08X\n", sc);
+            printf("[engine] nach Konstruktor [scene]=%08X ab=%d W:",
+                   sc, c->aborted);
+            for (int k = 0; k < 5; k++) {
+                uint32_t w = 0;
+                memcpy(&w, c->mem + 0x003EC028u + (uint32_t)k * 4u, 4);
+                printf(" %08X", w);
+            }
+            printf("\n");
             fflush(stdout);
         }
     }
@@ -3667,9 +3674,24 @@ static void gsp_command(Ipc *r, uint32_t *p) {
             ipc_put(r, 0);
             break;
         }
-        case 0x0006: { /* SetCommandList(addr, size, flags) */
+        case 0x0006: { /* SubmitCmdList(addr, size usw.) */
             g_cmdlist_addr = p[0];
             g_cmdlist_size = p[1];
+            /* Azahar (gsp_gpu.cpp, SubmitCmdList): der GSP legt den Eintrag
+               in den Shared-Memory-Ring (shmem+0x800, hier Thread 0) und
+               TriggerCmdReqQueue arbeitet ihn ab. Genau diesen Eintrag
+               schreibt die Firmware - nicht der Gast-Code. */
+            if (g_cpu != NULL) {
+                uint32_t base = 0x10002800u;
+                uint32_t hdr = 1u << 8;          /* index=0, number=1 */
+                uint32_t cb = base + 0x20u;      /* Command[0] */
+                uint8_t id = 0x01u;              /* 1 = SubmitCmdList */
+                uint32_t addr = g_cmdlist_addr, sz = g_cmdlist_size;
+                memcpy(g_cpu->mem + base, &hdr, 4);
+                memcpy(g_cpu->mem + cb, &id, 1);
+                memcpy(g_cpu->mem + cb + 4u, &addr, 4);
+                memcpy(g_cpu->mem + cb + 8u, &sz, 4);
+            }
             if (g_log) printf("[gsp] SetCommandList addr=0x%08X size=0x%X lr=%08X\n",
                               g_cmdlist_addr, g_cmdlist_size,
                               g_cpu ? g_cpu->r[14] : 0);

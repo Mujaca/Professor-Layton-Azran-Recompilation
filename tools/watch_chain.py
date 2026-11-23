@@ -23,6 +23,11 @@ def main(argv=None) -> int:
     ap.add_argument("--pc")
     ap.add_argument("--timeout", default="45")
     ap.add_argument("--label", default="chainwatch")
+    ap.add_argument("--env", action="append",
+                    help="Profil-Env ueberschreiben (NAME=WERT, mehrfach)")
+    ap.add_argument("--hook", action="append",
+                    help="HLE_HOOK-Kurzform: ADDR=KIND[,ADDR=KIND]")
+    ap.add_argument("--hook-max", default=None)
     args = ap.parse_args(argv)
 
     prof = json.load(open(args.profile, encoding="utf-8"))
@@ -42,6 +47,12 @@ def main(argv=None) -> int:
         cmd += ["--pc", args.pc]
     for k, v in prof["env"].items():
         cmd += ["--env", "%s=%s" % (k, v)]
+    for e in args.env or []:
+        cmd += ["--env", e]
+    if args.hook:
+        cmd += ["--env", "HLE_HOOK=" + ",".join(args.hook)]
+    if args.hook_max:
+        cmd += ["--env", "HLE_HOOK_MAX=" + args.hook_max]
     print("watch:", " ".join(cmd[:8]), "...")
     return subprocess.call(cmd, cwd=ROOT)
 
