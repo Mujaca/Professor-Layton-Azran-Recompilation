@@ -4345,3 +4345,18 @@ Abhilfe: die Engine-gsp-Wrapper explizit mit der gebauten Liste
 aufrufen (SetCommandList + Trigger) und pruefen, ob `0x10002800`
 dann vom Gast geschrieben wird.
 
+
+### Engine-gsp-Wrapper 0x1196AC blockiert im Port
+
+Minimaler Aufruf `0x1196AC(0,0,0,0)` per HLE_POSTCALL:
+
+```
+[postcall2] 0x001196AC(00000000,00000000)
+(kein -> r0 ...)   -> blockiert/kehrt nicht zurueck
+guest-watch --write 0x10002800: NIE GESCHRIEBEN
+```
+
+Der Wrapper laeuft in einen GSP-/Service-Wartepfad (0x120CFC/svc) und
+kehrt im Port nicht zurueck - daher kein Gast-Schreibzugriff auf den
+CommandBuffer.
+
