@@ -3746,6 +3746,20 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
                     static int pv = -1;
                     if (!es_read) { es = getenv("HLE_ENGINE_STREAM"); es_read = 1; }
                     if (pv < 0) pv = (getenv("HLE_PICA_VERTEX") != NULL);
+                    /* Bind vor dem Kopieren: 0x27B34C baut den Draw-Block
+                       (0x132130 -> 0x1323FC) am Cursor. HLE_PICA_BIND=1
+                       ersetzt den HLE_PRECALL fuer diese Aufgabe. */
+                    if (getenv("HLE_PICA_BIND") != NULL) {
+                        uint32_t sv[16];
+                        memcpy(sv, c->r, sizeof(sv));
+                        c->r[0] = 0x00408808u;
+                        c->r[1] = 0x0CFE7100u;
+                        c->r[2] = 0x0CFE7070u;
+                        c->r[3] = 1u;
+                        c->r[13] = 0x0CF0A000u;
+                        arm_call_guest_pub(c, 0x0027B34Cu);
+                        memcpy(c->r, sv, sizeof(sv));
+                    }
                     if (es != NULL && *es != 0 && eaddr == 0x0CFE6000u) {
                         uint32_t ssrc = (uint32_t)strtoul(es, NULL, 16);
                         const char *cm = strchr(es, ',');
