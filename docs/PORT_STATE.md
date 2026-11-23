@@ -5604,3 +5604,34 @@ Fuer die echte Liste fehlen also: 0xD2-Loader (`0x238F58`), Klasse-A-
 Nodes (`0xD0`, `0x1E93E8`) + `0x3669FC`-Setter, ein Aufrufer fuer
 Vtable `+0x1C` (`0x366AB4`), und ein Decoder fuer den 0x24-Byte-
 Kommandoblock aus `0x34AAC4`.
+
+### Klasse-A-2D-Pfad erstmals ausgefuehrt (2026-11-23, 800d520)
+
+Mit `tools/profiles/classa_probe.json` (3 synthetische 0x74-Records auf
+`0D800000`, Node `0D801000` mit `+0xC4=Recordbasis`, `+0xCC=3`,
+`+0xDC=0x07`, `+0xDD=1`, dazu `0CFE3204=0` fuer das
+`byte[[0x408808+0x9C]+4]==0`-Gate) und
+`HLE_POSTCALL=366ABC,0D801000,3,0,0` laeuft der echte Pfad:
+
+```
+[postcall2] 0x00366ABC(0D801000,00000003)
+[hook] count addr=00366ABC hits=1
+[hook] count addr=0020AD94 hits=1
+[hook] regs addr=0023D630 hits=1 r0=00000400 r1=1E000000 r7=00000007 r8=00000003
+[hook] regs addr=0034AAC4 hits=1 r0=00000000 r2=1E000000 ...
+[hook] regs addr=0023D630 hits=2 r0=00000401 r1=1E000000
+[postcall2] -> r0=00000001 ab=0
+```
+
+Der Zielring des 0x24-Byte-Kommandoblocks ist
+`[ [0x276038]+0x1C +0x5C ]` = `0x003D7C9C`: `[+0] = 0x10002800` (eye 0),
+`[+4] = 0x10002200` (eye 1) - also der **GSP-CommandBuffer**, nicht eine
+PICA-Liste. Beleg fuer die Kette: `0x27602C` = `ldr r0,[0x276038]`
+(`0x003D91E8`) + `ldr r0,[r0+0x1C]` (`0x003D7C40`), dann `+0x5C`
+(`0x10002800`/`0x10002200`).
+
+Damit ist klar, was fuer die echten 24/96 Draws noch fehlt: der 0xD2-
+Chunk muss die Records fuellen (Parser laeuft im Port nicht), und die
+0x24-Byte-Blocks im GSP-Ring (`0x10002800`) muessen dekodiert werden
+(Felder `+0` Flags, `+4` Textur, `+8` Partner, `+0xC` Stage1, `+0x10`
+Scale, `+0x14` texfmt, `+0x18` buf, `+0x1C` Stage).
