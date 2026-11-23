@@ -4843,3 +4843,28 @@ Damit ist der naechste Gate exakt: der Fuell-Loop/Statik-Ctor, der
 `0x40F048+0x00/+0x04/+0x26` setzt. Heap/Allokation sind bereits ok
 (`write 0x3D9320 <- 0x08000020`). Tests: 13/13, 12/12.
 
+
+### Menue-.xq ohne erzwungenen CFile-Open gelesen (2026-11-23)
+
+Der CFile-Pool-Deskriptor `0x40F048` wird jetzt ueber seine echte
+Ringstruktur gefuellt: freier Ring `0x40F060` (Array `0x0E905000`,
+Stride 4, Start/Ende 0, Count 16) mit einem CFile-Zeiger, dessen
+`+0x10`-Open auf `0x10F8C4` (liefert 1) zeigt. Danach liefern
+`0x268C80`/`0x2808A8` ohne `HLE_RETFORCE` gueltige CFiles.
+
+Beleg (Profil `tools/profiles/menu_xq_noforce.json`;
+`268C80` **nicht** in HLE_RETFORCE, `HLE_FA_FORCE_POS` nicht gesetzt):
+
+```
+[postcall2] 0x002919DC(003EC028,00000000)
+[faread] idx=0 pos=00458CB8 want=00000048 n=72 dst=0CF09D10
+[faread] idx=0 pos=00458D00 want=00000004 n=4
+[faread] idx=0 pos=00458D04 want=00000004 n=4
+[hook-final] count addr=00268C80 hits=1
+[hook-final] count addr=002808A8 hits=1
+```
+
+Der Offset kommt aus dem echten ARC0-Index (`fa_index.c`), der Datei-Read
+aus `lt6_a.fa`. Pixel unveraendert (HLE-Liste): 90281/90400 + 26091/71360.
+Tests: 13/13, 12/12.
+
