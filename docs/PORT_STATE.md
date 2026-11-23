@@ -6789,3 +6789,38 @@ corr 0.426   std 29.6   detail-hit 0.77
 Damit ist `corr` von 0.121 auf **0.426** gestiegen (Faktor 3.5) und
 `std` von 19.2 auf 29.6; die 0.9-Grenze ist noch nicht erreicht, weil
 der 3D-Titel selbst fehlt (Modell-Render, Stufe 3).
+
+### Stufe 3, erster echter 3D-Render (2026-11-24)
+
+`title.xc` ist ein Scene-Graph (123 Eintraege): `XIMA` (Node `far_01`),
+`XMPR@` mit eingebettetem `XPVB`, `MTRC00`, `ATRC01`, `MINF` und ETC1-
+Texturen. Die `.prm`-Meshes sind **echte 3D-Quads in Weltunits**, z. B.
+`007.prm`: 4 Vertices, `x[-14.2..14.2] y[-6.7..6.7] z=-28.3`, UV 0..1
+(Beleg: `python tools/title3d_mesh.py`).
+
+Damit ist ein einfacher Perspektiv-Render moeglich
+(`python tools/title3d_render.py`: 17 Quads, Fan-Triangulierung, ETC1-
+Textur, Brennweite als Suchparameter):
+
+```
+prm-Quads: 17
+best corr 0.342   tex=000.xi f=160   -> out/title3d_render.png
+```
+
+Der erste echte 3D-Render liegt damit bei `corr 0.342` und schlaegt den
+alten ETC1-Host-Render (0.095) deutlich, aber noch nicht das registrierte
+Spiel-Asset (0.435 revidiert). Kanonisch bleibt daher der registrierte
+BG (`corr 0.426` mit Font-Zeilen).
+
+Gemessene Negativ-Befunde (wichtig fuer dienaechsten Schritte):
+
+* `title_a.xa`-Quads sind nicht im Capture: maskierte NCC 0.168..0.375,
+  Komposition auf den BG ergibt `corr 0.423` (schlechter als 0.435).
+  Beleg: `python tools/title_sprite_fit.py`.
+* Die helle Logo-Zone (x 100..275, y 60..110) findet sich in `000.xi`
+  am besten mit NCC 0.632 (Skala 0.75); in `006.xi` 0.607. Also
+  Textur-Naehe, aber kein 1:1-Asset. Beleg: `tools/logo_search.py`.
+
+Offen fuer Stufe 3: Material->Textur-Zuordnung (`.txp`/`.mtr`),
+Alpha/Blend, Z-Sortierung und die echte Kamera (f ist bisher gesucht,
+nicht aus `000.mbn`/`002.atr` gelesen).
