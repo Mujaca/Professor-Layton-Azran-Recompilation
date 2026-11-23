@@ -5545,3 +5545,21 @@ A/B des Ersatz-Hintergrunds (canonical, `measure_ref`):
 | 9 Quads (nur XPVB, ohne Ersatz-BG) | 86876/90400 | 77.13 |
 
 Der Ersatz-BG bleibt also drin; Bottom unveraendert 25902/71360 (20.57).
+
+### .pvb-Scan: 305/482 Packs mit Quads, aber 3D-Modelle (2026-11-23)
+
+`python tools/scan_pvb.py` parst alle XPCK-Packs in `lt6_b.fa`/`lt6_uk.fa`
+und dekodiert jedes `000.pvb` (XPVB: attr/stride/count, Slot 0 =
+float32x3 Position). Zaehlt Quads, deren erster Vertex in
+`[-64,464] x [-64,304]` liegt:
+
+```
+lt6_b.fa: 305 Packs mit .pvb   Top: 404/572 @0EB4ACF0, 303/348 @0EAB1B30
+lt6_uk.fa: 482 Packs mit .pvb  Top: 372/622 @033D8FF8, 330/486 @03B91928
+```
+
+Das sind grosse 3D-Modelle (hunderte Quads, Modellkoordinaten im
+Screen-Zahlenbereich) - darunter ist die Titel-Map nicht ohne
+Textur-/Kamera-Zuordnung identifizierbar. Die 9 Quads aus
+`menu/uk/title_a.xa` bleiben die einzige belegte 2D-Sprite-Liste
+(absolute Screen-Positionen).
