@@ -4153,8 +4153,8 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
        [0x3EC00C]/[0x3EC008] und fuettern damit 0x289B9C(heap=0x408448).
        Ohne sie bleibt der Heap leer und 0x27B49C liefert 0. */
     {
-        uint32_t m0 = 0x05700000u;   /* App-/linearer Block (ControlMemory) */
-        uint32_t m1 = 0x02900000u;   /* Lineal-Heap */
+        uint32_t m0 = 0x08000000u;   /* Heap-Basis (ControlMemory op=3) */
+        uint32_t m1 = 0x05700000u;   /* Groesse des App-Blocks */
         memcpy(c->mem + 0x003EC008u, &m0, 4);
         memcpy(c->mem + 0x003EC00Cu, &m1, 4);
     }

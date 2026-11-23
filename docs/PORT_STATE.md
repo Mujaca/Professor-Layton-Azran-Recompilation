@@ -4793,3 +4793,26 @@ Der naechste Gate liegt damit in `0x289B9C`/`0x289AC0` (Segment-Init), nicht
 mehr in den Groessen. `[faread]` erscheint weiter nur mit dem
 `0x268C80`-Force. Tests: 13/13, 12/12.
 
+
+### Heap-Segment/Sub-Allocator laufen — CFile-Pool-Deskriptor ist ein anderer Init (2026-11-23)
+
+Mit Basis/Groesse `0x08000000`/`0x05700000` (statt vertauscht) und
+`HLE_POSTCALL=289B9C,408448,08000000,05700000,2;11A890,...;11B05C,...`:
+
+```
+[postcall2] 0x00289B9C(...) -> r0=00000001
+[postcall2] 0x0011A890(...) -> r0=00000001
+[postcall2] 0x0011B05C(...) -> r0=00000001
+write 0x003D9320 <- 0x08000020   (echte Engine-Allokation)
+```
+
+Heap-Segment und die beiden Sub-Allocator-Init laufen also. `0x268C80`
+liefert aber weiter 0: sein Deskriptor `0x40F048` ist zu diesem Zeitpunkt
+noch leer (Dump 64 Woerter = 0). Die Hash-Writes bei `0x40F070..0x40F07C`
+(`fn_002892DC`/`0x289290` aus `fn_0010395C`) kommen von einem **anderen**
+Init, nicht von `0x11A890`/`0x11B05C`.
+
+Damit ist der naechste Gate: den CFile-Pool-Deskriptor-Init
+(`0x10395C -> 0x289290/0x2892DC`) ausfuehren bzw. seinen Count-Store
+finden. Tests: 13/13, 12/12.
+
