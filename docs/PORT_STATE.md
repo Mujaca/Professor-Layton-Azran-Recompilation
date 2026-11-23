@@ -5766,3 +5766,38 @@ node+0xC4` bzw. ein Aufruf von `0x3669FC` fehlt.
 Gemessen: keiner der 7 Loader-Wrapper (`0x1EF240`, `0x1F3FA8`,
 `0x1F59B4`, `0x1F7E90`, `0x1FB3B4`, `0x200F04`, `0x2BB760`) und auch
 `0x209404` laufen im Port (0 Hooks).
+
+### 3D-Titel-Grundlayer im kanonischen Shot (2026-11-23, 86db83e)
+
+Asset-Analyse (Sub-Agent, Skripte `tools/title3d_*.py`, Report
+`tools/out/title3d_report.md`):
+
+* `title.xc` ist ein **Scene-Graph**: 20 `.mbn` (168 B) mit
+  `crc32(name)|crc32(parent)|flags|pos|rot|scale`, Geometrie als
+  **XPVB/XPVI in den `.prm`** (184 Vertices, 166 Tris).
+* Die 14 Texturen sind **ETC1** (IMGC `fmt=0x011B`, bd=4, 32 B/Tile),
+  keine L4-Palette (frueherer 0.125-NCC beruhte auf falschem Decode).
+* Kamera/Projektion ist **nicht** im Pack; Host-Fit f~850, cy~130.
+* Host-Render `tools/out/title3d_render.bin` (400x240): MAE ~50,
+  NCC 0.474 auf dem overlay-freien Himmelstreifen, 0.648 fuer m0010s.
+
+Dieser Render wird jetzt als Top-Grundlayer benutzt:
+`tools/profiles/title3d_bg.bin` (k=0.90 Helligkeit, 288000 B) landet im
+Atlas bei (0,1024); das BG-Quad steht **zuletzt** in
+`title_top_rects.txt` (deckt die 9 XPVB-Overlays ab).
+`tools/make_menu_assets.py` erzeugt Atlas + Rechteckliste neu.
+
+Kanonisch (deterministisch mit `HLE_PICA_CLEAR=1`):
+
+```
+TOP sichtbar    : 69370/ 90400  mean 47.98
+BOTTOM sichtbar : 25902/ 71360  mean 20.57
+```
+
+Helligkeits-Sweep (canonical, diff/mean): k=0.36 72365/48.13,
+k=0.66 69984/52.11, k=0.80 68694/48.92, **k=0.90 69370/47.98**,
+k=1.00 72365/48.13, k=1.20 79083/51.06.
+
+Zusatz: `pica_emit_sprites` faellt auf einen eigenen Draw-Block
+(0x228=6, 0x25E=0, 0x227=0, 0x22F=1) zurueck, wenn der Engine-Strom in
+einem Frame leer ist - damit ist die Liste selbst dann vollstaendig.

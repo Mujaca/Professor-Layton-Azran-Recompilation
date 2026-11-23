@@ -36,8 +36,8 @@ Aktuelle Pixel (Engine-PICA-Lauf `engine_pica_draw.json`):
 
 ```
 python tools\measure_ref.py out\shot_engine.bmp
-TOP sichtbar    : 65707/ 90400  mean 49.03
-TOP voll        : 70574/ 96000  mean 47.99
+TOP sichtbar    : 69370/ 90400  mean 47.98
+TOP voll        : 74970/ 96000  mean 49.38
 BOTTOM sichtbar : 25902/ 71360  mean 20.57
 BOTTOM voll     : 30595/ 76800  mean 21.33
 ```
