@@ -4499,3 +4499,17 @@ arm: unbekanntes call-Ziel 0xFF8001FF (von Block 0x0028AB04)
 arm: unbekanntes call-Ziel 0x00000000 (von Block 0x0028BE0C)
 ```
 
+
+### Indirekte Fehlziele: Vtable-Slot +0x78 ist 0/0xFF8001FF
+
+Beide Meldungen stammen aus `blx r1`, wobei
+
+```
+0028BE0C: ldr r1,[r0] ; ldr r1,[r1,#0x78] ; blx r1
+0028AB04: (analog, Vtable-Slot +0x78)
+```
+
+Der Slot `+0x78` des uebergebenen Objekts ist **0** (nicht konstruiert)
+bzw. `0xFF8001FF` (Fehlercode) -> `arm_call_guest` meldet unbekanntes Ziel.
+Damit fehlt erneut eine echte Objekt-/Vtable-Bindung, nicht der Code.
+
