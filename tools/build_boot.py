@@ -47,7 +47,9 @@ def main(argv=None) -> int:
         str(ROOT / "build" / "gen_boot.c"),
         str(ROOT / "runtime" / "arm_cpu.c"),
         str(ROOT / "runtime" / "arm_trace.c"),
+        str(ROOT / "runtime" / "fa_index.c"),
         str(ROOT / "runtime" / "gpu.c"),
+        str(ROOT / "runtime" / "imgc.c"),
         str(ROOT / "runtime" / "hle" / "hle.c"),
     ]
     if args.port:
