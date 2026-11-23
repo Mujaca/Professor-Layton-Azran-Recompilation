@@ -36,11 +36,16 @@ Aktuelle Pixel (Engine-PICA-Lauf `engine_pica_draw.json`):
 
 ```
 python tools\measure_ref.py out\shot_engine.bmp
-TOP sichtbar : diff>60      0/ 90400   mean 0.00
-TOP voll     : diff>60      0/ 96000   mean 0.00
-BOTTOM sichtbar : diff>60      0/ 71360   mean 0.00
-BOTTOM voll     : diff>60      0/ 76800   mean 0.00
+TOP sichtbar    : 65707/ 90400  mean 49.03
+TOP voll        : 70574/ 96000  mean 47.99
+BOTTOM sichtbar : 25902/ 71360  mean 20.57
+BOTTOM voll     : 30595/ 76800  mean 21.33
 ```
+
+Texturen sind jetzt Spiel-Assets (`out/title_top_atlas.bin` aus
+`title_a.xa` + `title_b_bg`; `out/title_b_bg.bin` aus `lt6_b.fa`),
+`HLE_MENU_TEX` ist aus dem Profil entfernt. Der Top-Rest ist die fehlende
+3D-Titel-Map (`title.xc`).
 
 Byte-Vergleich: TOP == `reports/menu_official.bin`, BOTTOM ==
 `reports/menu_official_bottom.bin` (zwei Läufe identisch).

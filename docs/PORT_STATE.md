@@ -5491,3 +5491,31 @@ Also ist der Top-Grundlayer ein **3D-Modell-Render** (mbn + Kamera),
 nicht eine flache Textur. Fuer 0 Diff mit Asset-Textur muesste dieser
 Pass im Port laufen (Modell + Kamera + L4-Palette; die CLUT fehlt in den
 `.fa`-Daten, die `.txp`-Eintraege sind 36-Byte-Parameter).
+
+### Kanonisch: Spiel-Assets statt Referenz (2026-11-23, ac3f0dd)
+
+`tools/profiles/engine_pica_draw.json` hat **kein** `HLE_MENU_TEX`/`_BOT`
+mehr; HLE laedt per Default die Spiel-Assets:
+
+* `out/title_top_atlas.bin` - 1024x1280 RGBA: `title_a`-Atlas (5 IMGC
+  aus `menu/uk/title_a.xa`) + Ersatz-Hintergrund `title_b_bg` (400x240)
+  bei (0,1024), erzeugt von `tools/make_menu_assets.py`.
+* `out/title_b_bg.bin` - 320x240 RGB: `menu/title_b_bg.xi` 1:1.
+
+Top: 10 Quads (BG-Ersatz + 9 echte XPVB-Quads), Bottom: 1 Quad.
+Texturformat RGBA8 (`HLE_PICA_TEX_BPP=4`, fmt 0) mit Alpha-Blending im
+Renderer; `HLE_PICA_QUAD`, `HLE_PRECALL` und `HLE_MENU_TEX` sind weg.
+
+```
+[engine] Menue-Assets geladen (top=1024x1280 bpp4 ...)
+[gspq-engine] sprites=10 len=730
+[gspq-engine] sprites=1 len=B8
+TOP sichtbar    : 65707/ 90400  mean 49.03
+TOP voll        : 70574/ 96000  mean 47.99
+BOTTOM sichtbar : 25902/ 71360  mean 20.57
+BOTTOM voll     : 30595/ 76800  mean 21.33
+```
+
+Zwei Laeufe byte-identisch. Tests 13/13, 12/12. Der Top-Rest ist die
+fehlende 3D-Titel-Map (`title.xc` = Modell-Pack, L4-NCC max 0.125); der
+Bottom ist bis auf 25902/71360 (Capture-Resampling) gleich.
