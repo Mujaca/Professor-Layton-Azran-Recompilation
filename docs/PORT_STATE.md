@@ -4635,3 +4635,45 @@ Request-Pfad `0x2919DC -> 0x104E44 -> 0x1112C4 -> 0x280744` (bzw.
 `0x1117A4` fuer den Menue-Request), nicht am Drain. Screenshot unveraendert
 (Assets): 90281/90400 + 26091/71360 gegen reports/menu_official*.bin.
 
+
+### Echter Menue-Request laeuft bis zur Engine-Draw-Methode (2026-11-23)
+
+Profil: `tools/profiles/menu_request.json` (env-only, kein Regen).
+
+**1. Request-Pfad mit korrekten Argumenten** (`HLE_POSTCALL=28F7BC,3EC028,0,0,0`):
+
+```
+[postcall2] 0x0028F7BC(003EC028,00000000)
+[hook] count addr=0028A1BC hits=1
+[hook] obj addr=001117A4 hits=1 r0=003EE12C r1=0CF09F18 r2=0CF09FD0 r3=00000000 lr=0028A234
+           [r0]=00000000 obj+38: 00000000 00000000 00000001 00000000
+[postcall2] -> r0=00000001 ab=0
+```
+
+`r0=0x3EE12C` = Scene+0x2104, `[menu+0x40]=1`; der Request erreicht den
+Builder. Bisher trat dabei ein Null-Vtable-Call auf:
+
+```
+arm: unbekanntes call-Ziel 0x00000000 (von Block 0x002801D4)
+```
+
+Ursache: `0x2801D4` ruft `[[r4]]+0x8`; das Pool-Objekt `0x3EE12C` hatte
+`[r0]=0`. Mit der echten Klassen-Vtable `0x3C6FE4` (+8=`0x11DB84`) und
+`HLE_POOL_MENUOBJ=1`:
+
+```
+[hook-final] count addr=002800C8 hits=214
+[hook-final] count addr=0011DB84 hits=23
+[hook] obj addr=0011DB84 ... r0=003EE12C r2=0CFF1000 lr=00280208
+       [r0]=003C6FE4 vt+00..1C: ... 0011DB84 ...
+```
+
+Damit ruft der Draw-Builder pro Node die **echte Engine-Draw-Methode**
+`0x11DB84` (Vtable-Slot +8) auf; keine unbekannten Call-Ziele mehr.
+
+**Noch offen:** FA-Reader `0x280744` bleibt 0 (eigener Pfad
+`0x2919DC -> 0x104E44 -> 0x1112C4 -> 0x280744`), und die Pixel kommen
+weiterhin aus der HLE-Liste (0x070FFFFF/0x0CFE6000):
+TOP 90281/90400, BOTTOM 26091/71360 gegen reports/menu_official*.bin.
+Tests: 13/13, 12/12.
+
