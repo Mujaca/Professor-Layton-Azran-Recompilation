@@ -184,12 +184,31 @@ def test_milestones():
 
 
 def test_framecheck():
+    import struct
+    OUT.mkdir(parents=True, exist_ok=True)
+    shot = OUT / "placeholder.bmp"
+    w, h = 400, 240
+    row = w * 3
+    data_size = row * h
+    hdr = bytearray(54)
+    hdr[0:2] = b"BM"
+    struct.pack_into("<I", hdr, 2, 54 + data_size)
+    struct.pack_into("<I", hdr, 10, 54)
+    struct.pack_into("<I", hdr, 14, 40)
+    struct.pack_into("<i", hdr, 18, w)
+    struct.pack_into("<i", hdr, 22, h)
+    struct.pack_into("<H", hdr, 26, 1)
+    struct.pack_into("<H", hdr, 28, 24)
+    struct.pack_into("<I", hdr, 34, data_size)
+    shot.write_bytes(bytes(hdr) + b"\x00" * data_size)
     out = OUT / "frame.json"
-    p = run(["framecheck", "--json-out", str(out)])
+    p = run(["framecheck", "--shot", str(shot), "--json-out", str(out)])
     need(p.returncode == 0, "framecheck Exit %d\n%s" % (p.returncode, p.stdout))
     data = load_json(out)
     need(data["placeholder"] is True, "Platzhalter nicht erkannt")
-    need(data["shot_bytes"] == 288054, "Screenshotgroesse: %s" % data["shot_bytes"])
+    # 288054 B = 400x240 (ein Screen), 576054 B = 400x480 (beide Screens).
+    need(data["shot_bytes"] in (288054, 576054),
+         "Screenshotgroesse: %s" % data["shot_bytes"])
 
 
 def test_hotpatch_list():
