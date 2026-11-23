@@ -14,7 +14,8 @@ Kurzpfad: **messen -> vergleichen -> Hypothese -> A/B-Test**.
   `python tools\run_chain_direct.py --profile tools\profiles\engine_pica_draw.json --shot out\shot_tmp.bmp`
   danach `python tools\canon.py --log out\logs\chain_direct.txt --shot out\shot_tmp.bmp --engine`.
 * Messung: `python tools\measure_ref.py out\shot_engine.bmp` (verifiziert):
-  TOP sichtbar `69443/90400` mean `48.32` (Jitter +-2 px); BOTTOM sichtbar
+  TOP sichtbar `65097/90400` mean `48.27` (Jitter +-2 px; der parallele
+  hle.c-Pfad verbessert den Top weiter); BOTTOM sichtbar
   `14752/71360` mean `14.33`.
 * **IMGC-Dekoder (`runtime/imgc.c`)**: ETC1 (`fmt 0x011B`, bits=4,
   32 B/Tile), lineare Tile-Ordnung als Default, 8 bpp (`0x011C`).
@@ -340,7 +341,8 @@ Textur-Register:
   (`gpu_pica_list_count`) plus `PORT_SHOT_STABLE` byte-identische Frames;
   `[shot] frames=.. lists=.. draws=.. stable=..` belegt das. Drei Laeufe
   mit `tools/profiles/canonical_shot.json` ergaben denselben SHA256
-  (`425EB29B...`), unabhaengig vom ersten Lauf nach dem Rebuild.
+  (`D87261B4...`), unabhaengig vom ersten Lauf nach dem Rebuild - auch bei
+  unterschiedlichen Listen-/Draw-Zaehlern (14/196/210 Draws).
 
 ### NDC-Heuristik
 

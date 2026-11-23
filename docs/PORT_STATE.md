@@ -6437,6 +6437,14 @@ SHA256 425EB29B8568B8B64270CAD5E7FB4A43B582EEDF71F34442912A5F3A8115D339 (3x)
 TOP 69443/90400 (48.32), BOTTOM 14752/71360 (14.33)
 ```
 
+Nachtrag (23:40, nach dem parallelen hle.c-Commit): derselbe Test mit dem
+aktuellen `out/port.exe` liefert TOP `65097/90400` (mean `48.27`) und
+BOTTOM unveraendert `14752/71360`; drei Laeufe mit
+`lists=2/28/30` und `draws=14/196/210` ergeben **denselben** SHA256
+`D87261B402CD1CAF60E683293C795E51B6DBD2486CCDB6AB7A55254D07F471A8`.
+Genau dafuer ist der Submit-/Stabilitaets-Gate da: unterschiedliche
+Draw-Zaehler, identische Pixel.
+
 `python tools\selftest_tools.py` prueft das jetzt als eigenen Test
 (zwei identische Shot-Hashes + BOTTOM <= 16000). `canonical_shot.json` ist
 die eingefrorene Messbasis; das Arbeitsprofil `engine_pica_draw.json` wird

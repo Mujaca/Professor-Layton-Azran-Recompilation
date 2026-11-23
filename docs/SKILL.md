@@ -31,8 +31,8 @@ python tests\mvp_selftest.py                # 13/13
 python tools\selftest_tools.py              # 16/16
 ```
 
-Aktueller Menue-Stand (Commit `854975c`, verifiziert): TOP sichtbar
-`69443/90400` mean `48.32`, BOTTOM sichtbar `14752/71360` mean `14.33`
+Aktueller Menue-Stand (Master-Binary 23:34, hle.c aus `94e3d41`, verifiziert): TOP sichtbar
+`65097/90400` mean `48.27`, BOTTOM sichtbar `14752/71360` mean `14.33`
 (`HLE_PICA_CLEAR=1`, deterministischer Shot). Der Draw-Block stammt aus dem Engine-Strom @`0x30` ->
 `0x0CFE6000`; Quads/Vertex-Attribute und Texturen emittiert jedoch noch HLE
 (`HLE_PICA_SPRITES`). Der fruehere „0 Pixel Diff“ galt nur fuer die
@@ -213,7 +213,7 @@ Statusbericht ohne diesen Checker.
 ## 7. Bekannter Meilenstein-Stand (Commit `854975c`, 2026-11-23)
 
 - Kanonisch: Engine-Strom @`0x30` -> `0x0CFE6000`; TOP sichtbar
-  `69443/90400` mean `48.32`, BOTTOM `14752/71360` mean `14.33`
+  `65097/90400` mean `48.27`, BOTTOM `14752/71360` mean `14.33`
   (`HLE_PICA_CLEAR=1`, deterministischer Shot, `canonical_shot.json`).
 - Attribute/Texturen kommen aus `HLE_PICA_SPRITES` (Spiel-Assets
   `title_a.xa` + `title_b_bg`), **nicht** aus `reports/menu_official*.bin`.

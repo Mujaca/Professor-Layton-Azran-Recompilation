@@ -26,7 +26,7 @@ Frames (`[shot] frames=... lists=... draws=... stable=...`); damit sind
 drei Laeufe byte-identisch (`tools\selftest_tools.py` prueft das).
 
 Aktueller Stand (2026-11-23, verifiziert): TOP sichtbar
-`69443/90400` mean `48.32` (Laufzeit-Jitter +-2 px); BOTTOM sichtbar
+`65097/90400` mean `48.27`; BOTTOM sichtbar
 `14752/71360` mean `14.33` (`HLE_PICA_CLEAR=1`). Der Bottom-Fortschritt
 kommt aus dem linearen IMGC-Tile-Decoder (vorher 25902/71360):
 `runtime/imgc.c` dekodiert ETC1 (`fmt 0x011B`) und lineare Kacheln,

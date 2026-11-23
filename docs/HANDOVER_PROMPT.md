@@ -14,7 +14,7 @@ beide Framebuffer gerendert werden: oben 400x240, unten 320x240, in einem
 Abgestimmte Praezisierungen gegenueber dem urspruenglichen Zieltext:
 
 1. **Statt "0 Diff"**: Der Screenshot ist eine **Asset-Naeherung**.
-   Gemessen: TOP 69443/90400 (mean 48.32), BOTTOM 14752/71360
+   Gemessen: TOP 65097/90400 (mean 48.27), BOTTOM 14752/71360
    (mean 14.33). Begruendung (belegt): der Azahar-Capture ist nicht
    pixelgleich aus Assets reproduzierbar - selbst das korrekte
    Bottom-Asset hat 0/1200 exakte 8x8-Bloecke; der Top ist ein
@@ -73,6 +73,11 @@ TOP voll        : 75043/ 96000  mean 49.70
 BOTTOM sichtbar : 14752/ 71360  mean 14.33
 BOTTOM voll     : 19482/ 76800  mean 15.57
 ```
+
+Nachtrag: mit dem aktuellen Master-Binary (nach dem parallelen hle.c-Commit)
+liefert derselbe Lauf TOP `65097/90400` (mean `48.27`); BOTTOM bleibt
+`14752/71360`. Drei Laeufe mit `lists=2/28/30` und `draws=14/196/210`
+haben denselben Shot-Hash `D87261B4...`.
 
 Der Shot ist deterministisch: `[shot] frames=60 lists=30 draws=210
 stable=..` (wartet auf abgeschlossene Engine-Listen + stabile Frames).
