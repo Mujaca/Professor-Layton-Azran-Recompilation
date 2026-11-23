@@ -4409,3 +4409,20 @@ hat seinen Stack nicht sauber restauriert - ein Recompiler-/EPILOG-
 Problem. Beim Aufruf von `0x1196AC` bleibt die Ausfuehrung danach in
 diesem Pfad (kein Rueckgabewert, `0x10002800` ungeschrieben).
 
+
+### Ursache der SP-Korrekturen gefunden: In-Funktions-Jump-Tabellen
+
+Die ldr-pc-Ziele in `0x12FAA4` sind **innerhalb derselben Funktion**
+(0x12FAD4/0x12FADC/0x12FAE4, 0x12FB30/38/40/44, 0x12FB98/BA0/BA8) - keine
+eigenen fn_-Eintraege. Unser `arm_call_guest(c, target)` findet sie
+nicht und kehrt sofort zurueck, **ohne** das spaetere `pop {r4,r5}` der
+Funktion auszufuehren -> SP bleibt 8 Byte zu tief (genau die gemessene
+Differenz). `arm_restore_sp` korrigiert das nur nachtraeglich.
+
+Konsequenz: `0x12FAA4` (Config-Setter) liefert falsche Werte/Stack, und
+der Submit-Pfad verliert den Faden (0x1196AC kehrt nicht zurueck).
+
+Richtiger Fix: `ldr pc` fuer **lokale Label-Ziele** als `goto
+L_<fn>_<addr>` emittieren (switch ueber die Tabellenwerte), statt
+`arm_call_guest`.
+

@@ -731,8 +731,8 @@ void arm_restore_sp(ArmCpu *c, uint32_t sp0) {
     if (c->r[13] != sp0) {
         static int n = 0;
         if (n++ < 40)
-            fprintf(stderr, "[sp] 0x%08X: SP %08X -> %08X (korrigiert)\n",
-                    arm_last_block, sp0, c->r[13]);
+            fprintf(stderr, "[sp] blk=0x%08X lr=0x%08X: SP %08X -> %08X (korrigiert)\n",
+                    arm_last_block, c->r[14], sp0, c->r[13]);
         c->r[13] = sp0;
     }
 }
