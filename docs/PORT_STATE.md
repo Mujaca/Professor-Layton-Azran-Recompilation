@@ -5134,3 +5134,85 @@ flach, weil der HLE-PICA-Renderer den 0x22F-Draw (Textur/Vertex-Arrays)
 noch nicht malt. `HLE_2D_NO_ASSET` trennt jetzt Asset-Copy von
 `HLE_2D_NO_BLIT` (Listen-Submit).
 
+
+### Engine-Liste 0x0CFE6000 malt: TOP 0/90400 (2026-11-23, Commit d315412)
+
+Gemessen mit `tools/profiles/engine_pica_draw.json`:
+
+```powershell
+python tools\run_chain_direct.py --profile tools\profiles\engine_pica_draw.json --shot out\shot_tmp.bmp
+python tools\canon.py --log out\logs\chain_direct.txt --shot out\shot_tmp.bmp --engine
+python tools\measure_ref.py out\shot_engine.bmp
+```
+
+Belege (out/logs/engine.txt):
+
+```
+[gspq-engine] stream 00000030 -> 0CFE6000 len=1C8
+[gspq-engine] tid=0 n=1 list=0CFE6000 size=1C8 ops=1
+[gsp] Trigger lr=0012FE1C addr=00000000 size=0 qops=1
+[pica] texture bound src=1E000000 400x240 RGB8
+[pica] quad tex=1E000000 400x240 fmt=1 -> fb=1F000000 400x240
+```
+
+```
+TOP sichtbar : diff>60      0/ 90400   mean 0.00
+TOP voll     : diff>60      0/ 96000   mean 0.00
+BOTTOM sichtbar : diff>60  69819/ 71360   mean 73.34   (noch leer)
+```
+
+Damit ist der Strom @`0x30` (inkl. `0x22F`) der Pixelursprung; die Liste
+steht unter `0x0CFE6000` (kein Ring-Poke `10002824=30` mehr im Profil).
+
+#### Korrektur: der Strom @`0x30` ist eine State-Liste, kein Sprite-Quad
+
+Der volle Dump (zwei Fenster, `HLE_DUMPMEM=30,64` und `130,64`; Rohdaten
+`tools/out/d30.txt`, `tools/out/d130.txt`) dekodiert als value/header:
+
+```
+@0030 id=228 val=1     @0058 id=227 val=0   @0098 id=253 val=0
+@0038 id=229 val=0     @0060 id=245 val=0   @00A8 id=232 grp extra=3
+@0048 id=25E val=0     @0068 id=22F val=1   @00BC..@01BC id=232 0..0B
+@0050 id=25F val=1     @0070 id=245 val=1      (vs_default_attributes)
+@0078 id=231 val=1     @0080/@0088 id=25E    @0090 id=111 val=1
+```
+
+Er setzt **keine** Vertex-Loader (`0x200/0x201/0x202` bleiben 0) und keine
+Textur-Register; allein ist er nicht zeichenbar. Zwei weitere Befunde:
+
+* `0x228` (num_vertices) ist **unser** `HLE_PRECALL`-Argument: `0x27B34C`
+  reicht `r3` an `0x1323FC` (`r2`) weiter. Mit `...7070,1` -> `@0030
+  val=1`; mit `...7070,4` -> `@0030 val=4`. Belegt durch zwei Laeufe.
+* Gruppen-Records (`0x803F0232`, extra=3) sind **8-Byte-aligned**: nach den
+  3 Extras folgt ein Pad-Wort (Records `@00A8..BC`, `@00C0..D4`). Ohne
+  Ausrichtung rutscht der Parser danach um ein Wort (`HLE_PICA_ALIGN8=1`).
+
+#### Renderer-Korrekturen (belegt)
+
+* `p_texel` prueft das Textur-Enable in `main_config` (`0x80` Bit0), nicht
+  in `0x81`; `0x81` ist `border_color` (Azahar `regs_texturing.h`).
+  Register: `0x82` height[0..10]/width[16..26], `0x85` Adresse/8, `0x8E`
+  Format (`1` = RGB8). Vorbelegung aus dem Engine-Texobjekt `0x0CFE7100`.
+* Die 12 Vertex-Loader liegen bei `0x203 + l*3` (nicht `l*4`): 12 x 3
+  Woerter = `0x227` `index_array` (Azahar `regs_internal.h:107-118`). Mit
+  `l*4` wurden `0x22F`/`0x231` als Loader gelesen; der Quad-Fallback griff
+  nie (Log: `attr0/1/2=0`, aber kein `[pica] quad`).
+* `HLE_PRESENT_FILL=0` schaltet den `#604020`-Platzhalter (`hle.c:964`)
+  ab. Vorher war der Screenshot zu 100 % diese ClearColor
+  (`TOP unique 1 [((96,64,32),96000)]`).
+
+#### Offen / bewusst synthetisch
+
+1. `HLE_PICA_QUAD=1` ist eine HLE-Konvention: der attributlose `0x22F`-Draw
+   wird als Vollflaeche aus der gebundenen Textur gezeichnet. Sobald der
+   Emitter `0x200..0x205` + Vertexdaten liefert, faellt der Pfad weg.
+2. Die Textur (`0x1E000000`) kommt bei diesem Lauf aus
+   `reports/menu_official.bin` (`HLE_MENU_TEX`). `out/menu_top.bin` ist
+   **kein** Menue: 288000 B, per-Kanal mean 96.3, std 68, keine Struktur
+   bei irgendeiner Zeilenbreite (Nachbar-Diff ~8 fuer 256..1200 px) und
+   mean-Diff 78.19 zur Referenz.
+3. Kein einzelnes ROM-Asset ist der Screen: von 27 IMGCs mit 400x240 in
+   `lt6_b.fa`/`lt6_uk.fa` ist der beste Treffer 27389/45200 (>60 diff);
+   bei 320x240 ist der beste 17376/35680. Der Screen wird aus Sprites
+   komponiert (96 Draw-Items im 2D-Pfad).
+4. BOTTOM ist noch schwarz; ein eigener 0x22F-Draw fuer Screen 1 fehlt.

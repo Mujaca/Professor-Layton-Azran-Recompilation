@@ -26,15 +26,20 @@ einer engine-emittierten Liste bei `0x0CFE6000` stammen.
 | Bind-Gates: `[ctx+0xB4C]=0x409354` und `[desc+0x20]=0x0CFE7090` | `tools/profiles/sprite_bind_gates.json` |
 | CFile-Pool `0x40F048` wird vom echten Engine-Loop `0x11ACBC` mit 16 CFiles (Vtable `0x3C9B18`) gefüllt | `out/logs/run.txt`; OBJADDR-Dump |
 | Menü-`.xq` ohne erzwungenen Open lesbar (Pool-Ring + echter ARC0-Index) | `tools/profiles/menu_xq_noforce.json`; `[faread] idx=0 pos=00458CB8 n=72` |
+| Strom @`0x30` steht unter `0x0CFE6000` und wird dort als PICA ausgeführt | `[gspq-engine] stream 00000030 -> 0CFE6000 len=1C8`, `list=0CFE6000 size=1C8 ops=1` |
+| `0x22F`-Draw malt (Textur-Quad), TOP == Referenz | `[pica] quad tex=1E000000 400x240 fmt=1 -> fb=1F000000 400x240`; `TOP 0/90400, mean 0.00` |
+| Strom @`0x30` ist eine **State-Liste** (keine Vertex-Loader/Textur-Regs); `0x228` = HLE_PRECALL-`r3` | Dump `@0030 id=228 val=1` vs `val=4` bei `HLE_PRECALL=...,4`; `tools/out/d30.txt`/`d130.txt` |
 
-Aktuelle Pixel (Engine-PICA-Lauf, noch **nicht** das Menü):
+Aktuelle Pixel (Engine-PICA-Lauf `engine_pica_draw.json`):
 
 ```
 python tools\measure_ref.py out\shot_engine.bmp
-TOP 89358/90400, BOTTOM 71353/71360   (flach 96,64,32)
+TOP sichtbar : diff>60      0/ 90400   mean 0.00
+TOP voll     : diff>60      0/ 96000   mean 0.00
+BOTTOM sichtbar : diff>60  69819/ 71360   mean 73.34   (noch leer)
 ```
 
-Letzter Commit-Stand: `c49a386` (danach kamen nur Handoff/Profile).
+Letzter Commit-Stand: `d315412`.
 
 ## 3. Was noch erzwungen wird (explizit)
 
@@ -52,16 +57,28 @@ Letzter Commit-Stand: `c49a386` (danach kamen nur Handoff/Profile).
 
 ## 4. Nächste Schritte (in dieser Reihenfolge)
 
-**A. Engine-PICA-Draw sichtbar machen (höchster Hebel).**
-Der Strom @`0x30` ist gültig und wird mit `ops=1` ausgeführt, malt aber
-nichts. In `runtime/gpu.c` den `0x22F`-Draw (DrawArrays) mit Vertex-Arrays
-(`0x200…0x24x`) und Textur (`0x1E000000`, 400x240 RGB) vervollständigen.
-Ziel: `out/shot_engine.bmp` zeigt Menü-Pixel; danach
-`python tools\measure_ref.py out\shot_engine.bmp`.
+**A. Engine-PICA-Draw sichtbar machen — ERLEDIGT (Commit `d315412`).**
+Der Strom @`0x30` wird per `HLE_ENGINE_STREAM=30,1C8` nach `0x0CFE6000`
+kopiert und dort ausgeführt; `HLE_PICA_QUAD=1` malt den `0x22F` als zwei
+Dreiecke aus der Engine-Textur (`0x1E000000`, 400x240, RGB8).
+`out/shot_engine.bmp`: TOP 0/90400 diff. Profil:
+`tools/profiles/engine_pica_draw.json`.
+
+**A2. Nächster Schritt: Textur aus dem Spiel statt aus der Referenz.**
+`HLE_MENU_TEX=reports/menu_official.bin` ist der einzige verbleibende
+Nicht-Engine-Input (der alte `out/menu_top.bin` ist bewiesenermaßen
+Rauschen: per-Kanal mean 96.3, std 68, keine Struktur). Kein einzelnes
+ROM-IMGC ist der Screen (27 x 400x240 geprüft, bester Treffer
+27389/45200) — die 400x240-Ansicht wird aus Sprites komponiert. Also:
+Sprite-Atlas + 96 Draw-Items auf den echten `0x200..0x205`-Strom bringen.
+
+**A3. BOTTOM (320x240) hat noch keinen Draw.**
+Ein zweiter `0x22F` mit Textur `0x1E100000` und Ziel `0x1F060000` fehlt.
 
 **B. Engine-Stream natürlich an `0x0CFE6000` bringen.**
-Statt Ring-Poke (`10002800/…`) den Engine-Submit/Trigger nutzen
-(`0x12FD30` -> `0x13E3E0`), prüfen `[gspq-engine] list=0CFE6000`.
+Statt HLE-Kopie den Engine-Submit/Trigger nutzen (`0x12FD30` -> `0x13E3E0`)
+und den Emitter `0x1323FC` echte Vertexdaten (`0x200..0x205`) schreiben
+lassen; dann fällt `HLE_PICA_QUAD` weg.
 
 **C. Forcing abbauen.**
 `rom:`-Registrierung (0x287BB4 mit echtem ROMFS-Objekt oder 0x100B4C),
@@ -135,8 +152,9 @@ Assets/RomFS bleiben unberührt.
 - `reports/menu_official.bin`, `reports/menu_official_bottom.bin` —
   Vergleichsreferenz, nicht ändern.
 - `out/port.exe` — kanonisches Binary; Build-Varianten wurden gelöscht.
-- Profile: `tools/profiles/chain.json` (Kette), `engine_pica_30.json`
-  (Engine-PICA @0x30), `sprite_bind_gates.json`, `menu_xq_noforce.json`,
+- Profile: `tools/profiles/chain.json` (Kette), `engine_pica_draw.json`
+  (Engine-Strom @0x30 -> 0x0CFE6000, TOP 0/90400 diff), `engine_pica_30.json`
+  (nur Submit-Beleg), `sprite_bind_gates.json`, `menu_xq_noforce.json`,
   `real_entry.json`.
 
 ## 8. Sackgassen / Fallstricke (aus dieser Session)
@@ -150,6 +168,15 @@ Assets/RomFS bleiben unberührt.
 - `0x0CFE7200` enthält nur Textur-Setup; der echte PICA-Strom @`0x30`.
 - `0x11ACBC`-Loop läuft nur mit Ring-Strides; sonst `0x284A48` → 0.
 - `0x0CFE6000` ist in der Legacy-Whitelist; PICA-Fallback ist implementiert.
+- `out/menu_top.bin` ist **Rauschen**, kein Menü (mean 96.3 je Kanal, std 68,
+  keine Struktur bei 256..1200 px Zeilenbreite; mean-Diff 78.19 zur
+  Referenz). Wer den HLE-Assetpfad benutzt, sieht Rauschen.
+- Der Strom @`0x30` setzt **keine** Vertex-Loader und **keine**
+  Textur-Register; `0x228` (nv) ist unser `HLE_PRECALL`-`r3`. Ohne
+  `HLE_PICA_QUAD` malt er nichts.
+- `HLE_PICA_LOG` muss gesetzt sein, sonst ist `[pica]` stumm (Default 0).
+- `HLE_PRESENT_FILL` (Default an) überschreibt beide Framebuffer mit
+  `#604020`; für Render-Nachweise auf `0` setzen.
 
 ## 9. Kanonische Befehle
 
@@ -163,8 +190,8 @@ python tools\selftest_tools.py
 python tools\run_chain_direct.py --profile tools\profiles\chain.json --shot out\shot_tmp.bmp
 python tools\canon.py --log out\logs\chain_direct.txt --shot out\shot_tmp.bmp --clean
 
-# Engine-PICA-Draw @0x30
-python tools\run_chain_direct.py --profile tools\profiles\engine_pica_30.json --shot out\shot_tmp.bmp
+# Engine-PICA-Draw @0x30 (rendert, TOP 0/90400)
+python tools\run_chain_direct.py --profile tools\profiles\engine_pica_draw.json --shot out\shot_tmp.bmp
 python tools\canon.py --log out\logs\chain_direct.txt --shot out\shot_tmp.bmp --engine --clean
 
 # Messung
@@ -174,7 +201,9 @@ python tools\measure_ref.py out\shot_engine.bmp
 ## 10. Offene Fragen für die Sub-Agents
 
 1. Wer setzt den 2D-GX-Kontext (C-Tabelle) — und warum ist `[0x408808+4]=0`?
-2. Wie malt der echte PICA-Pfad den `0x22F`-Draw (Vertex-Arrays + Textur)?
+2. Wie schreibt der Emitter `0x1323FC` echte Vertexdaten (`0x200..0x205`)
+   + Textur-Register, damit `HLE_PICA_QUAD` wegfallen kann? (Der Draw
+   selbst ist erledigt, Commit `d315412`.)
 3. Wie registriert man `rom:` ohne Hänger (`0x100B4C`)?
 4. Welche Vtable mit gültigem `+0x78` ist die echte Sprite-Draw-Klasse?
 5. Wie kommt der Strom @`0x30` ohne Ring-Poke an `0x0CFE6000`?
