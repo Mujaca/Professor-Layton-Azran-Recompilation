@@ -30,6 +30,20 @@ Abgestimmte Praezisierungen gegenueber dem urspruenglichen Zieltext:
    (`2.0/-2.0/399/-239`) projiziert Modellkoordinaten des Ring-Items;
    diese existieren im Port nicht (Node-/Scene-Felder sind 0).
 
+## 1b. A2-Stand und neuer Plan (2026-11-23)
+
+A2 (Pipeline) ist abgeschlossen: Notkruecken weg, echte 0x200..0x208,
+96 Draws kanonisch + deterministisch, Texturen aus lt6_*.fa. Das BILD ist
+aber noch nicht das Menue: python tools/menu_compare.py out/shot_engine.bmp
+liefert corr 0.024, std 17.0 (Referenz 47.9), detail-hit 0.29.
+
+Der Grund ist gefunden: der Overlay ist eine ANMC00-Animation in
+	itle_b.xa/RES.bin mit NAMEN und KOORDINATEN; 	ools/anmc_menu.py
+extrahiert sie (53 Records, 	ools/out/anmc_menu.txt). Bisher hat HLE
+diese echten Positionen durch Grid-Rects ersetzt.
+
+Neuer 4-Stufen-Plan mit Abnahmekriterien: docs/PLAN_MENU_REAL.md.
+
 ## 2. Verifizierter Stand (jede Zeile hat einen Beleg)
 
 | Fakt | Beleg |

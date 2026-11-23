@@ -6476,3 +6476,48 @@ Tests: **16/16** (selftest_tools) und **13/13** (mvp_selftest).
 Vergleich (fuer die Wahl): 13-Draw-Variante bleibt mit mean 48.32 etwas
 naeher am Capture; die 96-Draw-Variante ist jetzt aber kanonisch,
 deterministisch und zeigt echte Engine-Positionen.
+
+### Ehrliche Bildmessung: A2-Pipeline steht, das Bild ist nicht das Menue (2026-11-23)
+
+Neues Mass `tools/menu_compare.py` (Korrelation + Detail + Detail-Treffer)
+statt nur Farbdifferenz. Gegen `reports/menu_official.bin`:
+
+```
+96-Record-Rects (record_rects_96.txt, vorher kanonisch):
+  corr 0.024   std 17.0 (ref 47.9)   detail-hit 0.29   TOP 86645
+13 Draws (title_top_plus_records.txt):
+  corr 0.354   std 41.8 (ref 47.9)   detail-hit 0.99   TOP 65097
+```
+
+Damit ist belegt: die 96-Record-Quads haben das Bild mit Grid-Rects
+zugedeckt (Korrelation 0.024 = praktisch kein Layout-Treffer). Kanonisch
+ist wieder die 13-Draw-Liste (und jetzt besser: TOP **65097**/90400,
+mean 48.27 statt 75911/53.96).
+
+Kanonisch:
+
+```
+[gspq-engine] sprites=13 len=958
+[gspq-engine] sprites=1 len=B8
+TOP    : 65097/ 90400  mean 48.27
+BOTTOM : 14752/ 71360  mean 14.33
+corr 0.354, std 41.8, detail-hit 0.99
+```
+
+**Ursache der Geometrie-Luecke gefunden:** der Menue-Overlay ist eine
+ANMC00-Animation in `title_b.xa/RES.bin` mit **Namen und Koordinaten**.
+`python tools/anmc_menu.py` extrahiert sie (53 Records ->
+`tools/profiles/anmc_menu.txt`): `#continue_off 0 (103,24)`, `#new_off 0
+(105,24)`, `#scr_off 0 (99,24)`, `#setting_off 0 (150,24)`,
+`#sound1..3_off 0 (24,26)`, `#try_off 0 (256,66)`, `#www 0 (144,24)`,
+`#pointer 0 (3,3)`; dazu die Button-States (`btr01_*`, `btr_*`,
+`s01_btr_*`, `s_btr_*`). Diese echten Positionen hat HLE bisher durch
+Grid-Rects ersetzt.
+
+Neuer 4-Stufen-Plan mit Abnahmekriterien: `docs/PLAN_MENU_REAL.md`
+(1 ANMC-Rects, 2 Textur je Element, 3 echtes Titel-3D ohne k=0.90,
+4 Engine fuehrt Textur/Draws). Neues Abnahmemass:
+`corr >= 0.90, std >= 0.80*ref, detail-hit >= 0.80`.
+
+Messregel bestaetigt: der erste Lauf nach dem Rebuild war erneut flach
+(`TOP 87048`, mean 90.72), der zweite `65097` (48.27).
