@@ -4280,3 +4280,20 @@ In dieser Konfiguration wird `0x0E900000` jedoch **nie geschrieben**, weil
 `0x12FC24` dann nicht mehr laeuft (Chain haengt vorher). Stabile
 Konfiguration (Zwang `284AA8=0x0E800000`) wiederhergestellt.
 
+
+### Bump-Allokator: Liste persistiert jetzt (kein Aliasing)
+
+Mit `HLE_ALLOC_BUMP=0x0E900000` (Stride 0x1000) und ohne `284AA8`-Zwang:
+
+```
+[bump] 0x284AA8 -> 0E900000 sz=1000
+[emitin] r2=0E902000 r3=00000014 dsc[3EE678]=00000000 ...
+guest-watch --write 0x0E902000: 1 x Wert 0x00000004 (0x143F60 = Count)
+[dumpmem2] 0E902000: 00000004 00000000 ...   (bleibt erhalten!)
+```
+
+Der Emitter laeuft (`0x12FC24` 1x, `0x12FD30` 114x, `0x139914` 1x) und
+die Liste wird **nicht mehr vom Node-Fill ueberschrieben**. Sie enthaelt
+allerdings nur den Count (4), keine `(value,header)`-Paare - die Eintraege
+liegen in den separaten Node-Puffern.
+
