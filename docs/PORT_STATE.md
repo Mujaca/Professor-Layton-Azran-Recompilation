@@ -5657,3 +5657,27 @@ klasse-A-Kette (`366ABC -> 20AD94 -> 23D630 -> 34AAC4`) ihren
 Fuer echte Bloecke muss also zuerst die Renderer-Ring-Init laufen
 (`0x1ED64C`-Pfad / `[ctx+0x14C]`), danach lassen sich die 0x24-Byte-
 Felder dekodieren.
+
+### Ring-Init 0x1ED64C laeuft, setzt aber [ctx+0x14C] nicht (2026-11-23)
+
+Test mit `HLE_POSTCALL=@408A14=00000000;1ED64C,408808,3EC248,0,0`
+(Gate `[0x408808+0x20C]==0` per Postpoke, dann Init):
+
+```
+[postpoke] 00408A14=00000000
+[postcall2] 0x001ED64C(00408808,003EC248)
+[hook] count addr=001ED65C hits=2      # Init-Rumpf laeuft
+[postcall2] -> r0=00000001 ab=0
+[dumpafter] 00408950: 00000000 ...     # [ctx+0x14C]/[+0x150] bleiben 0
+[dumpafter] 2E0027C0: 00000000 ...     # auch kein Block am errechneten Ziel
+```
+
+Damit ist der 2D-Ring (`ctx+0x2000+0x3b8 = 0x40ABC0`) zwar HLE-gesetzt
+(`0x14004440`), aber der Klasse-A-Puffer (`[ctx+0x14C]`) bleibt 0 - die
+Init-Funktion setzt ihn in diesem Zustand nicht. Der 0x24-Byte-Block aus
+`0x34AAC4` landet daher an keiner der geprueften Adressen
+(`0x10002800`, `0x10002200`, `0x1E000000`, `0x2E0027C0`).
+
+Folge: Fuer die Record-Quads zuerst `[ctx+0x14C]` mit einem echten
+Ringpuffer besetzen (oder den 0xD2-Loader + Szene nutzen); der
+Klasse-A-Pfad selbst ist ausfuehrbar (siehe `classa_probe.json`).
