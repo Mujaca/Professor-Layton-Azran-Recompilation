@@ -4075,3 +4075,16 @@ Fazit: Der Allokator/Container muss die Pool-Basis `ctx+0xB4`
 Also: Der Pool wird im Port **von niemandem gefuellt**. Deshalb findet
 der (jetzt laufende) Flush `0x13A4B0`/`0x13F688` nichts zu zeichnen.
 
+
+### Pool-Push + Flush-Dispatch funktionieren jetzt
+
+- Push: `0x2669C0(0x42B7AC, 0x0D600000)` -> `r0=0x42B7DC`, Pool-Count
+  steigt (Write 0x42B888: 0 -> 1 via `0x26556C` aus `0x2669C0`).
+- Flush `0x13A4B0(0x42BB10)` -> `r0=0x42BCD4`.
+- Dispatch: `guest-watch --pc 0x142BD0` **1 Treffer** mit
+  `r0=0x0D600000` (Aufrufer `0x13F688+0x2C`).
+
+Damit ist die Kette **Push -> Pop -> 0x142BD0-Dispatch** erstmals
+geschlossen. Der Node ist noch typ-/drawable-los (Felder 0), daher
+entstehen noch keine Zeichendaten.
+
