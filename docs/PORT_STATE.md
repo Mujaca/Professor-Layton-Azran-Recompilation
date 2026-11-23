@@ -5105,3 +5105,32 @@ Pixel unveraendert: TOP 89358/90400, BOTTOM 71353/71360.
 Naechster Schritt: den Emitter des 0x22F-Draw-Templates finden und den
 fertigen PICA-Strom (Textur + Draw) an 0x0CFE6000 geben.
 
+
+### Echter PICA-Draw-Strom der Engine gefunden: @0x00000030 (2026-11-23)
+
+`0x1323FC` schreibt sein Template **nicht** nach 0x0CFE7200, sondern an
+die Adresse `r1=0x30` (Rueckgabe von `0x132130`). Dump:
+
+```
+@00000030: 00000001 000F0228 00000000 00020229
+           00000000 00000000 00000000 0002025E
+           00000001 000F025F 00000000 000F0227
+           00000000 00010245 00000001 000F022F   <- Draw 0x22F
+           00000001 000F0245 00000001 000F0231
+           00000000 0008025E 00000000 0008025E
+           00000001 000F0111 00000000 00030253
+           00000000 00000000 00000000 803F0232
+```
+
+Das ist ein echter `value,header`-PICA-Strom inkl. `0x22F` (DrawArrays).
+Als Liste submittiert (`0x30`, 0x80 B):
+
+```
+[gspq] tid=0 idx=0 id=1 list=00000030 size=80 ops=1
+```
+
+Die GPU fuehrt also den Engine-Draw aus (`ops=1`). Pixel bleiben noch
+flach, weil der HLE-PICA-Renderer den 0x22F-Draw (Textur/Vertex-Arrays)
+noch nicht malt. `HLE_2D_NO_ASSET` trennt jetzt Asset-Copy von
+`HLE_2D_NO_BLIT` (Listen-Submit).
+

@@ -589,7 +589,7 @@ static void hle_install_2d_entry(ArmCpu *c) {
         static int imgs_tried = 0;
         static int no_asset = -1;
         if (no_asset < 0)
-            no_asset = (getenv("HLE_2D_NO_BLIT") != NULL);
+            no_asset = (getenv("HLE_2D_NO_ASSET") != NULL);
         if (!imgs_tried && !no_asset) {
             FILE *f;
             int fa_bottom = (getenv("HLE_XQ_ASSET") != NULL);
