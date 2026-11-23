@@ -4868,3 +4868,34 @@ Der Offset kommt aus dem echten ARC0-Index (`fa_index.c`), der Datei-Read
 aus `lt6_a.fa`. Pixel unveraendert (HLE-Liste): 90281/90400 + 26091/71360.
 Tests: 13/13, 12/12.
 
+
+### CFile-Pool wird jetzt vom Engine-Fuell-Loop befuellt (2026-11-23)
+
+Ursache des uebersprungenen Loops: `0x284A48` bricht mit 0 ab, wenn der
+Ring-*Stride* (`[ring+4]`) 0 ist. Der Stride kommt aus dem Statik-Ctor.
+Mit den drei Strides (`0x40F04C/0x40F058/0x40F064 = 4`) laeuft der echte
+Loop:
+
+```
+[blk] 0011ABA0 ... -> 0011ACBC -> 0011ACD0 -> 0011AD2C -> (16x)
+[blk] 0011AD2C r0=0E907000/0E907004/... r4=0040F060
+```
+
+Pool danach (OBJADDR-Dump am 0x268C80-Aufruf):
+```
+@0040F048: 0E905000 00000004 00100010 0E906000 00000004 00100000
+            0E907000 00000004 00100010 00100000 ...
+```
+Count (`+0x26`) = 0x10, freier Ring-Array = `0x0E907000`; die Objekte
+haben die echte Engine-Vtable `0x003C9B18` (Dump @0E905000).
+
+`0x268C80`/`0x2808A8` rufen damit den **echten CFile-Open** auf:
+
+```
+[hook] regs addr=0032AF28 r0=0E905000 r1=0CF09E68 lr=002808EC
+```
+
+Der Open scheitert noch in `0x287D10 -> 0x26E95C` (Pfadformat/FS-State),
+daher noch keine `[faread]` in diesem Lauf. Der synthetische CFile-Slot
+ist weg; nur die drei Ring-Strides werden noch gepokt. Tests: 13/13, 12/12.
+
