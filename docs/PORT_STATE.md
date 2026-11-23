@@ -4247,3 +4247,22 @@ Damit baut die **Engine** den Menue-Draw mit dem echten Menue-Objekt
 (Builder 0x2800C8 + Loader 0x28D424), ausgeloest ueber
 Handler 0x142D34 -> 0x11DB84 -> 0x277004.
 
+
+### Ursache der leeren Liste gefunden: Allokator-Aliasing
+
+`guest-watch --write 0x0E800000` (mit erzwungenem `284AA8=0x0E800000`):
+
+```
+0x0E800000 <- 0x00000004   from 0x143F60   (Count)
+0x0E800000 <- 0x003C4F4C   from 0x288890   (Builder)
+0x0E800000 <- 0x003CAC3C   from 0x288890   (Entry)
+0x0E800000 <- 0x00000000   from 0x279E50   (Node-Fill, 4x)
+```
+
+Der **Node-Fill `0x279E50`** (aus `0x2895D0`) ueberschreibt die Liste, weil
+der erzwungene Arena-Allokator `0x284AA8` **denselben Puffer** liefert.
+Deshalb bleibt `0x0E800000` bei Count/Descriptor/Nullen.
+
+Mit echtem Allokator (ohne `284AA8`-Zwang) wird `0x0E800000` gar nicht
+mehr geschrieben (Emitter/Chain haengt wieder) - daher Zwang zurueckgestellt.
+
