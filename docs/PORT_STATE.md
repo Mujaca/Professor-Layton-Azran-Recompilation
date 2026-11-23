@@ -6007,3 +6007,20 @@ der Bereich ctx+0xB34 Teil des Kommandostroms, nicht der UV-Speicher;
 die UV-Paare werden im Desc-Buffer (`[ctx+0xD6C]`) gehalten.
 
 Kanonisch unveraendert: TOP 69370/90400 (47.98), BOTTOM 25902/71360.
+
+### Record-Position: desc+0x140 bleibt 0 (2026-11-23)
+
+Nach der laufenden Paar-Kette (`scene_pairs.json`) ist der Desc-Buffer
+bei `[ctx+0xD6C] = 0x0E910000`; `desc+0x140` (die 2x3-Transform-Matrix,
+die `0x278B84` aus der Draw-Item-Methode `0x11C000` setzt) ist **komplett
+0**:
+
+```
+[dumpafter] 0E910140: 00000000 00000000 00000000 00000000 ... (12 Woerter)
+```
+
+Damit fehlt die Position fuer echte Record-Quads: sie kommt aus dem
+Ring-Draw-Item (`0x11C000 -> 0x278B68`), nicht aus den Records oder der
+Paar-Kette. UV-Ranges sind konstant `(0,1)/(0,1)`.
+
+Kanonisch unveraendert: TOP 69370/90400 (47.98), BOTTOM 25902/71360.
