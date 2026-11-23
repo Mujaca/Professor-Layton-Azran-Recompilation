@@ -4230,3 +4230,20 @@ Damit ruft der Typ-6-Handler `0x142D34` jetzt eine **echte Engine-Draw-
 Methode** mit `r0`=Drawable auf (statt nur eines HLE-Stubs). Das ist die
 produktive Form des Drawable-Aufrufs.
 
+
+### Echter Menue-Drawable: Builder/Loader laufen mit r0=0x0D800000
+
+Menue-Objekt `0x3EE12C` nach `0x0D800000` kopiert, Vtable auf
+`0x0D7F2000` (`+0x14=0x0011DB84`), Gate `+0x40=1` gesetzt, als
+Drawable an `node+0x10` gebunden:
+
+```
+guest-watch --pc 0x2800C8: 218+ Treffer, r0=0x0D800000, lr=0x277004+0xD4
+guest-watch --pc 0x28D424: 251+ Treffer, r0=0x0D800000, lr=0x277004+0xE8
+guest-watch --pc 0x277004: 1 Treffer,  r0=0x0D800000, lr=0x11DB84+0xC
+```
+
+Damit baut die **Engine** den Menue-Draw mit dem echten Menue-Objekt
+(Builder 0x2800C8 + Loader 0x28D424), ausgeloest ueber
+Handler 0x142D34 -> 0x11DB84 -> 0x277004.
+

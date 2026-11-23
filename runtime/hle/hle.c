@@ -1570,6 +1570,30 @@ void hle_pump(void) {
                         buf[sl] = 0;
                         for (tok = strtok(buf, ";"); tok != NULL;
                              tok = strtok(NULL, ";")) {
+                            if (tok[0] == '#') {
+                                /* #src,dst,len : memcpy im Gast-RAM */
+                                char *c1 = strchr(tok, ',');
+                                uint32_t src = (uint32_t)strtoul(tok + 1,
+                                                                 NULL, 16);
+                                uint32_t dst = 0, len = 0;
+                                if (c1) {
+                                    char *c2 = NULL;
+                                    dst = (uint32_t)strtoul(c1 + 1, &c2, 16);
+                                    if (c2 != NULL && *c2 == ',')
+                                        len = (uint32_t)strtoul(c2 + 1,
+                                                                NULL, 16);
+                                }
+                                if (len != 0u &&
+                                    (uint64_t)src + len <= g_frame_cpu->mem_size &&
+                                    (uint64_t)dst + len <= g_frame_cpu->mem_size) {
+                                    memcpy(g_frame_cpu->mem + dst,
+                                           g_frame_cpu->mem + src, len);
+                                    printf("[postcopy] %08X -> %08X (%X)\n",
+                                           src, dst, len);
+                                    fflush(stdout);
+                                }
+                                continue;
+                            }
                             if (tok[0] == '@') {
                                 char *eq = strchr(tok, '=');
                                 if (eq) {
