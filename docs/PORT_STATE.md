@@ -5955,3 +5955,35 @@ aber `11A3E0/27C2BC/2794A4/2721E0 = 0` - der Node-Draw wird noch nicht
 erreicht (Node-/Vtable-Pfad in 0x28BE34 pruefen).
 
 Kanonisch unveraendert: TOP 69370/90400 (47.98), BOTTOM 25902/71360.
+
+### Scene-Paar-Kette laeuft (2026-11-23, 67f5116)
+
+Mit `HLE_POSTCALL` (Profil `tools/profiles/scene_pairs.json`) laufen
+alle vier Funktionen der Paar-Kette:
+
+```
+@408A14=1; @409574=0E910000; @40932C=0; @409330=3F000000
+@3F000010=1; @3F000024=1; @3EC688=0E905000; @3EC690=3
+11A3E0,3EC5C4,1,0,0; 11A3E0,3EC5C4,2,0,0; 11A3E0,3EC5C4,3,0,0
+POKE: Records 0E905000 (+38 Stage 1/2/3, +68 Hoehe),
+      Handle 0E906000 (+10/+24 = 1), rec+0x40 = 0E906000
+```
+
+```
+[postcall2] 0x0011A3E0(003EC5C4,00000001)
+[hook] count addr=0011A3E0 hits=1
+[hook] count addr=0027C2BC hits=1
+[hook] count addr=002794A4 hits=1
+[hook] count addr=002721E0 hits=1   (nach Handle-Poke, hits=2)
+```
+
+Wichtig: `0x11A3E0` nimmt den **Stage-Filter in r1** (Vergleich
+`ldrsb [rec+0x38] == r1`), deshalb drei Aufrufe mit 1/2/3. Der
+Handle-Guard in `0x2794A4` verlangt `[handle+0x10]` oder `[handle+0x24]`
+!= 0 - ohne Handle-Poke kehrt sie frueh zurueck (`2721E0` = 0).
+
+Die UV-Paare (`ctx+0x8334/8338`, `+0x833C/8340`) sind danach noch 0
+(`[dumpafter] 00408B3C: 0...`); der Konsument `0x12D030`/`0x2721E0`
+schreibt sie erst beim Layer-Commit - naechster Pruefpunkt.
+
+Kanonisch unveraendert: TOP 69370/90400 (47.98), BOTTOM 25902/71360.
