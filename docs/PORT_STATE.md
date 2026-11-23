@@ -5681,3 +5681,23 @@ Init-Funktion setzt ihn in diesem Zustand nicht. Der 0x24-Byte-Block aus
 Folge: Fuer die Record-Quads zuerst `[ctx+0x14C]` mit einem echten
 Ringpuffer besetzen (oder den 0xD2-Loader + Szene nutzen); der
 Klasse-A-Pfad selbst ist ausfuehrbar (siehe `classa_probe.json`).
+
+### Klasse-A-Puffer: [ctx+0x14C] gesetzt, trotzdem kein Block (2026-11-23)
+
+Test mit `HLE_POKE=...,408954=0CFB0000,408958=0CFB4000` (die in
+`0x23D630` gelesenen Pufferzeiger) und `HLE_DUMP_AFTER=0CFB0000,48`:
+
+```
+[hook] regs addr=0034AAC4 hits=1 r0=00000000 r2=1E000000 r3=1E000000
+                                            r5=00000340 r7=1E000000
+[dumpafter] 0CFB0000: 00000000 ...          # nichts geschrieben
+```
+
+`0x34AAC4` bekommt also `r2/r3 = 0x1E000000` (Texturzeiger), nicht den
+Puffer; der 0x24-Byte-Block wird an einer aus `[0x3D7C9C+eye*4]`
+(`0x10002800`/`0x10002200`) und `r3` berechneten Adresse abgelegt, die
+in diesem Zustand nicht getroffen wird (getestet: 0x10002800,
+0x10002200, 0x1E000000, 0x2E0027C0, 0x0CFB0000).
+
+Weiter offen: die genaue Adressrechnung von `0x34AAC4` (Registerrollen
+r2/r3) bzw. der 0xD2-Loader, der Records + Szene liefert.
