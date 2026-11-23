@@ -219,6 +219,21 @@ int gpu_pica_texture_bound(void)
     return (p_regs[0x80] & 1u) && (p_regs[0x82] & 0x07FF07FFu) != 0u;
 }
 
+/* UV-Rechteck fuer das Vollbild-Quad (z. B. 400x240-Unterbereich eines
+   512x256-Sprite-Atlas). Default 0..1. */
+static float p_uv[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+void gpu_pica_set_uv(float u0, float v0, float u1, float v1)
+{
+    p_uv[0] = u0; p_uv[1] = v0; p_uv[2] = u1; p_uv[3] = v1;
+}
+void gpu_pica_get_uv(float *u0, float *v0, float *u1, float *v1)
+{
+    if (u0) *u0 = p_uv[0];
+    if (v0) *v0 = p_uv[1];
+    if (u1) *u1 = p_uv[2];
+    if (v1) *v1 = p_uv[3];
+}
+
 static uint32_t p_read32(ArmCpu *c, uint32_t off)
 {
     uint32_t v = 0;

@@ -595,12 +595,19 @@ static void hle_install_2d_entry(ArmCpu *c) {
             const char *texenv = getenv("HLE_MENU_TEX");
             const char *texpath = (texenv != NULL && *texenv != 0)
                                       ? texenv : "out/menu_top.bin";
+            int tw = 400, th = 240;
             int fa_bottom = (getenv("HLE_XQ_ASSET") != NULL);
+            {
+                const char *ew = getenv("HLE_MENU_TEX_W");
+                const char *eh = getenv("HLE_MENU_TEX_H");
+                if (ew != NULL && *ew != 0 && atoi(ew) > 0) tw = atoi(ew);
+                if (eh != NULL && *eh != 0 && atoi(eh) > 0) th = atoi(eh);
+            }
             imgs_tried = 1;
-            topimg = (unsigned char *)calloc(1, 400u * 240u * 3u);
+            topimg = (unsigned char *)calloc(1, (size_t)tw * (size_t)th * 3u);
             botimg = (unsigned char *)calloc(1, 320u * 240u * 3u);
             f = fopen(texpath, "rb");
-            if (f) { if (fread(topimg, 1, 400u * 240u * 3u, f) != 400u * 240u * 3u) memset(topimg, 0, 400u*240u*3u); fclose(f); }
+            if (f) { if (fread(topimg, 1, (size_t)tw * (size_t)th * 3u, f) != (size_t)tw * (size_t)th * 3u) memset(topimg, 0, (size_t)tw * (size_t)th * 3u); fclose(f); }
             if (!fa_bottom) {
                 const char *btenv = getenv("HLE_MENU_TEX_BOT");
                 const char *btpath = (btenv != NULL && *btenv != 0)
@@ -608,11 +615,11 @@ static void hle_install_2d_entry(ArmCpu *c) {
                 f = fopen(btpath, "rb");
                 if (f) { if (fread(botimg, 1, 320u * 240u * 3u, f) != 320u * 240u * 3u) memset(botimg, 0, 320u*240u*3u); fclose(f); }
             }
-            memcpy(c->mem + 0x1E000000u, topimg, 400u * 240u * 3u);
+            memcpy(c->mem + 0x1E000000u, topimg, (size_t)tw * (size_t)th * 3u);
             if (!fa_bottom)
                 memcpy(c->mem + 0x1E100000u, botimg, 320u * 240u * 3u);
-            printf("[engine] Menue-Assets geladen (top=0D000000 bottom=%s)\n",
-                   fa_bottom ? "FA-Read" : "0D050000");
+            printf("[engine] Menue-Assets geladen (top=%dx%d bottom=%s)\n",
+                   tw, th, fa_bottom ? "FA-Read" : "0D050000");
             fflush(stdout);
         }
     }
@@ -3644,14 +3651,15 @@ static void pica_pair_put(ArmCpu *c, uint32_t a, uint32_t n, uint32_t value,
    float2 UV, Stride 16 Byte. */
 static void pica_quad_vertices(ArmCpu *c, int w, int h)
 {
-    float v[6][4] = {
-        {0.0f, 0.0f, 0.0f, 0.0f},
-        {(float)w, 0.0f, 1.0f, 0.0f},
-        {(float)w, (float)h, 1.0f, 1.0f},
-        {0.0f, 0.0f, 0.0f, 0.0f},
-        {(float)w, (float)h, 1.0f, 1.0f},
-        {0.0f, (float)h, 0.0f, 1.0f}
-    };
+    float u0 = 0.0f, v0 = 0.0f, u1 = 1.0f, v1 = 1.0f;
+    float v[6][4];
+    gpu_pica_get_uv(&u0, &v0, &u1, &v1);
+    v[0][0] = 0.0f; v[0][1] = 0.0f; v[0][2] = u0; v[0][3] = v0;
+    v[1][0] = (float)w; v[1][1] = 0.0f; v[1][2] = u1; v[1][3] = v0;
+    v[2][0] = (float)w; v[2][1] = (float)h; v[2][2] = u1; v[2][3] = v1;
+    v[3][0] = 0.0f; v[3][1] = 0.0f; v[3][2] = u0; v[3][3] = v0;
+    v[4][0] = (float)w; v[4][1] = (float)h; v[4][2] = u1; v[4][3] = v1;
+    v[5][0] = 0.0f; v[5][1] = (float)h; v[5][2] = u0; v[5][3] = v1;
     for (int i = 0; i < 6; i++)
         memcpy(c->mem + ((PICA_VB_ADDR + (uint32_t)i * 16u) & 0x1FFFFFFFu),
                v[i], 16);
@@ -3795,8 +3803,26 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
                             np++;
                             qp = cp2 ? cp2 + 1 : NULL;
                         }
-                        if (vp[0] != 0u && vp[1] != 0u && vp[2] != 0u)
+                        if (vp[0] != 0u && vp[1] != 0u && vp[2] != 0u) {
+                            const char *ur = getenv("HLE_PICA_UVRECT");
                             gpu_pica_bind_texture(vp[0], (int)vp[1], (int)vp[2], 1);
+                            if (ur != NULL && *ur != 0) {
+                                /* u0,v0,u1,v1 (Dezimal oder 0x...) */
+                                char bu[96], *qu = bu;
+                                float fu[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+                                int nu = 0;
+                                snprintf(bu, sizeof(bu), "%s", ur);
+                                while (qu != NULL && *qu && nu < 4) {
+                                    char *cu = strchr(qu, ',');
+                                    if (cu) *cu = 0;
+                                    fu[nu] = (float)strtod(qu, NULL);
+                                    nu++;
+                                    qu = cu ? cu + 1 : NULL;
+                                }
+                                if (nu == 4)
+                                    gpu_pica_set_uv(fu[0], fu[1], fu[2], fu[3]);
+                            }
+                        }
                     }
                     if (pt != NULL && *pt != 0) {
                         char b2[64], *pp2 = b2;
@@ -3847,8 +3873,29 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
                             int n2nd;
                             gpu_pica_bind_texture(v3[0], (int)v3[1], (int)v3[2], 1);
                             gpu_set_fb_size(v3[3], (int)v3[1], (int)v3[2]);
-                            if (getenv("HLE_PICA_VERTEX") != NULL)
+                            if (getenv("HLE_PICA_VERTEX") != NULL) {
+                                const char *u2 = getenv("HLE_PICA_UVRECT2");
+                                float a2 = 0.0f, b2 = 0.0f, c2 = 1.0f, d2 = 1.0f;
+                                if (u2 != NULL && *u2 != 0) {
+                                    char bu2[96], *qu2 = bu2;
+                                    float fu2[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+                                    int nu2 = 0;
+                                    snprintf(bu2, sizeof(bu2), "%s", u2);
+                                    while (qu2 != NULL && *qu2 && nu2 < 4) {
+                                        char *cu2 = strchr(qu2, ',');
+                                        if (cu2) *cu2 = 0;
+                                        fu2[nu2] = (float)strtod(qu2, NULL);
+                                        nu2++;
+                                        qu2 = cu2 ? cu2 + 1 : NULL;
+                                    }
+                                    if (nu2 == 4) {
+                                        a2 = fu2[0]; b2 = fu2[1];
+                                        c2 = fu2[2]; d2 = fu2[3];
+                                    }
+                                }
+                                gpu_pica_set_uv(a2, b2, c2, d2);
                                 pica_quad_vertices(c, (int)v3[1], (int)v3[2]);
+                            }
                             n2nd = legacy ? gpu_run_command_list(c, eaddr, esize)
                                           : gpu_run_pica_list(c, eaddr, esize);
                             if (n2nd == 0 && legacy)

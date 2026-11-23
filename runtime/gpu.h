@@ -24,5 +24,7 @@ void gpu_pica_reset(void);
    0x85 Adresse/8, 0x8E Format (1 = RGB8). */
 void gpu_pica_bind_texture(uint32_t addr, int w, int h, int fmt);
 int gpu_pica_texture_bound(void);
+void gpu_pica_set_uv(float u0, float v0, float u1, float v1);
+void gpu_pica_get_uv(float *u0, float *v0, float *u1, float *v1);
 
 #endif
