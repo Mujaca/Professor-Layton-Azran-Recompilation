@@ -4149,6 +4149,15 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     const char *lim = getenv("HLE_IPC_LOG");
     if (lim) g_ipc_log_limit = atoi(lim);
     setup_config_mem(c);
+    /* Boot-Speichergroessen fuer den Engine-Heap: 0x10FE9C/0x10FEAC lesen
+       [0x3EC00C]/[0x3EC008] und fuettern damit 0x289B9C(heap=0x408448).
+       Ohne sie bleibt der Heap leer und 0x27B49C liefert 0. */
+    {
+        uint32_t m0 = 0x05700000u;   /* App-/linearer Block (ControlMemory) */
+        uint32_t m1 = 0x02900000u;   /* Lineal-Heap */
+        memcpy(c->mem + 0x003EC008u, &m0, 4);
+        memcpy(c->mem + 0x003EC00Cu, &m1, 4);
+    }
     arm_pump_hook = hle_pump;
     arm_tick_hook = hle_tick;
     g_frame_cpu = c;

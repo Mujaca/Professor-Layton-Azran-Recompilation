@@ -4772,3 +4772,24 @@ Damit ist die Kette exakt:
 `0x2808A8 -> 0x268C80 -> Pool 0x40F048 -> fn_0011A890 -> 0x27B49C ->
 Heap 0x408448`. Der letzte erzwungene Teil ist der Heap, nicht der Pfad.
 
+
+### Engine-Heap-Groessen gesetzt: 0x289B9C bekommt echte Werte (2026-11-23)
+
+`0x10FE9C`/`0x10FEAC` lesen `[0x3EC00C]`/`[0x3EC008]` und fuettern damit
+`0x289B9C(heap=0x408448, ...)`. Diese Felder waren 0 (der Kernel/Port setzte
+sie nie), deshalb blieb der Heap leer.
+
+`hle_init` schreibt jetzt die vom Boot per ControlMemory gelieferten
+Groessen (0x05700000 / 0x02900000). Beleg am Aufruf:
+
+```
+vorher : [hook] regs addr=00289B9C r0=00408448 r1=00000000 r2=00000000
+jetzt  : [hook] regs addr=00289B9C r0=00408448 r1=05700000 r2=02900000
+```
+
+Der Heap selbst ist zum Zeitpunkt der CFile-Pool-Allokation aber weiterhin
+leer (`mem@00408448` 16x 0), `0x11A890` liefert 0 und `0x268C80` bleibt 0.
+Der naechste Gate liegt damit in `0x289B9C`/`0x289AC0` (Segment-Init), nicht
+mehr in den Groessen. `[faread]` erscheint weiter nur mit dem
+`0x268C80`-Force. Tests: 13/13, 12/12.
+
