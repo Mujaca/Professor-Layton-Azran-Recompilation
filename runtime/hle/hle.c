@@ -1800,7 +1800,10 @@ void hle_pump(void) {
                                spaeterer Fehlerpfad (0x23A778) loescht
                                sie wieder. Fuer den Pfad-Test setzen
                                wir Container und Records selbst. */
-                            uint32_t arr = 0x0D80E000u;
+                            /* Loader-Alloc (0x284AA8) landet im
+                               Bump-Bereich; Adresse aus dem Hook
+                               (0x0E905000) uebernehmen. */
+                            uint32_t arr = 0x0E905000u;
                             uint16_t c3 = 3u;
                             uint32_t k;
                             cont = obj + 0xDCu;
@@ -1865,7 +1868,7 @@ void hle_pump(void) {
                             {
                                 /* 0x366ABC erwartet in +0xC4 die
                                    Record-Basis, nicht den Container. */
-                                uint32_t arr2 = 0x0D80E000u;
+                                uint32_t arr2 = 0x0E905000u;
                                 memcpy(g_frame_cpu->mem + node + 0xC4u,
                                        &arr2, 4);
                             }
