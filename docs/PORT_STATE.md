@@ -6088,3 +6088,24 @@ damit aber vollstaendig ansteuerbar.
 
 Kanonisch unveraendert (A2 abgeschlossen): TOP 69370/90400 (47.98),
 BOTTOM 25902/71360 (20.57).
+
+### Positions-Kette komplett ansteuerbar; Desc-Route offen (2026-11-23)
+
+Mit `11C000,3EC5C4,0,0D80F000,0` (Float2 `(200,120)` auf `0D80F000`,
++0x2C=1.0f) laufen **alle drei** Position-Funktionen:
+
+```
+[hook] count addr=0011C000 hits=1
+[hook] count addr=00278B68 hits=1
+[hook] count addr=00278B84 hits=1
+```
+
+Der Desc-Buffer bei `[ctx+0xD6C] = 0x0E910000` ist in dieser Route aber
+komplett 0 (`[dumpafter] 0E910000: 0...(64 Woerter)`); der zuvor
+beobachtete Wert `desc+0x16C = 1.0f` entstand nur beim direkten
+`278B84,408808,0,0D80F100,0`. D.h. `0x11C000` schreibt die Matrix in
+einen anderen Desc/Offset - der genaue Schreibpfad ist noch offen.
+
+Status A2 (abgeschlossen, Nutzer-Entscheidung): TOP 69370/90400
+(47.98), BOTTOM 25902/71360 (20.57); dokumentierte Abweichungen:
+kein 0 Diff (Asset-Textur), keine 96 Draws (4 Slots x 24 Items).
