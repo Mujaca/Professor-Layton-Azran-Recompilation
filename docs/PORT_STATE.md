@@ -3852,3 +3852,21 @@ Objekt `0x3ECB68` (Vtable 0x3C91EC) traegt Name ~„…Obj2DManager" und
 Count-Felder 4. `HLE_PRECALL=297B24,3ECB68,...` lief timing-flaky
 (`fl2` feuert nur alle 4096 Ticks), daher noch nicht als Draw belegt.
 
+
+### Deterministische Kette: HLE_FL2_MASK + HLE_POSTCALL
+
+`fl2` feuerte nur alle 4096 Ticks (Flakiness). Neu:
+`HLE_FL2_MASK=0` -> Frame-Loop jeden Tick. `HLE_POSTCALL=addr,r0..r3`
+ruft deterministisch nach `0x12493C`.
+
+```
+[postcall2] 0x00297B24(003ECB68) -> r0=00000001 ab=0
+[dumpmem2] 0E800000: 00000001 0...
+[gspq] ... ops=4
+[gsp] Trigger ... qops=4
+```
+
+`0x297B24` (Vtable+0x14) laeuft also deterministisch und erfolgreich,
+schreibt aber **nicht** nach `0x0E800000`. Die 16-Zeilen-Kette ist nun
+reproduzierbar (kein Timing-Glueck mehr).
+
