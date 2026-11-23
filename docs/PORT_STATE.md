@@ -5854,3 +5854,25 @@ vollstaendig belegt; die Geometrie (x/y/u/v) kommt weiterhin aus den
 Zeigerpaaren des Scene-Renderers, nicht aus dem Record.
 
 Kanonisch unveraendert: TOP 69370/90400 (47.98), BOTTOM 25902/71360.
+
+### Klasse-A-Treiber mit Loader-Alloc-Records (2026-11-23, 896d22a)
+
+Der Treiber verwendet jetzt die vom 0xD2-Loader allokierten Records
+(`0x284AA8`-Bumppuffer, gemessen `0x0E905000`) statt einer HLE-eigenen
+Array. Beleg (`classa_drive.json`):
+
+```
+[drive] Container selbst gesetzt: base=0E905000 count=3
+[drive] vor 366ABC: node=0D80D000 C4=0E905000 CC=3 DC=00000107
+[drive] 366ABC -> r0=29341 ab=0
+[classa] eye0 P=10002200 hdr=00000100 slot=0 count=1
+[classa]  #0(slot) ring=00000001 srcA=00000000 srcB=00000000
+                   size=88 flags=00000340
+```
+
+Damit ist die Kette **Loader-Records -> Klasse-A-Block** belegt (Block
+entsteht aus den allokierten Records, Groesse aus `rec+0x68`).
+Fuer echte Record-Quads fehlen weiterhin die Position-/UV-Zeigerpaare
+des Scene-Renderers (`0x27C2BC`/`0x2794A4`) - sie stehen nicht im Record.
+
+Kanonisch unveraendert: TOP 69370/90400 (47.98), BOTTOM 25902/71360.
