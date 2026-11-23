@@ -1821,8 +1821,43 @@ void hle_pump(void) {
                                    (cont & 0x1FFFFFFFu), 4);
                             memcpy(&cnt, g_frame_cpu->mem + obj + 0xE4u, 4);
                         }
+                        {
+                            uint16_t cc = 0;
+                            memcpy(&cc, g_frame_cpu->mem + obj + 0xE4u, 2);
+                            cnt = cc & 0xFFFFu;
+                        }
                         printf("[drive] cont=%08X base=%08X cnt=%u\n",
                                cont, base, cnt);
+                        if (base != 0u) {
+                            const char *rp = getenv("HLE_CLASSA_RECTS");
+                            if (rp != NULL && *rp != 0) {
+                                FILE *rf = fopen(rp, "w");
+                                uint32_t k3;
+                                if (rf != NULL) {
+                                    uint32_t nn = cnt ? cnt : 3u;
+                                    fprintf(rf, "# Rechtecke aus den"
+                                            " 0x74-Records\n");
+                                    for (k3 = 0; k3 < nn && k3 < 96u; k3++) {
+                                        uint32_t r = base + k3 * 0x74u;
+                                        uint16_t rw = 0, rh = 0;
+                                        memcpy(&rw, g_frame_cpu->mem +
+                                               r + 0x66u, 2);
+                                        memcpy(&rh, g_frame_cpu->mem +
+                                               r + 0x68u, 2);
+                                        fprintf(rf, "%u %u %u %u 0 0 1 1\n",
+                                                (k3 % 8u) * 48u,
+                                                (k3 / 8u) * 24u,
+                                                (rw != 0u && rw <= 400u)
+                                                    ? rw : 64u,
+                                                (rh != 0u && rh <= 240u)
+                                                    ? rh : 22u);
+                                    }
+                                    fclose(rf);
+                                    printf("[drive] Rects -> %s (%u)\n",
+                                           rp, nn);
+                                }
+                            }
+                        }
                         if (cont == 0u) {
                             /* Der Loader setzt die Basis und ein
                                spaeterer Fehlerpfad (0x23A778) loescht
