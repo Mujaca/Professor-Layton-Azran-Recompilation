@@ -4393,3 +4393,19 @@ Der Wrapper kommt also bis zum GSP-IPC und laeuft dann in einer
 **Trigger- (0x000C) Warteschleife** mit SP-Korrekturen im Submit-Pfad -
 er kehrt nicht zurueck und schreibt `0x10002800` nicht.
 
+
+### SP-Korrekturen: drei Call-Sites im Submit-/Trigger-Pfad
+
+`arm_restore_sp` (runtime/arm_cpu.c:730) meldet unbalancierte Callees:
+
+```
+[sp] 0x0012FAA4: SP 0CF09F70 -> 0CF09F68
+[sp] 0x0026BF8C: SP ... (3x)
+[sp] 0x00101744: SP 0CF099F8 -> 0CF09A48
+```
+
+Die Runtime korrigiert SP zwangsweise (ABI-Garantie), aber der Callee
+hat seinen Stack nicht sauber restauriert - ein Recompiler-/EPILOG-
+Problem. Beim Aufruf von `0x1196AC` bleibt die Ausfuehrung danach in
+diesem Pfad (kein Rueckgabewert, `0x10002800` ungeschrieben).
+
