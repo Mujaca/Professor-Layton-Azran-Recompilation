@@ -1822,6 +1822,33 @@ void hle_pump(void) {
                             }
                             printf("[drive] Container selbst gesetzt: "
                                    "base=%08X count=3\n", arr);
+                            {
+                                const char *rp = getenv("HLE_CLASSA_RECTS");
+                                if (rp != NULL && *rp != 0) {
+                                    FILE *rf = fopen(rp, "w");
+                                    uint32_t k2;
+                                    if (rf != NULL) {
+                                        fprintf(rf, "# Rechtecke aus "
+                                                "0x74-Records (Probe)\n");
+                                        for (k2 = 0; k2 < 3u; k2++) {
+                                            uint32_t r = arr + k2 * 0x74u;
+                                            uint16_t rw = 0, rh = 0;
+                                            memcpy(&rw, g_frame_cpu->mem +
+                                                   r + 0x66u, 2);
+                                            memcpy(&rh, g_frame_cpu->mem +
+                                                   r + 0x68u, 2);
+                                            fprintf(rf, "%u %u %u %u "
+                                                    "0 0 1 1\n",
+                                                    (k2 % 4u) * 100u,
+                                                    (k2 / 4u) * 60u,
+                                                    (rw != 0u && rw <= 400u) ? rw : 64u,
+                                                    (rh != 0u && rh <= 240u) ? rh : 32u);
+                                        }
+                                        fclose(rf);
+                                        printf("[drive] Rects -> %s\n", rp);
+                                    }
+                                }
+                            }
                         }
                         if (base != 0u) {
                             uint32_t k;
