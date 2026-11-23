@@ -4453,3 +4453,13 @@ Fix-Bedarf: diese Fragmente nicht als eigene Funktionen fuehren, sondern
 als Blocks der umschliessenden Funktion (Merge), damit der lokale
 Switch/goto greift.
 
+
+### Merge-Versuch: Kriterium zu breit (1387 Fragmente)
+
+`_merge_ldrpc_fragments` (ldr-pc-Ziele, die eigene fn_ sind, ohne Prolog)
+merge-te **1387** Fragmente -> doppelte Labels, Build-Fehler. Kriterium
+muss enger sein: nur mergen, wenn das Ziel **innerhalb** eines schon
+existierenden Blocks der Elternfunktion liegt (echtes In-Funktions-Label),
+nicht bei echten Quer-Funktions-Eintraegen. Merge-Aufruf wieder entfernt,
+Build/Tests gruen (13/13, 12/12).
+
