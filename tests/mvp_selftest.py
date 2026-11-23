@@ -255,7 +255,8 @@ def main():
         c_path, main_path = build_case(case, idx)
         exe = os.path.join(OUT, "case_%d.exe" % idx)
         cmd = [zig, "cc", "-std=c11", "-O1", "-I", runtime, main_path, c_path,
-               os.path.join(runtime, "arm_cpu.c"), os.path.join(runtime, "arm_trace.c"), "-o", exe]
+               os.path.join(runtime, "arm_cpu.c"), os.path.join(runtime, "arm_trace.c"),
+               os.path.join(runtime, "fa_index.c"), "-o", exe]
         p = subprocess.run(cmd, capture_output=True, text=True)
         if p.returncode != 0:
             print("[%s] COMPILE-FEHLER\n%s\n%s" % (case["name"], p.stdout, p.stderr))

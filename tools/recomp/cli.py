@@ -314,14 +314,7 @@ def generate(res, path, max_funcs=None, trace=False, data=None):
                 _seen.add(_b.addr)
                 _u.append(_b)
             _f.blocks = _u
-    _dbg = 0x00141C38
-    _f = res.functions.get(_dbg)
-    print("DBG 141C38: in_res=%s thumb=%s blocks=%d needed=%s all=%s" % (
-        _f is not None, getattr(_f, 'thumb', None),
-        len(_f.blocks) if _f else -1, _dbg in needed, _dbg in all_addrs))
     funcs = [res.functions[a] for a in all_addrs if a in res.functions and res.functions[a].blocks]
-    print("DBG in_funcs=%s nfuncs=%d" % (
-        any(f.addr == 0x00141C38 for f in funcs), len(funcs)))
     if max_funcs:
         funcs = funcs[:max_funcs]
     generated = set(fn.addr for fn in funcs)

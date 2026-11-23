@@ -8,6 +8,12 @@
 #include <stdlib.h>
 #include <windows.h>
 #include "imgc.h"
+#include "fa_index.h"
+
+/* Letzter an 0x2808A8 uebergebener Ressourcenpfad (r1). Damit loest
+   hle_fa_read den Menue-Pfad gegen den echten ARC0-Index auf. */
+char g_fa_req[160];
+int g_fa_req_on = 0;
 
 /* Override fuer den naechsten FA-Read: erzwingt Archiv/Offset/Laenge
    und sammelt den gelesenen Bytestrom im Gast-RAM (Engine-Request-Pfad). */
@@ -87,6 +93,15 @@ int hle_fa_read(ArmCpu *c) {
         size = g_fa_ovr_base + g_fa_ovr_len;
     }
     if (path == NULL) return -1;
+    /* Echter Index-Lookup: der zuletzt an 0x2808A8 uebergebene Pfad wird
+       gegen den ARC0-Index des Archivs aufgeloest (statt HLE_FA_FORCE_POS). */
+    if (pos == 0u && g_fa_req_on) {
+        uint32_t off = 0, fsz = 0;
+        if (fa_index_lookup(path, g_fa_req, &off, &fsz)) {
+            pos = off;
+            g_fa_req_on = 0;
+        }
+    }
     want = c->r[2];
     dst = c->r[1];
     if (want == 0u) return -1;
@@ -907,6 +922,23 @@ static void trace_env_init(void) {
 void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
     if (!g_te.init) trace_env_init();
     arm_last_block = pc;
+    if (c != NULL && pc == 0x002808A8u) {
+        uint32_t p = c->r[1];
+        memset(g_fa_req, 0, sizeof(g_fa_req));
+        if (p >= 0x00100000u && p < 0x20000000u) {
+            int k;
+            for (k = 0; k < (int)sizeof(g_fa_req) - 1; k++) {
+                uint8_t ch = 0;
+                memcpy(&ch, c->mem + ((p + (uint32_t)k) & 0x1FFFFFFFu), 1);
+                if (ch == 0) break;
+                g_fa_req[k] = (char)ch;
+            }
+            g_fa_req[k] = 0;
+            g_fa_req_on = (g_fa_req[0] != 0);
+        } else {
+            g_fa_req_on = 0;
+        }
+    }
     if (c != NULL && g_te.xq_hook && pc == 0x001117A4u) {
         static int xq_done = 0;
         if (!xq_done) {

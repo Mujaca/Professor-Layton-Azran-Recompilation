@@ -4713,3 +4713,32 @@ identisch: True
 der naechste echte Gate (Lookup "seq/menu_logo.xq" -> Archivoffset).
 Pixel unveraendert (HLE-Liste): 90281/90400 + 26091/71360.
 
+
+### Echter ARC0-Index-Lookup fuer den Menue-Pfad (2026-11-23)
+
+`runtime/fa_index.c` parst den echten `.fa`-Index (LZSS + Huffman +
+CRC32 wie `tools/xfsatool/arc.cpp`) und loest einen Pfad zu
+`dataOffset + entry.offset` auf. `runtime/arm_trace.c` merkt sich den
+zuletzt an `0x2808A8` uebergebenen Pfad (r1) und ruft den Lookup in
+`hle_fa_read` auf, wenn `pos == 0` ist. Damit entfaellt
+`HLE_FA_FORCE_POS`.
+
+Verifikation des Index (`python tools\fa_index.py ... --verify`):
+
+```
+seq/menu_logo.xq   off=0x00458CB8 size=0xA58  magic=58513332
+seq/menu_title.xq  off=0x00465D60 size=0x12E8 magic=58513332
+```
+
+Lauf mit `tools/profiles/menu_xq_index.json` (kein `HLE_FA_FORCE_POS`):
+
+```
+[faread] idx=0 pos=00458CB8 want=00000048 n=72 dst=0CF09D10
+[faread] idx=0 pos=00458D00 want=00000004 n=4
+[postcall2] -> r0=00000001 ab=0
+```
+
+Ohne den `0x268C80`-Force (HLE_RETFORCE entfernt) gibt es **keine**
+`[faread]`-Zeile und `r0=0`; der CFile-Pool-Open ist damit der letzte
+erzwungene Teil (kein Offset-Force mehr). Tests: 13/13, 12/12.
+
