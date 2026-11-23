@@ -4063,3 +4063,15 @@ Allokator (`284AA8` real). Ergebnis: `0x13A4B0` blockiert wieder
 Fazit: Der Allokator/Container muss die Pool-Basis `ctx+0xB4`
 (Base/Maske/Count aus `0x126D28`) treffen; das ist noch nicht der Fall.
 
+
+### Pool-Push gemessen: nur der Initializer schreibt den Count
+
+- `guest-watch --pc 0x2669C0`: **0 Treffer** (Push-Pfad laeuft nie).
+- `guest-watch --write 0x42B888` (`ctx+0xB4+0x28`): **1 Schreibzugriff**,
+  Wert 0, `pc=0x26E180`, `lr=0x126D78` -> nur `0x126D28`-Init.
+- Auch mit Builder-Container `0x42B860` (`ctx+0xB4`) bleibt der Count 0;
+  `0x284AA8` ist ein Arena-Allokator und pusht nicht in den Pool.
+
+Also: Der Pool wird im Port **von niemandem gefuellt**. Deshalb findet
+der (jetzt laufende) Flush `0x13A4B0`/`0x13F688` nichts zu zeichnen.
+
