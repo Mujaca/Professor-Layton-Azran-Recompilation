@@ -65,15 +65,22 @@ def main():
             rgb[t * 3 + 2] = v
     bg = Image.frombytes('RGB', (w, h), bytes(rgb))
     open(os.path.join(out, 'title_b_bg.bin'), 'wb').write(bytes(rgb))
+    # 3D-Titel-Grundlayer (Host-Render aus title.xc, ETC1) bevorzugen,
+    # falls vorhanden; sonst Bottom-Asset als Ersatz.
+    bg3d = os.path.join(ROOT, 'tools', 'profiles', 'title3d_bg.bin')
+    if os.path.exists(bg3d):
+        bg = Image.frombytes('RGB', (400, 240), open(bg3d, 'rb').read())
+        print('BG: 3D-Titel-Render', bg3d)
 
     top = Image.new('RGBA', (TW, TH), (0, 0, 0, 0))
     top.paste(atlas, (0, 0))
     top.paste(bg.convert('RGBA').resize((400, 240)), (0, AH))
     open(os.path.join(out, 'title_top_atlas.bin'), 'wb').write(top.tobytes())
 
-    lines = ['# BG-Ersatz (title_b_bg, 400x240) zuerst, dann 9 XPVB-Quads',
-             '0 0 400 240 0 %.6f 0.390625 %.6f'
-             % (AH / float(TH), (AH + 240) / float(TH))]
+    bgline = ('0 0 400 240 0 %.6f 0.390625 %.6f'
+              % (AH / float(TH), (AH + 240) / float(TH)))
+    lines = ['# 9 XPVB-Quads, dann der Grundlayer zuletzt (deckt Overlays)',
+            ]
     for ln in open(os.path.join(ROOT, 'tools', 'profiles',
                                 'title_a_rects.txt'), encoding='utf-8'):
         ln = ln.strip()
@@ -83,6 +90,7 @@ def main():
         lines.append('%g %g %g %g %.8f %.8f %.8f %.8f'
                      % (x, y, qw, qh, u0, v0 * AH / float(TH), u1,
                         v1 * AH / float(TH)))
+    lines.append(bgline)
     open(os.path.join(ROOT, 'tools', 'profiles', 'title_top_rects.txt'),
          'w', newline='\n').write('\n'.join(lines) + '\n')
     print('top-atlas %dx%d, rects %d' % (TW, TH, len(lines) - 1))

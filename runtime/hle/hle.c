@@ -3823,7 +3823,7 @@ static uint32_t pica_emit_sprites(ArmCpu *c, uint32_t dst, uint32_t tmpl,
                                   const char *path)
 {
     FILE *f = fopen(path, "r");
-    uint32_t n = 0;
+    uint32_t n = 0, start = dst;
     char line[256];
     if (!f) return 0;
     while (fgets(line, sizeof(line), f) != NULL && n < 96u) {
@@ -3836,20 +3836,39 @@ static uint32_t pica_emit_sprites(ArmCpu *c, uint32_t dst, uint32_t tmpl,
         vb = 0x0CFC0000u + n * 0x60u;
         pica_quad_at(c, vb, x, y, w, h, u0, v0, u1, v1);
         pica_attr_block_at(c, dst, vb);
-        memcpy(c->mem + ((dst + PICA_ATTR_BYTES) & 0x1FFFFFFFu),
-               c->mem + (tmpl & 0x1FFFFFFFu), 0x70u);
         {
+            uint32_t t0 = 0;
             uint32_t nv = 6u;
-            memcpy(c->mem + ((dst + PICA_ATTR_BYTES) & 0x1FFFFFFFu), &nv, 4);
+            memcpy(&t0, c->mem + (tmpl & 0x1FFFFFFFu), 4);
+            if (t0 != 0u) {
+                /* Draw-Block des Engine-Emitters (0x1323FC). */
+                memcpy(c->mem + ((dst + PICA_ATTR_BYTES) & 0x1FFFFFFFu),
+                       c->mem + (tmpl & 0x1FFFFFFFu), 0x70u);
+                memcpy(c->mem + ((dst + PICA_ATTR_BYTES) & 0x1FFFFFFFu),
+                       &nv, 4);
+                dst += PICA_ATTR_BYTES + 0x70u;
+            } else {
+                /* Fallback: eigener Draw-Block, falls der Engine-Strom
+                   in diesem Frame leer ist (0x228=6, 0x25E=0, 0x227=0,
+                   0x22F=1) - 4 Paare = 0x20 Byte. */
+                pica_pair_put(c, dst + PICA_ATTR_BYTES, 0u, nv,
+                              0x228u, 0xFu);
+                pica_pair_put(c, dst + PICA_ATTR_BYTES, 2u, 0u,
+                              0x25Eu, 0xFu);
+                pica_pair_put(c, dst + PICA_ATTR_BYTES, 4u, 0u,
+                              0x227u, 0xFu);
+                pica_pair_put(c, dst + PICA_ATTR_BYTES, 6u, 1u,
+                              0x22Fu, 0xFu);
+                dst += PICA_ATTR_BYTES + 0x20u;
+            }
         }
-        dst += PICA_ATTR_BYTES + 0x70u;
         n++;
     }
     fclose(f);
     if (n == 0u) return 0;
-    printf("[gspq-engine] sprites=%u len=%X\n", n, n * (PICA_ATTR_BYTES + 0x70u));
+    printf("[gspq-engine] sprites=%u len=%X\n", n, dst - start);
     fflush(stdout);
-    return n * (PICA_ATTR_BYTES + 0x70u);
+    return dst - start;
 }
 
 static int gsp_process_cmdqueue(ArmCpu *c) {
