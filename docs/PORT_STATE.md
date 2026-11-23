@@ -3884,3 +3884,19 @@ write 0x0E800000  0x00000001  0x00143F60  lr=0x00140154  fn_00143F60
 
 Damit sind Messlauf und Watch-Lauf konsistent (Reproduzierbarkeit).
 
+
+### Klasse 0x3C91EC: Slot-Karte (decodiert)
+
+`+0x10 = 0x269E90` (Lock/Iteration; Body 0x269E94, ruft 0x283AE8/0x266680)
+`+0x14 = 0x297B24` (Reset/Iteration; ruft 0x269E94/0x231E6C/0x28796C)
+`+0x18 = 0x297618` (Draw-Buffer-Builder; nutzt 0x284AA8, 0x284A48,
+         0x288890, 0x288938 - dieselbe Allokator-Familie wie 0x10470C)
+`+0x0C = 0x36CCF0` (Kleinkram/Hash), `+0x2C/+0x38/+0x3C` weitere.
+
+Aufruf von `0x297618(0x3ECB68)` per HLE_POSTCALL: `r0=0` (leer/
+fehlende Ressource), schreibt nicht nach 0x0E800000. `0x297B24` liefert
+`r0=1` und schreibt nur Nullen in Objektfelder.
+
+Damit ist die Klasse strukturell bekannt; der GPU-Emitter liegt hinter
+`+0x18`/0x284AA8-Allokationen und braucht echte Element-Ressourcen.
+
