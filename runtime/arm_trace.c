@@ -510,6 +510,20 @@ static void hook_hit(ArmCpu *c, uint32_t pc)
         if (ed2 < 4) {
             uint32_t j, v;
             ed2++;
+            if (getenv("HLE_DUMPMEM") != NULL) {
+                const char *s = getenv("HLE_DUMPMEM");
+                uint32_t a = (uint32_t)strtoul(s, NULL, 16);
+                const char *comma = strchr(s, ',');
+                uint32_t n = comma ? (uint32_t)strtoul(comma + 1, NULL, 16) : 16u;
+                uint32_t k;
+                printf("[dumpmem2] %08X:", a);
+                for (k = 0; k < n && k < 64u; k++) {
+                    uint32_t v = 0;
+                    memcpy(&v, c->mem + ((a + k * 4u) & 0x1FFFFFFFu), 4);
+                    printf(" %08X", v);
+                }
+                printf("\n");
+            }
             printf("[postemit] E800000:");
             for (j = 0; j < 12u; j++) {
                 memcpy(&v, c->mem + 0x0E800000u + j * 4u, 4);
@@ -530,6 +544,25 @@ static void hook_hit(ArmCpu *c, uint32_t pc)
                         printf(" %08X", v);
                     }
                 }
+            }
+            printf("\n");
+            fflush(stdout);
+        }
+    }
+    if (c != NULL && pc == 0x0012FC24u && getenv("HLE_DUMPMEM") != NULL) {
+        static int dm = 0;
+        if (dm < 2) {
+            const char *s = getenv("HLE_DUMPMEM");
+            uint32_t a = (uint32_t)strtoul(s, NULL, 16);
+            const char *comma = strchr(s, ',');
+            uint32_t n = comma ? (uint32_t)strtoul(comma + 1, NULL, 16) : 16u;
+            uint32_t k;
+            dm++;
+            printf("[dumpmem] %08X:", a);
+            for (k = 0; k < n && k < 64u; k++) {
+                uint32_t v = 0;
+                memcpy(&v, c->mem + ((a + k * 4u) & 0x1FFFFFFFu), 4);
+                printf(" %08X", v);
             }
             printf("\n");
             fflush(stdout);

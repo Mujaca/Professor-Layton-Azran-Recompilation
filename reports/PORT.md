@@ -1172,3 +1172,12 @@ Format (w0=Zeiger, +8=Groesse, +0x14=Anzahl). Ergebnis:
 
 Offen: Pixel-Rendering des Menues (TOP nutzt im Test noch den
 HLE-Blend) und Abgleich der 4 Eintraege mit echten PICA-Kommandos.
+
+## Engine-CommandBuffer-Struktur (HLE_DUMPMEM)
+
+`0x3EE680` (32 Worte): `003ECB68 0 00000018 0 0 00000004 0 0 00000004 0 0 0 00000004 ... 003C7A1C 4377666C 326A624F 6E614D44 72656761`.
+Das ist ein Objekt-Header (Name im Buffer, ~"…Obj2DManager") mit
+mehreren Count-Feldern `4` und Listenzeiger `0x3ECB68` — also
+Objekt-/Descriptor-Daten, keine `(value,header)`-PICA-Paare.
+`gsp_engine_desc` zaehlt diese 4 als Ops (qops=4).
+
