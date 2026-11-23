@@ -4360,3 +4360,15 @@ Der Wrapper laeuft in einen GSP-/Service-Wartepfad (0x120CFC/svc) und
 kehrt im Port nicht zurueck - daher kein Gast-Schreibzugriff auf den
 CommandBuffer.
 
+
+### Block in 0x1196AC lokalisiert: GSP-SVC-Pfad
+
+`0x1196AC` -> `0x120CFC` -> `0x275B24`:
+
+```
+00275B24 push ... ; mrc p15,0,r4,c13,c0,3 ; str [r4,#0x80]! cmd ; svc #0x32
+```
+
+Der Wrapper endet also in einem **GSP-IPC-SVC (0x32)**. Beim Direktaufruf
+aus dem HLE-Kontext kehrt dieser Pfad nicht zurueck (IPC-/Reply-Wartepfad).
+
