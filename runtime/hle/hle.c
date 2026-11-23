@@ -1750,6 +1750,84 @@ void hle_pump(void) {
                     }
                 }
                 {
+                    /* 0xD2-Loader + Klasse-A-Kette treiben:
+                       HLE_CLASSA_DRIVE=1 baut einen synthetischen 0xD2-Chunk,
+                       ruft 0x238F58, setzt node+0xC4 via 0x3669FC und
+                       startet 0x366ABC. */
+                    if (getenv("HLE_CLASSA_DRIVE") != NULL) {
+                        uint32_t chunk = 0x0D80A000u, obj = 0x0D80B000u;
+                        uint32_t owner = 0x0D80C000u, node = 0x0D80D000u;
+                        uint32_t sv[16];
+                        uint32_t cont = 0, base = 0, cnt = 0;
+                        uint16_t w16;
+                        memset(g_frame_cpu->mem + chunk, 0, 0x200);
+                        memset(g_frame_cpu->mem + obj, 0, 0x200);
+                        memset(g_frame_cpu->mem + owner, 0, 0x200);
+                        memset(g_frame_cpu->mem + node, 0, 0x200);
+                        /* Tabelle bei chunk + 4*u16[chunk+0xC];
+                           Eintrag: +0 payload_off_words, +2 count, +4 TAG. */
+                        w16 = 4u;
+                        memcpy(g_frame_cpu->mem + chunk + 0x0Cu, &w16, 2);
+                        w16 = 0x20u; /* payload bei chunk+0x80 */
+                        memcpy(g_frame_cpu->mem + chunk + 0x10u, &w16, 2);
+                        w16 = 3u;    /* count */
+                        memcpy(g_frame_cpu->mem + chunk + 0x12u, &w16, 2);
+                        w16 = 0xD2u; /* TAG */
+                        memcpy(g_frame_cpu->mem + chunk + 0x14u, &w16, 2);
+                        {
+                            uint32_t h = 0x0E900000u;
+                            memcpy(g_frame_cpu->mem + owner + 0x2Cu, &h, 4);
+                        }
+                        memcpy(sv, g_frame_cpu->r, sizeof(sv));
+                        g_frame_cpu->r[0] = obj;
+                        g_frame_cpu->r[1] = owner;
+                        g_frame_cpu->r[2] = chunk;
+                        g_frame_cpu->r[3] = 0u;
+                        g_frame_cpu->r[13] = 0x0CF0A000u;
+                        arm_call_guest_pub(g_frame_cpu, 0x00238F58u);
+                        printf("[drive] 238F58 -> r0=%u ab=%d\n",
+                               g_frame_cpu->r[0], g_frame_cpu->aborted);
+                        memcpy(&cont, g_frame_cpu->mem + obj + 0xDCu, 4);
+                        if (cont != 0u) {
+                            memcpy(&base, g_frame_cpu->mem +
+                                   (cont & 0x1FFFFFFFu), 4);
+                            memcpy(&cnt, g_frame_cpu->mem + obj + 0xE4u, 4);
+                        }
+                        printf("[drive] cont=%08X base=%08X cnt=%u\n",
+                               cont, base, cnt);
+                        if (base != 0u) {
+                            uint32_t k;
+                            for (k = 0; k < 3u; k++) {
+                                uint32_t r = base + k * 0x74u;
+                                uint8_t st = (uint8_t)(k + 1u);
+                                uint32_t tex = 0x1E000000u;
+                                memcpy(g_frame_cpu->mem + r + 0x38u, &st, 1);
+                                memcpy(g_frame_cpu->mem + r + 0x30u, &k, 4);
+                                memcpy(g_frame_cpu->mem + r + 4u, &tex, 4);
+                            }
+                        }
+                        g_frame_cpu->r[0] = node;
+                        g_frame_cpu->r[1] = cont;
+                        g_frame_cpu->r[13] = 0x0CF0A000u;
+                        arm_call_guest_pub(g_frame_cpu, 0x003669FCu);
+                        printf("[drive] 3669FC node+0xC4 -> ", 0);
+                        {
+                            uint32_t nv2 = 0, nc = 0;
+                            memcpy(&nv2, g_frame_cpu->mem + node + 0xC4u, 4);
+                            memcpy(&nc, g_frame_cpu->mem + node + 0xCCu, 2);
+                            printf("%08X count=%u\n", nv2, nc & 0xFFFFu);
+                        }
+                        g_frame_cpu->r[0] = node;
+                        g_frame_cpu->r[1] = 3u;
+                        g_frame_cpu->r[13] = 0x0CF0A000u;
+                        arm_call_guest_pub(g_frame_cpu, 0x00366ABCu);
+                        printf("[drive] 366ABC -> r0=%u ab=%d\n",
+                               g_frame_cpu->r[0], g_frame_cpu->aborted);
+                        memcpy(g_frame_cpu->r, sv, sizeof(sv));
+                        fflush(stdout);
+                    }
+                }
+                {
                     /* Optionaler Dump nach dem POSTCALL:
                        HLE_DUMP_AFTER=<addr>,<woerter> */
                     const char *da = getenv("HLE_DUMP_AFTER");
