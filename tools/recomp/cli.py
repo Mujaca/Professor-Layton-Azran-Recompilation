@@ -8,6 +8,7 @@ import json
 import os
 import sys
 
+import capstone.arm as A
 from . import isa, emit
 from . import scan as scanmod
 
@@ -110,7 +111,53 @@ def needs_fallthrough(ins):
     return True
 
 
-def generate(res, path, max_funcs=None, trace=False):
+
+def _split_ldrpc_blocks(fn, data):
+    """ldr pc,[pc,rN,lsl#2]-Tabellenziele als eigene Blocks anlegen."""
+    if fn.thumb :
+        return
+    off0 = 0x100000
+
+    def rd(a):
+        o = a - off0
+        if o < 0 or o + 4 > len(data):
+            return None
+        return int.from_bytes(data[o:o + 4], 'little')
+
+    targets = set()
+    for blk in list(fn.blocks):
+        for ins in blk.insns:
+            if ins.id != A.ARM_INS_LDR :
+                continue
+            op = ins.op_str.replace(' ', '')
+            if 'pc' not in op or 'lsl#2' not in op:
+                continue
+            tbl = ins.address + 8
+            for i in range(64):
+                v = rd(tbl + i * 4)
+                if v is None:
+                    break
+                if fn.addr <= v < fn.addr + 0x10000:
+                    targets.add(v)
+    for t in sorted(targets):
+        if any(b.addr == t for b in fn.blocks):
+            continue
+        for i, b in enumerate(fn.blocks):
+            if b.addr >= t:
+                continue
+            idx = None
+            for j, x in enumerate(b.insns):
+                if x.address == t:
+                    idx = j
+                    break
+            if idx is None or idx == 0:
+                continue
+            nb = scanmod.Block(t, b.insns[idx:])
+            b.insns = b.insns[:idx]
+            fn.blocks.insert(i + 1, nb)
+            break
+
+def generate(res, path, max_funcs=None, trace=False, data=None):
     u32 = lambda v: v & 0xFFFFFFFF
     needed = set()
     for fn in res.functions.values():
@@ -173,6 +220,8 @@ def generate(res, path, max_funcs=None, trace=False):
             n_thumb += 1
         else:
             n_arm += 1
+        if data is not None:
+            _split_ldrpc_blocks(fn, data)
         em = emit.Emitter(fn.addr, fn.thumb)
         em.block_labels = set(b.addr for b in fn.blocks)
         out.append("void fn_%08X(ArmCpu *c) {" % u32(fn.addr))
@@ -288,7 +337,8 @@ def main(argv=None):
             with open(args.json, "w", encoding="utf-8") as f:
                 json.dump(stats, f, indent=2)
     else:
-        n, nt = generate(resimo, args.out, args.max_funcs, trace=args.trace_flag)
+        n, nt = generate(resimo, args.out, args.max_funcs,
+                         trace=args.trace_flag, data=data)
         print("geschrieben: %s (%d ARM-Funktionen, %d Thumb-Stubs)" % (args.out, n, nt))
 
 

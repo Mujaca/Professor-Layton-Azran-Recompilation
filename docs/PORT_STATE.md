@@ -4441,3 +4441,15 @@ splitten.
 
 Tests nach Regen: 13/13, 12/12.
 
+
+### Praezise Ursache: ldr-pc-Ziele wurden als *eigene Funktionen* gesplittet
+
+`fn_0012FAA4`-Switch enthaelt nur `case 0x0012FAA4`; die Tabellenziele
+(0x12FAD4, 0x12FADC, ...) sind bereits eigene `fn_0012FAD4`-Fragmente
+(ohne Prolog/Epilog). `arm_call_guest` ruft so ein Fragment -> dessen
+`pop {r4,r5}` fehlt, SP bleibt -8 (gemessene Korrektur).
+
+Fix-Bedarf: diese Fragmente nicht als eigene Funktionen fuehren, sondern
+als Blocks der umschliessenden Funktion (Merge), damit der lokale
+Switch/goto greift.
+
