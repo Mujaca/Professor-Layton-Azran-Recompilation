@@ -6356,3 +6356,28 @@ dann ohne `--clean` kanonisieren.
 
 Kanonisch: `[gspq-engine] sprites=13 len=958` / `sprites=1 len=B8`,
 TOP 69443/90400 (48.32), BOTTOM 25902/71360 (20.57).
+
+### A2-Abschluss: 0-Diff endgueltig renegotiiert, 13 Draws sind am naechsten (2026-11-23)
+
+Nutzer-Entscheidung: die 0-Diff-Klausel ist **endgueltig renegotiiert**
+(Asset-Texturen sind nicht pixelgleich zum Azahar-Capture).
+
+Fuer die 96-Draw-Frage wurde gemessen, welche Variante dem echten Render
+am naechsten kommt (`measure_ref`, TOP):
+
+| Variante | Quads | TOP diff | mean |
+|---|---|---|---|
+| 10 visuelle + 3 Record-Quads (kanonisch) | 13 | **69443/90400** | **48.32** |
+| 96 Record-Quads (Grid-Positionen) | 96 | 87268/90400 | 81.31 |
+| 10 visuelle + 96 Record-Quads | 96| 75883/90400 | 58.32 |
+| nur 9 XPVB-Quads (ohne BG) | 9 | 86876/90400 | 77.13 |
+| nur 3D-BG + Overlays ohne Records | 10 | 69445/90400 | 48.45 |
+
+**Ergebnis:** die 13-Draw-Variante ist dem echten Render am naechsten
+(mean 48.32); die 96er-Varianten verlieren, weil die Record-Positionen
+Grid-Platzhalter sind. Kanonisch bleibt daher `title_top_plus_records.txt`
+(13 Draws), die 96 sind als emittierbare Anzahl in `record_96.json`
+belegt (`sprites=96 len=4500`).
+
+Sobald echte Ring-/ANMC-Positionen verfuegbar sind, wird `record_96.json`
+mit echten Rects neu erzeugt und kanonisch.

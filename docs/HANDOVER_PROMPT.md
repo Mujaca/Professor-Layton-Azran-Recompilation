@@ -19,7 +19,8 @@ Abgestimmte Praezisierungen gegenueber dem urspruenglichen Zieltext:
    pixelgleich aus Assets reproduzierbar - selbst das korrekte
    Bottom-Asset hat 0/1200 exakte 8x8-Bloecke; der Top ist ein
    3D-Modell-Render (`title.xc`, ETC1), kein flaches Asset. Der Nutzer
-   hat diese Differenz ausdruecklich akzeptiert.
+   hat diese Differenz ausdruecklich akzeptiert; die 0-Diff-Klausel ist
+   damit **endgueltig renegotiiert** (2026-11-23).
 2. **Statt "96 Sprite-Draws"**: `0x11DB84` laeuft 96x = 4 Ring-Slots x
    24 gedrainte Items; der Record-Pfad liefert `count` Draws. Der
    Emitter kann 96 Quads ausgeben (`tools/profiles/record_96.json`,
