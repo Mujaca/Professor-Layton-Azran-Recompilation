@@ -4051,3 +4051,15 @@ Der Emitter legt seine Knoten in die **Pending-Liste ctx+0x16C**
 (0 Reads), nicht in den Pool, den der Flush leert. Diese beiden Listen
 sind im Port nicht verbunden.
 
+
+### Verbindungsversuch Pending->Pool
+
+Versuch: `0x12493C` mit Container `r1=0x42B7AC` und **ohne** erzwungenen
+Allokator (`284AA8` real). Ergebnis: `0x13A4B0` blockiert wieder
+(kein Rueckgabewert), `ops` bleibt 4. Mit der stabilen Konfiguration
+(Container 0x3EC028, `284AA8=0E800000`) kehrt der Flush zurueck
+(`r0=0x42BCD4`), Pool-Count bleibt aber 0.
+
+Fazit: Der Allokator/Container muss die Pool-Basis `ctx+0xB4`
+(Base/Maske/Count aus `0x126D28`) treffen; das ist noch nicht der Fall.
+
