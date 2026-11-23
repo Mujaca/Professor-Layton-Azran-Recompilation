@@ -5434,3 +5434,36 @@ Zusatzmessungen (Sub-Agent, static+dynamic):
   die Schleife nicht von selbst (4902 Calls).
 * Fertige Items im Speicher (`0x3ECB68` Obj2DManager, Entry-Liste
   `0x0E800000`, `0x3C6FF8`-Render-Items) tragen ebenfalls keine Rects/UVs.
+
+### A2-Assets: 9 echte Titel-Quads (XPVB/XPVI), xq sind Events (2026-11-23)
+
+* Die `.xq`-Records sind **keine** Geometrie: 0x18-Byte-Records mit
+  `name_offset`, `name_hash`, `frame_start`, `frame_end` + 6 u16 Events.
+  Beweis: sortiert nach `frame_start` kacheln die Intervalle aller 13
+  Menue-Skripte lueckenlos die Timeline (`menu_logo` 17 Records 0..200,
+  `menu_quest` 139 Records 0..3614, u.a.; 0 Luecken).
+* `menu/uk/title_a.xa` (XPCK in `lt6_uk.fa` @0x01428314) enthaelt
+  `000.pvb` (XPVB @abs 0x01428424): attr_off 16, attr_end 40, vtx_off
+  0x34, stride 0x14, 36 Vertices = **9 Quads**; Slot 0 = float32x3
+  Position, Slot 4 = float32x2 UV in Pixeln. Dazu 5 IMGC (000..004.xi,
+  512x512 bzw. 256x256/512x256). Quad 3 ist exakt 400x240 (x=0,y=0,
+  UV 0,256..400,496 aus 002.xi) - also der volle Screen-Layer.
+* Scan aller 1820 XPCK-Packs und 3079 IMGCs: **0 IMGC mit 400x240**.
+  Der Grundlayer ist die 3D-Map (`menu/title.xc`), nicht ein Asset.
+
+Messung mit echtem Atlas + 9 Quads (HLE_PICA_SPRITES):
+
+```
+[engine] Menue-Assets geladen (top=1024x1024 ...)
+[gspq-engine] sprites=9 len=678
+TOP sichtbar : 89421/90400  mean 85.60
+```
+
+Die Textur kommt damit aus dem Spiel-Asset, aber der Screen stimmt nicht,
+weil der 3D-Hintergrund fehlt. Positivkontrolle Bottom: `title_b_bg.xi`
+1:1 liefert 26091/71360 - selbst das richtige Asset ist wegen des
+Capture-Resamplings nicht 0-Diff-faehig.
+
+Artefakte: `tools/profiles/title_a_rects.txt` (9 Quads, UV normalisiert),
+`tools/profiles/title_a_atlas.png` (1024x1024), `tools/make_titlea_atlas.py`
+(PNG -> `tools/out/title_a_atlas.bin` fuer `HLE_MENU_TEX`).
