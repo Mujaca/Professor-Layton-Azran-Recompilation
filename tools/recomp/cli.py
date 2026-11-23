@@ -8,6 +8,7 @@ import json
 import os
 import sys
 
+import capstone
 import capstone.arm as A
 from . import isa, emit
 from . import scan as scanmod
@@ -87,6 +88,7 @@ def collect_stats(res, data):
 
 def needs_fallthrough(ins):
     """True, wenn nach dieser Instruktion der naechste Block folgt."""
+    import capstone
     import capstone.arm as A
     # Bedingt ausgefuehrte Terminatoren haben immer einen Fallthrough
     if ins.cc != A.ARM_CC_AL:
@@ -186,6 +188,32 @@ def _ldrpc_targets(fn, data):
     return out
 
 
+
+def _fill_empty_fns(res, data):
+    """Leere Funktionen mit einem linearen Block fuellen (bis Terminator)."""
+    if data is None:
+        return
+    md = capstone.Cs(capstone.CS_ARCH_ARM, capstone.CS_MODE_ARM)
+    n = 0
+    for fn in res.functions.values():
+        if fn.thumb or fn.blocks:
+            continue
+        o = fn.addr - 0x100000
+        if o < 0 or o >= len(data):
+            continue
+        insns = []
+        for ins in md.disasm(data[o:o + 0x100], fn.addr):
+            insns.append(ins)
+            if ins.mnemonic in ('bx', 'pop') and 'pc' in ins.op_str:
+                break
+            if len(insns) >= 64:
+                break
+        if insns:
+            fn.blocks = [scanmod.Block(fn.addr, insns)]
+            n += 1
+    if n:
+        print("Leere Funktionen gefuellt: %d" % n)
+
 def _all_split_ldrpc(res, data):
     """Globaler Vor-Pass: an ldr-pc-Zielen in der Elternfunktion splitten und
     leere Duplikat-Funktionen an diesen Zielen entfernen."""
@@ -265,6 +293,7 @@ def generate(res, path, max_funcs=None, trace=False, data=None):
             needed.add(call)
     all_addrs = sorted(set(res.functions) | needed)
     if data is not None:
+        _fill_empty_fns(res, data)
         _all_split_ldrpc(res, data)
         for _f in res.functions.values():
             _seen = set()
