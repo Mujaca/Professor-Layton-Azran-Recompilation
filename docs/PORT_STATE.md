@@ -5385,3 +5385,32 @@ Folge: Mit Content aus den Assets ist **kein 0 Diff** moeglich; 0 Diff
 erzwingt den Referenz-Capture. `HLE_MENU_TEX` bleibt, bis der 3D- +
 Sprite-Render des Spiels selbst laeuft (dann kommt die Textur aus dem
 Framebuffer/den Shadern, nicht aus einer Datei).
+
+### Draw-List-Gate gefunden: [menu+0x40] und Pool-Seed (2026-11-23, 017fb48)
+
+`fn_00277004` (Rumpf des 2D-Draws 0x11DB84) liest zuerst `ldrh [r0+0x40]`
+und springt bei 0 auf `0x277100` (Ende) - der Builder `fn_002800C8`
+(`0x2770D4`) wird dann nie erreicht. `0x3EE12C+0x40 = 0x3EE16C`.
+
+* `HLE_MENU_OBJ0=1` setzt das Feld auf 0 (`hle.c:925-930`) -> in
+  `chain.json`/`real_entry.json` lief `0x2800C8` deshalb 0x. Ohne den
+  Schalter: `[hook] count addr=002800C8 hits=8`.
+* Danach bricht `0x2800C8` bei `0x280338` ab, weil `fn_00284A38`
+  (`r0=[container]`, `r0 += [container+4]*index`) 0 liefert:
+  `[menu+0x5C] = 0x3EE188` ist 0 (Mem-Dump `mem@003EE188: 00000000
+  00000004 ...`). Der Gast nullt den Pool im Frame.
+
+`HLE_MENU_POOL=1` setzt vor jedem Ring-Draw Pool-Basis
+(`0x0CFF1000`, 0x100 Objekte `0x0CFF2000+i*0x100` mit Vtable 0x3C91EC),
+Array (`0x0CFF0000`, cap 0x100) und `[menu+0x40]=1`. Ergebnis:
+
+```
+[dl] arr=0CFF0000 count=1 cap=256
+[dl]  ent[0]=0CFF5700: 003C91EC 00000000 00000000 00000000 FFFFFFFF
+                       00000000 ... (12 Woerter)
+```
+
+Der Builder laeuft also und haengt an; das Item traegt aber **keine**
+Geometrie (Vertex-Liste `+0x10 = 0xFFFFFFFF`, restliche Felder 0), weil
+die Queue `menu+0x44` leer ist. Echte Rects/UVs brauchen diese Queue bzw.
+den Mesh-Puffer, nicht nur den Pool.
