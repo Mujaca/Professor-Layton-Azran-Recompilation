@@ -5519,3 +5519,29 @@ BOTTOM voll     : 30595/ 76800  mean 21.33
 Zwei Laeufe byte-identisch. Tests 13/13, 12/12. Der Top-Rest ist die
 fehlende 3D-Titel-Map (`title.xc` = Modell-Pack, L4-NCC max 0.125); der
 Bottom ist bis auf 25902/71360 (Capture-Resampling) gleich.
+
+### 2D-Ring/Node traegt keine Records; BG-Ersatz A/B (2026-11-23)
+
+Dumps im kanonischen Lauf (`HLE_DUMPMEM`):
+
+* Ring `0x14004440`: Eintrag 0/1 = `{0CFE3100, 003CA494}`, Rest 0 -
+  also die HLE-Fakes, keine echten Node-Objekte.
+* `0x003CA494` (Node-Feld) ist eine Funktionstabelle (erstes Wort
+  `0x3653CC`, danach 0x36xxxx-Zeiger); `+0xc4 = 0x003650EC`,
+  `+0xcc`(u16) = 0xC354 - kein Record-Array/Count.
+* `0x003ECB68` (Obj2DManager) ist im kanonischen Profil komplett 0
+  (der 2D-Pfad laeuft dort nicht); Inhalt nur im `real_entry`-Lauf.
+
+Damit ist die einzige real vorhandene Sprite-Geometrie die 9 XPVB-Quads
+aus `menu/uk/title_a.xa` (absolute Positionen). `title_b.xa` hat 23 Quads,
+aber nur lokale Positionen (ANMC platziert sie), also nicht direkt
+screen-faehig.
+
+A/B des Ersatz-Hintergrunds (canonical, `measure_ref`):
+
+| Top-Liste | diff>60 | mean |
+|---|---|---|
+| 10 Quads (title_b_bg-Ersatz + 9 XPVB), RGBA-Alpha | 65707/90400 | 49.03 |
+| 9 Quads (nur XPVB, ohne Ersatz-BG) | 86876/90400 | 77.13 |
+
+Der Ersatz-BG bleibt also drin; Bottom unveraendert 25902/71360 (20.57).
