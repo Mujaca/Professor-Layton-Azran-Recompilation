@@ -32,6 +32,13 @@ static uint32_t g_clear = 0x000000u;
 static int g_fb_w = 400;
 static int g_fb_h = 240;
 
+/* Determinismus-Zaehler: abgeschlossene Listen/Submits und Draws. */
+static volatile unsigned long long g_pica_lists = 0;
+static volatile unsigned long long g_pica_draws = 0;
+
+unsigned long long gpu_pica_list_count(void) { return g_pica_lists; }
+unsigned long long gpu_pica_draw_count(void) { return g_pica_draws; }
+
 void gpu_set_fb(uint32_t addr) { if (addr != 0) g_fb = addr; }
 uint32_t gpu_get_fb(void) { return g_fb; }
 void gpu_set_fb_size(uint32_t addr, int w, int h) {
@@ -428,6 +435,7 @@ static int p_draw_arrays(ArmCpu *c, int indexed)
     if (plog < 0) { const char *e = getenv("HLE_PICA_LOG"); plog = (e && *e) ? atoi(e) : 0; }
     if (nv == 0) return 0;
     if (nv > 0x10000u) nv = 0x10000u;
+    g_pica_draws++;
     if (plog > 0 && draws < (unsigned)plog) {
         uint32_t base = ((p_regs[0x200] >> 1) & 0x0FFFFFFFu) * 16u;
         printf("[pica] draw#%u nv=%u voff=%u base=%08X attr0=%08X attr1=%08X attr2=%08X "
@@ -565,5 +573,6 @@ int gpu_run_pica_list(ArmCpu *c, uint32_t addr, uint32_t size)
         }
         if (align8 && extra != 0u && (i & 1u) != 0u) i++;  /* Pad-Wort */
     }
+    g_pica_lists++;
     return ops;
 }

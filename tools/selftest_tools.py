@@ -218,6 +218,92 @@ def test_hotpatch_list():
         need(name in p.stdout, "Callback %s fehlt" % name)
 
 
+def test_canonical_shot():
+    """Shot-Hash des kanonischen Laufs: zwei Laeufe muessen byte-identisch
+    sein (Screenshot wartet auf stabile Engine-Submits), und die
+    Referenzmessung darf nicht schlechter werden."""
+    import hashlib
+    exe = ROOT / "out" / "port.exe"
+    need(exe.is_file(), "out/port.exe fehlt (python tools\\build_port.py)")
+    hashes = []
+    tries = 0
+    while tries < 6:
+        tries += 1
+        shot = OUT / "canon_try.bmp"
+        p = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "run_chain_direct.py"),
+             "--profile", str(ROOT / "tools" / "profiles" /
+                             "canonical_shot.json"),
+             "--shot", str(shot)],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=300)
+        need(p.returncode == 0, "run_chain_direct Exit %d\n%s"
+             % (p.returncode, p.stdout[-800:]))
+        need(shot.is_file(), "Shot fehlt: %s" % shot)
+        hashes.append(hashlib.sha256(shot.read_bytes()).hexdigest())
+        if len(hashes) >= 2 and hashes[-1] == hashes[-2]:
+            break
+    need(len(hashes) >= 2 and hashes[-1] == hashes[-2],
+         "Shot nicht deterministisch: %s" % hashes)
+    log = (ROOT / "out" / "logs" / "chain_direct.txt").read_text(
+        encoding="utf-8", errors="replace")
+    need("[shot] frames=" in log and "lists=" in log,
+         "kein [shot]-Beleg im Log")
+    m = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "measure_ref.py"),
+         str(OUT / "canon_try.bmp")],
+        cwd=str(ROOT), capture_output=True, text=True, timeout=120)
+    need(m.returncode == 0, "measure_ref Exit %d" % m.returncode)
+    bottom = None
+    for line in m.stdout.splitlines():
+        if line.startswith("BOTTOM sichtbar"):
+            bottom = int(line.split()[4].split("/")[0])
+    need(bottom is not None, "BOTTOM-Zeile fehlt:\n%s" % m.stdout)
+    need(bottom <= 16000, "BOTTOM diff zu hoch: %d (linear 14752)" % bottom)
+    print("     shot-sha256 %s  BOTTOM %d/71360" % (hashes[0][:16], bottom))
+
+
+def test_classa_record_block():
+    """Record-Kette 0xD2-Loader -> Records -> Klasse-A-Block (sprites=3)."""
+    logp = ROOT / "out" / "logs" / "chain_direct.txt"
+
+    def run_profile(name):
+        p = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "run_chain_direct.py"),
+             "--profile", str(ROOT / "tools" / "profiles" / name),
+             "--shot", str(OUT / (name + ".bmp"))],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=300)
+        need(p.returncode == 0, "run_chain_direct %s Exit %d"
+             % (name, p.returncode))
+        return logp.read_text(encoding="utf-8", errors="replace")
+
+    log = run_profile("classa_drive.json")
+    need("284A48(" in log and "0E905000,3" in log,
+         "Loader-Alloc-Kette (284A48 0E905000,3) fehlt")
+    need("[classa] eye0" in log and "hdr=" in log,
+         "Klasse-A-Block fehlt")
+    log = run_profile("record_quads.json")
+    need("sprites=3 " in log, "Record-Liste sprites=3 fehlt")
+    print("     sprites=3, Klasse-A-Block vorhanden, 284A48 0E905000")
+
+
+def test_pica_regs():
+    p = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "test_pica_c.py")],
+        cwd=str(ROOT), capture_output=True, text=True, timeout=300)
+    need(p.returncode == 0, "test_pica_c Exit %d\n%s"
+         % (p.returncode, p.stdout[-1200:]))
+    need("ERGEBNIS: OK" in p.stdout, "PICA-Checks fehlgeschlagen")
+
+
+def test_imgc_decoder():
+    p = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "test_imgc_c.py")],
+        cwd=str(ROOT), capture_output=True, text=True, timeout=300)
+    need(p.returncode == 0, "test_imgc_c Exit %d\n%s"
+         % (p.returncode, p.stdout[-1500:]))
+    need("ERGEBNIS: OK" in p.stdout, "IMGC-Checks fehlgeschlagen")
+
+
 TESTS = [
     ("guest-refs 0x40B4C4", test_guest_refs),
     ("trace-diff boss:U", test_trace_diff),
@@ -231,6 +317,10 @@ TESTS = [
     ("milestones Fixture", test_milestones),
     ("framecheck Platzhalter", test_framecheck),
     ("hotpatch list", test_hotpatch_list),
+    ("kanonischer Shot deterministisch", test_canonical_shot),
+    ("Record->Block sprites=3", test_classa_record_block),
+    ("PICA-Registermap", test_pica_regs),
+    ("IMGC ETC1/linear", test_imgc_decoder),
 ]
 
 

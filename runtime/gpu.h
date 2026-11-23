@@ -27,4 +27,10 @@ int gpu_pica_texture_bound(void);
 void gpu_pica_set_uv(float u0, float v0, float u1, float v1);
 void gpu_pica_get_uv(float *u0, float *v0, float *u1, float *v1);
 
+/* Zaehler fuer abgeschlossene PICA-Kommandolisten (Engine-Submits) und
+   tatsaechlich ausgefuehrte Draws. Der Screenshot wartet darauf, statt
+   sich auf einen Frame-Zeitpunkt zu verlassen (Determinismus). */
+unsigned long long gpu_pica_list_count(void);
+unsigned long long gpu_pica_draw_count(void);
+
 #endif

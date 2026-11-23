@@ -19,6 +19,12 @@ python tools\canon.py --log out\logs\chain_direct.txt --shot out\shot_tmp.bmp --
 python tools\measure_ref.py out\shot_engine.bmp
 ```
 
+Deterministische Messbasis: `--profile tools\profiles\canonical_shot.json`
+(eingefroren, `title_top_plus_records.txt`). Der Shot wartet auf
+`PORT_SHOT_LISTS` fertige Engine-Listen und `PORT_SHOT_STABLE` identische
+Frames (`[shot] frames=... lists=... draws=... stable=...`); damit sind
+drei Laeufe byte-identisch (`tools\selftest_tools.py` prueft das).
+
 Aktueller Stand (2026-11-23, verifiziert): TOP sichtbar
 `69443/90400` mean `48.32` (Laufzeit-Jitter +-2 px); BOTTOM sichtbar
 `14752/71360` mean `14.33` (`HLE_PICA_CLEAR=1`). Der Bottom-Fortschritt

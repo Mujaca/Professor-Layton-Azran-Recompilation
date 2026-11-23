@@ -6408,3 +6408,36 @@ BOTTOM 14752/71360 (mean 14.33)   <- verbessert (linearer IMGC-Decode)
 **Nebenbefund:** das Bottom-Asset wird jetzt linear dekodiert
 (`tools/make_menu_assets.py`, `decode_linear`) -> BOTTOM von 25902 auf
 **14752/71360** (mean 14.33) verbessert.
+
+### Deterministischer Screenshot: stabile Engine-Submits (2026-11-23, Paket 3)
+
+Problem: `PORT_SHOT_FRAMES=60` koppelte den Shot an einen Frame-Zeitpunkt;
+der erste Lauf nach einem Rebuild lieferte manchmal ein anderes Bild
+(TOP 87175 statt ~69400), weil die Engine zu diesem Zeitpunkt noch nicht
+fertig submitted hatte.
+
+Loesung:
+
+* `runtime/gpu.c` zaehlt abgeschlossene PICA-Listen (`gpu_pica_list_count`,
+  = Engine-Submits) und Draws (`gpu_pica_draw_count`).
+* `tests/port.c` macht den Shot erst, wenn
+  (a) mindestens `PORT_SHOT_LISTS` Listen fertig sind (Default 1),
+  (b) das zusammengesetzte 400x480-Bild `PORT_SHOT_STABLE` mal in Folge
+  byte-identisch war (Default 2), und
+  (c) `PORT_SHOT_FRAMES` erreicht ist (weiterhin die Untergrenze).
+  Danach bricht der Loop ab; das frueher zusaetzliche `save_bmp` am Ende
+  ueberschreibt den Shot nicht mehr.
+
+Beleg (drei Laeufe mit `tools/profiles/canonical_shot.json`, feste
+Messbasis `title_top_plus_records.txt`):
+
+```
+[shot] frames=60 lists=30 draws=210 stable=5/12/16
+SHA256 425EB29B8568B8B64270CAD5E7FB4A43B582EEDF71F34442912A5F3A8115D339 (3x)
+TOP 69443/90400 (48.32), BOTTOM 14752/71360 (14.33)
+```
+
+`python tools\selftest_tools.py` prueft das jetzt als eigenen Test
+(zwei identische Shot-Hashes + BOTTOM <= 16000). `canonical_shot.json` ist
+die eingefrorene Messbasis; das Arbeitsprofil `engine_pica_draw.json` wird
+parallel weiterentwickelt.

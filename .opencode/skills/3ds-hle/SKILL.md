@@ -335,10 +335,12 @@ Textur-Register:
 * Ohne Clear akkumuliert der Shot ueber die Frame-Anzahl: zwei Laeufe
   ergaben TOP `65707` vs `85271`.
 * Mit `HLE_PICA_CLEAR=1` (loescht das Ziel vor dem Draw, `w*h*3` Bytes) sind
-  drei Laeufe byte-identisch. **Regel:** jede Bildmessung nur mit Clear und
-  mindestens 2x wiederholen. Zusaetzlich: **der erste Lauf nach einem
-  Rebuild ist unzuverlaessig** (flach, `TOP 88358`); immer den zweiten
-  Lauf kanonisieren.
+  drei Laeufe byte-identisch. **Regel:** jede Bildmessung nur mit Clear.
+* Seit Paket 3 wartet der Shot auf **abgeschlossene Engine-Submits**
+  (`gpu_pica_list_count`) plus `PORT_SHOT_STABLE` byte-identische Frames;
+  `[shot] frames=.. lists=.. draws=.. stable=..` belegt das. Drei Laeufe
+  mit `tools/profiles/canonical_shot.json` ergaben denselben SHA256
+  (`425EB29B...`), unabhaengig vom ersten Lauf nach dem Rebuild.
 
 ### NDC-Heuristik
 

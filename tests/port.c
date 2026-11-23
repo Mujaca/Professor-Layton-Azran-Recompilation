@@ -1,6 +1,7 @@
 /* Port-Host: fuehrt den recompilierten Code aus und zeigt den Framebuffer. */
 #include "arm_cpu.h"
 #include "arm_trace.h"
+#include "gpu.h"
 #include "hle.h"
 #include "window.h"
 
@@ -239,6 +240,17 @@ static void compose_official(void) {
     }
 }
 
+/* Bildquelle des Fensters (Engine-Framebuffer, Referenz oder Menue). */
+static int compose_frame(void) {
+    int fb_mode = (getenv("HLE_ENGINE_FRAME") != NULL) ||
+                  (getenv("HLE_MENU_GPU") != NULL) ||
+                  (getenv("PORT_FB_MODE") != NULL);
+    if (fb_mode) compose_fb();
+    else if (g_official_ok) compose_official();
+    else draw_menu();
+    return fb_mode;
+}
+
 static void save_bmp(const char *path) {
     FILE *f = fopen(path, "wb");
     if (!f) return;
@@ -395,6 +407,7 @@ int main(int argc, char **argv) {
     if (!th) { printf("Thread fehlgeschlagen\n"); return 3; }
 
     int frames = 0;
+    int shot_saved = 0;
     while (win_pump()) {
         if (frames >= 2 && frames - 2 < keyn) win_key_push(keyseq[frames - 2]);
         if (win_key_take(VK_DOWN)) { g_menu_sel = (g_menu_sel + 1) % 3; g_menu_msg[0] = 0; }
@@ -403,19 +416,10 @@ int main(int argc, char **argv) {
             snprintf(g_menu_msg, sizeof(g_menu_msg), "%s SELECTED", MENU_ITEMS[g_menu_sel]);
         }
         {
-            int fb_mode = (getenv("HLE_ENGINE_FRAME") != NULL) ||
-                          (getenv("HLE_MENU_GPU") != NULL) ||
-                          (getenv("PORT_FB_MODE") != NULL);
-            if (fb_mode) {
-                compose_fb();
-                if (!g_game_fb_seen) {
-                    g_game_fb_seen = 1;
-                    win_status("game framebuffer active (screen 0+1)", 2);
-                }
-            } else if (g_official_ok) {
-                compose_official();
-            } else {
-                draw_menu();
+            int fb_mode = compose_frame();
+            if (fb_mode && !g_game_fb_seen) {
+                g_game_fb_seen = 1;
+                win_status("game framebuffer active (screen 0+1)", 2);
             }
         }
         win_blit(g_rgb, FB_W, FB_H);
@@ -673,6 +677,8 @@ int main(int argc, char **argv) {
         Sleep(16);
         {
             static int shot_at = -1, shot_stop = -1;
+            static int min_lists = -1, stable_need = -1, stable = 0;
+            static unsigned char prev[FB_W * FB_H * 3];
             if (shot_at < 0) {
                 const char *sf = getenv("PORT_SHOT_FRAMES");
                 if (sf != NULL && *sf != 0) shot_at = atoi(sf);
@@ -680,20 +686,45 @@ int main(int argc, char **argv) {
                 else if (getenv("HLE_ENGINE_FRAME") != NULL) shot_at = 16000;
                 else shot_at = 3;
                 if (shot_at < 3) shot_at = 3;
-                shot_stop = shot_at + 3;
+                shot_stop = shot_at + 180;
+                {
+                    const char *sl = getenv("PORT_SHOT_LISTS");
+                    min_lists = (sl != NULL && *sl != 0) ? atoi(sl) : 1;
+                }
+                {
+                    const char *ss = getenv("PORT_SHOT_STABLE");
+                    stable_need = (ss != NULL && *ss != 0) ? atoi(ss) : 2;
+                    if (stable_need < 1) stable_need = 1;
+                }
             }
-            if (shot != NULL && frames == shot_at) {
-                save_bmp(shot);
+            if (shot != NULL && !shot_saved) {
+                int fb_mode = compose_frame();
+                unsigned long long lists = gpu_pica_list_count();
+                unsigned long long draws = gpu_pica_draw_count();
+                if (memcmp(prev, g_rgb, sizeof(prev)) == 0) stable++;
+                else { memcpy(prev, g_rgb, sizeof(prev)); stable = 0; }
+                if (fb_mode) {
+                    if (frames >= shot_at && stable >= stable_need &&
+                        lists >= (unsigned long long)min_lists) {
+                        printf("[shot] frames=%d lists=%llu draws=%llu "
+                               "stable=%d\n", frames, lists, draws, stable);
+                        fflush(stdout);
+                        save_bmp(shot);
+                        shot_saved = 1;
+                    }
+                } else if (frames == shot_at) {
+                    save_bmp(shot);
+                    shot_saved = 1;
+                }
             }
-            if (shot != NULL && frames > shot_stop) {
-                break;
-            }
+            if (shot != NULL && shot_saved) break;
+            if (shot != NULL && frames > shot_stop) break;
         }
         if (g_halt && shot == NULL) {
             /* Fenster bleibt offen, bis es geschlossen wird */
         }
     }
-    if (shot) save_bmp(shot);
+    if (shot && !shot_saved) save_bmp(shot);
     win_close();
     hle_report();
     return 0;
