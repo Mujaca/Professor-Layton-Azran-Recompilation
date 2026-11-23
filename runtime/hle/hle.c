@@ -602,7 +602,10 @@ static void hle_install_2d_entry(ArmCpu *c) {
             f = fopen(texpath, "rb");
             if (f) { if (fread(topimg, 1, 400u * 240u * 3u, f) != 400u * 240u * 3u) memset(topimg, 0, 400u*240u*3u); fclose(f); }
             if (!fa_bottom) {
-                f = fopen("out/menu_bottom.bin", "rb");
+                const char *btenv = getenv("HLE_MENU_TEX_BOT");
+                const char *btpath = (btenv != NULL && *btenv != 0)
+                                         ? btenv : "out/menu_bottom.bin";
+                f = fopen(btpath, "rb");
                 if (f) { if (fread(botimg, 1, 320u * 240u * 3u, f) != 320u * 240u * 3u) memset(botimg, 0, 320u*240u*3u); fclose(f); }
             }
             memcpy(c->mem + 0x1E000000u, topimg, 400u * 240u * 3u);
@@ -3692,11 +3695,33 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
                     }
                 }
                 /* Ziel-Framebuffer fuer den PICA-Render:
-                   HLE_PICA_TARGET=<addr>,<w>,<h>. */
+                   HLE_PICA_TARGET=<addr>,<w>,<h>.
+                   HLE_PICA_PRIMARY=<tex>,<w>,<h> bindet vor jedem Submit die
+                   Haupttextur neu (der zweite Screen bindet eine andere). */
                 {
-                    static const char *pt = NULL;
+                    static const char *pt = NULL, *pm = NULL;
                     static int pt_read = 0;
-                    if (!pt_read) { pt = getenv("HLE_PICA_TARGET"); pt_read = 1; }
+                    if (!pt_read) {
+                        pt = getenv("HLE_PICA_TARGET");
+                        pm = getenv("HLE_PICA_PRIMARY");
+                        pt_read = 1;
+                    }
+                    if (pm != NULL && *pm != 0) {
+                        char bp[80], *qp = bp;
+                        uint32_t vp[3] = {0, 0, 0};
+                        int np = 0;
+                        snprintf(bp, sizeof(bp), "%s", pm);
+                        while (qp != NULL && *qp && np < 3) {
+                            char *cp2 = strchr(qp, ',');
+                            if (cp2) *cp2 = 0;
+                            vp[np] = (uint32_t)strtoul(qp, NULL,
+                                                       np == 0 ? 16 : 10);
+                            np++;
+                            qp = cp2 ? cp2 + 1 : NULL;
+                        }
+                        if (vp[0] != 0u && vp[1] != 0u && vp[2] != 0u)
+                            gpu_pica_bind_texture(vp[0], (int)vp[1], (int)vp[2], 1);
+                    }
                     if (pt != NULL && *pt != 0) {
                         char b2[64], *pp2 = b2;
                         uint32_t v2[3] = {0, 0, 0};
@@ -3719,6 +3744,41 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
                                   : gpu_run_pica_list(c, eaddr, esize);
                 if (nops == 0 && legacy)
                     nops = gpu_run_pica_list(c, eaddr, esize);
+                /* Zweiter Screen: dieselbe Engine-Liste mit der Bottom-Textur
+                   und dem Bottom-Framebuffer ausfuehren.
+                   HLE_PICA_SECOND=<tex>,<w>,<h>,<fb>. */
+                {
+                    static const char *sc = NULL;
+                    static int sc_read = 0;
+                    if (!sc_read) { sc = getenv("HLE_PICA_SECOND"); sc_read = 1; }
+                    if (sc != NULL && *sc != 0 && eaddr == 0x0CFE6000u) {
+                        char b3[96], *q = b3;
+                        uint32_t v3[4] = {0, 0, 0, 0};
+                        int n3 = 0;
+                        snprintf(b3, sizeof(b3), "%s", sc);
+                        while (q != NULL && *q && n3 < 4) {
+                            char *cc3 = strchr(q, ',');
+                            if (cc3) *cc3 = 0;
+                            v3[n3] = (uint32_t)strtoul(q, NULL,
+                                                       n3 == 0 ? 16 : (n3 == 3 ? 16 : 10));
+                            n3++;
+                            q = cc3 ? cc3 + 1 : NULL;
+                        }
+                        if (v3[0] != 0u && v3[1] != 0u && v3[2] != 0u && v3[3] != 0u) {
+                            int n2nd;
+                            gpu_pica_bind_texture(v3[0], (int)v3[1], (int)v3[2], 1);
+                            gpu_set_fb_size(v3[3], (int)v3[1], (int)v3[2]);
+                            n2nd = legacy ? gpu_run_command_list(c, eaddr, esize)
+                                          : gpu_run_pica_list(c, eaddr, esize);
+                            if (n2nd == 0 && legacy)
+                                n2nd = gpu_run_pica_list(c, eaddr, esize);
+                            nops += n2nd;
+                            printf("[gspq-engine] second pass tex=%08X %ux%u fb=%08X ops=%d\n",
+                                   v3[0], v3[1], v3[2], v3[3], n2nd);
+                            fflush(stdout);
+                        }
+                    }
+                }
                 if (nops == 0 && gsp_engine_list(c, eaddr)) nops = 1;
                 qops += nops;
                 printf("[gspq-engine] tid=%d n=%u list=%08X size=%X ops=%d\n",
