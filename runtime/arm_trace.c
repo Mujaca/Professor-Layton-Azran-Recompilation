@@ -520,6 +520,17 @@ static void hook_hit(ArmCpu *c, uint32_t pc)
                 memcpy(&v, c->mem + 0x003EE680u + j * 4u, 4);
                 printf(" %08X", v);
             }
+            {
+                uint32_t lp = 0;
+                memcpy(&lp, c->mem + 0x003EE680u, 4);
+                printf(" | LIST@%08X:", lp);
+                if (lp >= 0x00100000u && lp < 0x20000000u) {
+                    for (j = 0; j < 12u; j++) {
+                        memcpy(&v, c->mem + (lp & 0x1FFFFFFFu) + j * 4u, 4);
+                        printf(" %08X", v);
+                    }
+                }
+            }
             printf("\n");
             fflush(stdout);
         }

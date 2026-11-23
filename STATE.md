@@ -33,8 +33,15 @@ Stand: Engine-Submit-Kette bis `0x13F2D4` belegt; echte PICA-Liste fehlt noch.
 - `python tools\watch_chain.py --write 0x42B888 --timeout 45`
 - `HLE_PRECALL=addr,r0,r1,r2,r3` (einmaliger Vor-Aufruf, z. B. Ring-Init).
 
+## Belegt (neu): qops=4 aus Engine-Descriptor
+
+- `guest-watch 0x3EE680`: Wert `0x3ECB68` von `fn_002771EC` geschrieben.
+- Descriptor `003ECB68 0 0x18 0 0 4 ...`: Count 4 bei `+0x14`.
+- `gsp_engine_desc()` dekodiert dieses Format -> `ops=4`, `qops=4` (20x),
+  ohne `gsp_engine_list`-Fallback.
+
 ## Naechster Schritt
 
-Engine-CommandBuffer `0x3EE680` Format (`003ECB68 0 0x18 ...`) verstehen und
-`gpu_run_pica_list` dafuer erweitern bzw. den Pfad zu echten PICA-Paaren
-finden; dann `qops>0` ohne `gsp_engine_list`-Fallback und Top/Bottom messen.
+Die 4 Engine-Eintraege auf echte PICA-Kommandos abbilden (bzw.
+`gpu_run_pica_list`-Format erweitern), damit der GPU sie ausfuehrt und
+der Menue-Frame aus der Engine kommt; Top/Bottom neu messen.

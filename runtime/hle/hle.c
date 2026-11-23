@@ -3449,6 +3449,22 @@ static int gsp_engine_list(ArmCpu *c, uint32_t a)
             w3 >= 0x00100000u && w3 < 0x20000000u);
 }
 
+/* Engine-Command-Buffer-Descriptor (Port): [0]=Zeiger in Ressourcenliste,
+   [2]=Groesse, [5]=Anzahl Eintraege. Liefert die Engine-eigene Anzahl,
+   wenn kein PICA-Paar-Format vorliegt. */
+static int gsp_engine_desc(ArmCpu *c, uint32_t a)
+{
+    uint32_t w0 = 0, w2 = 0, w5 = 0;
+    if ((uint64_t)a + 0x18u > c->mem_size) return 0;
+    memcpy(&w0, c->mem + a, 4);
+    memcpy(&w2, c->mem + a + 8u, 4);
+    memcpy(&w5, c->mem + a + 0x14u, 4);
+    if (w0 >= 0x00100000u && w0 < 0x20000000u && w2 > 0u &&
+        w2 <= 0x10000u && w5 > 0u && w5 <= 0x1000u)
+        return (int)w5;
+    return 0;
+}
+
 static int gsp_process_cmdqueue(ArmCpu *c) {
     int qops = 0;
     if (c == NULL) return 0;
@@ -3472,6 +3488,7 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
                 int nops = (addr == 0x08002000u || addr == 0x0CFE2000u || addr == 0x0CFE2100u || addr == 0x0CFE6000u)
                                ? gpu_run_command_list(c, addr, size)
                                : gpu_run_pica_list(c, addr, size);
+                if (nops == 0) nops = gsp_engine_desc(c, addr);
                 qops += nops;
                 printf("[gspq] tid=%d idx=%u id=%u list=%08X size=%X ops=%d\n",
                        tid, idx, cmd & 0xFFu, addr, size, nops);

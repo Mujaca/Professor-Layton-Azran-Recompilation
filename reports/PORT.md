@@ -1147,3 +1147,28 @@ erzwingt `0x13038C` (Ring-Init); danach kehrt `0x12FC24` zurueck und
 `[gspq] list=003EE680 ops=0`: Engine-Format ist kein
 (value,header)-PICA-Format -> qops=0.
 
+
+## Engine-Descriptor zaehlt: qops=4 (20x) ohne gsp_engine_list-Fallback
+
+`guest-watch 0x3EE680` zeigte: der Wert wird von `fn_002771EC`
+(menue drain) geschrieben; `[0x3EE680]` ist ein Zeiger auf die
+Ressourcenliste `0x3ECB68`. Der Command-Buffer-Descriptor selbst
+(`003ECB68 00000000 00000018 00000000 00000000 00000004 ...`) hat
+Count 4 bei `+0x14`.
+
+Neuer GSP-Teil `gsp_engine_desc()` dekodiert genau dieses Engine-
+Format (w0=Zeiger, +8=Groesse, +0x14=Anzahl). Ergebnis:
+
+```
+[gspq] tid=0 idx=0 id=1 list=003EE680 size=20 ops=4
+[gsp] Trigger lr=00140170 addr=0CFE6000 size=24 qops=4
+```
+
+- `ops=4` 40x, `qops=4` 20x.
+- Quelle ist der **Engine-eigene** Command-Buffer (vom Submit-Body
+  `0x139914/0x13F2D4` gefuellt), **nicht** der `gsp_engine_list`-
+  Fallback.
+- Engine-Test-Frame: TOP 90281/90400 (Testkonfiguration), BOTTOM 26091.
+
+Offen: Pixel-Rendering des Menues (TOP nutzt im Test noch den
+HLE-Blend) und Abgleich der 4 Eintraege mit echten PICA-Kommandos.
