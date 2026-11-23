@@ -1524,7 +1524,7 @@ void hle_pump(void) {
                         pre_state = (getenv("HLE_PRECALL") != NULL) ? 0 : 2;
                     if (pre_state == 0) {
                         const char *s = getenv("HLE_PRECALL");
-                        char buf[128], *pp = buf;
+                        char buf[512], *pp = buf;
                         uint32_t v[5] = {0, 0, 0, 0, 0};
                         int n = 0;
                         memcpy(buf, s, sizeof(buf) < strlen(s) + 1
@@ -1562,7 +1562,7 @@ void hle_pump(void) {
                     if (post_state < 0)
                         post_state = (getenv("HLE_POSTCALL") != NULL) ? 0 : 2;
                     if (post_state == 0) {
-                        char buf[320], *tok;
+                        char buf[1024], *tok;
                         size_t sl = strlen(getenv("HLE_POSTCALL"));
                         post_state = 1;
                         if (sl >= sizeof(buf)) sl = sizeof(buf) - 1;

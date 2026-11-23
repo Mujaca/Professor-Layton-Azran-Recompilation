@@ -507,7 +507,7 @@ static void hook_hit(ArmCpu *c, uint32_t pc)
 {
     if (c != NULL && pc == 0x00139914u && getenv("HLE_EMITDUMP") != NULL) {
         static int ed2 = 0;
-        if (ed2 < 4) {
+        if (ed2 < 400) {
             uint32_t j, v;
             ed2++;
             if (getenv("HLE_DUMPMEM") != NULL) {

@@ -4103,3 +4103,21 @@ entstehen noch keine Zeichendaten.
   beobachtet (indirekte Sprungziele werden vom Hook offenbar nicht
   gesampled).
 
+
+### Puffer-Bugs behoben; Typ-6-Handler weiter nicht beobachtet
+
+- `HLE_POKE`: 16 -> 64 Slots (spaetere Pokes wurden still verworfen).
+- `HLE_POSTCALL`/`HLE_PRECALL`: Puffer 320/128 -> 1024/512 (Sequenz wurde
+  abgeschnitten; dadurch fehlten Tail-Aufrufe).
+- Stub-Bytes und Vtable verifiziert:
+  ```
+  [dumpmem2] 0D620000: E59F1010 E59F2010 E5821000 E12FFF1E ... CAFEBABE 0D630000
+  [dumpmem2] 0D610050: 00000000 0D620000   (V+0x14 = Stub)
+  ```
+  Der Stub schreibt bei direkter Ausfuehrung `CAFEBABE` nach `0x0D630000`
+  (45 Treffer). Wird er nur ueber den Handler gerufen, bleibt die Marke 0.
+
+=> `0x142BD0` wird mit `r0=0x0D600000` betreten, aber der Typ-6-Pfad
+`0x142D34 -> Stub` wird (per Marke) nicht ausgefuehrt. Die Typ-Auswahl
+im Dispatcher ist damit der naechste Punkt.
+
