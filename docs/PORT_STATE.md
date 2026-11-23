@@ -6197,3 +6197,30 @@ Profil: `HLE_PICA_SPRITES=tools/profiles/title_top_plus_records.txt`
 **0-Diff-Klausel (renegotiiert):** mit Asset-Texturen nicht erreichbar
 (0/1200 exakte 8x8-Bloecke im Capture); der Nutzer hat die Differenz
 ausdruecklich akzeptiert ("Die Differenz ist okay").
+
+### Desc-Buffer enthaelt jetzt Record-Daten (2026-11-23)
+
+Mit fixem Container (`cont=0x0E905000`) und dem Item-Aufruf
+`11C000,3EC5C4,0,0D80F000,0` (Float2 `(200,120)`) zeigt der *aktuelle*
+Desc-Zeiger `[ctx+0xD6C] = 0x0E9106CC` echte Daten:
+
+```
+[dumpafter] 0E9106CC: 0E906000 00160000 00000000 00426000 00070041
+                      00426000 00070041 00000060 0E9050E8 0...
+```
+
+| Offset | Wert | Bedeng |
+|---|---|---|
+| +0x00 | `0E906000` | Handle (rec+0x40) |
+| +0x04 | `00160000` | w/h-Paar (u16 w=0, h=22) |
+| +0x0C/+0x14 | `00426000 00070041` | UV-/Range-Paare (Bitmuster) |
+| +0x20 | `0E9050E8` | Record-/Texturzeiger |
+
+Die frueheren Nullen kamen vom **veralteten** Desc-Zeiger: `0x12D9CC`
+comittet je Layer und schiebt `[ctx+0xD6C]` um `0x244` weiter (hier
+2x: `0x0E910000 -> 0x0E910488 -> 0x0E9106CC`).
+
+Damit ist die Item-/Desc-Kette vollstaendig belegt; die Positionen
+stehen als Bitmuster in den Paaren und die w/h in `+0x04`.
+
+Kanonisch: 13 Top-Draws, TOP 69445/90400 (48.45), BOTTOM 25902/71360.
