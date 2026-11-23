@@ -5467,3 +5467,27 @@ Capture-Resamplings nicht 0-Diff-faehig.
 Artefakte: `tools/profiles/title_a_rects.txt` (9 Quads, UV normalisiert),
 `tools/profiles/title_a_atlas.png` (1024x1024), `tools/make_titlea_atlas.py`
 (PNG -> `tools/out/title_a_atlas.bin` fuer `HLE_MENU_TEX`).
+
+### title.xc ist ein Modell-Pack (kein 400x240-Flat), L4-Decode geprueft (2026-11-23)
+
+`menu/title.xc` (`lt6_b.fa` @0x0CD691E0) hat 123 XPCK-Eintraege: 14
+L4-IMGCs (bits=4, 32 Byte/Tile = 8x8 Nibbles), dazu `.mbn/.mtninf/.mtn2`
+(Modell/Animation), `.prm/.atr/.mtr` (Material) und `RES.bin` - aber
+**kein** `.pvb/.pbi` (also keine flachen Quads).
+
+Eigener L4-Decode (Nibble, lineare Tile-Ordnung, 8x8) und NCC gegen
+`reports/menu_official.bin` (jedes 400x240-Fenster, 32-px-Raster,
+Luminanz, Schritt 8):
+
+| Textur | best NCC | Offset |
+|---|---|---|
+| 000.xi (512x512) | 0.107 | 0,256 |
+| 003.xi (512x256) | 0.125 | 0,0 |
+| 005.xi (512x256) | 0.010 | 96,0 |
+| 006.xi (512x256) | 0.030 | 0,0 |
+| 010.xi (512x256) | 0.101 | 64,0 |
+
+Also ist der Top-Grundlayer ein **3D-Modell-Render** (mbn + Kamera),
+nicht eine flache Textur. Fuer 0 Diff mit Asset-Textur muesste dieser
+Pass im Port laufen (Modell + Kamera + L4-Palette; die CLUT fehlt in den
+`.fa`-Daten, die `.txp`-Eintraege sind 36-Byte-Parameter).
