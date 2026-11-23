@@ -5826,3 +5826,31 @@ neuen Basis (bzw. der Aufruf, der ihn setzt) fehlt noch - erst danach
 kann `0x3669FC(node, container)` die Records an `node+0xC4` haengen.
 
 Kanonisch unveraendert (69370/90400 mean 47.98, BOTTOM 25902/71360).
+
+### Record -> Klasse-A-Block: Kette verifiziert (2026-11-23, 399805d)
+
+Korrekturen am Treiber (`classa_drive.json`):
+
+* `[node+0xC4]` muss die **Record-Basis** sein (nicht der Container).
+  `0x3669FC(node, container)` setzt dort den Container; fuer den Test
+  setzt HLE danach `node+0xC4 = 0x0D80E000` (3 Records).
+* `node+0xCC` = u16 Record-Count (muss > 0 sein).
+* `node+0xDC` = Stage-Maske (`0x107` = 1|2|3 + Attach-Gate-Bit).
+* Records: `+0x38` = Stage 1/2/3, `+0x68` = Hoehe, `+0x04` = Texturzeiger.
+
+Damit schreibt der Klasse-A-Pfad erstmals einen Block aus **unseren**
+Records:
+
+```
+[drive] vor 366ABC: node=0D80D000 C4=0D80E000 CC=3 CE=65535 DC=00000107
+[classa] eye0 P=10002200 hdr=00000100 slot=0 count=1
+[classa]  #0(slot) ring=00000001 srcA=00000000 srcB=00000000
+                   size=88 flags=00000340 ring2=00000001
+```
+
+`size = mult * rec[0x68]` = 4*22 = 88 (cmd 0x8058 -> mult 4). Damit ist
+die Kette Record -> `0x20AD94` -> `0x23D630` -> `0x34AAC4` -> Block
+vollstaendig belegt; die Geometrie (x/y/u/v) kommt weiterhin aus den
+Zeigerpaaren des Scene-Renderers, nicht aus dem Record.
+
+Kanonisch unveraendert: TOP 69370/90400 (47.98), BOTTOM 25902/71360.
