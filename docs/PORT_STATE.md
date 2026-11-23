@@ -4995,3 +4995,22 @@ Der Draw laeuft also im Ring, erzeugt aber weiterhin keine GX-Kommandos
 (`0x140784`/`0x143F84` 0 Treffer) und keine neuen Pixel
 (TOP 89358/90400, BOTTOM 71353/71360; flach 96,64,32). Tests: 13/13, 12/12.
 
+
+### 2D-Ring: echte Draw-Items brauchen eine Vtable mit +0x78 (2026-11-23)
+
+Belege aus `tools/profiles/real_entry.json` / `itemdraw` / `menudraw`:
+
+- Renderer-Kontext `r0=0x00408808`, Vtable `0x3C4F4C`:
+  `+8=0x28EF3C`, `+0x1C=0x1BD720`, **`+0x78=0`**.
+- Ring: `0x40ABC0` -> Array `0x14004440`, Stride `0xB4`, Count 4.
+- Slot 0: `0x14004440 = 0CFE3100 003CA494 ...` (HLE-Fake; `[vt+8]=0x0CFE1000`).
+- `0x1BD720` (Draw-Item) 96x erreicht, aber `blx [vt+0x78]` = 0
+  (192x "unbekanntes call-Ziel 0x00000000").
+- `0x297B24` (Vtable `0x3C636C`, `+0x78=0x297B24`) 96x erreicht, aber
+  `0x140784`/`0x143F84` weiter 0 Treffer.
+
+Damit ist der naechste Gate exakt: ein Draw-Item mit einer Vtable, deren
+`+0x78` eine echte (Sprite-)Zeichenmethode ist, bzw. der Beweis, welcher
+Writer die 2D-Kommandos erzeugt. Pixel flach: TOP 89358/90400,
+BOTTOM 71353/71360. Tests: 13/13, 12/12.
+
