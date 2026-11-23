@@ -40,6 +40,13 @@ Kurzpfad: **messen -> vergleichen -> Hypothese -> A/B-Test**.
   (`[slot+0xBE]`), nicht die Record-Zahl.
 * Details/Belege: `docs/PORT_STATE.md` (letzte Abschnitte) und
   `docs/HANDOVER_PROMPT.md`.
+* **A2 ist abgeschlossen** (Nutzer-Entscheidung). Dokumentierte
+  Abweichungen: (1) kein 0 Diff - Asset-Texturen sind nicht
+  pixelgleich zum Capture (0/1200 exakte 8x8-Bloecke); (2) keine
+  96 Draws - 96 = 4 Ring-Slots x 24 Items; (3) echte
+  Record-Positionen fehlen (Ring-Draw-Item `0x11C000/0x278B68`,
+  `desc+0x140` = 0). Offener naechster Schritt: Ring-Draw-Item-
+  Pipeline, dann echte Record-Rects in `HLE_CLASSA_RECTS`.
 
 ## Zuerst die Werkzeuge
 
