@@ -6520,7 +6520,10 @@ ANMC00-Animation in `title_b.xa/RES.bin` mit **Namen und Koordinaten**.
 `#sound1..3_off 0 (24,26)`, `#try_off 0 (256,66)`, `#www 0 (144,24)`,
 `#pointer 0 (3,3)`; dazu die Button-States (`btr01_*`, `btr_*`,
 `s01_btr_*`, `s_btr_*`). Diese echten Positionen hat HLE bisher durch
-Grid-Rects ersetzt.
+Grid-Rects ersetzt. Achtung: die Paare sind element-lokal/Atlas
+(Stichprobe: lokale std < 8 trotz Menue-Text, 256/24,26 sind
+Power-of-Two-Werte); die Bildschirmposition kommt aus den
+#CHP-Keyframes (offen, siehe docs/PLAN_MENU_REAL.md 3b).
 
 Neuer 4-Stufen-Plan mit Abnahmekriterien: `docs/PLAN_MENU_REAL.md`
 (1 ANMC-Rects, 2 Textur je Element, 3 echtes Titel-3D ohne k=0.90,
