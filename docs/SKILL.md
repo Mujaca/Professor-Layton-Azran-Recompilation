@@ -28,12 +28,12 @@ python tools\measure_ref.py out\shot_engine.bmp
 
 # Pflicht-Selbsttests
 python tests\mvp_selftest.py                # 13/13
-python tools\selftest_tools.py              # 12/12
+python tools\selftest_tools.py              # 16/16
 ```
 
-Aktueller Menue-Stand (Commit `1edae74`, verifiziert): TOP sichtbar
-`69370/90400` mean `47.98`, BOTTOM sichtbar `25902/71360` mean `20.57`
-(`HLE_PICA_CLEAR=1`). Der Draw-Block stammt aus dem Engine-Strom @`0x30` ->
+Aktueller Menue-Stand (Commit `854975c`, verifiziert): TOP sichtbar
+`69443/90400` mean `48.32`, BOTTOM sichtbar `14752/71360` mean `14.33`
+(`HLE_PICA_CLEAR=1`, deterministischer Shot). Der Draw-Block stammt aus dem Engine-Strom @`0x30` ->
 `0x0CFE6000`; Quads/Vertex-Attribute und Texturen emittiert jedoch noch HLE
 (`HLE_PICA_SPRITES`). Der fruehere „0 Pixel Diff“ galt nur fuer die
 Referenz-Capture-Kopie, nicht fuer Spiel-Assets. Die Scene-Paar-Kette
@@ -210,11 +210,11 @@ dekodieren (macht `tools/where.py`).
 Jede Zeile enthaelt `✅`/`❌` und die konkrete Beweiszeile. Kein
 Statusbericht ohne diesen Checker.
 
-## 7. Bekannter Meilenstein-Stand (Commit `1edae74`, 2026-11-23)
+## 7. Bekannter Meilenstein-Stand (Commit `854975c`, 2026-11-23)
 
 - Kanonisch: Engine-Strom @`0x30` -> `0x0CFE6000`; TOP sichtbar
-  `69370/90400` mean `47.98`, BOTTOM `25902/71360` mean `20.57`
-  (`HLE_PICA_CLEAR=1`, deterministisch).
+  `69443/90400` mean `48.32`, BOTTOM `14752/71360` mean `14.33`
+  (`HLE_PICA_CLEAR=1`, deterministischer Shot, `canonical_shot.json`).
 - Attribute/Texturen kommen aus `HLE_PICA_SPRITES` (Spiel-Assets
   `title_a.xa` + `title_b_bg`), **nicht** aus `reports/menu_official*.bin`.
   „0 Diff“ ist nur noch der Referenz-Capture-Fall.
