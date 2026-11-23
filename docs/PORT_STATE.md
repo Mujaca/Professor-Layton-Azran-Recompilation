@@ -6338,7 +6338,7 @@ TOP             : 69443/90400  mean 48.32   (vorher 69370, 47.98; +-2 px
 **Nebenbefund (wichtig fuer die Asset-Pipeline):** `dectool.exe` liefert
 fuer einige 32-bpp-LZ10-Streams zu wenig Bytes (Beispiel `title_a
 000.xi`: 61280 statt der im Header deklarierten 99840). `tools/_imgc.py`
-macht LZ10 jetzt nativ (`_imgc.lz10`); alle 4735 geprueften IMGCs der drei
+macht LZ10 jetzt nativ (`_imgc.lz10`); alle geprueften IMGCs der drei
 `lt6_*.fa` liefern exakt die deklarierte Groesse.
 
 ### Messregel: erster Lauf nach einem Rebuild ist unzuverlaessig (2026-11-23)
