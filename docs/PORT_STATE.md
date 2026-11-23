@@ -4172,3 +4172,20 @@ Regeneriert: `python tools/build_boot.py --regen --port`.
 Tests: `mvp_selftest` 13/13, `selftest_tools` 12/12 (inkl. `ldm_stm`,
 `thumb_schleife`). Kanonisch unveraendert (TOP 65962, BOTTOM 26091).
 
+
+### Nach Recompiler-Fix: Dispatch betritt Handler weiterhin nicht
+
+```
+guest-watch --pc 0x142BD0: 1 Treffer, r0=0x0D600000 (aus 0x13F688+0x2C)
+[dumpmem2] 0D600000: 00000000 00000006 00000000 00000000 0CFE7000 ...
+guest-watch --pc 0x142D34: 0 Treffer
+```
+
+Node/Dispatch korrekt (Typ 6, Drawable 0x0CFE7000), Flush kehrt zurueck
+(`r0=0x42BCD4`). Der generierte `ldr pc`-Dispatch ruft jetzt
+`arm_call_guest(c, c->r[15])`, aber der Handler wird nicht gesampelt.
+
+Naechster Verdacht: `c->r[15]` ist im generierten Code nicht 0x142D34
+(Tabelle/Offset oder `arm_ld`-Wert), oder `arm_call_guest` findet das
+Ziel nicht (g_entries).
+
