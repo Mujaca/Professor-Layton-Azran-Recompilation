@@ -4564,3 +4564,42 @@ ueber FA-Reader `0x280744`/Builder `0x2800C8` ist noch nicht angesteuert
 (0 Treffer), `0x28D424` laeuft nur ueber den HLE-Direktaufruf.
 Tests: 13/13, 12/12.
 
+
+### Feedback umgesetzt: generischer Obj-Hook + ehrlicher Gate-Test (2026-11-23)
+
+- Neuer HLE_HOOK-Callback `obj` (auch via `tools\hotpatch.py`): druckt
+  `r0..r3`, `lr`, `[r0]` und die Vtable-Slots `+0x00..0x1C` sowie
+  `+0x70..0x8C`. Damit ist die frueher muehsam erratene +0x78-Frage ein
+  Einzeiler (`--hook 28BE0C=obj`). Beispiel:
+  `[hook] obj addr=0028D424 ... r0=003EE12C ... [r0]=00000000`.
+- Einmal-Patcher entfernt (`tools\_patch_scan_ldrpc.py`,
+  `_merge_fragments*.py`, `_fill_empty.py`); Aenderungen laufen direkt
+  ueber `edit`.
+
+**Ehrlicher Gate-Test** (`out/profiles/none.json`: HLE_RETFORCE und
+HLE_POSTCALL komplett entfernt, Ring-Pokes schon vorher raus):
+
+```
+TOP / BOTTOM == out/menu_top.bin / out/menu_bottom.bin : 0/96000 + 0/76800
+[gspq] tid=0 idx=0 id=1 list=0CFE6000 size=24 ops=1
+[gsp] Trigger ... qops=1
+```
+
+Der Dual-Screen-Render ueber SetCommandList(0x0CFE6000)/Trigger haengt also
+**nicht** an erzwungenen Gates oder POSTCALL-Pokes. Nur der alte
+Engine-Submit `0x139914`/`0x13F2D4` verschwindet ohne HLE_RETFORCE
+(0 Treffer), waehrend `qops=1` bleibt.
+
+**Naechster echter Ressourcen-Blocker** (gleicher Lauf, 0 RETFORCE/POSTCALL):
+
+```
+[hook-final] 0x28D424 hits=26     (nur HLE_ENGINE_RES-Direktaufruf)
+0x280744 (FA-Reader)  hits=0
+0x2800C8 (Draw-Builder) hits=0
+0x2919DC             hits=0
+```
+
+Damit ist belegt: der Loader wird aufgerufen, steigt aber nicht in den
+FA-Reader/Builder ab; die Pixel kommen weiterhin aus den vorbereiteten
+Assets. Tests: 13/13, 12/12.
+

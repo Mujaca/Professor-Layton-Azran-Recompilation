@@ -29,6 +29,7 @@ CALLBACKS = {
     "dump_regs": "Alias fuer regs",
     "mem": "8 Woerter ab r0 (max HLE_HOOK_MAX)",
     "dump_mem": "Alias fuer mem",
+    "obj": "r0-r3 + [r0] + Vtable-Slots +0x00..0x1C und +0x70..0x8C",
     "log": "pc/lr/r0/r1 (max HLE_HOOK_MAX)",
     "pc": "Alias fuer log",
     "set_r0": "r0 = HLE_HOOK_VALUE (veraendert den Gastzustand!)",

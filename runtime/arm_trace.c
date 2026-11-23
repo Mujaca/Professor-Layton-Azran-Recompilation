@@ -158,7 +158,7 @@ static unsigned g_pm_dumps = 0;
  * mem/dump_mem, log/pc, set_r0 (mit HLE_HOOK_VALUE=<hex>).
  * ------------------------------------------------------------------ */
 #define HOOK_MAX 16
-enum { HK_COUNT = 0, HK_REGS, HK_MEM, HK_LOG, HK_SET_R0 };
+enum { HK_COUNT = 0, HK_REGS, HK_MEM, HK_LOG, HK_SET_R0, HK_OBJ };
 typedef struct {
     uint32_t addr;
     int kind;
@@ -459,6 +459,8 @@ static int hook_kind(const char *name)
         return HK_REGS;
     if (strcmp(name, "mem") == 0 || strcmp(name, "dump_mem") == 0)
         return HK_MEM;
+    if (strcmp(name, "obj") == 0 || strcmp(name, "objdump") == 0)
+        return HK_OBJ;
     if (strcmp(name, "log") == 0 || strcmp(name, "pc") == 0)
         return HK_LOG;
     if (strcmp(name, "set_r0") == 0)
@@ -641,6 +643,30 @@ static void hook_hit(ArmCpu *c, uint32_t pc)
                        pc, (unsigned long long)h->hits, a);
                 for (int k = 0; k < 16; k++)
                     printf(" %08X", (unsigned)arm_mem_read(c, a + (uint32_t)k * 4u, 4));
+                printf("\n");
+                fflush(stdout);
+            }
+            break;
+        case HK_OBJ:
+            if (h->hits <= h->max) {
+                uint32_t a = c->r[0] & ~3u;
+                uint32_t vt = 0;
+                if (a >= 0x00100000u && a < 0x20000000u)
+                    vt = (unsigned)arm_mem_read(c, a, 4);
+                printf("[hook] %s addr=%08X hits=%llu r0=%08X r1=%08X r2=%08X "
+                       "r3=%08X lr=%08X [r0]=%08X",
+                       h->name, pc, (unsigned long long)h->hits, c->r[0],
+                       c->r[1], c->r[2], c->r[3], c->r[14], vt);
+                if (vt >= 0x00100000u && vt < 0x20000000u) {
+                    printf(" vt+00..1C:");
+                    for (int k = 0; k < 8; k++)
+                        printf(" %08X",
+                               (unsigned)arm_mem_read(c, vt + (uint32_t)k * 4u, 4));
+                    printf(" vt+70..8C:");
+                    for (int k = 0; k < 8; k++)
+                        printf(" %08X",
+                               (unsigned)arm_mem_read(c, vt + 0x70u + (uint32_t)k * 4u, 4));
+                }
                 printf("\n");
                 fflush(stdout);
             }
