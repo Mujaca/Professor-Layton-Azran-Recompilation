@@ -4326,3 +4326,22 @@ GPU-Uebersetzung (value,header) liegt hinter `+0x00`/`+0x10`.
 GPU-Emitter. Die Draw-Items selbst sind damit reine Objekte; die
 (value,header)-Erzeugung liegt in einem anderen Pass.
 
+
+### Architektur-Befund: Engine schreibt weder Kommandoliste noch GSP-Queue
+
+`guest-watch` im Chain-Lauf:
+
+```
+--write 0x0CFE6000: NIE GESCHRIEBEN
+--write 0x10002800: NIE GESCHRIEBEN
+```
+
+Die HLE fuellt `0x0CFE6000` (2D-Stub) und den GSP-Queue-Puffer selbst
+(Host-Code); der **Gast-Code** ruft die gsp-Wrapper (`0x1196AC` /
+`0x120DA0`) im Port nie auf. Deshalb gibt es keinen engine-eigenen
+Submit und nur den Descriptor-Fallback (qops=4).
+
+Abhilfe: die Engine-gsp-Wrapper explizit mit der gebauten Liste
+aufrufen (SetCommandList + Trigger) und pruefen, ob `0x10002800`
+dann vom Gast geschrieben wird.
+
