@@ -5414,3 +5414,23 @@ Der Builder laeuft also und haengt an; das Item traegt aber **keine**
 Geometrie (Vertex-Liste `+0x10 = 0xFFFFFFFF`, restliche Felder 0), weil
 die Queue `menu+0x44` leer ist. Echte Rects/UVs brauchen diese Queue bzw.
 den Mesh-Puffer, nicht nur den Pool.
+
+Zusatzmessungen (Sub-Agent, static+dynamic):
+
+* `fn_00277004` ist ARM (`push {r4..lr}`, `10 40 2d e9`), nicht Thumb; es
+  bricht zu 100 % bei `0x27701C` ab, wenn `[menu+0x40]==0`, und ruft dann
+  `0x284BC4(menu+0x6C)` -> `arr=0, count=0, cap=0` (genau die 17
+  `[dl]`-Dumps). `0x2800C8` ist ein Blockanfang und wird von `0x2770D4`
+  gerufen - nur eben nie erreicht.
+* Ohne `HLE_MENU_OBJ0` und mit `HLE_MENU_POOL=1`:
+  `[hook-final] count addr=002800C8 hits=4902`, genau **1** Append
+  (`0x2802D4 hits=1`, `r4=0x0CFF2000`).
+* Der Drain `0x28D424` leert die Liste sofort wieder; mit
+  `HLE_RETFORCE=...,28D424=0` waechst sie:
+  `[dl] arr=0CFF0000 count=56 cap=256`, danach `count=114` - alle
+  Eintraege sind derselbe Stub `0x0CFF2000` mit `+0x10=0xFFFFFFFF`.
+* `0x28D424` schreibt `menu+0x40` nirgends (nur `ldrh`), d.h. das Gate
+  wird nicht konsumiert; mit `+0x40=1` und leerer `menu+0x38` endet
+  die Schleife nicht von selbst (4902 Calls).
+* Fertige Items im Speicher (`0x3ECB68` Obj2DManager, Entry-Liste
+  `0x0E800000`, `0x3C6FF8`-Render-Items) tragen ebenfalls keine Rects/UVs.
