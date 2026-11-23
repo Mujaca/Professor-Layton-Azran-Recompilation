@@ -5635,3 +5635,25 @@ Chunk muss die Records fuellen (Parser laeuft im Port nicht), und die
 0x24-Byte-Blocks im GSP-Ring (`0x10002800`) muessen dekodiert werden
 (Felder `+0` Flags, `+4` Textur, `+8` Partner, `+0xC` Stage1, `+0x10`
 Scale, `+0x14` texfmt, `+0x18` buf, `+0x1C` Stage).
+
+### HLE_DUMP_AFTER + Klasse-A-Blockziel (2026-11-23)
+
+Neuer Diagnose-Schalter `HLE_DUMP_AFTER=<addr>,<woerter>` dumpt nach dem
+`HLE_POSTCALL` (bis 256 Woerter). Damit geprueft, wohin die
+klasse-A-Kette (`366ABC -> 20AD94 -> 23D630 -> 34AAC4`) ihren
+0x24-Byte-Block schreibt:
+
+* `0x10002800` (eye0) und `0x10002200` (eye1) sind nach dem POSTCALL
+  **0** (`[dumpafter] 10002800: 000...`), ebenso 0x100027C0.
+* `0x34AAC4` bekommt beim Aufruf `r0=0/1` (eye), `r2=r3=0x1E000000`
+  (Textur) - der Block landet also nicht am Ringbasis-Punkt, sondern
+  offset-abhaengig vom Zielpuffer.
+* Die Zielkette ist belegt: `[ [0x276038]+0x1C +0x5C ] = 0x3D7C9C`,
+  `[+0]=0x10002800`, `[+4]=0x10002200`; `[0x276038]=0x3D91E8`,
+  `[0x3D91E8+0x1C]=0x3D7C40`. `[ctx+0x14C]`/`[+0x150]` (0x408954/58)
+  sind 0 - die Ring-/Pufferinitialisierung des 2D-Renderers fehlt im
+  Port noch.
+
+Fuer echte Bloecke muss also zuerst die Renderer-Ring-Init laufen
+(`0x1ED64C`-Pfad / `[ctx+0x14C]`), danach lassen sich die 0x24-Byte-
+Felder dekodieren.

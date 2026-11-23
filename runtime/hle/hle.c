@@ -1750,6 +1750,38 @@ void hle_pump(void) {
                     }
                 }
                 {
+                    /* Optionaler Dump nach dem POSTCALL:
+                       HLE_DUMP_AFTER=<addr>,<woerter> */
+                    const char *da = getenv("HLE_DUMP_AFTER");
+                    if (da != NULL && *da != 0) {
+                        char db[64], *dq = db;
+                        uint32_t dv[2] = {0, 16};
+                        int dn = 0;
+                        snprintf(db, sizeof(db), "%s", da);
+                        while (dq != NULL && *dq && dn < 2) {
+                            char *dc = strchr(dq, ',');
+                            if (dc) *dc = 0;
+                            dv[dn] = (uint32_t)strtoul(dq, NULL,
+                                                       dn == 0 ? 16 : 0);
+                            dn++;
+                            dq = dc ? dc + 1 : NULL;
+                        }
+                        if (dv[0] != 0u) {
+                            uint32_t k;
+                            if (dv[1] > 256u) dv[1] = 256u;
+                            printf("[dumpafter] %08X:", dv[0]);
+                            for (k = 0; k < dv[1]; k++) {
+                                uint32_t w = 0;
+                                memcpy(&w, g_frame_cpu->mem +
+                                       ((dv[0] + k * 4u) & 0x1FFFFFFFu), 4);
+                                printf(" %08X", w);
+                            }
+                            printf("\n");
+                            fflush(stdout);
+                        }
+                    }
+                }
+                {
                     static int pc_done = 0;
                     if (pc_done < 6) {
                         uint32_t j, v, dsc = 0;
