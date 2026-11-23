@@ -4148,3 +4148,27 @@ Der Handler `0x142D34` laeuft (`r0=0`), aber die Indirektion
 Verdacht: Laufzeit-Code/Daten weichen von `code_decomp.bin` ab (wie
 schon beim `+2`-Vtable-Wert).
 
+
+### ROOT CAUSE: Recompiler behandelt `ldr pc,...` nicht als Sprung
+
+`build/gen_boot.c` fuer `fn_00142BD0`:
+
+```
+c->r[15] = arm_ld(c, table+off, 4, 0);
+return;      <-- kehrt zum C-Aufrufer zurueck, springt NICHT zum Handler
+```
+
+Damit lief die Jump-Table-Dispatch (`0x142BD0`) nie in die Handler
+(`0x142D34` usw.) - die Ursache fuer alle bisherigen "Handler laeuft
+nicht"-Messungen. Fix in `tools/recomp/emit.py`:
+
+```python
+if load and rd == 15:
+    lines.append("arm_call_guest(c, c->r[15]);")
+    lines.append("return;")
+```
+
+Regeneriert: `python tools/build_boot.py --regen --port`.
+Tests: `mvp_selftest` 13/13, `selftest_tools` 12/12 (inkl. `ldm_stm`,
+`thumb_schleife`). Kanonisch unveraendert (TOP 65962, BOTTOM 26091).
+
