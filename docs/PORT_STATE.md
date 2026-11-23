@@ -4037,3 +4037,17 @@ Der Pass laeuft jetzt durch. Er konsumiert den Pool (`ctx+0xB4` via
 `0x13F688`) - die separat gemessene Liste `ctx+0x16C` (aus `0x269248`)
 hat weiterhin 0 Reads, ist also eine andere (Pending-)Liste.
 
+
+### Flush laeuft, aber Pool ist leer
+
+`0x13A4B0` kehrt jetzt zurueck (`r0=0x42BCD4`). Der Flush-Dispatch
+`0x142BD0` springt per Tabelle auf `[node+4]` (Typ 0..0x3C) und ruft je
+Knoten `[node+0x10]->[[vt]+0x14]` (Drawable) - z. B. Handler `0x142D34`.
+
+Gemessen: Pool-Count `0x42B888` (`ctx+0xB4+0x28`) ist **0** ->
+`0x13F688` poppt nichts, also keine Knoten/Drawables -> keine PICA-Paare.
+
+Der Emitter legt seine Knoten in die **Pending-Liste ctx+0x16C**
+(0 Reads), nicht in den Pool, den der Flush leert. Diese beiden Listen
+sind im Port nicht verbunden.
+
