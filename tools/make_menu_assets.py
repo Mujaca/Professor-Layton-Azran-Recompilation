@@ -68,6 +68,28 @@ def main():
     top = Image.new('RGBA', (TW, TH), (0, 0, 0, 0))
     top.paste(atlas, (0, 0))
     top.paste(bg.convert('RGBA').resize((400, 240)), (0, AH))
+    # Font-Layer (aus tools/menu_text.py) in den freien Bereich rechts
+    # neben dem BG legen: 400..1023 x 1024..1263.
+    TX, TY = 400, AH
+    text_lines = []
+    tpath = os.path.join(ROOT, 'tools', 'profiles', 'menu_text_atlas.png')
+    rpath = os.path.join(ROOT, 'tools', 'profiles', 'menu_text_rects.txt')
+    if os.path.exists(tpath) and os.path.exists(rpath):
+        timg = Image.open(tpath).convert('RGBA')
+        top.alpha_composite(timg, (TX, TY))
+        for ln in open(rpath, encoding='utf-8'):
+            ln = ln.strip()
+            if not ln or ln.startswith('#'):
+                continue
+            sx, sy, w, h, lx, ly = [int(v) for v in ln.split()[:6]]
+            text_lines.append('%d %d %d %d %.8f %.8f %.8f %.8f'
+                              % (sx, sy, w, h,
+                                 (TX + lx) / float(TW),
+                                 (TY + ly) / float(TH),
+                                 (TX + lx + w) / float(TW),
+                                 (TY + ly + h) / float(TH)))
+        print('Font-Layer %dx%d bei (%d,%d), %d Zeilen'
+              % (timg.size[0], timg.size[1], TX, TY, len(text_lines)))
     open(os.path.join(out, 'title_top_atlas.bin'), 'wb').write(top.tobytes())
 
     bgline = ('0 0 400 240 0 %.6f 0.390625 %.6f'
@@ -84,6 +106,7 @@ def main():
                      % (x, y, qw, qh, u0, v0 * AH / float(TH), u1,
                         v1 * AH / float(TH)))
     lines.append(bgline)
+    lines.extend(text_lines)
     open(os.path.join(ROOT, 'tools', 'profiles', 'title_top_rects.txt'),
          'w', newline='\n').write('\n'.join(lines) + '\n')
     print('top-atlas %dx%d, rects %d' % (TW, TH, len(lines) - 1))

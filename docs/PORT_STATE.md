@@ -6696,3 +6696,50 @@ Atlas-Arbeit.
 Kanonisch unveraendert: `[gspq-engine] sprites=13 len=958` /
 `sprites=1 len=B8`, TOP 65097/90400 (mean 48.27), BOTTOM 14752/71360
 (mean 14.33), `corr 0.354`, `std 41.8`, `detail-hit 0.99`.
+
+### Font-Layer fuer die Menue-Zeilen (2026-11-24)
+
+Die sichtbare Menue-Schrift ist Font-Text (belegt: 19 glyph-artige
+Komponenten im Capture-Rechteck `100..220/104..132`). Neu:
+
+* `tools/menu_text.py` sucht je Zeile den String/Schrift/Groesse/Lage
+  per NCC gegen die Capture-Binärmaske (Kandidaten u. a. "New Game",
+  "Continue", "Settings", "Options").
+* Ergebnis: Zeile 1 = "Options" (segoeuib 20) bei (93,102), Zeile 2 =
+  "Setting" (arialbd 18) bei (42,138); NCC 0.333 bzw. 0.269 - niedrig,
+  weil die Spiel-Schrift nicht die Host-Schrift ist (ehrlich: Naeherung).
+* `tools/profiles/menu_text_atlas.png` (320x80 RGBA) +
+  `tools/profiles/menu_text_rects.txt` sind die Artefakte;
+  `tools/make_menu_assets.py` legt sie bei (400,1024) in den Top-Atlas
+  und haengt die Quads **nach** dem BG an.
+
+Messung (kanonisch, 2 Laeufe byte-identisch `True`):
+
+```
+[engine] bottom-sheet 230400 Bytes (out/title_b_bg.bin)
+[gspq-engine] sprites=15 len=AC8      (12 Atlas/BG + 3 Records)
+[gspq-engine] sprites=1 len=B8
+TOP    : 69377/ 90400  mean 48.50
+BOTTOM : 14752/ 71360  mean 14.33
+corr 0.121   std 19.2   detail-hit 0.38
+```
+
+A/B-Beleg fuer den Font-Layer (gleicher Atlas, Text nur an/aus):
+
+```
+ohne Text : corr 0.087  std 16.8  detail-hit 0.33  TOP 69443
+mit Text  : corr 0.121  std 19.2  detail-hit 0.38  TOP 69377
+```
+
+**Bugfix im HLE:** das Bottom-Sheet wurde mit `320*240*3` gelesen, auch
+wenn es hoeher ist (320x512 mit gepackten Sprites). Jetzt werden bis
+`320*512*3` gelesen und `botlen` geloggt. Beleg:
+`[engine] bottom-sheet 491520 Bytes (out/anmc_bottom_sheet_linear.bin)`
+im Profil `tools/out/prof_bottom_linear.json`. Die echten 23 Quads
+bleiben trotzdem schlechter als der BG allein (30830 vs 14752).
+
+**Korrektur einer alten Zahl:** `corr 0.354` liess sich mit dem
+korrekt 1280 hohen Atlas nicht reproduzieren - der damalige Lauf hatte
+den BG-Quad ausserhalb des Atlas (transparent) gesampelt. Mit BG zuletzt
+(deckt) ist es `0.121`; BG *zuerst* ist schlechter (`corr -0.02`,
+TOP 82057). Die 0.354 sind damit als Artefakt dokumentiert.

@@ -616,6 +616,7 @@ static void hle_install_2d_entry(ArmCpu *c) {
        laden und als BlitRGB-Kommandoliste ablegen. */
     {
         static unsigned char *topimg = NULL, *botimg = NULL;
+        static size_t botlen = 0;
         static int imgs_tried = 0;
         static int no_asset = -1;
         if (no_asset < 0)
@@ -641,7 +642,9 @@ static void hle_install_2d_entry(ArmCpu *c) {
             }
             imgs_tried = 1;
             topimg = (unsigned char *)calloc(1, (size_t)tw * (size_t)th * (size_t)tbpp);
-            botimg = (unsigned char *)calloc(1, 320u * 240u * 3u);
+            /* Sheet darf hoeher als 240 sein (gepackte Sprites
+               unterhalb des BG, z. B. 320x512). */
+            botimg = (unsigned char *)calloc(1, 320u * 512u * 3u);
             f = fopen(texpath, "rb");
             if (f) { if (fread(topimg, 1, (size_t)tw * (size_t)th * (size_t)tbpp, f) != (size_t)tw * (size_t)th * (size_t)tbpp) memset(topimg, 0, (size_t)tw * (size_t)th * (size_t)tbpp); fclose(f); }
             if (!fa_bottom) {
@@ -650,13 +653,23 @@ static void hle_install_2d_entry(ArmCpu *c) {
                                          ? btenv
                                          : "out/title_b_bg.bin";
                 f = fopen(btpath, "rb");
-                if (f) { if (fread(botimg, 1, 320u * 240u * 3u, f) != 320u * 240u * 3u) memset(botimg, 0, 320u*240u*3u); fclose(f); }
+                if (f) {
+                    botlen = fread(botimg, 1, 320u * 512u * 3u, f);
+                    if (botlen < 320u * 240u * 3u)
+                        memset(botimg, 0, 320u * 240u * 3u);
+                    fclose(f);
+                }
             }
             memcpy(c->mem + 0x1E000000u, topimg, (size_t)tw * (size_t)th * (size_t)tbpp);
             if (!fa_bottom)
-                memcpy(c->mem + 0x1E100000u, botimg, 320u * 240u * 3u);
+                memcpy(c->mem + 0x1E100000u, botimg,
+                       botlen != 0u ? botlen : 320u * 240u * 3u);
             printf("[engine] Menue-Assets geladen (top=%dx%d bpp%d bottom=%s)\n",
                    tw, th, tbpp, fa_bottom ? "FA-Read" : "0D050000");
+            printf("[engine] bottom-sheet %u Bytes (%s)\n",
+                   (unsigned)botlen, getenv("HLE_MENU_TEX_BOT") != NULL
+                       ? getenv("HLE_MENU_TEX_BOT") : "out/title_b_bg.bin");
+            fflush(stdout);
             fflush(stdout);
         }
     }
