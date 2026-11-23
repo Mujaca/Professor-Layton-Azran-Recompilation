@@ -19,7 +19,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MENU = os.path.join(ROOT, 'tools/profiles/anmc_menu.txt')
-RECTS = os.path.join(ROOT, 'tools/out/titleb_rects.txt')
+RECTS = os.path.join(ROOT, 'tools/profiles/titleb_rects.txt')
 OUT = os.path.join(ROOT, 'tools/profiles/menu_elements.txt')
 
 PAT = re.compile(r'quad\s+(\d+)\s+pos=\(\s*(-?[\d.]+),\s*(-?[\d.]+)\)'
@@ -42,7 +42,7 @@ MAP = [
 
 def pvb():
     rows = {}
-    for line in open(RECTS, encoding='utf-16'):
+    for line in open(RECTS, encoding='utf-8'):
         m = PAT.search(line)
         if m:
             rows[int(m.group(1))] = (float(m.group(4)), float(m.group(5)),

@@ -20,7 +20,7 @@ import _imgc  # noqa: E402
 
 ATLAS = os.path.join(ROOT, 'tools/out/title_b_000.xi')
 REF = os.path.join(ROOT, 'reports/menu_official.bin')
-RECTS = os.path.join(ROOT, 'tools/out/titleb_rects.txt')
+RECTS = os.path.join(ROOT, 'tools/profiles/titleb_rects.txt')
 
 PAT = re.compile(r'quad\s+(\d+)\s+pos=\(\s*(-?[\d.]+),\s*(-?[\d.]+)\)'
                  r'\s+([\d.]+)x([\d.]+)\s+uv=\(\s*(\d+),\s*(\d+)\)-'
@@ -29,7 +29,7 @@ PAT = re.compile(r'quad\s+(\d+)\s+pos=\(\s*(-?[\d.]+),\s*(-?[\d.]+)\)'
 
 def load_pvb():
     rows = []
-    for line in open(RECTS, encoding='utf-16'):
+    for line in open(RECTS, encoding='utf-8'):
         m = PAT.search(line)
         if m:
             rows.append((float(m.group(2)), float(m.group(3)),
