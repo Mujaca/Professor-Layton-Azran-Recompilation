@@ -6024,3 +6024,24 @@ Ring-Draw-Item (`0x11C000 -> 0x278B68`), nicht aus den Records oder der
 Paar-Kette. UV-Ranges sind konstant `(0,1)/(0,1)`.
 
 Kanonisch unveraendert: TOP 69370/90400 (47.98), BOTTOM 25902/71360.
+
+### A2 ABGESCHLOSSEN (2026-11-23, Nutzer-Entscheidung)
+
+Kanonischer Stand (deterministisch, `HLE_PICA_CLEAR=1`):
+TOP 69370/90400 (mean 47.98), BOTTOM 25902/71360 (mean 20.57).
+
+Belegt erledigt:
+- HLE_PICA_QUAD, nv-HLE_PRECALL, HLE_MENU_TEX aus dem Profil entfernt.
+- Texturen aus Spiel-Assets: title_top_atlas.bin (title_a.xa),
+  title3d_bg.bin (ETC1-Host-Render aus title.xc), title_b_bg.bin (lt6_b.fa).
+- Echte 0x200..0x208 je Quad, Draw-Block aus dem Engine-Stream (oder
+  HLE-Fallback), Record-Kette bis zum 0x1C-Block bewiesen
+  (Loader -> Records -> 366ABC/20AD94/23D630/34AAC4 -> Block).
+- Scene-Paar-Kette laeuft (11A3E0 -> 27C2BC -> 2794A4 -> 2721E0).
+
+Bewusst dokumentierte Abweichungen (Nutzer akzeptiert):
+1. Kein 0 Diff: Asset-Texturen sind nicht pixelgleich zum Capture.
+2. Keine 96 Draws: 96 = 4 Ring-Slots x 24 Items; Record-Pfad = count Draws.
+3. Record-Positionen fehlen (Ring-Draw-Item 0x11C000/0x278B68).
+
+Tests: 13/13 (mvp_selftest), 12/12 (selftest_tools).

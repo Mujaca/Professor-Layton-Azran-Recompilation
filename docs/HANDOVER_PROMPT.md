@@ -84,18 +84,31 @@ Dreiecke aus der Engine-Textur (`0x1E000000`, 400x240, RGB8).
 `out/shot_engine.bmp`: TOP 0/90400 diff. Profil:
 `tools/profiles/engine_pica_draw.json`.
 
-**A2. Echte Vertexdaten - erledigt in 8fb089b; Textur noch Referenz.**
-HLE_PICA_VERTEX haengt einen echten Attributblock (0x200..0x208) vor den
-Strom und setzt nv=6; der 0x22F-Draw liest float2-Position + float2-UV aus
-0x0CFE8000 (TOP+BOTTOM 0 Diff, HLE_PICA_QUAD entfernt).
-Offen: HLE_MENU_TEX. Kein einzelnes ROM-IMGC ist der Screen (1587
-Atlanten geprueft, bester 512x256 560/1500; 27 x 400x240, bester
-27389/45200) - der Screen ist eine Sprite-Komposition. Die Infrastruktur
-dafuer steht (HLE_MENU_TEX_W/H + HLE_PICA_UVRECT, mit 512x256-Quelle
-0 Diff belegt), es fehlen die per-Item-Rects/UVs. Die Draw-Liste
-menu+0x6C ist heute leer ([dl] count=0); der Builder 0x2800C8 hat 0
-Hooks, der Drain 0x28D424 laeuft. Die "96 Draws" sind 4 Ring-Slots x
-24 Renderer-Paesse (0x11DB84), keine 96 Sprite-Items.
+**A2. Abgeschlossen (dokumentiert, Stand a280508).**
+Kanonisch laeuft der Engine-Strom @`0x30` -> `0x0CFE6000` mit echten
+`0x200..0x208`-Bloecken je Quad; die Texturen kommen aus den Spiel-Assets
+(`out/title_top_atlas.bin` aus `title_a.xa` + 3D-Titel-Render
+`tools/profiles/title3d_bg.bin` aus `title.xc` (ETC1) + `out/title_b_bg.bin`
+aus `lt6_b.fa`). `HLE_PICA_QUAD`, nv-`HLE_PRECALL` und `HLE_MENU_TEX` sind
+aus dem Profil entfernt. Messung (deterministisch mit `HLE_PICA_CLEAR=1`):
+TOP `69370/90400` (mean 47.98), BOTTOM `25902/71360` (mean 20.57).
+
+Bewusst dokumentierte Abweichungen vom urspruenglichen Zieltext:
+1. **Kein 0 Diff**: Spiel-Asset-Texturen sind nicht pixelgleich zum
+   Azahar-Capture (0/1200 exakte 8x8-Bloecke selbst beim korrekten
+   Bottom-Asset; bester Asset-Render mean ~48). Vom Nutzer akzeptiert.
+2. **Keine 96 Sprite-Draws**: `0x11DB84` laeuft 96x = 4 Ring-Slots x 24
+   gedrainte Items (`[slot+0xBE]`), nicht 96 Records. Der Record-Pfad
+   liefert `count Zahlen` Draws; die Probe (3 Records) ergibt `sprites=3`.
+
+Record-Kette (belegt): `0xD2`-Loader (`0x238F58`) -> Records (0x74) ->
+`0x366ABC/0x20AD94/0x23D630/0x34AAC4` -> 0x1C-Block bei
+`P+4+0x1C*slot` (`P(eye0)=0x10002200`). `[node+0xC4]` = Recordbasis,
+`+0xCC` = count, `+0xDC` = Stage-Maske; Blockgroesse `mult*rec[0x68]`.
+Scene-Paar-Kette (`11A3E0 -> 27C2BC -> 2794A4 -> 2721E0`) laeuft mit
+`tools/profiles/scene_pairs.json`; UVs sind konstant `(0,1)/(0,1)`, die
+Position liegt nur im Ring-Draw-Item (`0x11C000/0x278B68`, desc+0x140 ist
+bei uns 0) - das ist der offene Rest fuer echte Record-Quads.
 
 **A3. BOTTOM (320x240) - erledigt in `88a816c`.**
 `HLE_PICA_SECOND=1E100000,320,240,1F060000` führt dieselbe Engine-Liste
