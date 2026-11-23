@@ -22,13 +22,16 @@ def main(argv=None) -> int:
     ap.add_argument("--profile",
                     default=os.path.join(ROOT, "tools", "profiles", "chain.json"))
     ap.add_argument("--shot", default="out\\shot_chain_direct.bmp")
+    ap.add_argument("--log", default=os.path.join(
+        ROOT, "out", "logs", "chain_direct.txt"),
+        help="Logpfad (parallel arbeitende Sessions: eigener Pfad)")
     args = ap.parse_args(argv)
 
     prof = json.load(open(args.profile, encoding="utf-8"))
     env = dict(os.environ)
     env.update(prof["env"])
 
-    log = os.path.join(ROOT, "out", "logs", "chain_direct.txt")
+    log = args.log
     p = subprocess.run([os.path.join(ROOT, "out", "port.exe"), "out\\romfs",
                         "--shot", args.shot], cwd=ROOT, env=env,
                        capture_output=True, text=True, errors="replace")

@@ -230,11 +230,12 @@ def test_canonical_shot():
     while tries < 6:
         tries += 1
         shot = OUT / "canon_try.bmp"
+        logp = OUT / "canon_log.txt"
         p = subprocess.run(
             [sys.executable, str(ROOT / "tools" / "run_chain_direct.py"),
              "--profile", str(ROOT / "tools" / "profiles" /
                              "canonical_shot.json"),
-             "--shot", str(shot)],
+             "--shot", str(shot), "--log", str(logp)],
             cwd=str(ROOT), capture_output=True, text=True, timeout=300)
         need(p.returncode == 0, "run_chain_direct Exit %d\n%s"
              % (p.returncode, p.stdout[-800:]))
@@ -244,8 +245,7 @@ def test_canonical_shot():
             break
     need(len(hashes) >= 2 and hashes[-1] == hashes[-2],
          "Shot nicht deterministisch: %s" % hashes)
-    log = (ROOT / "out" / "logs" / "chain_direct.txt").read_text(
-        encoding="utf-8", errors="replace")
+    log = logp.read_text(encoding="utf-8", errors="replace")
     need("[shot] frames=" in log and "lists=" in log,
          "kein [shot]-Beleg im Log")
     m = subprocess.run(
@@ -264,13 +264,13 @@ def test_canonical_shot():
 
 def test_classa_record_block():
     """Record-Kette 0xD2-Loader -> Records -> Klasse-A-Block (sprites=3)."""
-    logp = ROOT / "out" / "logs" / "chain_direct.txt"
 
     def run_profile(name):
+        logp = OUT / (name + ".log.txt")
         p = subprocess.run(
             [sys.executable, str(ROOT / "tools" / "run_chain_direct.py"),
              "--profile", str(ROOT / "tools" / "profiles" / name),
-             "--shot", str(OUT / (name + ".bmp"))],
+             "--shot", str(OUT / (name + ".bmp")), "--log", str(logp)],
             cwd=str(ROOT), capture_output=True, text=True, timeout=300)
         need(p.returncode == 0, "run_chain_direct %s Exit %d"
              % (name, p.returncode))
