@@ -6381,3 +6381,30 @@ belegt (`sprites=96 len=4500`).
 
 Sobald echte Ring-/ANMC-Positionen verfuegbar sind, wird `record_96.json`
 mit echten Rects neu erzeugt und kanonisch.
+
+### 96-Draws mit echten XPVB-Positionen getestet; instabil (2026-11-23)
+
+Variante `tools/profiles/title_96_realpos.txt`: 10 visuelle Quads + 86
+zyklisch aus den **9 echten XPVB-Rects** (`title_a_rects.txt`) = 96 Quads
+mit echten Engine-Positionen (kein Grid):
+
+```
+[gspq-engine] sprites=96 len=4500
+TOP: 958/90400-Bereich schwankt: 81960 (58.02), 76184 (54.14),
+     84740 (77.96), 75911 (53.96), 88358 (88.04, flach)
+```
+
+Die 96er-Liste (0x4500 B, 96 x 0xB8) ist **nicht deterministisch** (auch
+mit `HLE_PICA_CLEAR=1`): schwere Frames fallen aus, der letzte Frame ist
+mal gezeichnet, mal flach. Der kanonische Lauf bleibt daher bei der
+stabilen 13-Draw-Liste (`title_top_plus_records.txt`):
+
+```
+[gspq-engine] sprites=13 len=958
+TOP 69443/90400 (mean 48.32)
+BOTTOM 14752/71360 (mean 14.33)   <- verbessert (linearer IMGC-Decode)
+```
+
+**Nebenbefund:** das Bottom-Asset wird jetzt linear dekodiert
+(`tools/make_menu_assets.py`, `decode_linear`) -> BOTTOM von 25902 auf
+**14752/71360** (mean 14.33) verbessert.
