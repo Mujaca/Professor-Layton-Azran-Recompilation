@@ -4816,3 +4816,30 @@ Damit ist der naechste Gate: den CFile-Pool-Deskriptor-Init
 (`0x10395C -> 0x289290/0x2892DC`) ausfuehren bzw. seinen Count-Store
 finden. Tests: 13/13, 12/12.
 
+
+### CFile-Pool ist 0x40F048; Init fuellt ihn nicht (2026-11-23)
+
+Neuer generischer Dump: `HLE_OBJADDR=<hex>` im `obj`-Hook druckt 32 Woerter
+an einer festen Adresse. Damit ist der Pool am Aufruf von `0x268C80`
+sichtbar:
+
+```
+[hook] obj addr=00268C80 ... @0040F048: 00000000 ... (32x 0)
+```
+
+Der Ring-Init wird aber mit genau diesem Deskriptor aufgerufen
+(`0x284A48`):
+
+```
+[hook] regs addr=00284A48 r0=0040F048 r1=0E905000 r2=00000010 r3=00000010
+```
+
+`0x284A48` setzt nur die Indizes zurueck; Array und Stride an
+`[0x40F048]`/`[+4]` muessen vorher gesetzt sein. Mit
+`HLE_POKE=40F048=0E905000,40F04C=00000004` steht der Ring zwar, aber
+`[+0x26]` (Count) bleibt 0 — der Fuell-Loop `0x11ACBC` schreibt ihn nicht.
+
+Damit ist der naechste Gate exakt: der Fuell-Loop/Statik-Ctor, der
+`0x40F048+0x00/+0x04/+0x26` setzt. Heap/Allokation sind bereits ok
+(`write 0x3D9320 <- 0x08000020`). Tests: 13/13, 12/12.
+

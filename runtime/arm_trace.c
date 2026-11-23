@@ -692,6 +692,22 @@ static void hook_hit(ArmCpu *c, uint32_t pc)
                         printf(" %08X",
                                (unsigned)arm_mem_read(c, a + 0x68u + (uint32_t)k * 4u, 4));
                 }
+                {
+                    static uint32_t oa = 0;
+                    static int oa_init = 0;
+                    if (!oa_init) {
+                        const char *s = getenv("HLE_OBJADDR");
+                        oa = (s != NULL && *s != 0)
+                                 ? (uint32_t)strtoul(s, NULL, 16) : 0u;
+                        oa_init = 1;
+                    }
+                    if (oa != 0u) {
+                        printf(" @%08X:", oa);
+                        for (int k = 0; k < 32; k++)
+                            printf(" %08X",
+                                   (unsigned)arm_mem_read(c, oa + (uint32_t)k * 4u, 4));
+                    }
+                }
                 printf("\n");
                 fflush(stdout);
             }
