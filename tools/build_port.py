@@ -213,6 +213,22 @@ def main():
                    seg + txt[j:])
             open(gpath, "w", encoding="utf-8", newline="\n").write(txt)
 
+    # Echter Engine-Draw als 2D-Ring-Eintrag (0x0CFE4000): C-Stub setzt r0
+    # auf HLE_ENTRY_OBJ und ruft HLE_ENTRY_FN (Default 0x11DB84).
+    txt = open(gpath, encoding="utf-8").read()
+    if "hle_2d_real_stub" not in txt:
+        mark = "static const ArmEntry g_entries[] = {"
+        i = txt.find(mark)
+        if i >= 0:
+            j = txt.find("};", i)
+            seg = txt[i:j].rstrip()
+            if not seg.endswith(","):
+                seg += ","
+            seg += "\n    { 0x0CFE4000u, hle_2d_real_stub },\n"
+            txt = (txt[:i] + "extern void hle_2d_real_stub(ArmCpu *c);\n" +
+                   seg + txt[j:])
+            open(gpath, "w", encoding="utf-8", newline="\n").write(txt)
+
     # HLE-Stub "return 1" (fuer synthetische Vtable-Open-Funktionen).
     txt = open(gpath, encoding="utf-8").read()
     if "hle_ret_one" not in txt:

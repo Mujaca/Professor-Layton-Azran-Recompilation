@@ -4974,3 +4974,24 @@ werden.
 
 Profil: `tools/profiles/gx_emit_check.json`. Tests: 13/13, 12/12.
 
+
+### Echter Engine-Draw laeuft im 2D-Renderer-Ring (2026-11-23)
+
+Neu: `hle_2d_real_stub` (g_entries 0x0CFE4000) setzt `r0=HLE_ENTRY_OBJ`
+und ruft `HLE_ENTRY_FN`; damit ruft der 2D-Renderer `0x1ED8FC` die echte
+Engine-Draw-Methode statt eines HLE-Stubs auf.
+
+Lauf `tools/profiles/real_entry.json` (HLE_REAL_ENTRY=1,
+HLE_ENTRY_FN=11DB84, HLE_ENTRY_OBJ=3EE12C):
+
+```
+[hook-final] count addr=0011DB84 hits=96     (Engine-Draw)
+[hook-final] count addr=001ED8FC hits=25     (2D-Renderer)
+[hook-final] count addr=0013F2D4 hits=1
+keine "unbekanntes call-Ziel 0x0CFE4000"-Meldung mehr
+```
+
+Der Draw laeuft also im Ring, erzeugt aber weiterhin keine GX-Kommandos
+(`0x140784`/`0x143F84` 0 Treffer) und keine neuen Pixel
+(TOP 89358/90400, BOTTOM 71353/71360; flach 96,64,32). Tests: 13/13, 12/12.
+

@@ -254,6 +254,29 @@ void hle_ret_one(ArmCpu *c) {
     if (c != NULL) c->r[0] = 1u;
 }
 
+/* Echter Engine-Draw als 2D-Ring-Eintrag: r0 = HLE_ENTRY_OBJ, dann
+   HLE_ENTRY_FN (Default 0x11DB84 = Menue-Draw). */
+void hle_2d_real_stub(ArmCpu *c) {
+    static int inited = -1;
+    static uint32_t robj = 0x003CA494u, rfn = 0x0011DB84u;
+    if (inited < 0) {
+        const char *oe = getenv("HLE_ENTRY_OBJ");
+        const char *fe = getenv("HLE_ENTRY_FN");
+        if (oe != NULL && *oe != 0) robj = (uint32_t)strtoul(oe, NULL, 16);
+        if (fe != NULL && *fe != 0) rfn = (uint32_t)strtoul(fe, NULL, 16);
+        inited = 1;
+    }
+    if (c == NULL) return;
+    {
+        uint32_t sv[16];
+        memcpy(sv, c->r, sizeof(sv));
+        c->r[0] = robj;
+        c->r[13] = 0x0CF0A000u;
+        arm_call_guest_pub(c, rfn);
+        memcpy(c->r, sv, sizeof(sv));
+    }
+}
+
 void hle_2d_stub(ArmCpu *c) {    uint32_t *buf;
     uint32_t save[4];
     uint32_t ent, idx = 0, qx, qy, qw, qh;
@@ -610,15 +633,18 @@ static void hle_install_2d_entry(ArmCpu *c) {
             real_entry = (getenv("HLE_REAL_ENTRY") != NULL);
         if (real_entry) {
             uint32_t rfn = 0x0036C6E8u;
+            uint32_t robj = 0x003CA494u;
             uint32_t rst = 0x0CFE4000u;
             const char *fe = getenv("HLE_ENTRY_FN");
+            const char *oe = getenv("HLE_ENTRY_OBJ");
             uint32_t code2[6];
             if (fe != NULL && *fe != 0) rfn = (uint32_t)strtoul(fe, NULL, 16);
-            code2[0] = 0xE59F0008u;   /* ldr r0,[pc,#8]  -> scene */
+            if (oe != NULL && *oe != 0) robj = (uint32_t)strtoul(oe, NULL, 16);
+            code2[0] = 0xE59F0008u;   /* ldr r0,[pc,#8]  -> Objekt */
             code2[1] = 0xE59F1008u;   /* ldr r1,[pc,#8]  -> fn */
             code2[2] = 0xE12FFF11u;   /* bx r1 */
             code2[3] = 0xE1A00000u;   /* nop */
-            code2[4] = 0x003CA494u;   /* Scene-Objekt */
+            code2[4] = robj;          /* Draw-Objekt */
             code2[5] = rfn;
             memcpy(c->mem + rst, code2, sizeof(code2));
             memcpy(c->mem + vt + 8u, &rst, 4);
