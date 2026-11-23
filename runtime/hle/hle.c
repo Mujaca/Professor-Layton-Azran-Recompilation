@@ -4058,7 +4058,7 @@ static uint32_t pica_emit_sprites(ArmCpu *c, uint32_t dst, uint32_t tmpl,
     uint32_t n = 0, start = dst;
     char line[256];
     if (!f) return 0;
-    while (fgets(line, sizeof(line), f) != NULL && n < 96u) {
+    while (fgets(line, sizeof(line), f) != NULL && n < 140u) {
         float x, y, w, h, u0, v0, u1, v1;
         uint32_t vb;
         if (line[0] == '#' || line[0] == '\n') continue;
