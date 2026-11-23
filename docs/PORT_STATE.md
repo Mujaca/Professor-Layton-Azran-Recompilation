@@ -4603,3 +4603,35 @@ Damit ist belegt: der Loader wird aufgerufen, steigt aber nicht in den
 FA-Reader/Builder ab; die Pixel kommen weiterhin aus den vorbereiteten
 Assets. Tests: 13/13, 12/12.
 
+
+### Draw-Builder erstmals erreichbar: echter Treiber 0x277004 statt Drain (2026-11-23)
+
+Der FA-Reader-Agent hat belegt: `0x28D424` ist nur der Drain/Consumer;
+der echte Treiber ist `fn_00277004` (ruft `0x2770D4 bl 0x2800C8` und
+`0x2770E8 bl 0x28D424`). `HLE_ENGINE_RES` rief bisher nur den Drain.
+
+Gate-Messung mit dem generischen `obj`-Hook (`--hook 277004=obj`):
+
+```
+r0=003EE12C [r0]=00000000 obj+38: 00000000 00000000 00000000 00000000
+obj+68: 00010000 0CFF0000 00000000 01000000 00000000
+```
+
+`[r0+0x40]` (=0x3EE16C) ist 0, deshalb `0x27708C beq 0x2770F8` und der
+Builder wird uebersprungen. Ursache: `HLE_MENU_OBJ0=1` schrieb dort 0.
+Mit `HLE_POKE=...,3EE16C=00000001` und `HLE_POSTCALL=277004,3EE12C,0,0,0`
+(env-only, kein Regen/Build):
+
+```
+[hook-final] count addr=002800C8 hits=56     (vorher 0)
+[hook-final] count addr=0028D424 hits=82
+[gspq] tid=0 idx=0 id=1 list=0CFE6000 size=24 ops=1
+[port] frames=59 pc=002896C4 units=0 dl=0/256 arr=0CFF0000
+```
+
+Damit laufen Draw-Builder und Drain erstmals gemeinsam ueber den echten
+Treiber. Der FA-Reader `0x280744` bleibt 0: er haengt am separaten
+Request-Pfad `0x2919DC -> 0x104E44 -> 0x1112C4 -> 0x280744` (bzw.
+`0x1117A4` fuer den Menue-Request), nicht am Drain. Screenshot unveraendert
+(Assets): 90281/90400 + 26091/71360 gegen reports/menu_official*.bin.
+

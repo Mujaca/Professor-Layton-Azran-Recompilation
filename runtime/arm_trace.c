@@ -667,6 +667,16 @@ static void hook_hit(ArmCpu *c, uint32_t pc)
                         printf(" %08X",
                                (unsigned)arm_mem_read(c, vt + 0x70u + (uint32_t)k * 4u, 4));
                 }
+                if (a >= 0x00100000u && a < 0x20000000u) {
+                    printf(" obj+38:");
+                    for (int k = 0; k < 4; k++)
+                        printf(" %08X",
+                               (unsigned)arm_mem_read(c, a + 0x38u + (uint32_t)k * 4u, 4));
+                    printf(" obj+68:");
+                    for (int k = 0; k < 5; k++)
+                        printf(" %08X",
+                               (unsigned)arm_mem_read(c, a + 0x68u + (uint32_t)k * 4u, 4));
+                }
                 printf("\n");
                 fflush(stdout);
             }
