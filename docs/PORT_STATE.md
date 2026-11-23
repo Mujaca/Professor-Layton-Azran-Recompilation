@@ -6586,3 +6586,56 @@ erreichbar. Kanonisch bleibt `HLE_FRAME_LOOP2=12FD30` (13 Draws, ops=14).
 
 Neue Werkzeuge: `tools/submit_run.py`, `tools/submit_patch_26f130.py`,
 Profile `tools/profiles/submit_*.json`.
+
+### Paket 4: Bottom-Sprites aus `title_b.xa`/ANMC (2026-11-23)
+
+`menu/uk/title_b.xa` enthaelt `RES.bin` (ANMC00, LZ10, 5020 B). Sektionen
+(Hash-Scan, Dump `tools/out/anmc_struct.txt`):
+
+| Offset | Inhalt |
+|---|---|
+| `0x0064` | Root `title_b_menu` + Identity-/UV-Matrix |
+| `0x0158` | 18 Event-Keyframes `#CHP` |
+| `0x064C` | Hash-Tabelle der Event-Kommandos (18x u32) |
+| `0x0694` | Node-Geometrie (18 x 0x20) |
+| `0x08D4`/`0x0974` | Track-Tabellen (8/22 x 0x14) |
+| `0x0B2C` | Button-Platzierungen (21 x 0x30) |
+| `0x0F1C`/`0x109C` | Sound-/try-Platzierungen (8+1 x 0x30) |
+| `0x10CC` | 64 Strings (CRC32) |
+
+Platzierungs-Record: 4 B CRC32, u32 (`raw` low16 = Keyframe, high16 = 1),
+10 Floats; `f1,f2` = Anker, `f4,f5..f7,f8` = lokale BBox, also
+`Rect = (f1+f4, f2+f5, f7-f4, f8-f5)`. Beispiele:
+
+```
+btr_continue_off f=[0,108,108,0,0,0,0,103,24,0] -> (108,108,103,24)
+sound1_off       f=[0,296,0,0,0,-2,0,24,26,0]   -> (296,-2,24,26)
+pointer          f=[0,160,120,0,-21,-3,0,3,3,0] -> (139,117,24,6)
+try_www          f=[0,160,120,0,-70,84,0,74,108,0] -> (90,204,144,24)
+```
+
+Am Capture validiert: das Sound-Rect `(296,-2,24,26)` liegt exakt auf dem
+hellen Lautsprecher-Block `x=297..314, y=0..13`; der Pointer `(139,117)`
+auf einer Capture-Hellzone (mean 153.4 vs BG 101.2); Continue/New deckt
+den Diffblock `x=108..211, y=108..125` (weisse Schrift "New Game"
+`x=133..209, y=110..121`). `000.xi` ist ein Tile-Muster-Atlas
+(443 unique Tiles von 2048 Tabelleneintraegen), keine Glyphen.
+
+**Messung** (`tools/profiles/bottom_quads.json`, 2x byte-identisch):
+
+| Variante | diff>60/71360 | mean |
+|---|---|---|
+| 1:1-Hintergrund (kanonisch) | **14752** | **14.33** |
+| alle 23 echten Quads + BG | 30515 | 33.13 |
+| nur Sound-Icons+Pointer (Alpha vorgebacken) | 14755 | 14.62 |
+| offline, Sounds+Pointer korrekt alphageblendet | 14644 | 14.215 |
+
+Die echten Quads sind als **Sprite-List-Beleg** fuer den zweiten Screen
+gueltig, senken den Diff aber nicht: das grosse `try`-Quad (256x64 @ 32,88)
+bemalt die Bildmitte, und die sichtbare Schrift ist Font-/Message-Text,
+nicht `000.xi`. Kanonisch bleibt daher der 1:1-Hintergrund.
+
+Offen: Keyframe-Zuordnung (18 Event-/21 Button-Keyframes, benutzt wurde
+der spaeteste/idle), Alpha im Bottom-Pass (`HLE_PICA_SECOND` bindet RGB8)
+und der Font-Renderer. Werkzeuge: `tools/anmc_*.py`, Profile
+`bottom_quads*.json`, Belege `tools/out/anmc_*.txt`.
