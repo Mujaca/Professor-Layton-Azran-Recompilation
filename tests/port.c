@@ -10,9 +10,18 @@
 #include <windows.h>
 
 #define MEM_SIZE 0x30000000u
-#define FB_ADDR  0x1F000000u
+
+/* Fenster: 400x480 = oberer Screen (400x240) + unterer Screen (320x240).
+   Die 3DS-Framebuffer liegen getrennt; ihre Adressen kommen aus
+   gsp::Gpu SetBufferSwap (screen=0/1, Getter hle_gsp_fb_addr). */
 #define FB_W 400
-#define FB_H 240
+#define FB_H 480
+#define TOP_W 400
+#define TOP_H 240
+#define BOT_W 320
+#define BOT_H 240
+#define BOT_X 40
+#define BOT_Y 240
 
 void fn_00100000(ArmCpu *c);
 
@@ -21,8 +30,22 @@ static ArmCpu g_cpu;
 static int g_halt = 0;
 static int g_game_fb_seen = 0;
 static unsigned char g_rgb[FB_W * FB_H * 3];
-static unsigned char g_official[FB_W * FB_H * 3];
+static unsigned char g_official[TOP_W * TOP_H * 3];
+static unsigned char g_official_bottom[BOT_W * BOT_H * 3];
 static int g_official_ok = 0;
+static int g_official_bottom_ok = 0;
+
+static int load_bin(const char *const *paths, unsigned npaths,
+                    unsigned char *dst, size_t want) {
+    for (unsigned pi = 0; pi < npaths; pi++) {
+        FILE *f = fopen(paths[pi], "rb");
+        if (!f) continue;
+        size_t n = fread(dst, 1, want, f);
+        fclose(f);
+        if (n == want) return 1;
+    }
+    return 0;
+}
 
 static void load_official_frame(void) {
     if (getenv("PORT_NO_OFFICIAL") != NULL) {
@@ -36,18 +59,14 @@ static void load_official_frame(void) {
         printf("GPU-Menuepfad aktiv (kein Host-memcpy)\n");
         return;
     }
-    const char *paths[] = { "out/menu_official.bin", "reports/menu_official.bin" };
-    for (unsigned pi = 0; pi < 2; pi++) {
-        FILE *f = fopen(paths[pi], "rb");
-        if (!f) continue;
-        size_t n = fread(g_official, 1, sizeof(g_official), f);
-        fclose(f);
-        if (n == sizeof(g_official)) {
-            g_official_ok = 1;
-            printf("offizieller Menue-Frame geladen: %s (%zu Byte)\n", paths[pi], n);
-            return;
-        }
-    }
+    const char *top_paths[] = { "out/menu_official.bin", "reports/menu_official.bin" };
+    const char *bot_paths[] = { "out/menu_official_bottom.bin", "reports/menu_official_bottom.bin" };
+    g_official_ok = load_bin(top_paths, 2, g_official, sizeof(g_official));
+    g_official_bottom_ok = load_bin(bot_paths, 2, g_official_bottom, sizeof(g_official_bottom));
+    if (g_official_ok)
+        printf("Top-Referenz geladen (nur Vergleich)\n");
+    if (g_official_bottom_ok)
+        printf("Bottom-Referenz geladen (nur Vergleich)\n");
 }
 
 static DWORD WINAPI game_thread(LPVOID unused) {
@@ -121,9 +140,9 @@ static void draw_text(int x0, int y0, const char *txt, int scale, int r, int g, 
 }
 
 static void draw_menu(void) {
-    for (int y = 0; y < FB_H; y++) {
-        int v = 10 + y * 50 / FB_H;
-        for (int x = 0; x < FB_W; x++) {
+    for (int y = 0; y < TOP_H; y++) {
+        int v = 10 + y * 50 / TOP_H;
+        for (int x = 0; x < TOP_W; x++) {
             unsigned char *d = g_rgb + ((size_t)y * FB_W + x) * 3;
             d[0] = (unsigned char)(v / 2);
             d[1] = (unsigned char)(v / 2);
@@ -131,13 +150,13 @@ static void draw_menu(void) {
         }
     }
     draw_icon();
-    draw_text((FB_W - 16 * 6 * 2) / 2, 12, "PROFESSOR LAYTON", 2, 245, 220, 120);
-    draw_text((FB_W - 19 * 6) / 2, 34, "AND THE AZRAN LEGACY", 1, 200, 200, 210);
+    draw_text((TOP_W - 16 * 6 * 2) / 2, 12, "PROFESSOR LAYTON", 2, 245, 220, 120);
+    draw_text((TOP_W - 19 * 6) / 2, 34, "AND THE AZRAN LEGACY", 1, 200, 200, 210);
     for (int i = 0; i < 3; i++) {
         int y = 96 + i * 22;
         int sel = (i == g_menu_sel);
         int w = (int)strlen(MENU_ITEMS[i]) * 6 * 2;
-        int x = (FB_W - w) / 2;
+        int x = (TOP_W - w) / 2;
         draw_text(x, y, MENU_ITEMS[i], 2,
                   sel ? 255 : 170, sel ? 230 : 170, sel ? 120 : 170);
         if (sel) {
@@ -146,7 +165,8 @@ static void draw_menu(void) {
         }
     }
     if (g_menu_msg[0])
-        draw_text((FB_W - (int)strlen(g_menu_msg) * 6) / 2, FB_H - 34, g_menu_msg, 1, 255, 255, 255);
+        draw_text((TOP_W - (int)strlen(g_menu_msg) * 6) / 2, TOP_H - 34, g_menu_msg,
+                  1, 255, 255, 255);
 }
 
 /* SMDH-Icon (48x48 RGB565 bei 0x24C0) ins Framebuffer zeichnen. */
@@ -160,8 +180,8 @@ static void draw_icon(void) {
 
     const unsigned char *icon = smdh + 0x24C0;
     int scale = 4;
-    int ox = (FB_W - 48 * scale) / 2;
-    int oy = (FB_H - 48 * scale) / 2;
+    int ox = (TOP_W - 48 * scale) / 2;
+    int oy = (TOP_H - 48 * scale) / 2;
 
     for (int y = 0; y < 48 * scale; y++) {
         int sy = y / scale;
@@ -185,6 +205,38 @@ static void draw_icon(void) {
         if (title[i] == 0) break;
     }
     win_status(title[0] ? title : "Professor Layton and the Azran Legacy", 2);
+}
+
+/* Kopiert einen RGB24-Rechteckbereich aus dem Gast-VRAM in das Fensterbild. */
+static void copy_fb_region(int dx, int dy, int w, int h, uint32_t addr) {
+    uint32_t off = addr & 0x1FFFFFFFu;
+    size_t bytes = (size_t)w * (size_t)h * 3u;
+    if (off + bytes > MEM_SIZE) return;
+    const unsigned char *src = g_mem + off;
+    for (int y = 0; y < h; y++) {
+        memcpy(g_rgb + ((size_t)(dy + y) * FB_W + dx) * 3,
+               src + (size_t)y * w * 3, (size_t)w * 3);
+    }
+}
+
+/* Beide Screens direkt aus den vom Spiel gesetzten Framebuffern
+   zusammensetzen (kein Referenzbild als Renderquelle). */
+static void compose_fb(void) {
+    memset(g_rgb, 0, sizeof(g_rgb));
+    copy_fb_region(0, 0, TOP_W, TOP_H, hle_gsp_fb_addr(0));
+    copy_fb_region(BOT_X, BOT_Y, BOT_W, BOT_H, hle_gsp_fb_addr(1));
+}
+
+/* Nur Debug-Fallback: Referenzframes als Pixelvergleichsbild. */
+static void compose_official(void) {
+    memset(g_rgb, 0, sizeof(g_rgb));
+    if (g_official_ok)
+        memcpy(g_rgb, g_official, sizeof(g_official));
+    if (g_official_bottom_ok) {
+        for (int y = 0; y < BOT_H; y++)
+            memcpy(g_rgb + ((size_t)(BOT_Y + y) * FB_W + BOT_X) * 3,
+                   g_official_bottom + (size_t)y * BOT_W * 3, (size_t)BOT_W * 3);
+    }
 }
 
 static void save_bmp(const char *path) {
@@ -224,10 +276,19 @@ static void save_bmp(const char *path) {
 
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
-    /* Erste lauffaehige Version: offizieller Menue-Frame wird per GPU-
-       Kommandoliste ueber die gsp-Handler gerendert. */
-    if (getenv("HLE_MENU_GPU") == NULL && getenv("PORT_NO_MENU_GPU") == NULL) {
-        _putenv_s("HLE_MENU_GPU", "1");
+    /* Standard: die Spiel-Engine rendert selbst (fn_0028F084). Der
+       Referenz-/GPU-Blit bleibt nur als Debug-Fallback ueber
+       HLE_MENU_GPU=1 bzw. PORT_NO_ENGINE=1 erreichbar. */
+    if (getenv("HLE_ENGINE_FRAME") == NULL && getenv("PORT_NO_ENGINE") == NULL) {
+        _putenv_s("HLE_ENGINE_FRAME", "1");
+    }
+    /* Echte PICA-Kommandolisten der Engine ausfuehren (2D-Teilmenge). */
+    if (getenv("HLE_ENGINE_FRAME") != NULL && getenv("HLE_PICA_RENDER") == NULL) {
+        _putenv_s("HLE_PICA_RENDER", "1");
+    }
+    /* Engine-eigenen 2D-Scene-Renderer (0x1ED8FC) takten. */
+    if (getenv("HLE_ENGINE_FRAME") != NULL && getenv("HLE_ENGINE_2D") == NULL) {
+        _putenv_s("HLE_ENGINE_2D", "1");
     }
     const char *romfs = "out/romfs";
     const char *shot = NULL;
@@ -283,6 +344,24 @@ int main(int argc, char **argv) {
            sonst blockiert der Delay den kooperativen Scheduler. */
         *(uint32_t *)(g_mem + 0x11A818) = 0xE3A00000u;  /* mov r0,#0 */
         *(uint32_t *)(g_mem + 0x11A81C) = 0xE12FFF1Eu;  /* bx lr */
+        /* Engine-SetBufferSwap (fn_001196AC): der VBlank-Wait 0x2877C0
+           blockiert, weil der Port keine GSP-IRQ-Relay-Pulse liefert.
+           Der Submit selbst (0x120CFC -> gsp 0x0005) laeuft weiter. */
+        if (getenv("HLE_ENGINE_FRAME") != NULL) {
+            /* fn_001196AC komplett als Erfolg zurueckgeben: der VBlank-Wait
+               haengt ohne echte GSP-IRQ-Pulse. Der Renderer submitted seine
+               eigene Liste danach ueber 0x1B9938/0x34xxxx. */
+            *(uint32_t *)(g_mem + 0x1196AC) = 0xE3A00001u;  /* mov r0,#1 */
+            *(uint32_t *)(g_mem + 0x1196B0) = 0xE12FFF1Eu;  /* bx lr */
+        }
+        /* Diagnose: Scene-Readiness 0x37EF94 (+0x38) meldet fertig, damit
+           fn_00103D20 die Warteschleife (0x103DA8 -> 0x28F1E8) verlaesst. */
+        if (getenv("HLE_ENGINE_DRAW") != NULL) {
+            *(uint32_t *)(g_mem + 0x37EF94) = 0xE3A00000u;  /* mov r0,#0 */
+            *(uint32_t *)(g_mem + 0x37EF98) = 0xE12FFF1Eu;  /* bx lr */
+            /* Readiness-Loop am 0x103DA8 direkt verlassen: beq -> b 0x103DC8 */
+            *(uint32_t *)(g_mem + 0x103DA4) = 0xEA000007u;
+        }
     }
 
 
@@ -301,13 +380,16 @@ int main(int argc, char **argv) {
     win_status("Layton 6 Port - recompiliert (ARM11 -> C)", 0);
     win_status("boot...", 1);
     load_official_frame();
-    if (g_official_ok) {
-        memcpy(g_mem + FB_ADDR, g_official, sizeof(g_rgb));
-        win_status("offizielles Hauptmenue geladen", 2);
+    {
+        int fb_mode = (getenv("HLE_ENGINE_FRAME") != NULL) ||
+                      (getenv("HLE_MENU_GPU") != NULL) ||
+                      (getenv("PORT_FB_MODE") != NULL);
+        if (fb_mode) compose_fb();
+        else if (g_official_ok) compose_official();
+        else draw_menu();
+        if (fb_mode) win_status("Engine-Framebuffer (oben+unten)", 2);
+        else if (g_official_ok) win_status("Referenz-Frame (nur Debug)", 2);
     }
-    draw_menu();
-    if (g_official_ok) memcpy(g_rgb, g_official, sizeof(g_rgb));
-    else memcpy(g_rgb, g_mem + FB_ADDR, sizeof(g_rgb));
 
     HANDLE th = CreateThread(NULL, 0, game_thread, NULL, 0, NULL);
     if (!th) { printf("Thread fehlgeschlagen\n"); return 3; }
@@ -321,18 +403,17 @@ int main(int argc, char **argv) {
             snprintf(g_menu_msg, sizeof(g_menu_msg), "%s SELECTED", MENU_ITEMS[g_menu_sel]);
         }
         {
-            /* Sobald das Spiel selbst in den Framebuffer schreibt, diesen zeigen,
-               sonst den Port-Menue-Platzhalter. */
-            int fb_used = 0;
-            const unsigned char *fb = g_mem + FB_ADDR;
-            for (size_t i = 0; i < sizeof(g_rgb); i += 97) {
-                if (fb[i]) { fb_used = 1; break; }
-            }
-            if (fb_used) {
-                memcpy(g_rgb, fb, sizeof(g_rgb));
-                if (!g_game_fb_seen) { g_game_fb_seen = 1; win_status("game framebuffer active", 2); }
+            int fb_mode = (getenv("HLE_ENGINE_FRAME") != NULL) ||
+                          (getenv("HLE_MENU_GPU") != NULL) ||
+                          (getenv("PORT_FB_MODE") != NULL);
+            if (fb_mode) {
+                compose_fb();
+                if (!g_game_fb_seen) {
+                    g_game_fb_seen = 1;
+                    win_status("game framebuffer active (screen 0+1)", 2);
+                }
             } else if (g_official_ok) {
-                memcpy(g_rgb, g_official, sizeof(g_rgb));
+                compose_official();
             } else {
                 draw_menu();
             }
@@ -342,7 +423,248 @@ int main(int argc, char **argv) {
         static int tick = 0;
         if ((++tick % 30) == 0) {
             char line[192];
-            printf("[port] frames=%d\n", frames);
+            uint32_t units = 0, dla = 0, dl0 = 0, pool = 0;
+            uint16_t dlc = 0, mn = 0, mcap = 0, pstart = 0, pend = 0;
+            memcpy(&units, g_mem + 0x00422200u + 0x1530u, 4);
+            memcpy(&dlc, g_mem + 0x003EE1A0u, 2);
+            memcpy(&mcap, g_mem + 0x003EE1A2u, 2);
+            memcpy(&mn, g_mem + 0x003EE196u, 2);
+            memcpy(&dla, g_mem + 0x003EE198u, 4);
+            memcpy(&pool, g_mem + 0x003EE188u, 4);
+            memcpy(&pstart, g_mem + 0x003EE190u, 2);
+            memcpy(&pend, g_mem + 0x003EE194u, 2);
+            if (dla != 0u) {
+                uint32_t base = dla & 0x1FFFFFFFu;
+                memcpy(&dl0, g_mem + base, 4);
+            }
+            printf("[port] frames=%d pc=%08X units=%u dl=%u/%u arr=%08X e0=%08X mn=%u pool=%08X %u..%u\n",
+                   frames, g_cpu.r[15], units, (unsigned)dlc, (unsigned)mcap,
+                   dla, dl0, (unsigned)mn, pool, (unsigned)pstart, (unsigned)pend);
+            {
+                /* Diagnose: Gast-RAM nach einem 32-Bit-Wert scannen. */
+                static int sp_on = -1, sp_done = 0;
+                if (sp_on < 0) sp_on = (getenv("HLE_SCANPTR") != NULL);
+                if (sp_on && !sp_done) {
+                    const char *sv = getenv("HLE_SCANPTR");
+                    const char *sf = getenv("HLE_SCAN_AT");
+                    int at = (sf != NULL && *sf != 0) ? atoi(sf) : 200;
+                    if (frames >= at && sv != NULL && *sv != 0) {
+                        uint32_t want = (uint32_t)strtoul(sv, NULL, 16);
+                        uint32_t a, hits = 0;
+                        sp_done = 1;
+                        printf("[scanptr] want=%08X hits:", want);
+                        for (a = 0x00100000u; a + 4u < MEM_SIZE && hits < 16u; a += 4u) {
+                            uint32_t v;
+                            memcpy(&v, g_mem + a, 4);
+                            if (v == want) {
+                                printf(" %08X", a);
+                                hits++;
+                            }
+                        }
+                        printf("\n");
+                        fflush(stdout);
+                    }
+                }
+            }
+            {
+                /* Diagnose: rohen GSP-/GX-Shared-Memory-Bereich dumpen. */
+                static int sd = -1, sd_done = 0;
+                if (sd < 0) sd = (getenv("HLE_SHM_DUMP") != NULL);
+                if (sd && !sd_done) {
+                    const char *sf = getenv("HLE_SHM_AT");
+                    int at = (sf != NULL && *sf != 0) ? atoi(sf) : 40;
+                    if (frames >= at) {
+                        uint32_t a, lo = 0x100027C0u, hi = 0x10002900u;
+                        const char *da = getenv("HLE_DUMP_ADDR");
+                        const char *dl = getenv("HLE_DUMP_LEN");
+                        if (da != NULL && *da != 0) {
+                            lo = (uint32_t)strtoul(da, NULL, 16);
+                            hi = lo + ((dl != NULL && *dl != 0)
+                                       ? (uint32_t)strtoul(dl, NULL, 16) : 0x100u);
+                        }
+                        sd_done = 1;
+                        printf("[shmdump] %08X..%08X:\n", lo, hi);
+                        for (a = lo; a < hi; a += 0x10u) {
+                            printf("  %08X:", a);
+                            for (int k = 0; k < 4; k++) {
+                                uint32_t v = 0;
+                                memcpy(&v, g_mem + a + (uint32_t)k * 4u, 4);
+                                printf(" %08X", v);
+                            }
+                            printf("\n");
+                        }
+                    }
+                }
+            }
+            {
+                /* Diagnose: GSP-CommandBuffer (SubmitCmdList-Queue) im
+                   gesamten Gast-RAM suchen. */
+                static int cq = -1, cq_done = 0;                if (cq < 0) cq = (getenv("HLE_SCAN_CMDQ") != NULL);
+                if (cq && !cq_done) {
+                    const char *sf = getenv("HLE_SCAN_AT");
+                    int at = (sf != NULL && *sf != 0) ? atoi(sf) : 120;
+                    if (frames >= at) {
+                        uint32_t base, found = 0, k;
+                        cq_done = 1;
+                        printf("[cmdq] shm10000800:");
+                        for (k = 0; k < 8u; k++) {
+                            uint32_t v = 0;
+                            memcpy(&v, g_mem + 0x10000800u + k * 4u, 4);
+                            printf(" %08X", v);
+                        }
+                        printf("\n[cmdq] shm10002800:");
+                        for (k = 0; k < 8u; k++) {
+                            uint32_t v = 0;
+                            memcpy(&v, g_mem + 0x10002800u + k * 4u, 4);
+                            printf(" %08X", v);
+                        }
+                        printf("\n[cmdq] scan:");
+                        for (base = 0x08000000u; base < 0x20000000u && found < 8u; base += 0x200u) {
+                            uint32_t hdr, n, idx, cb, cmd, addr, size;
+                            memcpy(&hdr, g_mem + base, 4);
+                            n = (hdr >> 8) & 0xFFu;
+                            idx = hdr & 0xFFu;
+                            if (n == 0u || n > 15u || idx > 14u) continue;
+                            cb = base + 0x20u + idx * 0x20u;
+                            memcpy(&cmd, g_mem + cb, 4);
+                            memcpy(&addr, g_mem + cb + 4u, 4);
+                            memcpy(&size, g_mem + cb + 8u, 4);
+                            if ((cmd & 0xFFu) != 1u) continue;
+                            if (addr < 0x00100000u || addr >= 0x20000000u) continue;
+                            if (size == 0u || size > 0x00100000u) continue;
+                            printf(" base=%08X hdr=%08X addr=%08X size=%X", base, hdr, addr, size);
+                            found++;
+                        }
+                        printf("\n");
+                        fflush(stdout);
+                    }
+                }
+            }
+            {
+                static int mdump = -1, mdone = 0;
+                static int dump_at = -1;
+                if (mdump < 0) mdump = (getenv("HLE_MENU_DUMP") != NULL);
+                if (dump_at < 0) {
+                    const char *da = getenv("HLE_DUMP_AT");
+                    dump_at = (da != NULL && *da != 0) ? atoi(da) : 90;
+                }
+                if (mdump && !mdone && frames >= dump_at) {
+                    uint32_t k, vt = 0, sp = 0;
+                    uint16_t sc = 0;
+                    mdone = 1;
+                    memcpy(&vt, g_mem + 0x003EE12Cu, 4);
+                    memcpy(&sp, g_mem + 0x003EE194u, 4);
+                    memcpy(&sc, g_mem + 0x003EE19Cu, 2);
+                    printf("[menuobj] frames=%d vt=%08X seqtab=%08X seqcnt=%u\n",
+                           frames, vt, sp, (unsigned)sc);
+                    printf("[menuobj] raw3EE12C:");
+                    for (k = 0; k < 0x20u; k++) {
+                        uint32_t w = 0;
+                        memcpy(&w, g_mem + 0x003EE12Cu + k * 4u, 4);
+                        printf(" %08X", w);
+                    }
+                    printf("\n");
+                    if (sp >= 0x00100000u && sp < 0x20000000u && sc > 0u) {
+                        uint32_t n = sc > 12u ? 12u : sc;
+                        printf("[menuobj] seq:");
+                        for (k = 0; k < n; k++) {
+                            uint32_t w0 = 0, w1 = 0;
+                            memcpy(&w0, g_mem + (sp & 0x1FFFFFFFu) + k * 8u, 4);
+                            memcpy(&w1, g_mem + (sp & 0x1FFFFFFFu) + k * 8u + 4u, 4);
+                            printf(" [%u:%08X/%08X]", (unsigned)k, w0, w1);
+                        }
+                        printf("\n");
+                    }
+                    /* Ersten Draw-List-Eintrag (menu+0x6C[0]) und dessen
+                       Objekt-Kopf dumpen. */
+                    {
+                        uint32_t arr2 = 0, obj2 = 0;
+                        uint16_t cnt2 = 0;
+                        memcpy(&arr2, g_mem + 0x003EE198u, 4);
+                        memcpy(&cnt2, g_mem + 0x003EE1A0u, 2);
+                        printf("[menuobj] arr=%08X cnt=%u:", arr2,
+                               (unsigned)cnt2);
+                        if (arr2 >= 0x00100000u && arr2 < 0x20000000u) {
+                            uint32_t lim = cnt2 > 16u ? 16u : cnt2;
+                            for (k = 0; k < lim; k++) {
+                                uint32_t v = 0;
+                                memcpy(&v, g_mem + (arr2 & 0x1FFFFFFFu) + k * 4u, 4);
+                                printf(" [%u]=%08X", (unsigned)k, v);
+                                if (k == 0u) obj2 = v;
+                            }
+                        }
+                        printf("\n");
+                        if (arr2 >= 0x00100000u && arr2 < 0x20000000u) {
+                            uint32_t lim = cnt2 > 16u ? 16u : cnt2;
+                            for (k = 0; k < lim; k++) {
+                                uint32_t o = 0, j;
+                                memcpy(&o, g_mem + (arr2 & 0x1FFFFFFFu) + k * 4u, 4);
+                                if (o < 0x00100000u || o >= 0x20000000u) continue;
+                                printf("[menuobj] obj[%u]=%08X:", (unsigned)k, o);
+                                for (j = 0; j < 12u; j++) {
+                                    uint32_t v = 0;
+                                    memcpy(&v, g_mem + (o & 0x1FFFFFFFu) + j * 4u, 4);
+                                    printf(" %08X", v);
+                                }
+                                printf("\n");
+                            }
+                        }
+                        if (obj2 >= 0x00100000u && obj2 < 0x20000000u) {
+                            printf("[menuobj] obj%08X:", obj2);
+                            for (k = 0; k < 8u; k++) {
+                                uint32_t v = 0;
+                                memcpy(&v, g_mem + (obj2 & 0x1FFFFFFFu) + k * 4u, 4);
+                                printf(" %08X", v);
+                            }
+                            printf("\n");
+                        }
+                        /* GSP-Client-Zustand 0x3D7C40: enthaelt er eine
+                           Shared-Memory-Adresse? */
+                        printf("[menuobj] gspstate:");
+                        for (k = 0; k < 0x10u; k++) {
+                            uint32_t v = 0;
+                            memcpy(&v, g_mem + 0x003D91E8u + k * 4u, 4);
+                            printf(" %08X", v);
+                        }
+                        printf("\n[menuobj] gspglobals:");
+                        for (k = 0; k < 0x10u; k++) {
+                            uint32_t v = 0;
+                            memcpy(&v, g_mem + 0x003DA6D0u + k * 4u, 4);
+                            printf(" %08X", v);
+                        }
+                        printf("\n[menuobj] gsplock:");
+                        for (k = 0; k < 8u; k++) {
+                            uint32_t v = 0;
+                            memcpy(&v, g_mem + 0x0040C620u + k * 4u, 4);
+                            printf(" %08X", v);
+                        }
+                        printf("\n");
+                        /* 3D-Unit-Node (HLE_UNIT_XFER) und Renderer-Kopf. */
+                        printf("[menuobj] unitnode:");
+                        for (k = 0; k < 0x10u; k++) {
+                            uint32_t v = 0;
+                            memcpy(&v, g_mem + 0x004236F0u + k * 4u, 4);
+                            printf(" %08X", v);
+                        }
+                        printf("\n");
+                        {
+                            uint32_t uc = 0, u0 = 0;
+                            memcpy(&uc, g_mem + 0x00422200u + 0x1530u, 4);
+                            memcpy(&u0, g_mem + 0x00422200u + 0x14F0u, 4);
+                            printf("[menuobj] units=%u u0=%08X:", uc, u0);
+                            if (u0 >= 0x00100000u && u0 < 0x20000000u) {
+                                for (k = 0; k < 0x10u; k++) {
+                                    uint32_t v = 0;
+                                    memcpy(&v, g_mem + (u0 & 0x1FFFFFFFu) + k * 4u, 4);
+                                    printf(" %08X", v);
+                                }
+                            }
+                            printf("\n");
+                        }
+                    }
+                    fflush(stdout);
+                }
+            }
             snprintf(line, sizeof(line), "PC=0x%08X  halted=%d  frames=%d",
                      g_cpu.r[15], g_halt, frames);
             win_status(line, 1);
@@ -354,7 +676,9 @@ int main(int argc, char **argv) {
             if (shot_at < 0) {
                 const char *sf = getenv("PORT_SHOT_FRAMES");
                 if (sf != NULL && *sf != 0) shot_at = atoi(sf);
-                else shot_at = (getenv("HLE_MENU_GPU") != NULL) ? 240 : 3;
+                else if (getenv("HLE_MENU_GPU") != NULL) shot_at = 240;
+                else if (getenv("HLE_ENGINE_FRAME") != NULL) shot_at = 16000;
+                else shot_at = 3;
                 if (shot_at < 3) shot_at = 3;
                 shot_stop = shot_at + 3;
             }

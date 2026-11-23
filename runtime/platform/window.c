@@ -51,6 +51,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 int win_open(int width, int height, const char *title) {
     g_w = width;
     g_h = height;
+    /* 400x480 (beide Screens) im Massstab 1:1; einzelne Screens 2x. */
+    g_scale = (height > 240) ? 1 : 2;
 
     WNDCLASSA wc;
     memset(&wc, 0, sizeof(wc));

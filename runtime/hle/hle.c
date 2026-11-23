@@ -1801,6 +1801,11 @@ void hle_pump(void) {
                             uint32_t a0 = obj + 0xDCu;
                             uint32_t a1 = 0x0E905000u;
                             uint32_t a3 = 3u;
+                            uint32_t zero4 = 0u, one4 = 1u;
+                            /* Guard: [container+4] muss != 0 sein,
+                               [container] == 0 vermeidet den Free. */
+                            memcpy(g_frame_cpu->mem + a0, &zero4, 4);
+                            memcpy(g_frame_cpu->mem + a0 + 4u, &one4, 4);
                             memcpy(sv, g_frame_cpu->r, sizeof(sv));
                             g_frame_cpu->r[0] = a0;
                             g_frame_cpu->r[1] = a1;
