@@ -445,9 +445,18 @@ static int p_draw_arrays(ArmCpu *c, int indexed)
                 p_load_attrs(c, voff + v + 1u, a[1]);
                 p_load_attrs(c, voff + v + 2u, a[2]);
                 float px[3], py[3], uu[3], vv[3];
+                /* NDC nur, wenn ALLE drei Eckpunkte in [-1.6,1.6] liegen.
+                   Sonst sind es bereits Pixelkoordinaten (2D-Quad, z. B.
+                   (0,0)-(400,240)); sonst wuerde (0,0) als NDC-Mitte landen. */
+                int ndc = 1;
                 for (int k = 0; k < 3; k++) {
                     float x = a[k][0][0], y = a[k][0][1];
-                    if (x > -1.6f && x < 1.6f && y > -1.6f && y < 1.6f) {
+                    if (!(x > -1.6f && x < 1.6f && y > -1.6f && y < 1.6f))
+                        ndc = 0;
+                }
+                for (int k = 0; k < 3; k++) {
+                    float x = a[k][0][0], y = a[k][0][1];
+                    if (ndc) {
                         px[k] = (x + 1.0f) * 0.5f * (float)g_fb_w;
                         py[k] = (1.0f - y) * 0.5f * (float)g_fb_h;
                     } else { px[k] = x; py[k] = y; }

@@ -3620,6 +3620,65 @@ static int gsp_engine_desc(ArmCpu *c, uint32_t a)
     return 0;
 }
 
+/* ---------- Vollbild-Quad als echte PICA-Vertexdaten ----------
+ * Wird vor den Engine-Strom gehaengt (HLE_PICA_VERTEX=1), damit der 0x22F-Draw
+ * echte Attribute liest statt des HLE_PICA_QUAD-Fallbacks.
+ * Registerlayout (Azahar regs_pipeline.h):
+ *   0x200 base_address (bits1..28, Wert*16 = Gastadresse)
+ *   0x201/0x202 Format (2 Bit) + size (2 Bit, Elemente-1) je Attribut,
+ *           max_attribute_index in 0x202 bits28..31
+ *   0x203+3*i Loader i: data_offset, comp0..11, byte_count, component_count
+ */
+#define PICA_VB_ADDR 0x0CFE8000u
+#define PICA_ATTR_BYTES 0x48u
+
+static void pica_pair_put(ArmCpu *c, uint32_t a, uint32_t n, uint32_t value,
+                          uint32_t id, uint32_t mask)
+{
+    uint32_t hdr = (id & 0xFFFFu) | ((mask & 0xFu) << 16);
+    memcpy(c->mem + ((a + n * 4u) & 0x1FFFFFFFu), &value, 4);
+    memcpy(c->mem + ((a + (n + 1u) * 4u) & 0x1FFFFFFFu), &hdr, 4);
+}
+
+/* 6 Vertices = 2 Dreiecke; Attribut 0 = float2 Position, Attribut 1 =
+   float2 UV, Stride 16 Byte. */
+static void pica_quad_vertices(ArmCpu *c, int w, int h)
+{
+    float v[6][4] = {
+        {0.0f, 0.0f, 0.0f, 0.0f},
+        {(float)w, 0.0f, 1.0f, 0.0f},
+        {(float)w, (float)h, 1.0f, 1.0f},
+        {0.0f, 0.0f, 0.0f, 0.0f},
+        {(float)w, (float)h, 1.0f, 1.0f},
+        {0.0f, (float)h, 0.0f, 1.0f}
+    };
+    for (int i = 0; i < 6; i++)
+        memcpy(c->mem + ((PICA_VB_ADDR + (uint32_t)i * 16u) & 0x1FFFFFFFu),
+               v[i], 16);
+}
+
+static void pica_attr_block(ArmCpu *c, uint32_t dst)
+{
+    uint32_t n = 0;
+    pica_pair_put(c, dst, n, (PICA_VB_ADDR >> 3) & 0x1FFFFFFFu, 0x200u, 0xFu);
+    n += 2;
+    pica_pair_put(c, dst, n, 0x77u, 0x201u, 0xFu);         /* attr0/1 float2 */
+    n += 2;
+    pica_pair_put(c, dst, n, 0x10000000u, 0x202u, 0xFu);   /* maxattr = 1 */
+    n += 2;
+    pica_pair_put(c, dst, n, 0u, 0x203u, 0xFu);            /* loader0 offset 0 */
+    n += 2;
+    pica_pair_put(c, dst, n, 0u, 0x204u, 0xFu);            /* comp0 = Attribut 0 */
+    n += 2;
+    pica_pair_put(c, dst, n, 0x10100000u, 0x205u, 0xFu);   /* stride 16, 1 Attr */
+    n += 2;
+    pica_pair_put(c, dst, n, 8u, 0x206u, 0xFu);            /* loader1 offset 8 */
+    n += 2;
+    pica_pair_put(c, dst, n, 1u, 0x207u, 0xFu);            /* comp0 = Attribut 1 */
+    n += 2;
+    pica_pair_put(c, dst, n, 0x10100000u, 0x208u, 0xFu);
+}
+
 static int gsp_process_cmdqueue(ArmCpu *c) {
     int qops = 0;
     if (c == NULL) return 0;
@@ -3676,7 +3735,9 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
                 {
                     static const char *es = NULL;
                     static int es_read = 0;
+                    static int pv = -1;
                     if (!es_read) { es = getenv("HLE_ENGINE_STREAM"); es_read = 1; }
+                    if (pv < 0) pv = (getenv("HLE_PICA_VERTEX") != NULL);
                     if (es != NULL && *es != 0 && eaddr == 0x0CFE6000u) {
                         uint32_t ssrc = (uint32_t)strtoul(es, NULL, 16);
                         const char *cm = strchr(es, ',');
@@ -3685,11 +3746,26 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
                                             : 0u;
                         if (ssrc != 0u && slen >= 8u && slen <= 0x1000u &&
                             (uint64_t)(ssrc & 0x1FFFFFFFu) + slen <= c->mem_size) {
-                            memcpy(c->mem + eaddr,
-                                   c->mem + (ssrc & 0x1FFFFFFFu), slen);
-                            esize = slen;
+                            if (pv) {
+                                uint32_t d = eaddr + PICA_ATTR_BYTES;
+                                uint32_t nv = 6u;
+                                memcpy(c->mem + d, c->mem + (ssrc & 0x1FFFFFFFu),
+                                       slen);
+                                pica_attr_block(c, eaddr);
+                                /* nv des Engine-Stroms auf die 6 Vertices des
+                                   Quads setzen (erstes Wort = 0x228-Wert). */
+                                memcpy(c->mem + (d & 0x1FFFFFFFu), &nv, 4);
+                                esize = PICA_ATTR_BYTES + slen;
+                                printf("[gspq-engine] vertex block @%08X -> "
+                                       "%08X nv=6 stream @%08X len=%X\n",
+                                       PICA_VB_ADDR, eaddr, d, slen);
+                            } else {
+                                memcpy(c->mem + eaddr,
+                                       c->mem + (ssrc & 0x1FFFFFFFu), slen);
+                                esize = slen;
+                            }
                             printf("[gspq-engine] stream %08X -> %08X len=%X\n",
-                                   ssrc, eaddr, slen);
+                                   ssrc, eaddr, esize);
                             fflush(stdout);
                         }
                     }
@@ -3734,8 +3810,11 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
                             n2++;
                             pp2 = cc ? cc + 1 : NULL;
                         }
-                        if (v2[0] != 0u)
+                        if (v2[0] != 0u) {
                             gpu_set_fb_size(v2[0], (int)v2[1], (int)v2[2]);
+                            if (getenv("HLE_PICA_VERTEX") != NULL)
+                                pica_quad_vertices(c, (int)v2[1], (int)v2[2]);
+                        }
                     }
                 }
                 int legacy = (eaddr == 0x08002000u || eaddr == 0x0CFE2000u ||
@@ -3768,6 +3847,8 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
                             int n2nd;
                             gpu_pica_bind_texture(v3[0], (int)v3[1], (int)v3[2], 1);
                             gpu_set_fb_size(v3[3], (int)v3[1], (int)v3[2]);
+                            if (getenv("HLE_PICA_VERTEX") != NULL)
+                                pica_quad_vertices(c, (int)v3[1], (int)v3[2]);
                             n2nd = legacy ? gpu_run_command_list(c, eaddr, esize)
                                           : gpu_run_pica_list(c, eaddr, esize);
                             if (n2nd == 0 && legacy)
