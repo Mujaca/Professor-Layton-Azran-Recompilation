@@ -592,11 +592,14 @@ static void hle_install_2d_entry(ArmCpu *c) {
             no_asset = (getenv("HLE_2D_NO_ASSET") != NULL);
         if (!imgs_tried && !no_asset) {
             FILE *f;
+            const char *texenv = getenv("HLE_MENU_TEX");
+            const char *texpath = (texenv != NULL && *texenv != 0)
+                                      ? texenv : "out/menu_top.bin";
             int fa_bottom = (getenv("HLE_XQ_ASSET") != NULL);
             imgs_tried = 1;
             topimg = (unsigned char *)calloc(1, 400u * 240u * 3u);
             botimg = (unsigned char *)calloc(1, 320u * 240u * 3u);
-            f = fopen("out/menu_top.bin", "rb");
+            f = fopen(texpath, "rb");
             if (f) { if (fread(topimg, 1, 400u * 240u * 3u, f) != 400u * 240u * 3u) memset(topimg, 0, 400u*240u*3u); fclose(f); }
             if (!fa_bottom) {
                 f = fopen("out/menu_bottom.bin", "rb");
@@ -703,6 +706,11 @@ static void hle_install_2d_entry(ArmCpu *c) {
                 memcpy(&cur, c->mem + 0x0040ABB8u, 4);
                 printf("[tex] current bound texture [3b0]=%08X (tex=%08X)\n", cur, texobj);
             }
+            /* PICA-Texturzustand aus demselben Objekt vorbelegen: Quelle
+               +0x40 = 0x1E000000, 400x240, RGB8. Damit kann der PICA-Draw
+               (0x22F) die Engine-Textur sampeln. */
+            gpu_pica_bind_texture(src, 400, 240, 1);
+            printf("[pica] texture bound src=%08X 400x240 RGB8\n", src);
             memcpy(c->r, save, sizeof(save));
             fflush(stdout);
         }
@@ -956,8 +964,15 @@ static void hle_engine_frame(ArmCpu *c) {
         dispatch_ipc(g_hle_gsp_handle);
         memcpy(buf, save, sizeof(save));
         /* Beide Framebuffer ueber den GPU-Pfad fuellen, solange die
-           Menue-Sprite-Liste noch leer ist (sichtbarer Present-Beleg). */
-        for (uint32_t s = 0; s < 2u; s++) {
+           Menue-Sprite-Liste noch leer ist (sichtbarer Present-Beleg).
+           HLE_PRESENT_FILL=0 schaltet den Platzhalter ab, damit ein echter
+           Engine-PICA-Render im Screenshot sichtbar bleibt. */
+        static int present_fill = -1;
+        if (present_fill < 0) {
+            const char *pf = getenv("HLE_PRESENT_FILL");
+            present_fill = (pf != NULL && *pf != 0 && atoi(pf) == 0) ? 0 : 1;
+        }
+        for (uint32_t s = 0; s < 2u && present_fill; s++) {
             uint32_t fa = hle_gsp_fb_addr((int)s);
             int fw = (s == 1u) ? 320 : 400;
             uint32_t list[8];
@@ -3650,6 +3665,54 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
             memcpy(&esize, c->mem + base + 0xB0u, 4);
             if (ecnt != 0u && ecnt <= 0xFu && eaddr >= 0x00100000u &&
                 eaddr < 0x20000000u && esize > 0u && esize <= 0x01000000u) {
+                /* Engine-PICA-Strom in die Engine-Liste kopieren:
+                   HLE_ENGINE_STREAM=<src>,<len> schreibt den vom Emitter
+                   (0x1323FC) gebauten Strom vor der Ausfuehrung an die
+                   Listenadresse. Damit stammen die Pixel aus 0x0CFE6000
+                   und nicht aus einem Ring-Poke. */
+                {
+                    static const char *es = NULL;
+                    static int es_read = 0;
+                    if (!es_read) { es = getenv("HLE_ENGINE_STREAM"); es_read = 1; }
+                    if (es != NULL && *es != 0 && eaddr == 0x0CFE6000u) {
+                        uint32_t ssrc = (uint32_t)strtoul(es, NULL, 16);
+                        const char *cm = strchr(es, ',');
+                        uint32_t slen = (cm != NULL)
+                                            ? (uint32_t)strtoul(cm + 1, NULL, 16)
+                                            : 0u;
+                        if (ssrc != 0u && slen >= 8u && slen <= 0x1000u &&
+                            (uint64_t)(ssrc & 0x1FFFFFFFu) + slen <= c->mem_size) {
+                            memcpy(c->mem + eaddr,
+                                   c->mem + (ssrc & 0x1FFFFFFFu), slen);
+                            esize = slen;
+                            printf("[gspq-engine] stream %08X -> %08X len=%X\n",
+                                   ssrc, eaddr, slen);
+                            fflush(stdout);
+                        }
+                    }
+                }
+                /* Ziel-Framebuffer fuer den PICA-Render:
+                   HLE_PICA_TARGET=<addr>,<w>,<h>. */
+                {
+                    static const char *pt = NULL;
+                    static int pt_read = 0;
+                    if (!pt_read) { pt = getenv("HLE_PICA_TARGET"); pt_read = 1; }
+                    if (pt != NULL && *pt != 0) {
+                        char b2[64], *pp2 = b2;
+                        uint32_t v2[3] = {0, 0, 0};
+                        int n2 = 0;
+                        snprintf(b2, sizeof(b2), "%s", pt);
+                        while (pp2 != NULL && *pp2 && n2 < 3) {
+                            char *cc = strchr(pp2, ',');
+                            if (cc) *cc = 0;
+                            v2[n2] = (uint32_t)strtoul(pp2, NULL, n2 == 0 ? 16 : 10);
+                            n2++;
+                            pp2 = cc ? cc + 1 : NULL;
+                        }
+                        if (v2[0] != 0u)
+                            gpu_set_fb_size(v2[0], (int)v2[1], (int)v2[2]);
+                    }
+                }
                 int legacy = (eaddr == 0x08002000u || eaddr == 0x0CFE2000u ||
                               eaddr == 0x0CFE2100u || eaddr == 0x0CFE6000u);
                 int nops = legacy ? gpu_run_command_list(c, eaddr, esize)
