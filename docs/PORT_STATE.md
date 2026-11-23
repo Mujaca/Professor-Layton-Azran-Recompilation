@@ -4266,3 +4266,17 @@ Deshalb bleibt `0x0E800000` bei Count/Descriptor/Nullen.
 Mit echtem Allokator (ohne `284AA8`-Zwang) wird `0x0E800000` gar nicht
 mehr geschrieben (Emitter/Chain haengt wieder) - daher Zwang zurueckgestellt.
 
+
+### Bump-Allokator korrigiert (getrennte Puffer), Emitter laeuft dann aber nicht
+
+`HLE_ALLOC_BUMP` wird jetzt getroffen und nutzt feste Stride:
+
+```
+[bump] 0x284AA8 -> 0E900000 sz=1000
+```
+
+Damit sind Liste (`0x0E900000`) und Node-Pool getrennt (kein Aliasing).
+In dieser Konfiguration wird `0x0E900000` jedoch **nie geschrieben**, weil
+`0x12FC24` dann nicht mehr laeuft (Chain haengt vorher). Stabile
+Konfiguration (Zwang `284AA8=0x0E800000`) wiederhergestellt.
+

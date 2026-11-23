@@ -779,9 +779,15 @@ int arm_retforce(struct ArmCpu *c, uint32_t addr) {
                 bump_cur = (uint32_t)strtoul(e, NULL, 16);
         }
         if (bump_cur != 0u && c != NULL && addr == 0x00284AA8u) {
-            uint32_t sz = (c->r[1] + 0x1Fu) & ~0x1Fu;
-            if (sz < 0x20u) sz = 0x20u;
+            uint32_t sz = 0x1000u;   /* feste Stride: getrennte Puffer */
             c->r[0] = bump_cur;
+            {
+                static int bhit = 0;
+                if (bhit++ == 0) {
+                    printf("[bump] 0x284AA8 -> %08X sz=%X\n", bump_cur, sz);
+                    fflush(stdout);
+                }
+            }
             bump_cur += sz;
             return 1;
         }
