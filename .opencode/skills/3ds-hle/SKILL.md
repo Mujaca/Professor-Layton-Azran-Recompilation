@@ -336,7 +336,9 @@ Textur-Register:
   ergaben TOP `65707` vs `85271`.
 * Mit `HLE_PICA_CLEAR=1` (loescht das Ziel vor dem Draw, `w*h*3` Bytes) sind
   drei Laeufe byte-identisch. **Regel:** jede Bildmessung nur mit Clear und
-  mindestens 2x wiederholen.
+  mindestens 2x wiederholen. Zusaetzlich: **der erste Lauf nach einem
+  Rebuild ist unzuverlaessig** (flach, `TOP 88358`); immer den zweiten
+  Lauf kanonisieren.
 
 ### NDC-Heuristik
 

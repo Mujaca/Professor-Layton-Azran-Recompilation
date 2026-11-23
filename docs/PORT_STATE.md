@@ -6340,3 +6340,19 @@ fuer einige 32-bpp-LZ10-Streams zu wenig Bytes (Beispiel `title_a
 000.xi`: 61280 statt der im Header deklarierten 99840). `tools/_imgc.py`
 macht LZ10 jetzt nativ (`_imgc.lz10`); alle 4735 geprueften IMGCs der drei
 `lt6_*.fa` liefern exakt die deklarierte Groesse.
+
+### Messregel: erster Lauf nach einem Rebuild ist unzuverlaessig (2026-11-23)
+
+Beobachtet (mehrfach): direkt nach `python tools\build_boot.py --port`
+liefert der erste `run_chain_direct`-Lauf haeufig ein flaches Bild
+(`TOP 88358/90400`, mean 88.04) bzw. 87175, waehrend der **zweite** und
+alle folgenden Laeufe stabil `69443/90400` (mean 48.32) liefern - bei
+identischem Log (`sprites=13/1`).
+
+Regel: nach jedem Rebuild **mindestens zwei** Laeufe messen und den
+zweiten (stabilen) kanonisieren. `tools/canon.py --clean` kann an
+gesperrten Logs (`audio_*.txt`, von einem anderen Prozess) scheitern -
+dann ohne `--clean` kanonisieren.
+
+Kanonisch: `[gspq-engine] sprites=13 len=958` / `sprites=1 len=B8`,
+TOP 69443/90400 (48.32), BOTTOM 25902/71360 (20.57).
