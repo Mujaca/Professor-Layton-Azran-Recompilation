@@ -5083,3 +5083,25 @@ Der Block ist also eine Engine-Displaylist/Container, kein roher
 (0x0C-Praefix + Eintraege) dekodieren bzw. die Engine-Funktion finden,
 die ihn in PICA-Kommandos umsetzt.
 
+
+### Sprite-Block ist Textur-Setup; Draw-Template 0xF022F existiert (2026-11-23)
+
+Der Block @0x0CFE7200 bleibt auch nach dem Renderer/Trigger unveraendert
+(14 Woerter, Praefix 0x0C + 6 Paare; letzte Werte 0x802F0200/0xF0000000).
+Es ist also ein **statisches Textur-Setup**, kein Draw-Kommando.
+
+Im Literal-Pool @0x132590/0x1325A4 liegen aber die Header
+`0x000F0228` und `0x000F022F` (PICA 0x228/0x22F = Draw-Arrays). Diese
+Draw-Templates werden nicht in den 0x0CFE7200-Block geschrieben; der
+Emitter dafuer ist noch nicht identifiziert (statische LDR-Literal-Suche
+auf 0x132590/0x1325A4 ergab 0 Treffer -> indirekte/Thumb-Nutzung).
+
+Submissions-Test (Block als PICA @0x0CFE7204, 0x60 B):
+```
+[gspq] tid=0 idx=0 id=1 list=0CFE7204 size=60 ops=0
+```
+Pixel unveraendert: TOP 89358/90400, BOTTOM 71353/71360.
+
+Naechster Schritt: den Emitter des 0x22F-Draw-Templates finden und den
+fertigen PICA-Strom (Textur + Draw) an 0x0CFE6000 geben.
+
