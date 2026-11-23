@@ -1,4 +1,4 @@
-# HANDOVER - 3DS-Port (Stand 2026-11-23, 17:30)
+# HANDOVER - 3DS-Port (Stand 2026-11-23, Commit `a9a88e0`)
 
 Dies ist die einzige Einstiegsdatei. Danach `docs/PORT_STATE.md` (letzte
 Einträge) und `docs/SKILL.md` lesen. **Skills `3ds-hle` und `3ds-port`
@@ -27,9 +27,9 @@ einer engine-emittierten Liste bei `0x0CFE6000` stammen.
 | CFile-Pool `0x40F048` wird vom echten Engine-Loop `0x11ACBC` mit 16 CFiles (Vtable `0x3C9B18`) gefüllt | `out/logs/run.txt`; OBJADDR-Dump |
 | Menü-`.xq` ohne erzwungenen Open lesbar (Pool-Ring + echter ARC0-Index) | `tools/profiles/menu_xq_noforce.json`; `[faread] idx=0 pos=00458CB8 n=72` |
 | Strom @`0x30` steht unter `0x0CFE6000` und wird dort als PICA ausgeführt | `[gspq-engine] stream 00000030 -> 0CFE6000 len=1C8`, `list=0CFE6000 size=1C8 ops=1` |
-| `0x22F`-Draw malt, TOP+BOTTOM == Referenz | `[pica] quad tex=1E000000 400x240 -> fb=1F000000` (Vorstufe) bzw. `[pica] draw#0 nv=6 base=0CFE8000`; `TOP 0/90400, BOTTOM 0/71360` |
+| `0x22F`-Draw malt, TOP+BOTTOM == Referenz (historisch, Referenztextur) | `[pica] quad tex=1E000000 400x240 -> fb=1F000000` (Vorstufe) bzw. `[pica] draw#0 nv=6 base=0CFE8000`; `TOP 0/90400, BOTTOM 0/71360` |
 | Strom @`0x30` = 0x70-B-Draw-Block `fn_001323FC`; Records ab +0xA8 = Attribut-Block `fn_001ED65C` (Basis 0) | statische Analyse: `0x1324D0 str r6,[r5]`, `0x132580` letzter Store; `0x823F0203` = cmd 0x203 + 35 Register |
-| `0x22F` liest **echte** Attribute (kein `HLE_PICA_QUAD`, kein `HLE_PRECALL`) | `[gspq-engine] vertex block @0CFE8000 ... nv=6`; `[pica] draw#0 nv=6 base=0CFE8000 attr0=019FD000 attr1=0x77`; TOP/BOTTOM 0 Diff |
+| `0x22F` liest **echte** Attribute (kein `HLE_PICA_QUAD`, kein `HLE_PRECALL`) | `[gspq-engine] vertex block @0CFE8000 ... nv=6`; `[pica] draw#0 nv=6 base=0CFE8000 attr0=019FD000 attr1=0x77`; TOP/BOTTOM 0 Diff (historisch) |
 | Strom @`0x30` ist eine **State-Liste** (keine Vertex-Loader/Textur-Regs); `0x228` setzt `HLE_PICA_VERTEX` auf 6 | Dump `@0030 id=228 val=1` vs `val=4` bei `HLE_PRECALL=...,4`; `[pica] draw#0 nv=6`; `out/logs/engine.txt` (`[dumpmem2] 00000030`) |
 
 Aktuelle Pixel (Engine-PICA-Lauf `engine_pica_draw.json`):
@@ -50,7 +50,7 @@ Texturen sind jetzt Spiel-Assets (`out/title_top_atlas.bin` aus
 Byte-Vergleich: TOP == `reports/menu_official.bin`, BOTTOM ==
 `reports/menu_official_bottom.bin` (zwei Läufe identisch).
 
-Letzter Commit-Stand: `88a816c`.
+Letzter Commit-Stand: `a9a88e0`.
 
 ## 3. Was noch erzwungen wird (explizit)
 
@@ -58,10 +58,13 @@ Letzter Commit-Stand: `88a816c`.
    bricht ohne Force an `0x26F130` ab. Descriptor-/C-Tabellen-POKEs
    (`0x0EA00000…`, count=1) sind synthetisch.
 2. Ring-Strides `0x40F04C/0x40F058/0x40F064 = 4` (Statik-Ctor fehlt).
-3. Bind-Gates `0x409354`, `0x0CFE7090` und `HLE_PRECALL=27B34C,…`.
-4. `HLE_2D_NO_BLIT` (HLE-Liste/Assets aus) und `HLE_PICA_VERTEX`
-   (Vollbild-Quad als echte 0x200..0x208-Attribute + nv=6).
-   `HLE_MENU_TEX`/`_BOT` kommen noch aus `reports/menu_official*.bin`.
+3. Bind-Gates `0x409354`, `0x0CFE7090` und `HLE_PICA_BIND` (ersetzt
+   `HLE_PRECALL=27B34C,…`).
+4. `HLE_2D_NO_BLIT` (HLE-Liste/Assets aus), `HLE_PICA_BIND` (baut den
+   Draw-Block ueber `0x27B34C`) und `HLE_PICA_SPRITES` (Quads + echte
+   `0x200..0x208`-Attribute, `nv=6`). `HLE_PICA_VERTEX` ist nur noch der
+   Altpfad; `HLE_MENU_TEX`/`_BOT` sind Pfad-Overrides, Default sind die
+   Spiel-Assets `out/title_top_atlas.bin` / `out/title_b_bg.bin`.
 5. `rom:`-Registrierung offen: `0x408150` leer; `0x26E95C` erwartet
    UTF-16 `L"rom:/…"`; Registrar ist `0x287BB4` (nicht `0x26E7C0`!), und
    der Eintrag braucht ein echtes ROMFS-Objekt. Der authentische Mount
@@ -69,6 +72,10 @@ Letzter Commit-Stand: `88a816c`.
 6. Init-Kette `0x289B9C/0x11A890/0x11B05C/0x2919DC` wird HLE-getrieben.
 
 ## 4. Nächste Schritte (in dieser Reihenfolge)
+
+> Die `0/90400`-Zahlen in A/A2/A3 sind **historisch** (Zeitpunkt mit
+> Referenztextur `reports/menu_official*.bin`). Aktueller kanonischer Stand
+> mit Spiel-Assets: TOP `69370/90400` (47.98), BOTTOM `25902/71360` (20.57).
 
 **A. Engine-PICA-Draw sichtbar machen - ERLEDIGT (Commit `d315412`).**
 Der Strom @`0x30` wird per `HLE_ENGINE_STREAM=30,1C8` nach `0x0CFE6000`
@@ -174,9 +181,9 @@ Assets/RomFS bleiben unberührt.
   Vergleichsreferenz, nicht ändern.
 - `out/port.exe` - kanonisches Binary; Build-Varianten wurden gelöscht.
 - Profile: `tools/profiles/chain.json` (Kette), `engine_pica_draw.json`
-  (Engine-Strom @0x30 -> 0x0CFE6000, TOP 0/90400 diff), `engine_pica_30.json`
-  (nur Submit-Beleg), `sprite_bind_gates.json`, `menu_xq_noforce.json`,
-  `real_entry.json`.
+  (kanonisch: Stream @`0x30` + Sprite-Quads, TOP `69370/90400`),
+  `engine_pica_30.json` (nur Submit-Beleg), `sprite_bind_gates.json`,
+  `menu_xq_noforce.json`, `real_entry.json`.
 
 ## 8. Sackgassen / Fallstricke (aus dieser Session)
 
@@ -211,7 +218,7 @@ python tools\selftest_tools.py
 python tools\run_chain_direct.py --profile tools\profiles\chain.json --shot out\shot_tmp.bmp
 python tools\canon.py --log out\logs\chain_direct.txt --shot out\shot_tmp.bmp --clean
 
-# Engine-PICA-Draw @0x30 (rendert, TOP 0/90400)
+# Engine-PICA-Draw @0x30 (kanonisch, TOP 69370/90400)
 python tools\run_chain_direct.py --profile tools\profiles\engine_pica_draw.json --shot out\shot_tmp.bmp
 python tools\canon.py --log out\logs\chain_direct.txt --shot out\shot_tmp.bmp --engine --clean
 

@@ -18,24 +18,34 @@ python tools\build_boot.py                  # -> out\boot.exe (headless)
 # Headless-Boot (ohne Fenster); beendet sich nach ~10 s selbst
 .\out\boot.exe out\romfs
 
-# Referenzframes (Top 400x240 + Bottom 320x240) erzeugen
+# Referenzframes (Top 400x240 + Bottom 320x240) erzeugen - nur Vergleich
 python tools\_make_menu_frame.py
 
-# Port mit Screenshot (GPU-/gsp-Pfad ist Default)
-.\out\port.exe out\romfs --shot out\shot.bmp
-python tools\_cmp_shot.py out\shot.bmp reports\menu_official.bin   # diff_pixels=0
+# Kanonischer Engine-PICA-Lauf (Strom @0x30 -> 0x0CFE6000)
+python tools\run_chain_direct.py --profile tools\profiles\engine_pica_draw.json --shot out\shot_tmp.bmp
+python tools\canon.py --log out\logs\chain_direct.txt --shot out\shot_tmp.bmp --engine
+python tools\measure_ref.py out\shot_engine.bmp
 
 # Pflicht-Selbsttests
 python tests\mvp_selftest.py                # 13/13
 python tools\selftest_tools.py              # 12/12
 ```
 
-Aktueller Menue-Stand: Der Top-Screen wird ueber eine echte gsp-Kommandoliste
-gerendert (`SubmitCmdList`-Ring + `0x0006`/`0x000C`/`0x0005`, `runtime/gpu.c`
-mit `BlitRGB` 0x07). `HLE_MENU_GPU` ist im Port Default; `PORT_NO_MENU_GPU=1`
-schaltet auf den alten Host-Frame-Fallback, `PORT_NO_OFFICIAL=1` deaktiviert
-den Referenz-Loader. Das naechste Ziel (beide Screens + Engine-Render) steht
-in [`HANDOVER_PROMPT.md`](HANDOVER_PROMPT.md).
+Aktueller Menue-Stand (Commit `a9a88e0`, verifiziert): TOP sichtbar
+`69370/90400` mean `47.98`, BOTTOM sichtbar `25902/71360` mean `20.57`
+(`HLE_PICA_CLEAR=1`). Der Draw-Block stammt aus dem Engine-Strom @`0x30` ->
+`0x0CFE6000`; Quads/Vertex-Attribute und Texturen emittiert jedoch noch HLE
+(`HLE_PICA_SPRITES`). Der fruehere „0 Pixel Diff“ galt nur fuer die
+Referenz-Capture-Kopie, nicht fuer Spiel-Assets. Die Scene-Paar-Kette
+`11A3E0 -> 27C2BC -> 2794A4 -> 2721E0` laeuft (Profil
+`tools/profiles/scene_pairs.json`); offen sind noch die UV-Paare
+`ctx+0x8334..8340` (danach 0, Consumer `0x12D030`/`0x2721E0` schreibt erst
+beim Layer-Commit), der 0xD2-Container-Link und der natuerliche Submit.
+
+`python tools\_cmp_shot.py` vergleicht einen einzelnen 400x240-Frame; fuer
+den 400x480-Portshot ist `measure_ref.py` die kanonische Messung (sichtbare
+226/223 Zeilen). `PORT_NO_OFFICIAL=1` deaktiviert den Referenz-Loader;
+`PORT_NO_MENU_GPU=1` schaltet auf den alten Host-Frame-Fallback.
 
 `python tools\build_port.py` regeneriert `build/gen_boot.c` (dauert) und
 wendet die SDK-Patches aus `tests/port.c` an. `build_boot.py` nutzt die
@@ -130,6 +140,18 @@ muss jede Reply mit `Result + N` zuerst ein Dummy-Wort pushen:
 `Dummy, Result, Parameter...`. Sonst rutscht alles um ein Wort.
 Beleg: `runtime/hle/hle.c` `ipc_finish`/`put_result`; Skill `3ds-hle`.
 
+### Alpha-Blending und Frame-Akkumulation
+`put_px_blend` mischt Quell-Alpha ueber das Ziel (`out = src*a + dst*(1-a)`),
+ohne implizites Frame-Clear. Ohne `HLE_PICA_CLEAR=1` akkumuliert der
+Shot ueber die Frame-Anzahl (gemessen: TOP `65707` vs `85271`). Fuer
+Bildmessungen daher immer `HLE_PICA_CLEAR=1` setzen und 2x wiederholen.
+`HLE_PRESENT_FILL=0` schaltet den `#604020`-Platzhalter ab.
+
+### PICA-Register
+Kurzmap (`0x200` Basis, `0x201/0x202` Formate, Loader `0x203 + l*3` mit
+`byte_count` in Wort 2 Bits 16..23, `0x228` nv, `0x22E/0x22F` Draw,
+`0x80` Texture-Enable, `0x8E` Format) steht im Skill `3ds-hle`.
+
 ### `HLE_NO_THREAD_LOCK`
 Schaltet den Gast-Lock ab (`guest_lock_enter/leave`). Ohne Lock koennen
 Threads parallel Speicher lesen/schreiben und Messungen werden nicht
@@ -186,18 +208,20 @@ dekodieren (macht `tools/where.py`).
 Jede Zeile enthaelt `✅`/`❌` und die konkrete Beweiszeile. Kein
 Statusbericht ohne diesen Checker.
 
-## 7. Bekannter Meilenstein-Stand (2026-11-22)
+## 7. Bekannter Meilenstein-Stand (Commit `a9a88e0`, 2026-11-23)
 
-- APT, FS, DSP, GSP-Init, `boss:U`, SaveData/`head.lt6` und alle drei
-  `.fa`-Indizes laufen.
-- Der Top-Screen des Hauptmenues wird ueber den echten gsp-Pfad gerendert
-  (`SubmitCmdList`-Ring + `SetCommandList`/`TriggerCmdReqQueue`/
-  `SetBufferSwap`), `runtime/gpu.c` mit `BlitRGB`; Nachweis 0 Diff.
-- Die Engine-eigene Draw-Liste waechst: mit `HLE_DRAW_LIST=1 HLE_DRAW_FIX=1`
-  legt `fn_002800C8` echte Eintraege an (`[dl] count=11` im Probe-Log).
-- **Offen (naechstes Ziel):** beide Screens (400x240 + 320x240) uebereinander
-  und Engine-eigener Render statt Referenz-Blit. Submit-Pfade/Gates stehen
-  in [`HANDOVER_PROMPT.md`](HANDOVER_PROMPT.md).
+- Kanonisch: Engine-Strom @`0x30` -> `0x0CFE6000`; TOP sichtbar
+  `69370/90400` mean `47.98`, BOTTOM `25902/71360` mean `20.57`
+  (`HLE_PICA_CLEAR=1`, deterministisch).
+- Attribute/Texturen kommen aus `HLE_PICA_SPRITES` (Spiel-Assets
+  `title_a.xa` + `title_b_bg`), **nicht** aus `reports/menu_official*.bin`.
+  „0 Diff“ ist nur noch der Referenz-Capture-Fall.
+- **Offen:** Scene-Paar-Kette laeuft zwar (`11A3E0`/`27C2BC`/`2794A4`/
+  `2721E0` mit `scene_pairs.json`), aber die UV-Paare
+  `ctx+0x8334..8340` sind danach 0 (Consumer `0x12D030`/`0x2721E0` schreibt
+  erst beim Layer-Commit); dazu 0xD2-Container-Link und natuerlicher
+  Engine-Submit ohne `HLE_FRAME_LOOP2`. Details:
+  [`PORT_STATE.md`](PORT_STATE.md).
 
 Statisch belegter RM-Wartepunkt (weiterhin gueltig):
 

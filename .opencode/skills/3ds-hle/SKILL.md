@@ -8,7 +8,7 @@ description: Debugging-Wissen fuer den statischen 3DS-Port (Professor Layton/Azr
 Dieser Skill ist fuer den Port in `C:\Users\user\Documents\Repos\3DS`.
 Kurzpfad: **messen -> vergleichen -> Hypothese -> A/B-Test**.
 
-## Aktueller Stand (Commit `89d30a7`, 2026-11-23)
+## Aktueller Stand (Commit `a9a88e0`, 2026-11-23)
 
 * Kanonischer Lauf:
   `python tools\run_chain_direct.py --profile tools\profiles\engine_pica_draw.json --shot out\shot_tmp.bmp`

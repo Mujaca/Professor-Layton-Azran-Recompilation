@@ -8,25 +8,37 @@ description: Mess- und Analyse-Rezepte fuer den statischen 3DS-Port (Professor L
 Vollstaendige Anleitung: [`docs/SKILL.md`](../../../docs/SKILL.md).
 Naechster Auftrag: [`docs/HANDOVER_PROMPT.md`](../../../docs/HANDOVER_PROMPT.md).
 
-Schnellstart:
+Schnellstart (kanonischer Engine-PICA-Lauf):
 
 ```powershell
 python tools\build_port.py
-python tools\_make_menu_frame.py
-.\out\port.exe out\romfs --shot out\shot.bmp
-python tools\_cmp_shot.py out\shot.bmp reports\menu_official.bin
 python tests\mvp_selftest.py
+python tools\selftest_tools.py
+python tools\run_chain_direct.py --profile tools\profiles\engine_pica_draw.json --shot out\shot_tmp.bmp
+python tools\canon.py --log out\logs\chain_direct.txt --shot out\shot_tmp.bmp --engine
+python tools\measure_ref.py out\shot_engine.bmp
 ```
 
-Aktueller Stand: Der Top-Screen des Hauptmenues wird ueber den echten
-gsp-Pfad gerendert (`SubmitCmdList`-Ring + `SetCommandList` 0x0006 +
-`TriggerCmdReqQueue` 0x000C + `SetBufferSwap` 0x0005, `runtime/gpu.c` mit
-`BlitRGB` 0x07); Nachweis 0 Pixel Diff. Naechstes Ziel: beide Screens
-(400x240 + 320x240) uebereinander und Engine-eigener Render.
+Aktueller Stand (Commit `a9a88e0`, 2026-11-23, verifiziert): TOP sichtbar
+`69370/90400` mean `47.98`; BOTTOM sichtbar `25902/71360` mean `20.57`
+(`HLE_PICA_CLEAR=1`, zwei Laeufe identisch). Der Draw-Block stammt aus dem
+Engine-Strom @`0x30` -> `0x0CFE6000`, aber Quads/Vertex-Attribute und
+Texturen emittiert noch HLE (`HLE_PICA_SPRITES`). Die Scene-Paar-Kette
+`11A3E0 -> 27C2BC -> 2794A4 -> 2721E0` laeuft (Profil
+`tools/profiles/scene_pairs.json`); offen: UV-Paare `ctx+0x8334..8340`
+sind danach 0 (Consumer `0x12D030`/`0x2721E0` schreibt erst beim
+Layer-Commit), 0xD2-Container-Link und natuerlicher Submit. Details:
+[`docs/PORT_STATE.md`](../../../docs/PORT_STATE.md) (letzte Abschnitte).
 
 Wichtigste Fallstricke: `getenv()` nie im Hot Path (static cachen),
 IPC-Reply braucht ein Dummy-Wort vor `Result`, `GetTickCount64()` hat
 ~15,6 ms Aufloesung, `HLE_TICK=0` stoppt die Tick-Tasks, RomFS-IVFC-Groessen
 stehen bei `0x10/0x18/0x20`, SelfNCCH ist Archive-ID 3, `tools/decomp.py`
 ueberschreibt alle Patches, `arm_trace_block` existiert nur an
-Blockanfaengen.
+Blockanfaengen. Bildmessung **nur** mit `HLE_PICA_CLEAR=1` (sonst akkumuliert
+Alpha ueber die Frames: 65707 vs 85271), `HLE_PRESENT_FILL=0` fuer echte
+Render-Nachweise, `measure_ref.py` statt `_cmp_shot.py` fuer den
+400x480-Shot.
+
+Prozessregel: nach jedem belegten Fakt eine Zeile hier **und** in
+`3ds-hle` ergaenzen, nicht nur in `docs/PORT_STATE.md`.
