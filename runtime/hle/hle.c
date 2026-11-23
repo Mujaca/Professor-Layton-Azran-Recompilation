@@ -709,7 +709,7 @@ static void hle_install_2d_entry(ArmCpu *c) {
      0x4237A3 (Renderer+0x15A3, Renderer-Enable)
    Nur Flags, keine Bilddaten: die Pixel entstehen ausschliesslich im
    Gast-Renderer. */
-static uint32_t g_poke_a[16], g_poke_v[16];
+static uint32_t g_poke_a[64], g_poke_v[64];
 static int g_poke_n = -1;
 
 static void hle_apply_pokes(ArmCpu *c) {
@@ -718,7 +718,7 @@ static void hle_apply_pokes(ArmCpu *c) {
         const char *pv = getenv("HLE_POKE");
         g_poke_n = 0;
         if (pv != NULL) {
-            while (*pv != 0 && g_poke_n < 16) {
+            while (*pv != 0 && g_poke_n < 64) {
                 char *end = NULL;
                 uint32_t a = (uint32_t)strtoul(pv, &end, 16);
                 if (end == pv || *end != '=') break;
@@ -736,7 +736,7 @@ static void hle_apply_pokes(ArmCpu *c) {
             }
         }
     }
-    for (int i = 0; i < g_poke_n; i++) {
+    for (int i = 0; i < g_poke_n && i < 64; i++) {
         if (g_poke_a[i] + 4u <= c->mem_size)
             memcpy(c->mem + g_poke_a[i], &g_poke_v[i], 4);
     }

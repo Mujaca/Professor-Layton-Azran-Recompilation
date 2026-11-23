@@ -4088,3 +4088,18 @@ Damit ist die Kette **Push -> Pop -> 0x142BD0-Dispatch** erstmals
 geschlossen. Der Node ist noch typ-/drawable-los (Felder 0), daher
 entstehen noch keine Zeichendaten.
 
+
+### HLE_POKE-Bugfix + typisierter Node
+
+- `HLE_POKE` hatte nur **16 Slots**; spaetere Pokes wurden still verworfen.
+  Jetzt 64 Slots -> alle Pokes wirken:
+  ```
+  [dumpmem2] 0D600000: 00000000 00000006 00000000 00000000 0CFE7000 ...
+  [dumpmem2] 0CFE7000: 0D610040 0CFE7100 ...
+  ```
+  Node hat Typ 6 und Drawable `0x0CFE7000` (Vtable-Zeiger -> 0x0D610040).
+- Dispatch `0x142BD0` wird mit `r0=0x0D600000` betreten; der Typ-6-Handler
+  `0x142D34` bzw. der Stub `0x0D620000` werden per PC-Watch nicht
+  beobachtet (indirekte Sprungziele werden vom Hook offenbar nicht
+  gesampled).
+
