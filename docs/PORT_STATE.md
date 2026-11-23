@@ -6224,3 +6224,28 @@ Damit ist die Item-/Desc-Kette vollstaendig belegt; die Positionen
 stehen als Bitmuster in den Paaren und die w/h in `+0x04`.
 
 Kanonisch: 13 Top-Draws, TOP 69445/90400 (48.45), BOTTOM 25902/71360.
+
+### Positions-Matrix gedumpt (echte Floats) (2026-11-23)
+
+`0x278B68` baut die Matrix auf dem Stack (`r0 = 0x0CF09FA8`,
+`r2 = Float2-Position`); `0x278B84` schiebt sie in den Desc. Dump am
+Eintritt von `0x278B84` (`HLE_HOOK=278B84=obj`, `HLE_OBJADDR=0CF09FA8`):
+
+```
+@0CF09FA8: 40000000 00000000 00000000 00000000
+            00000000 C0000000 00000000 00000000
+            00000000 00000000 B8CCCCCD 00000000
+            43C78000 C36F0000 BF000000 3F800000
+```
+
+Das sind echte Floats: `2.0`, `-2.0`, `-0.0001`, `399.0`, `-239.0`,
+`-0.5`, `1.0` - eine Viewport-/Projektionsmatrix (399 ~ 400 px,
+239 ~ 240 px Breite/Hoehe), keine einfache (x,y)-Translation. Die
+Position ist darin kodiert, nicht als Rect.
+
+Damit ist belegt: der Item-/Positions-Pfad liefert eine Matrix; fuer
+Record-Rects muesste HLE die Matrix auf die Quad-Ecken (0,0)-(1,1)
+anwenden, statt eine (x,y)-Zahl zu erwarten.
+
+Kanonisch: 13 Top-Draws, TOP 69445/90400 (48.45), BOTTOM 25902/71360
+(20.57). Tests 13/13, 12/12.
