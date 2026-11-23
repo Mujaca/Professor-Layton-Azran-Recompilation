@@ -7,8 +7,11 @@
  */
 #include "hle.h"
 #include "../gpu.h"
+#include "../imgc.h"
 
 static uint32_t g_hle_gsp_handle;
+/* Von generiertem Code (gen_boot.c) lesbarer gsp-Handle. */
+uint32_t g_hle_gsp_export;
 static uint32_t g_apt_param_ev = 0;
 static void dispatch_ipc(uint32_t handle);
 static int gsp_process_cmdqueue(ArmCpu *c);
@@ -29,6 +32,14 @@ void arm_trace_thread_dump(int ti, unsigned n);
 static CRITICAL_SECTION g_guest_lock;
 static int g_guest_lock_init = 0;
 static ArmCpu *g_main_cpu = NULL;
+
+/* Von SetBufferSwap (gsp 0x0005) gesetzte Framebuffer-Adressen. Screen 0 =
+   oben (400x240), Screen 1 = unten (320x240). Getter fuer den Port-Host. */
+static uint32_t g_gsp_fb_addr[3] = {0x1F000000u, 0x1F060000u, 0x1F0C0000u};
+uint32_t hle_gsp_fb_addr(int screen) {
+    if (screen < 0 || screen > 2) return 0x1F000000u;
+    return g_gsp_fb_addr[screen];
+}
 
 static int g_no_lock = 0;
 
@@ -204,6 +215,1076 @@ static void hle_menu_gpu_submit(void)
     done = 1;
 }
 
+/* Baut einen gueltigen 2D-Displaylisten-Eintrag in den Ring des globalen
+   Renderers 0x408808 und setzt den aktiven Listenzeiger [0x4088A4].
+   Die Draw-Methode des Eintrags ist ein kleiner ARM-Stub, der ueber
+   svc 0x32 gsp::Gpu SetCommandList(0x0006) + TriggerCmdReqQueue(0x000C)
+   absetzt. Damit laeuft die Submission aus dem Engine-Renderer heraus. */
+/* Wird vom 2D-Displaylisten-Eintrag (0x0CFE1000) aufgerufen: setzt die
+   PICA-Liste ueber gsp::Gpu SetCommandList (0x0006) und Trigger (0x000C)
+   ab. Der Aufruf kommt aus dem Engine-Renderer-Ring. */
+static uint32_t g_ring_arr = 0x14004440u;
+static uint32_t g_bound_tex = 0x0CFE7100u;
+
+/* Echte Engine-Draw-Methode als Displaylist-Eintrag: ruft die Engine-
+   Funktion (Default 0x0036C6E8) mit dem Scene-Objekt als this auf. */
+void hle_engine_entry(ArmCpu *c) {
+    uint32_t sv[16], fn, obj = 0;
+    const char *e;
+    if (c == NULL) return;
+    e = getenv("HLE_ENTRY_FN");
+    fn = (e != NULL && *e != 0) ? (uint32_t)strtoul(e, NULL, 16)
+                               : 0x0036C6E8u;
+    /* Konvention: r0 = Ring-Eintrag; das echte Objekt steht in [entry+4]. */
+    if (c->r[0] != 0u)
+        memcpy(&obj, c->mem + (c->r[0] & 0x1FFFFFFFu) + 4u, 4);
+    if (obj == 0u) {
+        const char *o = getenv("HLE_ENTRY_OBJ");
+        obj = (o != NULL && *o != 0) ? (uint32_t)strtoul(o, NULL, 16)
+                                     : 0x003CA494u;
+    }
+    memcpy(sv, c->r, sizeof(sv));
+    c->r[0] = obj;
+    c->r[13] = 0x0CF0A000u;
+    arm_call_guest_pub(c, fn);
+    memcpy(c->r, sv, sizeof(sv));
+}
+
+void hle_ret_one(ArmCpu *c) {
+    if (c != NULL) c->r[0] = 1u;
+}
+
+void hle_2d_stub(ArmCpu *c) {    uint32_t *buf;
+    uint32_t save[4];
+    uint32_t ent, idx = 0, qx, qy, qw, qh;
+    uint32_t bound = 0, bsrc0 = 0x1E000000u, bsrc1 = 0x1E100000u;
+    int fa_asset = 0;
+    if (c == NULL || g_hle_gsp_handle == 0) return;
+    /* Wurde das Titel-Asset ueber den Engine-FA-Reader (0x280744) in den
+       Gast-RAM geladen? Dann direkt aus diesen Bytes dekodieren, statt
+       out/menu_bottom.bin per Host-fopen zu lesen. */
+    {
+        static int asset_dec = 0;
+        int dec_now = asset_dec;
+        if (!asset_dec && c->mem_size > HLE_ASSET_CAP + 0x48u &&
+            memcmp(c->mem + HLE_ASSET_CAP, "IMGC00", 6) == 0) {
+            int dw = 0, dh = 0;
+            if (imgc_decode(c->mem + HLE_ASSET_CAP, HLE_ASSET_CAP_MAX,
+                            c->mem + 0x1E100000u, &dw, &dh) == 0 &&
+                dw == 320 && dh == 240) {
+                asset_dec = 1;
+                dec_now = 1;
+                printf("[engine2d] title_b_bg aus FA-Read dekodiert (%dx%d)\n",
+                       dw, dh);
+                fflush(stdout);
+            }
+        }
+        fa_asset = dec_now;
+    }
+    /* 32-bpp-Assets (A,B,G,R) aus demselben FA-Puffer dekodieren und zum
+       Abgleich gegen den Python-Dekoder dumpen. */
+    {
+        static int asset32 = 0;
+        if (!asset32 && c->mem_size > HLE_ASSET_CAP + 0x48u &&
+            memcmp(c->mem + HLE_ASSET_CAP, "IMGC00", 6) == 0 &&
+            c->mem[HLE_ASSET_CAP + 0x0Du] == 32u) {
+            int dw = 0, dh = 0;
+            if (imgc_decode(c->mem + HLE_ASSET_CAP, HLE_ASSET_CAP_MAX,
+                            c->mem + 0x1E700000u, &dw, &dh) == 0) {
+                FILE *f;
+                asset32 = 1;
+                printf("[engine2d] 32bpp aus FA-Read dekodiert (%dx%d)\n",
+                       dw, dh);
+                fflush(stdout);
+                f = fopen("out/engine_32bpp.bin", "wb");
+                if (f != NULL) {
+                    fwrite(c->mem + 0x1E700000u, 1u,
+                           (size_t)dw * (size_t)dh * 3u, f);
+                    fclose(f);
+                }
+            }
+        }
+    }
+    /* Der Engine-Renderer setzt [0x3b0] am Frame-Ende auf 0; fuer den Draw
+       den gebundenen Texture-State wieder einsetzen und daraus lesen. */
+    if (g_bound_tex != 0u)
+        memcpy(c->mem + 0x0040ABB8u, &g_bound_tex, 4);
+    memcpy(&bound, c->mem + 0x0040ABB8u, 4);
+    if (bound != 0u) {
+        memcpy(&bsrc0, c->mem + bound + 0x40u, 4);
+        memcpy(&bsrc1, c->mem + bound + 0x44u, 4);
+    }
+    {
+        static int use_logged = 0;
+        if (!use_logged && bound != 0u) {
+            use_logged = 1;
+            printf("[engine2d] draw konsumiert tex=%08X src0=%08X src1=%08X\n",
+                   bound, bsrc0, bsrc1);
+            fflush(stdout);
+        }
+    }
+    ent = c->r[0];
+    int node_draw = 0;
+    uint32_t node_type = 0;
+    {
+        uint32_t node = 0;
+        static int mnlog = 0;
+        if (ent >= 0x00100000u && ent + 8u <= c->mem_size)
+            memcpy(&node, c->mem + (ent & 0x1FFFFFFFu) + 4u, 4);
+        if (node >= 0x00100000u && node < 0x20000000u &&
+            node != 0x003CA494u) {
+            node_draw = 1;
+            memcpy(&node_type, c->mem + (node & 0x1FFFFFFFu) + 8u, 4);
+        }
+        if (!mnlog && node_draw) {
+            uint32_t ty = node_type, f1c = 0, f20 = 0, f24 = 0, n0 = 0;
+            mnlog = 1;
+            memcpy(&n0, c->mem + (node & 0x1FFFFFFFu), 4);
+            if (getenv("HLE_NODE_POKE0") != NULL && n0 == 0u) {
+                uint32_t pv = (uint32_t)strtoul(getenv("HLE_NODE_POKE0"),
+                                                NULL, 16);
+                memcpy(c->mem + (node & 0x1FFFFFFFu), &pv, 4);
+                n0 = pv;
+                printf("[engine2d] node[0] -> %08X\n", pv);
+                fflush(stdout);
+            }
+            memcpy(&f1c, c->mem + (node & 0x1FFFFFFFu) + 0x1Cu, 4);
+            memcpy(&f20, c->mem + (node & 0x1FFFFFFFu) + 0x20u, 4);
+            memcpy(&f24, c->mem + (node & 0x1FFFFFFFu) + 0x24u, 4);
+            printf("[engine2d] menu-node r0=%08X node=%08X type=%08X "
+                   "node0=%08X fn1c=%08X fn20=%08X fn24=%08X -> full-screen\n",
+                   ent, node, ty, n0, f1c, f20, f24);
+            fflush(stdout);
+            if (getenv("HLE_NODE_VT") != NULL) {
+                uint32_t vt = (uint32_t)strtoul(getenv("HLE_NODE_VT"),
+                                                NULL, 16);
+                uint32_t fn = 0, old0 = 0, sv[16];
+                uint32_t tgt = (getenv("HLE_NODE_ENT") != NULL)
+                                   ? ent : node;
+                memcpy(&old0, c->mem + (tgt & 0x1FFFFFFFu), 4);
+                memcpy(c->mem + (tgt & 0x1FFFFFFFu), &vt, 4);
+                memcpy(&fn, c->mem + (vt & 0x1FFFFFFFu) + 8u, 4);
+                printf("[engine2d] node vt tgt=%08X -> %08X fn+8=%08X\n",
+                       tgt, vt, fn);
+                fflush(stdout);
+                memcpy(sv, c->r, sizeof(sv));
+                c->r[0] = tgt;
+                c->r[1] = 0u; c->r[2] = 0u; c->r[3] = 0u;
+                c->r[13] = 0x0CF0A000u;
+                if (fn >= 0x00100000u && fn < 0x00500000u)
+                    arm_call_guest_pub(c, fn);
+                printf("[engine2d] node vt fn -> r0=%u\n", c->r[0]);
+                fflush(stdout);
+                memcpy(c->r, sv, sizeof(sv));
+                memcpy(c->mem + (tgt & 0x1FFFFFFFu), &old0, 4);
+            }
+            if (getenv("HLE_NODE_CALL") != NULL) {
+                uint32_t sv[16];
+                memcpy(sv, c->r, sizeof(sv));
+                c->r[0] = node;
+                c->r[1] = 0u; c->r[2] = 0u; c->r[3] = 0u;
+                c->r[13] = 0x0CF0A000u;
+                printf("[engine2d] call node+0x1C fn=%08X\n", f1c);
+                fflush(stdout);
+                arm_call_guest_pub(c, f1c);
+                printf("[engine2d] node+0x1C ret r0=%08X\n", c->r[0]);
+                fflush(stdout);
+                memcpy(c->r, sv, sizeof(sv));
+            }
+            if (getenv("HLE_NODE_CALL2") != NULL && f20 >= 0x00100000u) {
+                uint32_t sv[16];
+                memcpy(sv, c->r, sizeof(sv));
+                c->r[0] = node;
+                c->r[1] = 0u;
+                c->r[2] = 0u;
+                c->r[3] = 0u;
+                c->r[13] = 0x0CF0A000u;
+                printf("[engine2d] call node+0x20 fn=%08X\n", f20);
+                fflush(stdout);
+                arm_call_guest_pub(c, f20);
+                printf("[engine2d] node+0x20 ret r0=%08X\n", c->r[0]);
+                fflush(stdout);
+                memcpy(c->r, sv, sizeof(sv));
+            }
+        }
+    }
+    if (ent >= g_ring_arr && ((ent - g_ring_arr) / 0xB4u) < 4u)
+        idx = (ent - g_ring_arr) / 0xB4u;
+    int xq_draw = 0;
+    if (node_draw && getenv("HLE_XQ_DRAW") != NULL) {
+        static int xq_loaded = 0;
+        if (!xq_loaded) {
+            FILE *f = fopen("out/menu_logo_dec.bin", "rb");
+            xq_loaded = 1;
+            if (f) {
+                unsigned char src[2048];
+                size_t n = fread(src, 1, sizeof(src), f);
+                fclose(f);
+                if (n >= 2048u) {
+                    uint32_t i;
+                    for (i = 0; i < 64u * 32u; i++) {
+                        unsigned char v = src[i];
+                        c->mem[0x1E200000u + i * 3u + 0u] = v;
+                        c->mem[0x1E200000u + i * 3u + 1u] = v;
+                        c->mem[0x1E200000u + i * 3u + 2u] = v;
+                    }
+                    printf("[engine2d] xq texture 64x32 @1E200000\n");
+                    fflush(stdout);
+                }
+            }
+        }
+        xq_draw = 1;
+    }
+    qx = (idx & 1u) ? 200u : 0u;
+    qy = (idx & 2u) ? 120u : 0u;
+    qw = 200u; qh = 120u;
+    {
+        static int spr_bound = 0;
+        if (!spr_bound) {
+            uint32_t sv[16];
+            spr_bound = 1;
+            memcpy(sv, c->r, sizeof(sv));
+            c->r[0] = 0u;
+            c->r[1] = 0x0CFE7000u;
+            c->r[13] = 0x0CF0A000u;
+            arm_call_guest_pub(c, 0x002812ECu);
+            {
+                uint32_t rr = c->r[0];
+                memcpy(c->r, sv, sizeof(sv));
+                printf("[tex] 0x2812EC(sprite) -> r0=%u\n", rr);
+            }
+            fflush(stdout);
+        }
+    }
+    buf = (uint32_t *)(c->mem + c->tpidruro + 0x80u);
+    memcpy(save, buf, sizeof(save));
+    for (uint32_t s = 0; s < 2u; s++) {
+        uint32_t fa = hle_gsp_fb_addr((int)s);
+        uint32_t w = (s == 1u) ? 320u : 400u;
+        uint32_t lx = (idx & 1u) ? w / 2u : 0u;
+        uint32_t lw = (idx & 1u) ? w - w / 2u : w / 2u;
+        uint32_t ly = (idx & 2u) ? 120u : 0u;
+        uint32_t lh = 120u;
+        uint32_t list[9];
+        uint32_t src = (s == 1u) ? bsrc1 : bsrc0;
+        uint32_t srcW = w, srcH = 240u;
+        int full_src = 0;
+        if (xq_draw) { src = 0x1E200000u; srcW = 64u; srcH = 32u; }
+        if (fa_asset && s == 0u && !xq_draw && !node_draw) {
+            full_src = 1;
+            lx = 0u; lw = 400u; ly = 0u; lh = 240u;
+            src = 0x1E100000u; srcW = 320u; srcH = 240u;
+        }
+        if (node_draw) {
+            lx = 0u; lw = w; ly = 0u; lh = 240u;
+        }
+        list[0] = 0x070FFFFFu; list[1] = 7u;
+        list[2] = lx; list[3] = ly; list[4] = lw; list[5] = lh;
+        list[6] = (node_draw || full_src)
+                      ? src
+                      : src + ((idx & 2u) ? 120u : 0u) * w * 3u +
+                            ((idx & 1u) ? (w / 2u) : 0u) * 3u;
+        list[7] = srcW; list[8] = srcH;
+        memcpy(c->mem + 0x0CFE6000u, list, sizeof(list));
+        uint32_t listbytes = 36u;
+        if (xq_draw && s == 0u) {
+            uint32_t l2[9];
+            l2[0] = 0x070FFFFFu; l2[1] = 7u;
+            l2[2] = 50u;  l2[3] = 70u;
+            l2[4] = 300u; l2[5] = 100u;
+            l2[6] = 0x1E200000u; l2[7] = 64u; l2[8] = 32u;
+            memcpy(c->mem + 0x0CFE6000u + 36u, l2, sizeof(l2));
+            listbytes = 72u;
+        }
+        gpu_set_fb_size(fa, (int)w, 240);
+        buf[0] = (0x0006u << 16) | (2u << 6);
+        buf[1] = 0x0CFE6000u;
+        buf[2] = listbytes;
+        buf[3] = 0u;
+        dispatch_ipc(g_hle_gsp_handle);
+        buf[0] = (0x000Cu << 16);
+        buf[1] = 0u;
+        dispatch_ipc(g_hle_gsp_handle);
+    }
+    memcpy(buf, save, sizeof(save));
+    printf("[engine2d] Sprite-Entry idx=%u submitted (lr=%08X)\n", idx, c->r[14]);
+    fflush(stdout);
+}
+
+static void hle_install_2d_entry(ArmCpu *c) {
+    if (getenv("HLE_NO_2D_INSTALL") != NULL) return;
+    uint32_t arr = 0, stub = 0x0CFE1000u, list = 0x0CFE2000u;
+    uint32_t entry = 0x0CFE3000u, vt = 0x0CFE3100u, ctx = 0x0CFE3200u;
+    uint32_t code[18];
+    uint16_t zero16 = 0, one16 = 1;
+    uint32_t one32 = 1;
+    if (c == NULL) return;
+    /* Stub: SetCommandList(list,28) + TriggerCmdReqQueue. */
+    code[0]  = 0xE92D4010u;   /* push {r4,lr} */
+    code[1]  = 0xEE1D4F70u;   /* mrc p15,0,r4,c13,c0,3 */
+    code[2]  = 0xE59F0038u;   /* ldr r0, [pc,#0x38] -> 0x00060040 */
+    code[3]  = 0xE5A40080u;   /* str r0, [r4,#0x80]! */
+    code[4]  = 0xE59F1034u;   /* ldr r1, [pc,#0x34] -> list */
+    code[5]  = 0xE5841004u;   /* str r1, [r4,#4] */
+    code[6]  = 0xE59F1030u;   /* ldr r1, [pc,#0x30] -> 28 */
+    code[7]  = 0xE5841008u;   /* str r1, [r4,#8] */
+    code[8]  = 0xE59F002Cu;   /* ldr r0, [pc,#0x2c] -> handle-global */
+    code[9]  = 0xE5900000u;   /* ldr r0, [r0] */
+    code[10] = 0xEF000032u;   /* svc 0x32 */
+    code[11] = 0xE59F0024u;   /* ldr r0, [pc,#0x24] -> 0x000C0000 */
+    code[12] = 0xE5840000u;   /* str r0, [r4] */
+    code[13] = 0xE59F0018u;   /* ldr r0, [pc,#0x18] -> handle-global */
+    code[14] = 0xE5900000u;   /* ldr r0, [r0] */
+    code[15] = 0xEF000032u;   /* svc 0x32 */
+    code[16] = 0xE3A00000u;   /* mov r0,#0 */
+    code[17] = 0xE8BD8010u;   /* pop {r4,pc} */
+    memcpy(c->mem + stub, code, sizeof(code));
+    memcpy(c->mem + stub + 0x48u, (uint32_t[]){0x00060040u, list, 28u,
+                                               0x003D9098u, 0x000C0000u},
+           sizeof(uint32_t) * 5u);
+    /* Der Stub liest den Client-Slot [0x3D9098]; dort muss das echte
+       gsp::Gpu-Handle stehen, sonst geht svc 0x32 an einen falschen Dienst. */
+    if (g_hle_gsp_handle != 0) {
+        uint32_t gh = g_hle_gsp_handle;
+        memcpy(c->mem + 0x003D9098u, &gh, 4);
+    }
+    /* Echte Spiel-Assets (aus lt6_b.fa/menu extrahiert) in den Gast-RAM
+       laden und als BlitRGB-Kommandoliste ablegen. */
+    {
+        static unsigned char *topimg = NULL, *botimg = NULL;
+        static int imgs_tried = 0;
+        if (!imgs_tried) {
+            FILE *f;
+            int fa_bottom = (getenv("HLE_XQ_ASSET") != NULL);
+            imgs_tried = 1;
+            topimg = (unsigned char *)calloc(1, 400u * 240u * 3u);
+            botimg = (unsigned char *)calloc(1, 320u * 240u * 3u);
+            f = fopen("out/menu_top.bin", "rb");
+            if (f) { if (fread(topimg, 1, 400u * 240u * 3u, f) != 400u * 240u * 3u) memset(topimg, 0, 400u*240u*3u); fclose(f); }
+            if (!fa_bottom) {
+                f = fopen("out/menu_bottom.bin", "rb");
+                if (f) { if (fread(botimg, 1, 320u * 240u * 3u, f) != 320u * 240u * 3u) memset(botimg, 0, 320u*240u*3u); fclose(f); }
+            }
+            memcpy(c->mem + 0x1E000000u, topimg, 400u * 240u * 3u);
+            if (!fa_bottom)
+                memcpy(c->mem + 0x1E100000u, botimg, 320u * 240u * 3u);
+            printf("[engine] Menue-Assets geladen (top=0D000000 bottom=%s)\n",
+                   fa_bottom ? "FA-Read" : "0D050000");
+            fflush(stdout);
+        }
+    }
+    {
+        uint32_t lt[9], lb[9];
+        lt[0] = 0x070FFFFFu; lt[1] = 7u;
+        lt[2] = 0u; lt[3] = 0u; lt[4] = 400u; lt[5] = 240u;
+        lt[6] = 0x1E000000u; lt[7] = 400u; lt[8] = 240u;
+        lb[0] = 0x070FFFFFu; lb[1] = 7u;
+        lb[2] = 0u; lb[3] = 0u; lb[4] = 320u; lb[5] = 240u;
+        lb[6] = 0x1E100000u; lb[7] = 320u; lb[8] = 240u;
+        memcpy(c->mem + list, lt, sizeof(lt));
+        memcpy(c->mem + list + 0x100u, lb, sizeof(lb));
+    }
+    /* Entry + Vtable + aktiver Listenkontext. */
+    memcpy(c->mem + entry, &vt, 4);
+    memcpy(c->mem + vt + 8u, &stub, 4);
+    /* Optional: echte Engine-Draw-Methode als Ring-Eintrag (statt HLE-Stub).
+       Ein kleiner ARM-Stub setzt r0 = Scene-Objekt und springt in die
+       Engine-Funktion (Default 0x0036C6E8). */
+    {
+        static int real_entry = -1;
+        if (real_entry < 0)
+            real_entry = (getenv("HLE_REAL_ENTRY") != NULL);
+        if (real_entry) {
+            uint32_t rfn = 0x0036C6E8u;
+            uint32_t rst = 0x0CFE4000u;
+            const char *fe = getenv("HLE_ENTRY_FN");
+            uint32_t code2[6];
+            if (fe != NULL && *fe != 0) rfn = (uint32_t)strtoul(fe, NULL, 16);
+            code2[0] = 0xE59F0008u;   /* ldr r0,[pc,#8]  -> scene */
+            code2[1] = 0xE59F1008u;   /* ldr r1,[pc,#8]  -> fn */
+            code2[2] = 0xE12FFF11u;   /* bx r1 */
+            code2[3] = 0xE1A00000u;   /* nop */
+            code2[4] = 0x003CA494u;   /* Scene-Objekt */
+            code2[5] = rfn;
+            memcpy(c->mem + rst, code2, sizeof(code2));
+            memcpy(c->mem + vt + 8u, &rst, 4);
+        }
+    }
+    memcpy(c->mem + ctx + 4u, &one32, 4);
+    memcpy(c->mem + 0x004088A4u, &ctx, 4);
+    /* Ring: array[0] = entry, cursor=0, wrap=0, count=1. */
+    memcpy(&arr, c->mem + 0x0040ABC0u, 4);
+    if (arr == 0u) arr = 0x14004440u;
+    {
+        uint32_t stride = 0xB4u;
+        memcpy(c->mem + 0x0040ABC0u, &arr, 4);
+        memcpy(c->mem + 0x0040ABC4u, &stride, 4);
+    }
+    /* Echtes Texture-Objekt bauen und ueber 0x132370/0x27B34C binden. */
+    {
+        static int bind_done = 0;
+        if (!bind_done) {
+            uint32_t sprite = 0x0CFE7000u, texobj = 0x0CFE7100u;
+            uint32_t desc = sprite + 0x70u;
+            uint8_t one = 1, zero = 0;
+            uint32_t src = 0x1E000000u, src1 = 0x1E100000u, srclen = 400u * 240u * 3u;
+            uint32_t scratch = 0x0CFE7200u;
+            uint32_t save[16];
+            bind_done = 1;
+            memcpy(c->mem + sprite + 4u, &texobj, 4);
+            memcpy(c->mem + sprite + 0x56u, &one, 2);
+            memcpy(c->mem + texobj + 0x40u, &src, 4);
+            memcpy(c->mem + texobj + 0x44u, &src1, 4);
+            memcpy(c->mem + texobj + 0x4Cu, &srclen, 4);
+            memcpy(c->mem + texobj + 0x58u, &one, 1);
+            memcpy(c->mem + texobj + 0x59u, &one, 1);
+            memcpy(c->mem + texobj + 0x5Au, &one, 1);
+            memcpy(c->mem + texobj + 0x5Cu, &zero, 1);
+            memcpy(c->mem + texobj + 0x5Du, &zero, 1);
+            memcpy(c->mem + texobj + 0x60u, &scratch, 4);
+            memcpy(c->mem + desc + 0x1Fu, &one, 1);
+            memcpy(c->mem + desc + 0x10u, &src, 4);
+            memcpy(c->mem + desc + 0x14u, &srclen, 4);
+            memcpy(save, c->r, sizeof(save));
+            c->r[0] = texobj;
+            c->r[13] = 0x0CF0A000u;
+            arm_call_guest_pub(c, 0x00132370u);
+            printf("[tex] 0x132370(tex=%08X) -> r0=%u\n", texobj, c->r[0]);
+            c->r[0] = 0x00408808u;
+            c->r[1] = texobj;
+            c->r[2] = desc;
+            c->r[3] = 1u;
+            c->r[13] = 0x0CF0A000u;
+            arm_call_guest_pub(c, 0x0027B34Cu);
+            printf("[tex] 0x27B34C bind -> r0=%u\n", c->r[0]);
+            memcpy(c->mem + 0x0040ABB8u, &texobj, 4);
+            {
+                uint32_t cur = 0;
+                memcpy(&cur, c->mem + 0x0040ABB8u, 4);
+                printf("[tex] current bound texture [3b0]=%08X (tex=%08X)\n", cur, texobj);
+            }
+            memcpy(c->r, save, sizeof(save));
+            fflush(stdout);
+        }
+    }
+    g_ring_arr = arr;
+    for (uint32_t i = 0; i < 4u; i++) {
+        uint32_t base = (arr + i * 0xB4u) & 0x1FFFFFFFu;
+        uint32_t obj = 0x003CA494u;
+        const char *eo = getenv("HLE_ENTRY_OBJ");
+        if (eo != NULL && *eo != 0) obj = (uint32_t)strtoul(eo, NULL, 16);
+        memcpy(c->mem + base, &vt, 4);
+        memcpy(c->mem + base + 4u, &obj, 4);
+    }
+    memcpy(c->mem + 0x0040ABC8u, &zero16, 2);
+    memcpy(c->mem + 0x0040ABCCu, &zero16, 2);
+    {
+        uint16_t four16 = 4;
+        memcpy(c->mem + 0x0040ABCEu, &four16, 2);
+    }
+    {
+        static int announced = 0;
+        if (!announced) {
+            announced = 1;
+            {
+                uint32_t slot = 0;
+                memcpy(&slot, c->mem + 0x003D9098u, 4);
+                printf("[engine] 2D-Displaylistentry installiert (entry=%08X arr=%08X gsp_h=%u slot=%08X)\n",
+                       entry, arr, g_hle_gsp_handle, slot);
+            }
+            fflush(stdout);
+        }
+    }
+}
+
+/* Engine-Frame: fn_0028F084(0x003EC028) ist der echte Frame-Dispatcher des
+   Spiels (SetBufferSwap -> Scene-Update -> Scene-Draw -> GX-Flush). Er wird
+   hier wie ein VBlank-Callback regelmaessig aufgerufen, damit die Szene
+   ohne Host-Blit selbst rendert. Die Gates sind Felder, die im Port wegen
+   des unvollstaendigen Loaders nie gesetzt werden:
+     0x40B3A0 (App bereit, gelesen von 0x11AF10 +0x4C)
+     0x3D8D5D (App laeuft, gelesen von 0x11A270 +5)
+     0x3EE16C (Scene+0x2144, Init-Schleife 0x101508)
+     0x40B4CC (Frame-Callback 0x00101750)
+     0x4237A3 (Renderer+0x15A3, Renderer-Enable)
+   Nur Flags, keine Bilddaten: die Pixel entstehen ausschliesslich im
+   Gast-Renderer. */
+static uint32_t g_poke_a[16], g_poke_v[16];
+static int g_poke_n = -1;
+
+static void hle_apply_pokes(ArmCpu *c) {
+    if (c == NULL) return;
+    if (g_poke_n < 0) {
+        const char *pv = getenv("HLE_POKE");
+        g_poke_n = 0;
+        if (pv != NULL) {
+            while (*pv != 0 && g_poke_n < 16) {
+                char *end = NULL;
+                uint32_t a = (uint32_t)strtoul(pv, &end, 16);
+                if (end == pv || *end != '=') break;
+                pv = end + 1;
+                uint32_t v = (uint32_t)strtoul(pv, &end, 16);
+                if (end == pv) break;
+                g_poke_a[g_poke_n] = a; g_poke_v[g_poke_n] = v;
+                g_poke_n++;
+                pv = end;
+                while (*pv == ',' || *pv == ' ') pv++;
+            }
+            if (g_poke_n > 0) {
+                printf("[poke] %d Wert(e) aktiv\n", g_poke_n);
+                fflush(stdout);
+            }
+        }
+    }
+    for (int i = 0; i < g_poke_n; i++) {
+        if (g_poke_a[i] + 4u <= c->mem_size)
+            memcpy(c->mem + g_poke_a[i], &g_poke_v[i], 4);
+    }
+}
+
+static void hle_engine_frame(ArmCpu *c) {
+    static int on = -1, elog = -1;
+    static unsigned calls = 0;
+    uint32_t sr[16];
+    extern int arm_fa_ready;
+    if (!c) return;
+    if (on < 0) {
+        on = (getenv("HLE_ENGINE_FRAME") != NULL);
+        elog = (getenv("HLE_ENGINE_LOG") != NULL);
+    }
+    if (!on) return;
+    /* Generisches Speicher-Poke fuer die Gate-Bisektion:
+       HLE_POKE=addr=value[,addr=value] (32-Bit, hex). Wird pro Aufruf
+       erneut angewendet, damit ein spaeterer Reset die Werte nicht kippt. */
+    hle_apply_pokes(c);
+    /* Draw-Liste/Pool bei jedem Engine-Frame absichern: Menue-Loop und
+       Builder nullen die Felder sonst zwischen zwei hle_tick-Aufrufen. */
+    {
+        static int dl2 = -1;
+        if (dl2 < 0) dl2 = (getenv("HLE_DRAW_LIST") != NULL);
+        if (dl2) {
+            uint32_t arr = 0x0CFF0000u, pool = 0x0CFF1000u, stride = 4u;
+            uint16_t cap = 0x100u, one = 1, z16 = 0, cur16 = 0;
+            uint32_t cur32 = 0;
+            memcpy(&cur32, c->mem + 0x003EE198u, 4);
+            if (cur32 == 0u) memcpy(c->mem + 0x003EE198u, &arr, 4);
+            memcpy(&cur16, c->mem + 0x003EE1A2u, 2);
+            if (cur16 == 0u) memcpy(c->mem + 0x003EE1A2u, &cap, 2);
+            memcpy(&cur16, c->mem + 0x003EE196u, 2);
+            if (cur16 == 0u) memcpy(c->mem + 0x003EE196u, &one, 2);
+            memcpy(&cur32, c->mem + 0x003EE188u, 4);
+            if (cur32 == 0u) {
+                memcpy(c->mem + 0x003EE188u, &pool, 4);
+                memcpy(c->mem + 0x003EE18Cu, &stride, 4);
+                memcpy(c->mem + 0x003EE190u, &z16, 2);
+                memcpy(c->mem + 0x003EE192u, &cap, 2);
+                memcpy(c->mem + 0x003EE194u, &z16, 2);
+                for (uint32_t i = 0; i < 0x100u; i++) {
+                    uint32_t o = 0x0CFF2000u + i * 0x100u;
+                    if (getenv("HLE_POOL_MENUOBJ")) o = 0x003EE12Cu;
+                    memcpy(c->mem + ((pool + i * 4u) & 0x1FFFFFFFu), &o, 4);
+                }
+            }
+            {
+                static int pmo = -1;
+                if (pmo < 0) pmo = (getenv("HLE_POOL_MENUOBJ") != NULL);
+                if (pmo) {
+                    uint32_t o = 0x003EE12Cu;
+                    for (uint32_t i = 0; i < 0x100u; i++)
+                        memcpy(c->mem + ((pool + i * 4u) & 0x1FFFFFFFu), &o, 4);
+                }
+            }
+            /* Snapshot: der Menue-Drain nullt Array/Count zwischen zwei
+               Pumps; hier wird die zuletzt gebaute Liste konserviert und
+               bei Bedarf restauriert (nur Pointer, 4 Byte je Eintrag). */
+            {
+                static uint32_t snap[256];
+                static uint32_t snapn = 0;
+                uint32_t a2 = 0, n2 = 0;
+                memcpy(&a2, c->mem + 0x003EE198u, 4);
+                memcpy(&n2, c->mem + 0x003EE1A0u, 2);
+                if (a2 != 0u && n2 != 0u) {
+                    uint32_t k, nn = n2 > 256u ? 256u : n2;
+                    for (k = 0; k < nn; k++)
+                        memcpy(&snap[k],
+                               c->mem + ((a2 + k * 4u) & 0x1FFFFFFFu), 4);
+                    snapn = nn;
+                } else if (snapn != 0u) {
+                    uint16_t c2 = (uint16_t)snapn;
+                    memcpy(c->mem + 0x003EE198u, &arr, 4);
+                    memcpy(c->mem + 0x003EE1A0u, &c2, 2);
+                    memcpy(c->mem + 0x003EE1A2u, &cap, 2);
+                    for (uint32_t k = 0; k < snapn; k++)
+                        memcpy(c->mem + ((arr + k * 4u) & 0x1FFFFFFFu),
+                               &snap[k], 4);
+                }
+            }
+        }
+    }
+    if (calls == 0) {
+        uint32_t scene_obj = 0;
+        memcpy(&scene_obj, c->mem + 0x003EC028u, 4);
+        printf("[engine] fn_0028F084(003EC028) gestartet, [scene]=%08X\n", scene_obj);
+        fflush(stdout);
+    }
+    /* Der Szenen-Konstruktor 0x381CE4 (-> 0x365228) wird im Port nie
+       aufgerufen; ohne ihn ist [0x3EC028] = 0 und der Frame-Dispatcher
+       hat kein Objekt. Nach dem Boot einmal nachziehen. */
+    {
+        static int ctor_tried = 0;
+        uint32_t sc = 0;
+        memcpy(&sc, c->mem + 0x003EC028u, 4);
+        if (!ctor_tried && calls >= 20u && sc == 0u) {
+            uint32_t cs[16];
+            ctor_tried = 1;
+            memcpy(cs, c->r, sizeof(cs));
+            c->r[13] = 0x0CF0A000u;
+            printf("[engine] Scene-Konstruktor 0x381CE4 aufrufen\n");
+            fflush(stdout);
+            arm_call_guest_pub(c, 0x00381CE4u);
+            memcpy(c->r, cs, sizeof(cs));
+            memcpy(&sc, c->mem + 0x003EC028u, 4);
+            printf("[engine] nach Konstruktor [scene]=%08X\n", sc);
+            fflush(stdout);
+        }
+    }
+    {
+        uint8_t one8 = 1;
+        uint16_t one16 = 1;
+        uint32_t cb = 0x00101750u;
+        /* Init-Schleife 0x101508 erst freigeben, wenn das Scene-Objekt
+           konstruiert ist; sonst laeuft 0x101F10 mit [scene]=0 in den
+           SDK-Fehlerpfad (err:f). */
+        {
+            uint32_t sc0 = 0;
+            uint16_t objc = one16;
+            static int obj0 = -1;
+            if (obj0 < 0) obj0 = (getenv("HLE_MENU_OBJ0") != NULL);
+            if (obj0) objc = 0;
+            memcpy(&sc0, c->mem + 0x003EC028u, 4);
+            if (sc0 != 0u) memcpy(c->mem + 0x003EE16Cu, &objc, 2);
+        }
+        memcpy(c->mem + 0x0040B354u, &one8, 1);  /* 0x11AF10: [0x40B308+0x4C] */
+        memcpy(c->mem + 0x0040B3A0u, &one8, 1);  /* 0x37FB1C: [0x40B354+0x4C] */
+        memcpy(c->mem + 0x003D8D5Du, &one8, 1);
+        memcpy(c->mem + 0x003D8D64u, &one8, 1);  /* 0x27CE44 (+0xC) */
+        memcpy(c->mem + 0x003D8D65u, &one8, 1);  /* 0x27CE54 (+0xD) */
+        memcpy(c->mem + 0x0040B4CCu, &cb, 4);
+        memcpy(c->mem + 0x004237A3u, &one8, 1);
+        /* SDK-Flag 0x3E7771 (gelesen von 0x139844 im GX-Submit) muss 1
+           sein; das Wort ist im Port 0x00010000 statt 0x00010100. */
+        {
+            uint32_t sdkflag = 0x00010100u;
+            memcpy(c->mem + 0x003E7770u, &sdkflag, 4);
+        }
+        memcpy(c->mem + 0x003EE196u, &one16, 2);  /* [menu+0x6A] */
+    }
+    memcpy(sr, c->r, sizeof(sr));
+    c->r[0] = 0x003EC028u;
+    c->r[1] = 0u; c->r[2] = 0u; c->r[3] = 0u;
+    c->r[13] = 0x0CF0A000u;
+    /* Menue-Ressourcen-Loader (0x28D424) fuer das Menue-Objekt 0x3EE12C
+       anstossen, damit die 2D-Sprite-Liste gefuellt wird. */
+    {
+        static int res_on = -1;
+        if (res_on < 0) res_on = (getenv("HLE_ENGINE_RES") != NULL);
+        if (res_on) {
+            uint32_t s3[16];
+            memcpy(s3, c->r, sizeof(s3));
+            c->r[0] = 0x003EE12Cu;
+            c->r[13] = 0x0CF0A000u;
+            arm_call_guest_pub(c, 0x0028D424u);
+            memcpy(c->r, s3, sizeof(s3));
+        }
+    }
+    /* Present: die Engine ruft im Normalfall gsp SetBufferSwap(screen=2)
+       (beide Screens). Der Port-Handler setzt daraus screen=0/1 mit den
+       Adressen aus dem GSP-Shared-Memory. Hier einmal pro Frame anstossen. */
+    if (g_hle_gsp_handle != 0 && g_frame_cpu != NULL && (calls & 7u) == 0u) {
+        uint32_t *buf = (uint32_t *)(c->mem + c->tpidruro + 0x80u);
+        uint32_t save[4];
+        memcpy(save, buf, sizeof(save));
+        buf[0] = (0x0005u << 16) | (1u << 6);
+        buf[1] = 2u;   /* beide Screens */
+        dispatch_ipc(g_hle_gsp_handle);
+        memcpy(buf, save, sizeof(save));
+        /* Beide Framebuffer ueber den GPU-Pfad fuellen, solange die
+           Menue-Sprite-Liste noch leer ist (sichtbarer Present-Beleg). */
+        for (uint32_t s = 0; s < 2u; s++) {
+            uint32_t fa = hle_gsp_fb_addr((int)s);
+            int fw = (s == 1u) ? 320 : 400;
+            uint32_t list[8];
+            list[0] = 0x04204060u;      /* ClearColor */
+            list[1] = 0x050FFFFFu;      /* FillRect */
+            list[2] = 4u;
+            list[3] = 0u; list[4] = 0u;
+            list[5] = (uint32_t)fw; list[6] = 240u;
+            memcpy(c->mem + 0x08004000u + s * 0x40u, list, sizeof(list));
+            gpu_set_fb_size(fa, fw, 240);
+            gpu_run_command_list(c, 0x08004000u + s * 0x40u, (uint32_t)sizeof(list));
+        }
+    }
+    /* 2D-Ring vor dem Scene-Draw installieren: 0x1ED8FC setzt den Count am
+       Frame-Ende auf 0, sonst sieht der Draw keine Eintraege. */
+    {
+        static int pre2d = -1;
+        if (pre2d < 0) pre2d = (getenv("HLE_ENGINE_2D") != NULL);
+        if (pre2d) hle_install_2d_entry(c);
+    }
+    /* Welt-/Renderer-Update fn_00285208 (-> 0x11AEF4 -> fn_0027AF48 mit
+       Renderer 0x00422200) fuellt die Render-Units. Im Port ruft das
+       Spiel diesen Pfad nie auf; fuer die Diagnose optional direkt. */
+    /* Komplettes Menue-Setup fn_00100F98 (Einstieg des Spiels:
+       0x100B4C -> 0x100F98 -> 0x1034F4 -> 0x108F70 -> 0x285208) einmal
+       anstossen; Argument ist ein Byte-Struct mit Sprachindex [0]. */
+    {
+        static int menu = -1, menu_done = 0;
+        if (menu < 0) menu = (getenv("HLE_ENGINE_MENU") != NULL);
+        if (menu && !menu_done && calls >= 25u) {
+            uint32_t arg = 0x0CFE9000u;
+            const char *ma = getenv("HLE_MENU_ARG");
+            uint32_t sm[16];
+            uint8_t lang = 0;
+            if (ma != NULL && *ma != 0) arg = (uint32_t)strtoul(ma, NULL, 16);
+            menu_done = 1;
+            memcpy(c->mem + arg, &lang, 1);
+            /* Init-Gate 0x10FC9C: liest *(s8*)0x3D8CE0; muss != 0 sein,
+               sonst bricht der Menue-Init-Pfad bei 0x1036C8 ab. */
+            {
+                uint8_t g1 = 1;
+                memcpy(c->mem + 0x003D8CE0u, &g1, 1);
+            }
+            /* Optional: Scene-Builder fn_0035FF14 mit Scene/World aufrufen,
+               damit das eingebettete Menue-Objekt aufgebaut wird. */
+            {
+                const char *sb = getenv("HLE_SCENEBUILD");
+                if (sb != NULL && *sb != 0) {
+                    uint32_t sarg = 0x003EC028u;
+                    const char *sa = getenv("HLE_SB_ARG");
+                    uint32_t sv[16];
+                    int snew = (getenv("HLE_SB_NEW") != NULL);
+                    if (sa != NULL && *sa != 0)
+                        sarg = (uint32_t)strtoul(sa, NULL, 16);
+                    if (snew) {
+                        /* Frisches, genulltes Scene-Objekt mit Klassen-
+                           Vtable anlegen und den Builder darauf ansetzen. */
+                        sarg = 0x0D200000u;
+                        memset(c->mem + sarg, 0, 0x4000u);
+                    }
+                    memcpy(sv, c->r, sizeof(sv));
+                    /* Scene-Klassen-Vtable setzen (Tabelle @0x3CA370,
+                       Builder ist Methode +0x04). */
+                    if (sarg >= 0x00100000u && sarg < 0x20000000u) {
+                        uint32_t vt = 0x003CA370u;
+                        memcpy(c->mem + (sarg & 0x1FFFFFFFu), &vt, 4);
+                    }
+                    c->r[0] = sarg;
+                    c->r[1] = 0u;
+                    /* Eigenes, grosses Stack-Areal (der Builder braucht
+                       mehr als die 4 KB bei 0x0CF0A000 und darf nicht mit
+                       dem Spiel-Stack kollidieren). */
+                    c->r[13] = 0x0D840000u;
+                    printf("[scenebuild] fn_0035F3B4(%08X)\n", sarg);
+                    fflush(stdout);
+                    arm_call_guest_pub(c, 0x0035F3B4u);
+                    memcpy(c->r, sv, sizeof(sv));
+                    printf("[scenebuild] zurueck\n");
+                    fflush(stdout);
+                }
+            }
+            /* Menue-Node-Liste (menu+0x6C/+0x74) mit einem Testobjekt
+               fuellen; Typ-Byte an obj+8 waehlt den 0x28D424-Zweig (3..7). */
+            {
+                const char *nt = getenv("HLE_MENU_NODE");
+                if (nt != NULL && *nt != 0) {
+                    uint32_t arr = 0x0CFF0000u, obj = 0x0CFF2100u;
+                    uint16_t one = 1;
+                    uint8_t ty = (uint8_t)atoi(nt);
+                    memcpy(c->mem + 0x003EE198u, &arr, 4);
+                    memcpy(c->mem + 0x003EE1A0u, &one, 2);
+                    memcpy(c->mem + 0x0CFF0000u, &obj, 4);
+                    memset(c->mem + 0x0CFF2100u, 0, 0x20);
+                    memcpy(c->mem + 0x0CFF2108u, &ty, 1);
+                    /* Objektliste menu+0x38/+0x40 mit dem Engine-State-
+                       Objekt (0x3C6FE4, vtable-Table) fuellen. */
+                    {
+                        uint32_t oarr = 0x0CFF0200u, oobj = 0x003C6FE4u;
+                        const char *oe = getenv("HLE_MENU_OBJ");
+                        if (oe != NULL && *oe != 0)
+                            oobj = (uint32_t)strtoul(oe, NULL, 16);
+                        memcpy(c->mem + 0x003EE164u, &oarr, 4);
+                        memcpy(c->mem + 0x003EE16Cu, &one, 2);
+                        memcpy(c->mem + 0x0CFF0200u, &oobj, 4);
+                        printf("[menunode] obj=%08X in menu+0x38\n", oobj);
+                    }
+                    printf("[menunode] type=%u arr=%08X cnt=1\n", ty, arr);
+                    fflush(stdout);
+                }
+            }
+            memcpy(sm, c->r, sizeof(sm));
+            c->r[0] = arg;
+            c->r[1] = 0u;
+            c->r[13] = 0x0CF0A000u;
+            printf("[enginemenu] fn_00100F98(%08X) -> ...\n", arg);
+            fflush(stdout);
+            arm_call_guest_pub(c, 0x00100F98u);
+            memcpy(c->r, sm, sizeof(sm));
+            {
+                uint32_t u = 0;
+                memcpy(&u, c->mem + 0x00422200u + 0x1530u, 4);
+                printf("[enginemenu] zurueck, units=%u\n", u);
+                fflush(stdout);
+            }
+            /* Menue-Objekt 0x3EE12C: vtable + Sequenz-Namenstabelle
+               (+0x68 = 0x3EE194, count u16 @ +0x68+8 = 0x3EE19C) und
+               Node-/Objektlisten dumpen. */
+            {
+                uint32_t vt = 0, seqp = 0, nodea = 0, obja = 0;
+                uint16_t seqc = 0, nodec = 0, objc = 0;
+                memcpy(&vt, c->mem + 0x003EE12Cu, 4);
+                memcpy(&seqp, c->mem + 0x003EE12Cu + 0x68u, 4);
+                memcpy(&seqc, c->mem + 0x003EE12Cu + 0x6Cu, 2);
+                memcpy(&nodea, c->mem + 0x003EE198u, 4);
+                memcpy(&nodec, c->mem + 0x003EE1A0u, 2);
+                memcpy(&obja, c->mem + 0x003EE164u, 4);
+                memcpy(&objc, c->mem + 0x003EE16Cu, 2);
+                printf("[menuobj] vt=%08X seqtab=%08X seqcnt=%u nodea=%08X "
+                       "nodec=%u obja=%08X objc=%u\n",
+                       vt, seqp, (unsigned)seqc, nodea, (unsigned)nodec,
+                       obja, (unsigned)objc);
+                if (seqp >= 0x00100000u && seqp < 0x20000000u && seqc > 0u) {
+                    uint32_t k, n = seqc > 12u ? 12u : seqc;
+                    printf("[menuobj] seq:");
+                    for (k = 0; k < n; k++) {
+                        uint32_t w0 = 0, w1 = 0;
+                        memcpy(&w0, c->mem + (seqp & 0x1FFFFFFFu) + k * 8u, 4);
+                        memcpy(&w1, c->mem + (seqp & 0x1FFFFFFFu) + k * 8u + 4u, 4);
+                        printf(" [%u:%08X/%08X]", (unsigned)k, w0, w1);
+                    }
+                    printf("\n");
+                }
+                {
+                    uint32_t k;
+                    printf("[menuobj] raw3EE12C:");
+                    for (k = 0; k < 0x24u; k++) {
+                        uint32_t w = 0;
+                        memcpy(&w, c->mem + 0x003EE12Cu + k * 4u, 4);
+                        printf(" %08X", w);
+                    }
+                    printf("\n");
+                }
+                fflush(stdout);
+            }
+        }
+    }
+    {
+        static int world = -1;
+        if (world < 0) world = (getenv("HLE_ENGINE_WORLD") != NULL);
+        uint32_t wsc = 0;
+        memcpy(&wsc, c->mem + 0x003EC028u, 4);
+        if (world && wsc != 0u) {
+            uint32_t arg = 0x003EC028u;
+            const char *wa = getenv("HLE_WORLD_ARG");
+            uint32_t sw[16];
+            if (wa != NULL && *wa != 0) arg = (uint32_t)strtoul(wa, NULL, 16);
+            memcpy(sw, c->r, sizeof(sw));
+            c->r[0] = arg;
+            c->r[1] = 0u;
+            c->r[13] = 0x0CF0A000u;
+            arm_call_guest_pub(c, 0x00285208u);
+            memcpy(c->r, sw, sizeof(sw));
+            {
+                static int lw = 0;
+                if (!lw) {
+                    uint32_t u = 0;
+                    lw = 1;
+                    memcpy(&u, c->mem + 0x00422200u + 0x1530u, 4);
+                    printf("[engineworld] fn_00285208(arg=%08X) units=%u\n", arg, u);
+                    fflush(stdout);
+                }
+            }
+        }
+    }
+    /* Echten 3D-Scene-Renderer fn_001B9938 mit dem initialisierten
+       Renderer-Objekt 0x00422200 aufrufen (PICA-Submit via gsp). */
+    {
+        static int three_d = -1;
+        if (three_d < 0) three_d = (getenv("HLE_ENGINE_3D") != NULL);
+        if (three_d) {
+            uint32_t s3[16];
+            /* fn_001B9938 bricht bei 0x1BA964 ab, wenn [0x3D8E6A] != 0
+               oder ([0x3D94E8] & ~[0x3D94E9]) == 0. Genau diese beiden
+               Gates oeffnen, damit der Renderer seine Liste submitted. */
+            {
+                uint8_t z = 0, one = 1;
+                memcpy(c->mem + 0x003D8E6Au, &z, 1);
+                memcpy(c->mem + 0x003D94E8u, &one, 1);
+                memcpy(c->mem + 0x003D94E9u, &z, 1);
+            }
+            memcpy(s3, c->r, sizeof(s3));
+            c->r[0] = 0x00422200u;
+            c->r[13] = 0x0CF0A000u;
+            arm_call_guest_pub(c, 0x001B9938u);
+            memcpy(c->r, s3, sizeof(s3));
+            {
+                static int logged3 = 0;
+                /* Der 3D-Renderer liest die Render-Unit-Liste aus dem
+                   Scene-Objekt: Array scene+0x14F0, Count scene+0x1530,
+                   Stride 0x20 (aus 0x1BA214..0x1BA288 / 0x1BA378).
+                   Erst loggen, wenn der Scene-Konstruktor gelaufen ist. */
+                uint32_t sc = 0;
+                memcpy(&sc, c->mem + 0x003EC028u, 4);
+                if (!logged3 && sc != 0u) {
+                    /* Der Renderer-Arg ist 0x00422200 (nicht die Scene):
+                       Unit-Array +0x14F0, Count +0x1530, Stride 0x20. */
+                    uint32_t cnt = 0, n0 = 0, nt = 0, scnt = 0;
+                    logged3 = 1;
+                    memcpy(&cnt, c->mem + 0x00422200u + 0x1530u, 4);
+                    memcpy(&n0, c->mem + 0x00422200u + 0x14F0u, 4);
+                    memcpy(&nt, c->mem + 0x00422200u + 0x14F8u, 4);
+                    memcpy(&scnt, c->mem + sc + 0x1530u, 4);
+                    printf("[engine3d] renderer=00422200 units=%u node0=%08X "
+                           "type=%08X (scene=%08X scene_units=%u)\n",
+                           cnt, n0, nt, sc, scnt);
+                    fflush(stdout);
+                }
+            }
+        }
+    }
+    /* 2D-Scene-Renderer (globales Objekt 0x408808) direkt zeichnen. */
+    {
+        static int two_d = -1;
+        if (two_d < 0) two_d = (getenv("HLE_ENGINE_2D") != NULL);
+        if (two_d) {
+            uint32_t s2[16];
+            hle_install_2d_entry(c);
+            /* Persistente Menue-Draw-Liste in den 2D-Renderer-Ring
+               uebernehmen: Eintrag = {vtable 0CFE3100, node}. */
+            {
+                static int mring = -1;
+                if (mring < 0) mring = (getenv("HLE_MENU_RING") != NULL);
+                if (mring) {
+                    uint32_t marr = 0, mnode = 0, ring = g_ring_arr;
+                    uint16_t mcnt = 0;
+                    memcpy(&marr, c->mem + 0x003EE198u, 4);
+                    memcpy(&mcnt, c->mem + 0x003EE1A0u, 2);
+                    if (marr != 0u && mcnt != 0u) {
+                        uint32_t vt = 0x0CFE3100u, n = mcnt > 4u ? 4u : mcnt;
+                        uint16_t n16 = (uint16_t)n;
+                        for (uint32_t i = 0; i < n; i++) {
+                            uint32_t base = (ring + i * 0xB4u) & 0x1FFFFFFFu;
+                            memcpy(&mnode,
+                                   c->mem + ((marr + i * 4u) & 0x1FFFFFFFu), 4);
+                            if (mnode >= 0x00100000u && mnode < 0x20000000u)
+                                memcpy(c->mem + (mnode & 0x1FFFFFFFu), &vt, 4);
+                            memcpy(c->mem + base, &vt, 4);
+                            memcpy(c->mem + base + 4u, &mnode, 4);
+                        }
+                        memcpy(c->mem + 0x0040ABCEu, &n16, 2);
+                        printf("[menuring] %u Eintraege aus 0CFF0000 in Ring %08X\n",
+                               n, ring);
+                        fflush(stdout);
+                    }
+                }
+            }
+            static int act_done = 0;
+            memcpy(s2, c->r, sizeof(s2));
+            if (!act_done) {
+                act_done = 1;
+                c->r[0] = 0x00408808u;
+                c->r[13] = 0x0CF0A000u;
+                arm_call_guest_pub(c, 0x00366E38u);   /* 2D-Renderer-Ctor */
+                c->r[0] = 0x00408808u;
+                c->r[1] = 0x003EC248u;
+                c->r[13] = 0x0CF0A000u;
+                arm_call_guest_pub(c, 0x001ED64Cu);
+            }
+            c->r[13] = 0x0CF0A000u;
+            arm_call_guest_pub(c, 0x00366B98u);
+            memcpy(c->r, s2, sizeof(s2));
+        }
+    }
+    /* Nur den Scene-Draw fn_00103D20 treiben (ohne den blockierenden
+       Present-Pfad 0x28F084). */
+    {
+        static int draw2 = -1;
+        if (draw2 < 0) draw2 = (getenv("HLE_ENGINE_DRAW") != NULL);
+        if (draw2) {
+            uint32_t s4[16];
+            {
+                static int vlogged = 0;
+                if (!vlogged) {
+                    uint32_t sc = 0, vt = 0, f38 = 0;
+                    memcpy(&sc, c->mem + 0x003EC028u, 4);
+                                        if (sc) { memcpy(&vt, c->mem + sc, 4); if (vt) memcpy(&f38, c->mem + vt + 0x38u, 4); }
+                    printf("[draw2] scene=%08X vt=%08X fn+38=%08X\n", sc, vt, f38);
+                    fflush(stdout);
+                    vlogged = 1;
+                }
+            }
+            memcpy(s4, c->r, sizeof(s4));
+            uint32_t scdraw = 0;
+            memcpy(&scdraw, c->mem + 0x003EC028u, 4);
+            if (scdraw != 0u) {
+                c->r[0] = 0x003EC028u;
+                c->r[1] = 0u; c->r[2] = 0u; c->r[3] = 0u;
+                c->r[13] = 0x0CF0A000u;
+                arm_call_guest_pub(c, 0x00103D20u);
+            }
+            memcpy(c->r, s4, sizeof(s4));
+        }
+    }
+    /* Standard: die Spiel-Hauptschleife (0x101F10) ruft 0x28F084 und
+       0x103D20 selbst. Nur fuer Diagnose optional direkt treiben. */
+    {
+        static int drive = -1;
+        if (drive < 0) drive = (getenv("HLE_ENGINE_DRIVE") != NULL);
+        if (drive) {
+            c->r[0] = 0x003EC028u;
+            arm_call_guest_pub(c, 0x0028F084u);
+            c->r[0] = 0x003EC028u;
+            c->r[1] = 0u; c->r[2] = 0u; c->r[3] = 0u;
+            c->r[13] = 0x0CF0A000u;
+            arm_call_guest_pub(c, 0x00103D20u);
+        }
+    }
+    memcpy(c->r, sr, sizeof(sr));
+    calls++;
+    if (elog && (calls <= 3 || (calls % 120u) == 0)) {
+        uint32_t c4 = 0, fb0 = 0, fb1 = 0, dl = 0;
+        memcpy(&c4, c->mem + 0x0040B4C4u, 4);
+        memcpy(&dl, c->mem + 0x0040B4E0u, 4);
+        fb0 = hle_gsp_fb_addr(0);
+        fb1 = hle_gsp_fb_addr(1);
+        uint32_t scv = 0, rv = 0, rg = 0, m59c = 0, f248 = 0;
+        memcpy(&scv, c->mem + 0x003EC028u, 4);
+        memcpy(&rv, c->mem + 0x00422200u, 4);
+        memcpy(&rg, c->mem + 0x004237A3u, 1);
+        memcpy(&m59c, c->mem + 0x003EC5C4u, 4);
+        memcpy(&f248, c->mem + 0x003EC270u, 4);
+        {
+            uint16_t lc = 0;
+            uint32_t r_vt = 0, r98 = 0, r9c = 0, r20c = 0, r_b4c = 0, r_b48 = 0;
+            uint32_t r_3b0 = 0, r_3b4 = 0;
+            memcpy(&lc, c->mem + 0x0040ABCEu, 2);
+            memcpy(&r_vt, c->mem + 0x00408808u, 4);
+            memcpy(&r98, c->mem + 0x004088A0u, 4);
+            memcpy(&r9c, c->mem + 0x004088A4u, 4);
+            memcpy(&r20c, c->mem + 0x00408A14u, 4);
+            memcpy(&r_b4c, c->mem + 0x00409354u, 4);
+            memcpy(&r_b48, c->mem + 0x00409350u, 4);
+            memcpy(&r_3b0, c->mem + 0x0040ABC0u, 4);
+            memcpy(&r_3b4, c->mem + 0x0040ABC4u, 4);
+            printf("[engine] call=%u scene=%08X rnd=%08X gate=%08X list=%u "
+                   "rvt=%08X r98=%08X r9c=%08X r20c=%08X b48=%08X b4c=%08X "
+                   "l3b0=%08X l3b4=%08X\n",
+                   calls, scv, rv, rg, (unsigned)lc, r_vt, r98, r9c, r20c,
+                   r_b48, r_b4c, r_3b0, r_3b4);
+        }
+        fflush(stdout);
+    }
+}
+
 /* VBlank-/Frame-Dispatcher: Die Engine registriert ihre Tick-Tasks in der
    Callback-Tabelle 0x3D7C50 (Basis [0x3D91E8+0x1C]); Slot 2 = 0x00134818
    (Timebase 0x400) und Slot 3 = 0x0013485C (Timebase 0x401). Ohne diese
@@ -258,15 +1339,20 @@ static void hle_tick(ArmCpu *c) {
             /* Pool an +0x5C: {array, stride, start, end}; array[0] -> Scratch-Objekt */
             memcpy(&cur, c->mem + 0x3EE188u, 4);
             if (cur == 0u) {
+                uint16_t cap16 = 0x100u;
                 memcpy(c->mem + 0x3EE188u, &pool, 4);
                 memcpy(c->mem + 0x3EE18Cu, &stride, 4);
                 memcpy(c->mem + 0x3EE190u, &zero16, 2);
-                memcpy(c->mem + 0x3EE194u, &one, 2);
+                memcpy(c->mem + 0x3EE192u, &cap16, 2);
+                memcpy(c->mem + 0x3EE194u, &zero16, 2);
                 /* Pool-Slots mit Scratch-Objekten fuellen: fn_00284A38 liefert
                    base+index*stride, und der Builder liest dort den Objektzeiger.
                    Ohne gefuellte Slots bricht er bei 0x280338 ab. */
                 for (uint32_t i = 0; i < 0x100u; i++) {
                     uint32_t o = obj + i * 0x100u;
+                    /* Diagnose: Pool-Slots mit dem echten Menue-Objekt
+                       fuellen, damit der Builder kein Null-Objekt anhaengt. */
+                    if (getenv("HLE_POOL_MENUOBJ")) o = 0x003EE12Cu;
                     memcpy(c->mem + ((pool + i * 4u) & 0x1FFFFFFFu), &o, 4);
                 }
             }
@@ -326,6 +1412,7 @@ static void hle_tick(ArmCpu *c) {
     c->r[13] = 0x0CF0F000u;
     arm_call_guest_pub(c, 0x00134818u);
     arm_call_guest_pub(c, 0x0013485Cu);
+    hle_engine_frame(c);
     if (getenv("HLE_TICK_LOG")) {
         static uint32_t last_h1 = 0xFFFFFFFFu;
         uint32_t h1 = 0, h2 = 0, c4 = 0, dl = 0;
@@ -393,9 +1480,150 @@ void hle_pump(void) {
                         }
                     }
                 }
+                /* Diagnose: Parent-Zeiger des Menue-Objekts (menu+4)
+                   setzen; er bleibt im Port 0, weil die Welt-Init ihn
+                   nicht schreibt. */
+                {
+                    static int mpar = -1;
+                    if (mpar < 0) mpar = (getenv("HLE_MENU_PARENT") != NULL);
+                    if (mpar) {
+                        uint32_t w = 0x003EC028u;
+                        const char *mp = getenv("HLE_MENU_PARENT");
+                        if (mp != NULL && *mp != 0 && *mp != '1')
+                            w = (uint32_t)strtoul(mp, NULL, 16);
+                        memcpy(g_frame_cpu->mem + 0x003EE130u, &w, 4);
+                    }
+                }
                 printf("[frameloop2] call 0x%08X r0=%08X\n", fa2, g_frame_cpu->r[0]);
                 fflush(stdout);
+                hle_apply_pokes(g_frame_cpu);
+                {
+                    static uint32_t fsp = 0xFFFFFFFFu;
+                    if (fsp == 0xFFFFFFFFu) {
+                        const char *es = getenv("HLE_FRAME_SP");
+                        fsp = (es != NULL && *es != 0)
+                                  ? (uint32_t)strtoul(es, NULL, 16) : 0u;
+                    }
+                    if (fsp != 0u) {
+                        g_frame_cpu->r[13] = fsp;
+                        memset(g_frame_cpu->mem + (fsp & 0x1FFFFFFFu), 0, 0x100u);
+                    }
+                }
+                hle_apply_pokes(g_frame_cpu);
+                /* Einmaliger Vor-Aufruf (z. B. Ring-Init 0x126D28):
+                   HLE_PRECALL=addr,r0,r1,r2,r3 (hex, optional). */
+                {
+                    static int pre_state = -1;
+                    if (pre_state < 0)
+                        pre_state = (getenv("HLE_PRECALL") != NULL) ? 0 : 2;
+                    if (pre_state == 0) {
+                        const char *s = getenv("HLE_PRECALL");
+                        char buf[128], *pp = buf;
+                        uint32_t v[5] = {0, 0, 0, 0, 0};
+                        int n = 0;
+                        memcpy(buf, s, sizeof(buf) < strlen(s) + 1
+                               ? sizeof(buf) - 1 : strlen(s) + 1);
+                        buf[sizeof(buf) - 1] = 0;
+                        while (pp != NULL && *pp && n < 5) {
+                            char *c = strchr(pp, ',');
+                            if (c) *c = 0;
+                            v[n++] = (uint32_t)strtoul(pp, NULL, 16);
+                            pp = c ? c + 1 : NULL;
+                        }
+                        pre_state = 1;
+                        if (n >= 1 && v[0] >= 0x00100000u) {
+                            uint32_t sv[16];
+                            memcpy(sv, g_frame_cpu->r, sizeof(sv));
+                            g_frame_cpu->r[0] = v[1];
+                            g_frame_cpu->r[1] = v[2];
+                            g_frame_cpu->r[2] = v[3];
+                            g_frame_cpu->r[3] = v[4];
+                            g_frame_cpu->r[13] = 0x0CF0A000u;
+                            printf("[precall] 0x%08X(%08X,%08X,%08X)\n",
+                                   v[0], v[1], v[2], v[3]);
+                            fflush(stdout);
+                            arm_call_guest_pub(g_frame_cpu, v[0]);
+                            printf("[precall] -> r0=%08X\n", g_frame_cpu->r[0]);
+                            fflush(stdout);
+                            memcpy(g_frame_cpu->r, sv, sizeof(sv));
+                        }
+                    }
+                }
                 arm_call_guest_pub(g_frame_cpu, fa2);
+                {
+                    static int pc_done = 0;
+                    if (pc_done < 6) {
+                        uint32_t j, v, dsc = 0;
+                        pc_done++;
+                        memcpy(&dsc, g_frame_cpu->mem + 0x3EE678u, 4);
+                        printf("[postcall] fa2=%08X dsc[3EE678]=%08X E800000:",
+                               fa2, dsc);
+                        for (j = 0; j < 10u; j++) {
+                            memcpy(&v, g_frame_cpu->mem +
+                                   0x0E800000u + j * 4u, 4);
+                            printf(" %08X", v);
+                        }
+                        printf(" ab=%d\n", g_frame_cpu->aborted);
+                        fflush(stdout);
+                    }
+                }
+                {
+                    static int logret = -1;
+                    if (logret < 0) logret = (getenv("HLE_LOGRET") != NULL);
+                    if (logret) {
+                        printf("[frameloop2] ret 0x%08X -> r0=%08X\n", fa2,
+                               g_frame_cpu->r[0]);
+                        fflush(stdout);
+                    }
+                }
+                /* Nach dem Engine-Submit den echten Trigger-Wrapper
+                   0x13E3E0 (gsp::Gpu 0x000C) aus dem Engine-Code aufrufen. */
+                if (fa2 == 0x0012FD30u || fa2 == 0x0012493Cu) {
+                    static int gtrig = -1;
+                    if (gtrig < 0) gtrig = (getenv("HLE_GSP_TRIGGER") != NULL);
+                    if (gtrig && g_hle_gsp_handle != 0u) {
+                        uint32_t tv[16], h = g_hle_gsp_handle, out = 0;
+                        memcpy(g_frame_cpu->mem + 0x0CFE9100u, &h, 4);
+                        hle_apply_pokes(g_frame_cpu);
+                        {
+                            static int qlog = -1;
+                            if (qlog < 0) qlog = (getenv("HLE_QUEUE_LOG") != NULL);
+                            if (qlog) {
+                                uint32_t c1 = 0, a1 = 0, s1 = 0;
+                                uint32_t d0 = 0, d1 = 0, d2 = 0;
+                                memcpy(&c1, g_frame_cpu->mem + 0x10002818u, 4);
+                                memcpy(&a1, g_frame_cpu->mem + 0x1000281Cu, 4);
+                                memcpy(&s1, g_frame_cpu->mem + 0x100028B0u, 4);
+                                memcpy(&d0, g_frame_cpu->mem + 0x0EA00004u, 4);
+                                memcpy(&d1, g_frame_cpu->mem + 0x0EA10000u, 4);
+                                memcpy(&d2, g_frame_cpu->mem + 0x0EA1002Cu, 4);
+                                printf("[queue] pre-trigger n=%u addr=%08X size=%X "
+                                       "desc+4=%08X A=%08X A+2c=%08X\n",
+                                       c1, a1, s1, d0, d1, d2);
+                                {
+                                    uint32_t saw;
+                                    printf("[qmem] E800000:");
+                                    for (saw = 0; saw < 16; saw++) {
+                                        uint32_t v = 0;
+                                        memcpy(&v, g_frame_cpu->mem +
+                                               0x0E800000u + saw * 4u, 4);
+                                        printf(" %08X", v);
+                                    }
+                                    printf("\n");
+                                }
+                                fflush(stdout);
+                            }
+                        }
+                        memcpy(tv, g_frame_cpu->r, sizeof(tv));
+                        g_frame_cpu->r[0] = 0x0CFE9100u;
+                        g_frame_cpu->r[1] = 0u;
+                        g_frame_cpu->r[2] = 0x0CFE9200u;
+                        g_frame_cpu->r[13] = 0x0D900000u;
+                        arm_call_guest_pub(g_frame_cpu, 0x0013E3E0u);
+                        memcpy(&out, g_frame_cpu->mem + 0x0CFE9200u, 4);
+                        memcpy(g_frame_cpu->r, tv, sizeof(tv));
+                    }
+                }
                 memcpy(g_frame_cpu->r, fsave, sizeof(fsave));
                 in_fl2 = 0;
             }
@@ -409,6 +1637,266 @@ void hle_pump(void) {
             static unsigned gspq_div = 0;
             if ((++gspq_div & 0x3FFu) == 0) {
                 gsp_process_cmdqueue(g_frame_cpu);
+            }
+        }
+    }
+    /* Menue-Init-Gate dauerhaft offen halten (0x10FC9C liest es). */
+    if (g_frame_cpu != NULL) {
+        static int meg = -1;
+        if (meg < 0) meg = (getenv("HLE_ENGINE_MENU") != NULL);
+        if (meg && g_frame_cpu->mem_size > 0x3D8CE0u) {
+            uint8_t g1 = 1;
+            g_frame_cpu->mem[0x3D8CE0u] = g1;
+        }
+    }
+    /* Diagnose: Menue-Welt-Update + 3D-Renderer periodisch aus dem laufenden
+       Menue-Kontext aufrufen (eigener Stack, damit nichts ueberschrieben
+       wird). */
+    if (g_frame_cpu != NULL) {
+        static int mw = -1, in_mw = 0;
+        if (mw < 0) mw = (getenv("HLE_MENU_WORLD") != NULL);
+        if (mw && !in_mw) {
+            static unsigned mc = 0;
+            uint32_t sc = 0;
+            memcpy(&sc, g_frame_cpu->mem + 0x003EC028u, 4);
+            if (sc != 0u && (++mc & 0x1FFFu) == 0) {
+                uint32_t sv[16];
+                in_mw = 1;
+                memcpy(sv, g_frame_cpu->r, sizeof(sv));
+                g_frame_cpu->r[0] = 0x003EC028u;
+                g_frame_cpu->r[1] = 0u;
+                g_frame_cpu->r[13] = 0x0CF0A000u;
+                arm_call_guest_pub(g_frame_cpu, 0x00285208u);
+                {
+                    uint8_t z = 0, one = 1;
+                    memcpy(g_frame_cpu->mem + 0x003D8E6Au, &z, 1);
+                    memcpy(g_frame_cpu->mem + 0x003D94E8u, &one, 1);
+                    memcpy(g_frame_cpu->mem + 0x003D94E9u, &z, 1);
+                }
+                g_frame_cpu->r[0] = 0x00422200u;
+                g_frame_cpu->r[13] = 0x0CF0A000u;
+                arm_call_guest_pub(g_frame_cpu, 0x001B9938u);
+                memcpy(g_frame_cpu->r, sv, sizeof(sv));
+                {
+                    static int lm = 0;
+                    if (!lm) {
+                        uint32_t u = 0;
+                        lm = 1;
+                        memcpy(&u, g_frame_cpu->mem + 0x00422200u + 0x1530u, 4);
+                        printf("[menuworld] units=%u\n", u);
+                        {
+                            int k;
+                            printf("[menudump] 3EE12C:");
+                            for (k = 0; k < 24; k++) {
+                                uint32_t v = 0;
+                                memcpy(&v, g_frame_cpu->mem + 0x003EE12Cu + (uint32_t)k * 4u, 4);
+                                printf(" %08X", v);
+                            }
+                            printf("\n[menudump] scene:");
+                            for (k = 0; k < 16; k++) {
+                                uint32_t v = 0;
+                                memcpy(&v, g_frame_cpu->mem + 0x003CA494u + (uint32_t)k * 4u, 4);
+                                printf(" %08X", v);
+                            }
+                            printf("\n");
+                            {
+                                uint32_t st = 0;
+                                memcpy(&st, g_frame_cpu->mem + 0x003EE12Cu, 4);
+                                printf("[menudump] state=%08X:", st);
+                                if (st >= 0x00100000u && st < 0x20000000u) {
+                                    for (k = 0; k < 32; k++) {
+                                        uint32_t v = 0;
+                                        memcpy(&v, g_frame_cpu->mem + (st & 0x1FFFFFFFu) + (uint32_t)k * 4u, 4);
+                                        printf(" %08X", v);
+                                    }
+                                }
+                                printf("\n");
+                            }
+                            {
+                                uint32_t a, hits = 0;
+                                {
+                                    uint32_t a, hits = 0, want = 0x003EE12Cu;
+                                    printf("[menuscan] ptr(3EE12C):");
+                                    for (a = 0x00100000u; a + 4u < g_frame_cpu->mem_size && hits < 8u; a += 4u) {
+                                        uint32_t v = 0;
+                                        memcpy(&v, g_frame_cpu->mem + a, 4);
+                                        if (v == want) {
+                                            printf(" %08X", a);
+                                            hits++;
+                                        }
+                                    }
+                                    printf("\n");
+                                }
+                                printf("[menuscan] IMGC00:");
+                                for (a = 0x00100000u; a + 8u < g_frame_cpu->mem_size && hits < 8u; a += 4u) {
+                                    if (memcmp(g_frame_cpu->mem + a, "IMGC00", 6) == 0) {
+                                        printf(" %08X", a);
+                                        hits++;
+                                    }
+                                }
+                                printf("\n");
+                            }
+                        }
+                        fflush(stdout);
+                    }
+                }
+                in_mw = 0;
+            }
+        }
+    }
+    /* Diagnose: Engine-GSP-Client initialisieren und Trigger periodisch
+       aufrufen (beide laufen im Menue-Loop sonst nie). */
+    if (g_frame_cpu != NULL) {
+        static int ge = -1, ge_init = 0, in_ge = 0;
+        if (ge < 0) ge = (getenv("HLE_GSP_ENGINE") != NULL);
+        if (ge && !in_ge) {
+            uint32_t sv[16];
+            static unsigned gc = 0;
+            in_ge = 1;
+            memcpy(sv, g_frame_cpu->r, sizeof(sv));
+            if (!ge_init) {
+                uint8_t z = 0;
+                uint32_t nine = 9, h1 = 0, h2 = 0, st = 0;
+                ge_init = 1;
+                /* GSP-Client 0x3D91E8 wie im echten Boot vorbereiten:
+                   Name "gsp::Gpu" an +0x10, Laenge 9 an +4, Flags 0. */
+                memcpy(g_frame_cpu->mem + 0x003D91F8u, "gsp::Gpu", 9);
+                memcpy(g_frame_cpu->mem + 0x003D91E8u, &z, 1);
+                memcpy(g_frame_cpu->mem + 0x003D91E9u, &z, 1);
+                memcpy(g_frame_cpu->mem + 0x003D91EAu, &z, 1);
+                memcpy(g_frame_cpu->mem + 0x003D91ECu, &nine, 4);
+                g_frame_cpu->r[13] = 0x0CF0A000u;
+                arm_call_guest_pub(g_frame_cpu, 0x00138D70u);
+                memcpy(&h1, g_frame_cpu->mem + 0x003D91F8u, 4);
+                memcpy(&h2, g_frame_cpu->mem + 0x003D91FCu, 4);
+                memcpy(&st, g_frame_cpu->mem + 0x003D9204u, 4);
+                /* Die Engine-Init bekam cam:u (Handle 4) statt gsp: den
+                   echten gsp-Handle in Client und Auswahl-Slot setzen. */
+                if (g_hle_gsp_handle != 0) {
+                    uint32_t gh = g_hle_gsp_handle;
+                    memcpy(g_frame_cpu->mem + 0x003D91F8u, &gh, 4);
+                    memcpy(g_frame_cpu->mem + 0x003D91FCu, &gh, 4);
+                    memcpy(g_frame_cpu->mem + 0x003DA6DCu, &gh, 4);
+                }
+                {
+                    uint32_t ctx = 0;
+                    memcpy(&ctx, g_frame_cpu->mem + 0x003D91E8u + 0x1Cu, 4);
+                    printf("[gspengine] ctx=%08X", ctx);
+                    if (ctx >= 0x00100000u && ctx < 0x20000000u) {
+                        uint32_t k;
+                        for (k = 0x38u; k <= 0x68u; k += 4u) {
+                            uint32_t v = 0;
+                            memcpy(&v, g_frame_cpu->mem + (ctx & 0x1FFFFFFFu) + k, 4);
+                            printf(" +%02X=%08X", k, v);
+                        }
+                        if (getenv("HLE_GSP_BASE")) {
+                            const char *bs = getenv("HLE_GSP_BASE");
+                            uint32_t b = (bs != NULL && *bs != 0 && *bs != '1')
+                                             ? (uint32_t)strtoul(bs, NULL, 16) : 0x10002000u;
+                            uint32_t q58 = b + 0x800u, q5c = b + 0x200u, q60 = b + 0x240u;
+                            memcpy(g_frame_cpu->mem + (ctx & 0x1FFFFFFFu) + 0x40u, &b, 4);
+                            memcpy(g_frame_cpu->mem + (ctx & 0x1FFFFFFFu) + 0x58u, &q58, 4);
+                            memcpy(g_frame_cpu->mem + (ctx & 0x1FFFFFFFu) + 0x5Cu, &q5c, 4);
+                            memcpy(g_frame_cpu->mem + (ctx & 0x1FFFFFFFu) + 0x60u, &q60, 4);
+                            printf(" base=%08X q58=%08X", b, q58);
+                        }
+                    }
+                    printf("\n");
+                }
+                printf("[gspengine] 0x138D70: h10=%u h14=%u state=%08X -> gsp=%u\n",
+                       h1, h2, st, g_hle_gsp_handle);
+                fflush(stdout);
+            }
+            if ((++gc & 0x1FFFu) == 0) {
+                /* 0x13E3E0 ist ein generischer IPC-Wrapper:
+                   r0 zeigt auf die Handle-Variable, r1 = Param, r2 = Out.
+                   Also einen Scratch-Slot mit dem gsp-Handle fuellen. */
+                uint32_t gh = g_hle_gsp_export;
+                static int ring_fill = -1;
+                if (ring_fill < 0)
+                    ring_fill = (getenv("HLE_RING_FILL") != NULL);
+                if (ring_fill) {
+                    uint32_t base = 0x10002800u, hdr = 1u << 8;
+                    uint32_t addr = 0x0CFE6000u, sz = 0x24u;
+                    uint8_t id = 1;
+                    memcpy(g_frame_cpu->mem + base, &hdr, 4);
+                    memcpy(g_frame_cpu->mem + base + 0x20u, &id, 1);
+                    memcpy(g_frame_cpu->mem + base + 0x24u, &addr, 4);
+                    memcpy(g_frame_cpu->mem + base + 0x28u, &sz, 4);
+                }
+                memcpy(g_frame_cpu->mem + 0x0CFE9100u, &gh, 4);
+                g_frame_cpu->r[0] = 0x0CFE9100u;
+                g_frame_cpu->r[1] = 0u;
+                g_frame_cpu->r[2] = 0x0CFE9108u;
+                g_frame_cpu->r[3] = 0u;
+                g_frame_cpu->r[13] = 0x0CF0A000u;
+                arm_call_guest_pub(g_frame_cpu, 0x0013E3E0u);
+            }
+            memcpy(g_frame_cpu->r, sv, sizeof(sv));
+            in_ge = 0;
+        }
+    }
+    /* Diagnose: Draw-List-Eintrag in die 3D-Unit-Liste
+       (0x00422200+0x14F0/+0x1530) spiegeln und den 3D-Renderer aufrufen. */
+    if (g_frame_cpu != NULL) {
+        static int xu = -1, in_xu = 0;
+        if (xu < 0) xu = (getenv("HLE_UNIT_XFER") != NULL);
+        if (xu && !in_xu) {
+            uint16_t dlc = 0;
+            uint32_t arr = 0;
+            memcpy(&dlc, g_frame_cpu->mem + 0x003EE1A0u, 2);
+            memcpy(&arr, g_frame_cpu->mem + 0x003EE198u, 4);
+            {
+                const char *uo = getenv("HLE_UNIT_OBJ");
+                uint32_t forced = (uo != NULL && *uo != 0) ? (uint32_t)strtoul(uo, NULL, 16) : 0u;
+                if (forced == 0u && arr != 0u)
+                    memcpy(&forced, g_frame_cpu->mem + (arr & 0x1FFFFFFFu), 4);
+            if (forced != 0u) {
+                uint32_t obj = 0, n = 0x004236F0u, z = 0, one = 1;
+                uint8_t t = 0;
+                uint32_t sx[16];
+                obj = forced;
+                memcpy(g_frame_cpu->mem + n + 0x00u, &obj, 4);
+                memcpy(g_frame_cpu->mem + n + 0x04u, &z, 4);
+                memcpy(g_frame_cpu->mem + n + 0x08u, &t, 1);
+                memcpy(g_frame_cpu->mem + n + 0x10u, &obj, 4);
+                memcpy(g_frame_cpu->mem + n + 0x14u, &obj, 4);
+                {
+                    uint32_t node18 = 0x0CFF4000u;
+                    memcpy(g_frame_cpu->mem + n + 0x18u, &node18, 4);
+                }
+                memcpy(g_frame_cpu->mem + 0x00423730u, &one, 4);
+                in_xu = 1;
+                memcpy(sx, g_frame_cpu->r, sizeof(sx));
+                {
+                    uint8_t gz = 0, go = 1;
+                    memcpy(g_frame_cpu->mem + 0x003D8E6Au, &gz, 1);
+                    memcpy(g_frame_cpu->mem + 0x003D94E8u, &go, 1);
+                    memcpy(g_frame_cpu->mem + 0x003D94E9u, &gz, 1);
+                    /* Renderer-Enable [0x422200+0x15A3]: ohne dieses Byte
+                       bricht fn_001B9938 sofort bei 0x1BA964 ab. */
+                    memcpy(g_frame_cpu->mem + 0x004237A3u, &go, 1);
+                }
+                /* gsp-Client-Slot der Engine-Wrapper (0x34B55C/0x34B5C4) */
+                if (g_hle_gsp_handle != 0) {
+                    uint32_t gh = g_hle_gsp_handle;
+                    memcpy(g_frame_cpu->mem + 0x003DA6DCu, &gh, 4);
+                    memcpy(g_frame_cpu->mem + 0x003D9098u, &gh, 4);
+                }
+                g_frame_cpu->r[0] = 0x00422200u;
+                g_frame_cpu->r[13] = 0x0CF0A000u;
+                arm_call_guest_pub(g_frame_cpu, 0x001B9938u);
+                memcpy(g_frame_cpu->r, sx, sizeof(sx));
+                {
+                    static int lx = 0;
+                    if (!lx) {
+                        lx = 1;
+                        printf("[unitxfer] obj=%08X -> units=1, 3D-Renderer aufgerufen\n", obj);
+                        fflush(stdout);
+                    }
+                }
+                in_xu = 0;
+            }
             }
         }
     }
@@ -1913,11 +3401,54 @@ static void dsp_command(Ipc *r, uint32_t *p) {
 /* GSP-Service: minimal, damit ein Aufruf des Spiels nicht scheitert.
  * WriteHWRegs (0x0001), SetBufferSwap (0x0004), RegisterInterruptRelayQueue
  * (0x0006), TriggerCmdReqQueue (0x0008), ImportDisplayCaptureInfo (0x0009). */
-static uint32_t g_gsp_fb_addr[3] = {0x1F000000u, 0x1F000000u, 0x1F000000u};
 static int g_gsp_last_screen = 0;
 
 /* Verarbeitet den GSP-Shared-Memory-Kommandopuffer (Azahar-Layout) und
    fuehrt SubmitCmdList-Eintraege (id 0x01) ueber gpu_run_command_list aus. */
+/* Liest die vom Spiel in den GSP-Shared-Memory geschriebene
+   FrameBufferInfo (Azahar gsp_gpu.h):
+     base = GSP-Shmem + 0x200 + (2*thread + screen) * 0x40
+     +0 byte index, +1 dirty, +8 FrameBufferInfo (0x20 je Eintrag)
+     FrameBufferInfo: +0 active_fb, +4 address_left, +0xC stride, +0x10 format.
+   Damit bekommt der Port die echten FB-Adressen beider Screens. */
+static int gsp_fb_info(ArmCpu *c, int screen, uint32_t *addr, uint32_t *stride,
+                       uint32_t *format) {
+    if (c == NULL) return 0;
+    for (int tid = 0; tid < 8; tid++) {
+        uint32_t base = (0x10002000u + 0x200u +
+                         ((uint32_t)(2 * tid + screen) * 0x40u)) & 0x1FFFFFFFu;
+        if (base + 0x40u > c->mem_size) break;
+        uint32_t idx = c->mem[base] & 1u;
+        uint32_t info = base + 8u + idx * 0x20u;
+        uint32_t active = 0, left = 0, right = 0, st = 0, fmt = 0;
+        memcpy(&active, c->mem + info + 0u, 4);
+        memcpy(&left, c->mem + info + 4u, 4);
+        memcpy(&right, c->mem + info + 8u, 4);
+        memcpy(&st, c->mem + info + 0xCu, 4);
+        memcpy(&fmt, c->mem + info + 0x10u, 4);
+        (void)active; (void)right;
+        if (left != 0u && st != 0u) {
+            if (addr) *addr = left;
+            if (stride) *stride = st;
+            if (format) *format = fmt;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int gsp_engine_list(ArmCpu *c, uint32_t a)
+{
+    uint32_t w0 = 0, w1 = 0, w2 = 0, w3 = 0;
+    if ((uint64_t)a + 0x64u > c->mem_size) return 0;
+    memcpy(&w0, c->mem + a, 4);
+    memcpy(&w1, c->mem + a + 4u, 4);
+    memcpy(&w2, c->mem + a + 8u, 4);
+    memcpy(&w3, c->mem + a + 0x60u, 4);
+    return (w0 == 0u && w1 == a + 4u && w2 == a + 4u &&
+            w3 >= 0x00100000u && w3 < 0x20000000u);
+}
+
 static int gsp_process_cmdqueue(ArmCpu *c) {
     int qops = 0;
     if (c == NULL) return 0;
@@ -1938,7 +3469,9 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
             memcpy(&size, c->mem + cb + 8u, 4);
             if ((cmd & 0xFFu) == 0x01u && addr != 0u && size != 0u &&
                 size <= 0x00100000u) {
-                int nops = gpu_run_command_list(c, addr, size);
+                int nops = (addr == 0x08002000u || addr == 0x0CFE2000u || addr == 0x0CFE2100u || addr == 0x0CFE6000u)
+                               ? gpu_run_command_list(c, addr, size)
+                               : gpu_run_pica_list(c, addr, size);
                 qops += nops;
                 printf("[gspq] tid=%d idx=%u id=%u list=%08X size=%X ops=%d\n",
                        tid, idx, cmd & 0xFFu, addr, size, nops);
@@ -1948,6 +3481,30 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
             uint32_t nn = ((hdr >> 8) & 0xFFu) - 1u;
             hdr = (ni & 0xFFu) | ((nn & 0xFFu) << 8) | (hdr & 0xFFFF0000u);
             memcpy(c->mem + base, &hdr, 4);
+        }
+        /* Engine-GX-Layout (aus fn_0013F2D4/fn_00139914): Anzahl bei +0x18,
+           Listenadresse bei +0x1C, Groesse bei +0xB0. Die Engine schreibt
+           genau diese Felder, wenn 0x12FD30 mit dem CommandBuffer als r0
+           laeuft; HLE liest sie hier als SubmitCmdList. */
+        {
+            uint32_t ecnt = 0, eaddr = 0, esize = 0;
+            memcpy(&ecnt, c->mem + base + 0x18u, 4);
+            memcpy(&eaddr, c->mem + base + 0x1Cu, 4);
+            memcpy(&esize, c->mem + base + 0xB0u, 4);
+            if (ecnt != 0u && ecnt <= 0xFu && eaddr >= 0x00100000u &&
+                eaddr < 0x20000000u && esize > 0u && esize <= 0x01000000u) {
+                int nops = (eaddr == 0x08002000u || eaddr == 0x0CFE2000u ||
+                            eaddr == 0x0CFE2100u || eaddr == 0x0CFE6000u)
+                               ? gpu_run_command_list(c, eaddr, esize)
+                               : gpu_run_pica_list(c, eaddr, esize);
+                if (nops == 0 && gsp_engine_list(c, eaddr)) nops = 1;
+                qops += nops;
+                printf("[gspq-engine] tid=%d n=%u list=%08X size=%X ops=%d\n",
+                       tid, ecnt, eaddr, esize, nops);
+                fflush(stdout);
+                ecnt = 0;
+                memcpy(c->mem + base + 0x18u, &ecnt, 4);
+            }
         }
     }
     return qops;
@@ -1970,13 +3527,35 @@ static void gsp_command(Ipc *r, uint32_t *p) {
             ipc_put(r, 0);
             break;
         }
-        case 0x0005: { /* SetBufferSwap(screen, framebuffer_info) */
+        case 0x0005: { /* SetBufferSwap(screen, framebuffer_info)
+                           screen=2 bedeutet "beide" und wird als zwei echte
+                           Swaps screen=0/1 mit den FB-Adressen aus dem
+                           GSP-Shared-Memory behandelt. */
             uint32_t screen = p[0];
-            uint32_t fb = p[1];
-            if (screen < 3) g_gsp_fb_addr[screen] = fb;
-            gpu_set_fb(fb);
-            g_gsp_last_screen = (int)(screen & 1);
-            if (g_log) printf("[gsp] SetBufferSwap screen=%u fb=0x%08X\n", screen, fb);
+            uint32_t fb = (r->normal >= 2) ? p[1] : 0u;
+            if (screen == 2u || screen == 3u) {
+                for (uint32_t s = 0; s < 2u; s++) {
+                    uint32_t a = 0, st = 0, fmt = 0;
+                    if (!gsp_fb_info(g_cpu, (int)s, &a, &st, &fmt)) a = g_gsp_fb_addr[s];
+                    g_gsp_fb_addr[s] = a;
+                    gpu_set_fb_size(a, (s == 1u) ? 320 : 400, 240);
+                    if (g_log) printf("[gsp] SetBufferSwap screen=%u fb=0x%08X "
+                                      "stride=0x%X fmt=%X\n", s, a, st, fmt);
+                }
+                g_gsp_last_screen = 1;
+            } else {
+                if (screen < 3u && fb != 0u) g_gsp_fb_addr[screen] = fb;
+                else if (screen < 2u) {
+                    uint32_t a = 0, st = 0, fmt = 0;
+                    if (gsp_fb_info(g_cpu, (int)screen, &a, &st, &fmt))
+                        g_gsp_fb_addr[screen] = a;
+                }
+                gpu_set_fb_size(g_gsp_fb_addr[screen < 2u ? screen : 0],
+                                (screen == 1u) ? 320 : 400, 240);
+                g_gsp_last_screen = (int)(screen & 1);
+                if (g_log) printf("[gsp] SetBufferSwap screen=%u fb=0x%08X\n",
+                                  screen, g_gsp_fb_addr[screen < 3u ? screen : 0]);
+            }
             ipc_begin(r, 0x0005, 1, 0);
             ipc_put(r, 0);
             break;
@@ -1991,10 +3570,23 @@ static void gsp_command(Ipc *r, uint32_t *p) {
             ipc_put(r, 0);
             break;
         }
-        case 0x0007: { /* RequestDma */
+        case 0x0007: { /* RequestDma(src, dst, size, flags) */
+            uint32_t s0 = p[0], s1 = p[1], s2 = p[2], s3 = p[3];
             ipc_begin(r, r->cmd, (r->cmd == 0x0007) ? 2 : 1, 0);
             ipc_put(r, 0);
             if (r->cmd == 0x0007) ipc_put(r, 0);
+            if (g_log && r->cmd == 0x0007) {
+                printf("[gsp] RequestDma p0=%08X p1=%08X p2=%08X p3=%08X\n",
+                       s0, s1, s2, s3);
+            }
+            /* Echte DMA ausfuehren, falls die Parameter plausibel sind. */
+            if (r->cmd == 0x0007 && g_cpu != NULL && s2 != 0u &&
+                s2 <= 0x00100000u && s0 + s2 <= g_cpu->mem_size &&
+                s1 + s2 <= g_cpu->mem_size) {
+                memmove(g_cpu->mem + s1, g_cpu->mem + s0, s2);
+                if (g_log) printf("[gsp] DMA copy %08X -> %08X (%u)\n",
+                                  s0, s1, s2);
+            }
             break;
         }
         case 0x0008: case 0x0009: case 0x000A:
@@ -2009,13 +3601,32 @@ static void gsp_command(Ipc *r, uint32_t *p) {
                Command[15] ab +0x20 (je 0x20 B). id 0x01 = SubmitCmdList
                (Adresse +0x04, Laenge +0x08). */
             int qops = gsp_process_cmdqueue(g_cpu);
+            {
+                static int ring_only = -1;
+                if (ring_only < 0)
+                    ring_only = (getenv("HLE_RING_ONLY") != NULL);
+                if (ring_only && qops > 0 && g_log) {
+                    printf("[gsp] Trigger: %d Ops aus Shared-Memory-Ring\n", qops);
+                }
+                if (ring_only && qops > 0)
+                    goto trigger_done;
+            }
             if (g_cmdlist_addr != 0 && g_cmdlist_size != 0 && g_cpu != NULL) {
-                int nops = gpu_run_command_list(g_cpu, g_cmdlist_addr, g_cmdlist_size);
-                if (g_log) printf("[gsp] TriggerCmdReqQueue -> %d Ops\n", nops);
+                int legacy = (g_cmdlist_addr == 0x08002000u ||
+                              g_cmdlist_addr == 0x00410000u ||
+                              g_cmdlist_addr == 0x0CFE2000u ||
+                              g_cmdlist_addr == 0x0CFE2100u ||
+                              g_cmdlist_addr == 0x0CFE6000u);
+                int nops = legacy
+                               ? gpu_run_command_list(g_cpu, g_cmdlist_addr, g_cmdlist_size)
+                               : gpu_run_pica_list(g_cpu, g_cmdlist_addr, g_cmdlist_size);
+                if (g_log) printf("[gsp] TriggerCmdReqQueue -> %d Ops%s\n", nops,
+                                          legacy ? " (legacy)" : " (pica)");
             }
             if (g_log) printf("[gsp] Trigger lr=%08X addr=%08X size=%X qops=%d\n",
                               g_cpu ? g_cpu->r[14] : 0,
                               g_cmdlist_addr, g_cmdlist_size, qops);
+        trigger_done:
             ipc_begin(r, 0x000C, 1, 0);
             ipc_put(r, 0);
             break;
@@ -2412,6 +4023,7 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     arm_pump_hook = hle_pump;
     arm_tick_hook = hle_tick;
     g_frame_cpu = c;
+
     /* Der VBlank-Thread war nie gestartet (g_vblank_run blieb 0) ->
        keine Handle-Signalisierung, kein HID-Update, kein Relay-Flag. */
     if (getenv("HLE_NO_VBLANK") == NULL) {
@@ -2555,7 +4167,16 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
         if (!g_no_lock) guest_lock_enter();
     }
     g_main_cpu = c;
-    printf("[hle] romfs=%s log=%d srv-handle=%u\n", g_romfs, g_log, g_srv_handle);
+    /* gsp::Gpu muss im Port immer als Dienst existieren. Der Gast oeffnet
+       ihn im Normalfall beim Boot; im unvollstaendigen Bootpfad kommt der
+       srv-Request nie an, dann sind SetCommandList/TriggerCmdReqQueue/
+       SetBufferSwap fuer die HLE unerreichbar (g_hle_gsp_handle == 0).
+       WICHTIG: erst nach dem Handle-Reset oben allozieren. */
+    if (g_hle_gsp_handle == 0)
+        g_hle_gsp_handle = (uint32_t)alloc_handle(SVC_GSP_GPU, "gsp::Gpu");
+    g_hle_gsp_export = g_hle_gsp_handle;
+    printf("[hle] romfs=%s log=%d srv-handle=%u gsp-handle=%u\n",
+           g_romfs, g_log, g_srv_handle, g_hle_gsp_handle);
 }
 
 void hle_tick_stats(int *calls, unsigned long long *tick) {
@@ -2566,6 +4187,7 @@ void hle_tick_stats(int *calls, unsigned long long *tick) {
 void hle_report(void) {
     printf("[hle] ipc=%d ticks=%llu tickcalls=%d\n", g_ipc_count, (unsigned long long)g_tick, g_tick_calls);
     arm_hook_report();
+    arm_retforce_report();
     arm_perfmap_report();
     printf("[hle] letzte Ereignisse:\n");
     for (int i = 0; i < HLE_EV_RING; i++) {
@@ -2993,7 +4615,8 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             const char *name = (const char *)(c->mem + (c->r[1] & 0x1FFFFFFF));
             int svc = service_from_name(name);
             uint32_t h = (uint32_t)alloc_handle(svc, name);
-            if (g_log) printf("[svc] ConnectToPort(\"%s\") -> %u\n", name, h);
+            if (g_log) printf("[svc] ConnectToPort(\"%s\") -> %u (lr=%08X sp=%08X)\n",
+                              name, h, c->r[14], c->r[13]);
             c->r[1] = h;
             return 0;
         }

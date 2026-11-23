@@ -7,9 +7,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <windows.h>
+#include "imgc.h"
+
+/* Override fuer den naechsten FA-Read: erzwingt Archiv/Offset/Laenge
+   und sammelt den gelesenen Bytestrom im Gast-RAM (Engine-Request-Pfad). */
+static int g_fa_ovr_on = 0, g_fa_ovr_idx = 0;
+static uint32_t g_fa_ovr_base = 0u, g_fa_ovr_len = 0u, g_fa_ovr_cap = 0u;
+static int g_init_copied = 0;
+static int g_world_called = 0;
 
 uint32_t arm_last_block = 0;
 int arm_fa_ready = 0;
+extern void arm_call_guest_pub(struct ArmCpu *c, uint32_t addr);
 
 /* Host-Read fuer die .fa-Streams: Die Engine liest den ARC0-Header/Index ueber
  * fn_00280744 aus einem CFile-Objekt, dessen Stream nur 4 Bytes liefert. Hier
@@ -27,6 +36,11 @@ int hle_fa_read(ArmCpu *c) {
     memcpy(&stream, c->mem + (fob & 0x1FFFFFFFu), 4);
     if (stream < 0x08000000u || stream >= 0x20000000u) return -1;
     memcpy(&pos, c->mem + ((fob + 4u) & 0x1FFFFFFFu), 4);
+    {
+        const char *fpv = getenv("HLE_FA_FORCE_POS");
+        if (fpv != NULL && *fpv != 0 && fob == 0x00400008u && pos == 0u)
+            pos = (uint32_t)strtoul(fpv, NULL, 16);
+    }
     memcpy(&size, c->mem + ((stream + 0x10u) & 0x1FFFFFFFu), 4);
     /* Synthetischer HLE_REG_ENABLE-Archivguard: feste Objektadressen fuer
        lt6_b.fa / lt6_uk.fa, deren Stream-Groesse 0 bleibt. */
@@ -52,9 +66,26 @@ int hle_fa_read(ArmCpu *c) {
             }
         }
     }
+    /* Pro-Archiv-Zuordnung: die drei Registrierungs-Fobs sind fest
+       (0x400008/0x4000C8/0x400188 = a/b/uk). Das synthetische
+       File-Object teilt sich einen Stream; hier wird trotzdem das
+       richtige Archiv gewaehlt. */
+    if (fob == 0x00400008u) size = 0x004C1448u;
+    else if (fob == 0x004000C8u) size = 0x108BDFB8u;
+    else if (fob == 0x00400188u) size = 0x09BD69CCu;
+    if (size == 0x004C1448u || size == 0x108BDFB8u || size == 0x09BD69CCu)
+        memcpy(c->mem + ((stream + 0x10u) & 0x1FFFFFFFu), &size, 4);
     if (size == 0x004C1448u) { path = "out/romfs/lt6/arc/lt6_a.fa"; idx = 0; }
     else if (size == 0x108BDFB8u) { path = "out/romfs/lt6/arc/lt6_b.fa"; idx = 1; }
     else if (size == 0x09BD69CCu) { path = "out/romfs/lt6/arc/lt6_uk.fa"; idx = 2; }
+    if (g_fa_ovr_on) {
+        if (g_fa_ovr_idx == 1) path = "out/romfs/lt6/arc/lt6_b.fa";
+        else if (g_fa_ovr_idx == 2) path = "out/romfs/lt6/arc/lt6_uk.fa";
+        else path = "out/romfs/lt6/arc/lt6_a.fa";
+        idx = g_fa_ovr_idx;
+        if (pos < g_fa_ovr_base) pos = g_fa_ovr_base;
+        size = g_fa_ovr_base + g_fa_ovr_len;
+    }
     if (path == NULL) return -1;
     want = c->r[2];
     dst = c->r[1];
@@ -66,6 +97,13 @@ int hle_fa_read(ArmCpu *c) {
     if (fseek(fp[idx], (long)pos, SEEK_SET) != 0) return -1;
     if ((uint64_t)(dst & 0x1FFFFFFFu) + want > c->mem_size) return -1;
     n = fread(c->mem + (dst & 0x1FFFFFFFu), 1, want, fp[idx]);
+    if (g_fa_ovr_on && g_fa_ovr_cap != 0u && n > 0u) {
+        uint32_t rel = pos - g_fa_ovr_base;
+        if (rel < HLE_ASSET_CAP_MAX &&
+            rel + (uint32_t)n <= HLE_ASSET_CAP_MAX)
+            memcpy(c->mem + g_fa_ovr_cap + rel,
+                   c->mem + (dst & 0x1FFFFFFFu), n);
+    }
     npos = pos + (uint32_t)n;
     memcpy(c->mem + ((fob + 4u) & 0x1FFFFFFFu), &npos, 4);
     c->r[0] = (uint32_t)n;
@@ -73,7 +111,8 @@ int hle_fa_read(ArmCpu *c) {
         static int falog = -1;
         if (falog < 0) falog = (getenv("HLE_FA_LOG") != NULL);
         if (falog)
-            printf("[faread] idx=%d pos=%08X want=%08X n=%u\n", idx, pos, want, (unsigned)n);
+            printf("[faread] idx=%d pos=%08X want=%08X n=%u dst=%08X\n",
+                   idx, pos, want, (unsigned)n, dst);
     }
     return (int)n;
 }
@@ -466,6 +505,67 @@ static void hook_init(void)
 
 static void hook_hit(ArmCpu *c, uint32_t pc)
 {
+    if (c != NULL && pc == 0x00139914u && getenv("HLE_EMITDUMP") != NULL) {
+        static int ed2 = 0;
+        if (ed2 < 4) {
+            uint32_t j, v;
+            ed2++;
+            printf("[postemit] E800000:");
+            for (j = 0; j < 12u; j++) {
+                memcpy(&v, c->mem + 0x0E800000u + j * 4u, 4);
+                printf(" %08X", v);
+            }
+            printf(" | CB3EE680:");
+            for (j = 0; j < 12u; j++) {
+                memcpy(&v, c->mem + 0x003EE680u + j * 4u, 4);
+                printf(" %08X", v);
+            }
+            printf("\n");
+            fflush(stdout);
+        }
+    }
+    if (c != NULL && pc == 0x0012FC24u && getenv("HLE_EMITDUMP") != NULL) {
+        static int ed = 0;
+        if (ed < 6) {
+            uint32_t j, v, dsc = 0;
+            ed++;
+            memcpy(&dsc, c->mem + 0x003EE678u, 4);
+            {
+                uint32_t o1 = 0, o2 = 0, o3 = 0;
+                memcpy(&o1, c->mem + 0x003EE2D4u, 4);   /* [r1+4] */
+                if (o1 >= 0x00100000u && o1 < 0x20000000u)
+                    memcpy(&o2, c->mem + ((o1 + 0x3Cu) & 0x1FFFFFFFu), 4);
+                if (o2 >= 0x00100000u && o2 < 0x20000000u)
+                    memcpy(&o3, c->mem + (o2 & 0x1FFFFFFFu), 4);
+                printf("[emitin] chain [3EE2D4]=%08X o2=%08X count=%08X\n",
+                       o1, o2, o3);
+                {
+                    uint32_t k, base = 0x0042B7ACu & 0x1FFFFFFFu;
+                    printf("[ring42B7AC]");
+                    for (k = 0x17Cu; k <= 0x190u; k += 4u) {
+                        uint32_t v = 0;
+                        memcpy(&v, c->mem + base + k, 4);
+                        printf(" +%03X=%08X", k, v);
+                    }
+                    for (k = 0x20u; k <= 0x30u; k += 4u) {
+                        uint32_t v = 0;
+                        memcpy(&v, c->mem + base + k, 4);
+                        printf(" p%02X=%08X", k, v);
+                    }
+                    printf("\n");
+                    fflush(stdout);
+                }
+            }
+            printf("[emitin] r2=%08X r3=%08X dsc[3EE678]=%08X E800000:",
+                   c->r[2], c->r[3], dsc);
+            for (j = 0; j < 10u; j++) {
+                memcpy(&v, c->mem + 0x0E800000u + j * 4u, 4);
+                printf(" %08X", v);
+            }
+            printf("\n");
+            fflush(stdout);
+        }
+    }
     for (int i = 0; i < g_hook_count; i++) {
         HookEntry *h = &g_hooks[i];
         if (h->addr != pc || c == NULL) continue;
@@ -482,9 +582,11 @@ static void hook_hit(ArmCpu *c, uint32_t pc)
         case HK_REGS:
             if (h->hits <= h->max) {
                 printf("[hook] %s addr=%08X hits=%llu r0=%08X r1=%08X r2=%08X "
-                       "r3=%08X r4=%08X sp=%08X lr=%08X\n", h->name, pc,
+                       "r3=%08X r4=%08X r5=%08X r6=%08X r7=%08X r8=%08X "
+                       "sp=%08X lr=%08X\n", h->name, pc,
                        (unsigned long long)h->hits, c->r[0], c->r[1], c->r[2],
-                       c->r[3], c->r[4], c->r[13], c->r[14]);
+                       c->r[3], c->r[4], c->r[5], c->r[6], c->r[7], c->r[8],
+                       c->r[13], c->r[14]);
                 fflush(stdout);
             }
             break;
@@ -493,7 +595,7 @@ static void hook_hit(ArmCpu *c, uint32_t pc)
                 uint32_t a = c->r[0] & ~3u;
                 printf("[hook] %s addr=%08X hits=%llu mem@%08X:", h->name,
                        pc, (unsigned long long)h->hits, a);
-                for (int k = 0; k < 8; k++)
+                for (int k = 0; k < 16; k++)
                     printf(" %08X", (unsigned)arm_mem_read(c, a + (uint32_t)k * 4u, 4));
                 printf("\n");
                 fflush(stdout);
@@ -539,12 +641,124 @@ typedef struct {
     int fa_reg_ok, fa_fake_ok, fa_always, blklogf, force_asset;
     int dump_fatal, dump_r3, watch_pool, perf, rm_adv, romfs_log, romfs_force, heap_seed;
     int fast_memcpy, fake_asset, load_task, scene_ready, sp_gap;
-    int perfmap, hooks;
-    uint32_t blklog_lo;
-} TraceEnv;
+    int perfmap, hooks, xq_hook;
+    uint32_t blklog_lo;} TraceEnv;
 static TraceEnv g_te;
 
 static int envset(const char *n) { return getenv(n) != NULL; }
+static void trace_env_init(void);
+
+/* ------------------------------------------------------------------ *
+ * HLE_RETFORCE: generischer Gate-Force-Hook.
+ *   HLE_RETFORCE=26F130=1,284AA8=1,280034=1
+ * Die generierten fn_XXXXXX-Einstiege pruefen arm_retforce() und kehren
+ * bei Treffer sofort mit r0=<wert> zurueck. So lassen sich Ressourcen-/
+ * Submit-Gates in EINEM Build per Env durchfahren (statt Patch-Rebuilds).
+ * ------------------------------------------------------------------ */
+#define RETFORCE_MAX 32
+typedef struct {
+    uint32_t addr;
+    uint32_t value;
+    uint64_t hits;
+} RetForce;
+static RetForce g_rf[RETFORCE_MAX];
+static int g_rf_n = 0;
+static int g_rf_init = 0;
+
+static void retforce_init(void) {
+    const char *v = getenv("HLE_RETFORCE");
+    g_rf_init = 1;
+    g_rf_n = 0;
+    if (v == NULL) return;
+    while (*v != 0 && g_rf_n < RETFORCE_MAX) {
+        char *end = NULL;
+        uint32_t a = (uint32_t)strtoul(v, &end, 16);
+        if (end == v || *end != '=') break;
+        v = end + 1;
+        uint32_t val = (uint32_t)strtoul(v, &end, 16);
+        if (end == v) break;
+        g_rf[g_rf_n].addr = a;
+        g_rf[g_rf_n].value = val;
+        g_rf[g_rf_n].hits = 0;
+        g_rf_n++;
+        v = end;
+        while (*v == ',' || *v == ' ') v++;
+    }
+    if (g_rf_n > 0) {
+        printf("[retforce] %d Gate(s) aktiv:\n", g_rf_n);
+        for (int i = 0; i < g_rf_n; i++)
+            printf("  %08X -> r0=%08X\n", g_rf[i].addr, g_rf[i].value);
+        fflush(stdout);
+    }
+}
+
+int arm_retforce(struct ArmCpu *c, uint32_t addr) {
+    static int ba_init = 0;
+    static uint32_t ba_val = 0;
+    if (!ba_init) {
+        const char *e = getenv("HLE_BUILDER_ALLOC");
+        ba_init = 1;
+        if (e != NULL && *e != 0) ba_val = (uint32_t)strtoul(e, NULL, 16);
+    }
+    if (ba_val != 0u && addr == 0x00288960u && c != NULL &&
+        c->r[14] == 0x00280254u) {
+        static int ba_hit = 0;
+        if (ba_hit++ == 0) {
+            printf("[builderalloc] 0x288960 -> %08X (lr=00280254)\n", ba_val);
+            fflush(stdout);
+        }
+        c->r[0] = ba_val;
+        return 1;
+    }
+    /* HLE_ALLOC_BUMP=<base>: simpler Bump-Allokator fuer 0x284AA8.
+       Gibt bei jeder Allokation einen NEUEN Puffer (base + n*size)
+       zurueck, damit von der Engine gebaute Listen nicht zyklisch
+       werden (HLE_RETFORCE mit fester Adresse tat genau das). */
+    {
+        static int bump_init = 0;
+        static uint32_t bump_cur = 0;
+        if (!bump_init) {
+            const char *e = getenv("HLE_ALLOC_BUMP");
+            bump_init = 1;
+            if (e != NULL && *e != 0)
+                bump_cur = (uint32_t)strtoul(e, NULL, 16);
+        }
+        if (bump_cur != 0u && c != NULL && addr == 0x00284AA8u) {
+            uint32_t sz = (c->r[1] + 0x1Fu) & ~0x1Fu;
+            if (sz < 0x20u) sz = 0x20u;
+            c->r[0] = bump_cur;
+            bump_cur += sz;
+            return 1;
+        }
+    }
+    if (!g_te.init) trace_env_init();
+    if (!g_rf_init) retforce_init();
+    if (g_rf_n == 0) return 0;
+    for (int i = 0; i < g_rf_n; i++) {
+        if (g_rf[i].addr != addr) continue;
+        if (g_rf[i].hits == 0) {
+            uint32_t lr = (c != NULL) ? c->r[14] : 0;
+            printf("[retforce] hit %08X -> r0=%08X (lr=%08X)\n",
+                   g_rf[i].addr, g_rf[i].value, lr);
+            fflush(stdout);
+        }
+        g_rf[i].hits++;
+        if (c != NULL) c->r[0] = g_rf[i].value;
+        return 1;
+    }
+    return 0;
+}
+
+void arm_retforce_report(void) {
+    if (!g_rf_init) return;
+    for (int i = 0; i < g_rf_n; i++) {
+        if (g_rf[i].hits == 0) continue;
+        printf("[retforce-final] %08X hits=%llu value=%08X\n",
+               g_rf[i].addr, (unsigned long long)g_rf[i].hits,
+               g_rf[i].value);
+    }
+    fflush(stdout);
+}
 
 static void trace_env_init(void) {
     const char *v;
@@ -583,6 +797,7 @@ static void trace_env_init(void) {
     }
     g_te.perfmap = envset("HLE_PERFMAP") || (getenv("HLE_PERFMAP_FILE") != NULL);
     g_te.hooks = (getenv("HLE_HOOK") != NULL);
+    g_te.xq_hook = envset("HLE_XQ_HOOK");
     if (g_te.perfmap) perfmap_init();
     if (g_te.hooks) hook_init();
     v = getenv("HLE_BLKLOGF");
@@ -595,6 +810,486 @@ static void trace_env_init(void) {
 void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
     if (!g_te.init) trace_env_init();
     arm_last_block = pc;
+    if (c != NULL && g_te.xq_hook && pc == 0x001117A4u) {
+        static int xq_done = 0;
+        if (!xq_done) {
+            uint32_t sv[16], h = 0x00400008u;
+            const char *xp = getenv("HLE_XQ_PATH");
+            if (xp == NULL || *xp == 0) xp = "seq/menu_logo.xq";
+            xq_done = 1;
+            memcpy(sv, c->r, sizeof(sv));
+            if (c->mem_size > 0x0E600104u) {
+                size_t plen = strlen(xp);
+                if (plen > 0xF0u) plen = 0xF0u;
+                memset(c->mem + 0x0E600000u, 0, 0x100u);
+                memcpy(c->mem + 0x0E600000u, xp, plen);
+                memset(c->mem + 0x0E600104u, 0, 4);
+                memcpy(c->mem + 0x0E600100u, &h, 4);
+                {
+                    uint32_t magic = 0x32335158u;   /* "XQ32" */
+                    memcpy(c->mem + 0x003D9440u, &magic, 4);
+                }
+            }
+            c->r[0] = 0x00400000u;
+            c->r[1] = 0x0E600100u;
+            c->r[2] = 0x0E600000u;   /* Pfad aus HLE_XQ_PATH */
+            c->r[3] = 0u;
+            c->r[13] = 0x0CF0A000u;
+            printf("[xqhook] 0x1117A4 -> 0x1112C4(%s)\n", xp);
+            fflush(stdout);
+            arm_call_guest_pub(c, 0x001112C4u);
+            memcpy(c->r, sv, sizeof(sv));
+            {
+                const char *ap = getenv("HLE_XQ_ASSET");
+                if (ap != NULL && *ap != 0) {
+                    const char *ps = getenv("HLE_XQ_ASSET_POS");
+                    const char *ls = getenv("HLE_XQ_ASSET_LEN");
+                    const char *is = getenv("HLE_XQ_ASSET_IDX");
+                    int aidx = (is != NULL && *is != 0)
+                                   ? (int)strtoul(is, NULL, 10) : 1;
+                    uint32_t afob = 0x0E601100u;
+                    uint32_t astream = (aidx == 2) ? 0x080000C8u
+                                                   : 0x08000090u;
+                    uint32_t apos = (ps != NULL && *ps != 0)
+                                        ? (uint32_t)strtoul(ps, NULL, 16) : 0u;
+                    uint32_t alen2 = (ls != NULL && *ls != 0)
+                                        ? (uint32_t)strtoul(ls, NULL, 16) : 0u;
+                    size_t alen = strlen(ap);
+                    uint32_t asv[16];
+                    if (alen > 0xF0u) alen = 0xF0u;
+                    memcpy(asv, c->r, sizeof(asv));
+                    memset(c->mem + 0x0E601000u, 0, 0x100u);
+                    memcpy(c->mem + 0x0E601000u, ap, alen);
+                    memset(c->mem + afob, 0, 8);
+                    memcpy(c->mem + afob, &astream, 4);
+                    memcpy(c->mem + afob + 4u, &apos, 4);
+                    c->r[0] = 0x00400000u;
+                    c->r[1] = afob;
+                    c->r[2] = 0x0E601000u;
+                    c->r[3] = 0u;
+                    c->r[13] = 0x0CF0A000u;
+                    printf("[xqhook] asset 0x280744(%s) pos=%08X len=%08X\n",
+                           ap, apos, alen2);
+                    fflush(stdout);
+                    g_fa_ovr_on = 1;
+                    g_fa_ovr_idx = aidx;
+                    g_fa_ovr_base = apos;
+                    g_fa_ovr_len = alen2;
+                    g_fa_ovr_cap = HLE_ASSET_CAP;
+                    {
+                        uint32_t off = apos, end = apos + alen2;
+                        uint32_t scratch = 0x0CF90000u, total = 0u;
+                        while (off < end) {
+                            uint32_t want = end - off;
+                            if (want > 0x8000u) want = 0x8000u;
+                            memcpy(c->mem + afob, &astream, 4);
+                            memcpy(c->mem + afob + 4u, &off, 4);
+                            c->r[0] = afob;
+                            c->r[1] = scratch;
+                            c->r[2] = want;
+                            c->r[3] = 0u;
+                            c->r[13] = 0x0CF0A000u;
+                            arm_call_guest_pub(c, 0x00280744u);
+                            if (c->r[0] == 0u) break;
+                            off += c->r[0];
+                            total += c->r[0];
+                        }
+                        printf("[xqhook] asset bytes=%u magic=%02X%02X%02X%02X\n",
+                               total, c->mem[HLE_ASSET_CAP],
+                               c->mem[HLE_ASSET_CAP + 1u],
+                               c->mem[HLE_ASSET_CAP + 2u],
+                               c->mem[HLE_ASSET_CAP + 3u]);
+                        fflush(stdout);
+                    }
+                    g_fa_ovr_on = 0;
+                    memcpy(c->r, asv, sizeof(asv));
+                }
+            }
+        }
+    }
+    if (c != NULL && getenv("HLE_MOUNT_LOG") != NULL) {
+        const char *mpc = getenv("HLE_MOUNT_PC");
+        uint32_t mpcv = (mpc != NULL && *mpc != 0)
+                            ? (uint32_t)strtoul(mpc, NULL, 16)
+                            : 0x001014D4u;
+        if (pc == mpcv) {
+            uint32_t w = 0x003EC028u, arc = 0, arg2 = 0;
+            if (getenv("HLE_INIT_CALL") != NULL) {
+                static int init_done = 0;
+                if (!init_done) {
+                    uint32_t sv[16];
+                    init_done = 1;
+                    memset(c->mem + 0x0CFE9800u, 0, 0x100u);
+                    memcpy(sv, c->r, sizeof(sv));
+                    c->r[0] = 0x003EC028u;
+                    c->r[1] = 0x0CFE9800u;
+                    c->r[2] = 0u;
+                    c->r[3] = 0u;
+                    c->r[13] = 0x0CF0A000u;
+                    printf("[init] call 0x1034F4(3EC028,0CFE9800)\n");
+                    fflush(stdout);
+                    arm_call_guest_pub(c, 0x001034F4u);
+                    printf("[init] -> r0=%08X ab=%d\n", c->r[0], c->aborted);
+                    {
+                        int si;
+                        for (si = 0; si < 8; si++) {
+                            uint32_t v = 0;
+                            memcpy(&v, c->mem + 0x0CFE9800u + si * 4u, 4);
+                            printf("[init] st%d=%08X\n", si, v);
+                        }
+                    }
+                    fflush(stdout);
+                    memcpy(c->r, sv, sizeof(sv));
+                }
+            }
+            if (getenv("HLE_WORLD_CALL") != NULL) {
+                static int world_done = 0;
+                if (g_init_copied && !world_done) {
+                    uint32_t sv[16];
+                    uint16_t one16 = 1;
+                    world_done = 1;
+                    memcpy(sv, c->r, sizeof(sv));
+                    memcpy(c->mem + 0x003EE16Cu, &one16, 2);
+                    {
+                        int si;
+                        for (si = 0; si < 8; si++) {
+                            uint32_t sv2 = 0;
+                            memcpy(&sv2, c->mem + 0x0CFE9800u + si * 4u, 4);
+                            printf("[world] st%d=%08X\n", si, sv2);
+                        }
+                        fflush(stdout);
+                    }
+                    c->r[0] = 0x003EC028u;
+                    c->r[1] = 0x0CFE9800u;
+                    c->r[2] = 0u;
+                    c->r[3] = 0u;
+                    c->r[13] = 0x0CF0A000u;
+                    printf("[world] call 0x108F70(3EC028,0CFE9800)\n");
+                    fflush(stdout);
+                    if (getenv("HLE_RING_CLEAR") != NULL) {
+                        uint16_t z16 = 0;
+                        memcpy(c->mem + 0x0040ABC8u, &z16, 2);
+                        memcpy(c->mem + 0x0040ABCCu, &z16, 2);
+                        memcpy(c->mem + 0x0040ABCEu, &z16, 2);
+                        printf("[world] ring cleared\n");
+                        fflush(stdout);
+                    }
+                    {
+                        uint16_t c0 = 0;
+                        memcpy(&c0, c->mem + 0x40ABCEu, 2);
+                        printf("[world] pre-ring=%u\n", c0);
+                        fflush(stdout);
+                    }
+                    if (getenv("HLE_RENDERER_INIT") != NULL) {
+                        uint32_t p = 0x00408808u, sv2[16], r2v = 0;
+                        if (getenv("HLE_RENDERER_CTOR") != NULL) {
+                            memcpy(sv2, c->r, sizeof(sv2));
+                            c->r[0] = p;
+                            c->r[13] = 0x0CF0A000u;
+                            printf("[rendinit] ctor 0x366E38(%08X)\n", p);
+                            fflush(stdout);
+                            arm_call_guest_pub(c, 0x00366E38u);
+                            printf("[rendinit] ctor -> r0=%08X\n", c->r[0]);
+                            fflush(stdout);
+                            memcpy(c->r, sv2, sizeof(sv2));
+                        }
+                        memcpy(&r2v, c->mem + p + 0x20Cu, 4);
+                        if (getenv("HLE_RENDERER_FORCE") != NULL) {
+                            uint32_t z = 0;
+                            memcpy(c->mem + p + 0x20Cu, &z, 4);
+                            r2v = 0;
+                        }
+                        printf("[rendinit] obj=%08X [20C]=%08X\n", p, r2v);
+                        memcpy(sv2, c->r, sizeof(sv2));
+                        c->r[0] = p;
+                        c->r[1] = 0u;
+                        c->r[2] = 0u;
+                        c->r[3] = 0u;
+                        c->r[13] = 0x0CF0A000u;
+                        arm_call_guest_pub(c, 0x001ED64Cu);
+                        printf("[rendinit] -> r0=%08X\n", c->r[0]);
+                        memcpy(c->r, sv2, sizeof(sv2));
+                        fflush(stdout);
+                    }
+                    g_world_called = 1;
+                    arm_call_guest_pub(c, 0x00108F70u);
+                    printf("[world] -> r0=%08X ab=%d\n", c->r[0], c->aborted);
+                    {
+                        uint16_t cnt = 0;
+                        memcpy(&cnt, c->mem + 0x40ABCEu, 2);
+                        printf("[world] ring cnt=%u\n", cnt);
+                    }
+                    fflush(stdout);
+                    memcpy(c->r, sv, sizeof(sv));
+                }
+            }
+            if (getenv("HLE_RING_DUMP") != NULL && g_world_called) {
+                static int rdumps = 0;
+                if (rdumps < 4) {
+                    uint16_t cnt = 0;
+                    uint32_t p8 = 0;
+                    rdumps++;
+                    memcpy(&cnt, c->mem + 0x40ABCEu, 2);
+                    memcpy(&p8, c->mem + 0x40ABC8u, 4);
+                    printf("[ring] cnt=%u p8=%08X\n", cnt, p8);
+                    if (cnt > 0u && p8 >= 0x00100000u &&
+                        (p8 & 0x1FFFFFFFu) + 4u <= c->mem_size) {
+                        uint32_t vt = 0;
+                        memcpy(&vt, c->mem + (p8 & 0x1FFFFFFFu), 4);
+                        printf("[ring] entry0 vtable=%08X\n", vt);
+                    }
+                    fflush(stdout);
+                }
+            }
+            if (getenv("HLE_DRAIN_CALL") != NULL) {
+                static int drain_hits = 0;
+                const char *atS = getenv("HLE_DRAIN_AT");
+                int at = (atS != NULL && *atS != 0)
+                             ? atoi(atS) : 1;
+                drain_hits++;
+                if (drain_hits == at) {
+                    uint32_t sv[16];
+                    uint16_t one16 = 1, old16 = 0;
+                    memcpy(sv, c->r, sizeof(sv));
+                    memcpy(&old16, c->mem + 0x003EE16Cu, 2);
+                    memcpy(c->mem + 0x003EE16Cu, &one16, 2);
+                    c->r[0] = 0x003EE12Cu;
+                    c->r[13] = 0x0CF0A000u;
+                    printf("[drain] call 0x11DB84(003EE12C) old40=%u\n", old16);
+                    fflush(stdout);
+                    arm_call_guest_pub(c, 0x0011DB84u);
+                    memcpy(c->mem + 0x003EE16Cu, &old16, 2);
+                    printf("[drain] -> r0=%08X ab=%d\n", c->r[0], c->aborted);
+                    {
+                        uint16_t cnt = 0;
+                        uint32_t p8 = 0, pc2 = 0, p10 = 0, p14 = 0;
+                        memcpy(&cnt, c->mem + 0x40ABCEu, 2);
+                        memcpy(&p8, c->mem + 0x40ABC8u, 4);
+                        memcpy(&pc2, c->mem + 0x40ABCCu, 4);
+                        memcpy(&p10, c->mem + 0x40ABD0u, 4);
+                        memcpy(&p14, c->mem + 0x40ABD4u, 4);
+                        printf("[drain] ring cnt=%u p8=%08X pC=%08X p10=%08X p14=%08X\n",
+                               cnt, p8, pc2, p10, p14);
+                        if (cnt > 0u && p8 >= 0x00100000u) {
+                            uint32_t vt = 0;
+                            memcpy(&vt, c->mem + (p8 & 0x1FFFFFFFu), 4);
+                            printf("[drain] entry0 @%08X vtable=%08X\n",
+                                   p8, vt);
+                        }
+                    }
+                    fflush(stdout);
+                    memcpy(c->r, sv, sizeof(sv));
+                }
+            }
+            if (getenv("HLE_MOUNT_SUBMIT") != NULL) {
+                static int sub_done = 0;
+                if (!sub_done) {
+                    uint32_t sv[16];
+                    sub_done = 1;
+                    memcpy(sv, c->r, sizeof(sv));
+                    {
+                        uint32_t v;
+                        v = 0x00001000u; memcpy(c->mem + 0x0D900000u, &v, 4);
+                        v = 3u;          memcpy(c->mem + 0x0E800000u, &v, 4);
+                        v = 0x000F0228u; memcpy(c->mem + 0x0E800004u, &v, 4);
+                        v = 0u;          memcpy(c->mem + 0x0E800008u, &v, 4);
+                        v = 0x0000022Eu; memcpy(c->mem + 0x0E80000Cu, &v, 4);
+                        v = 0x0EA10000u; memcpy(c->mem + 0x0EA00004u, &v, 4);
+                        v = 0x0EA20000u; memcpy(c->mem + 0x0EA1003Cu, &v, 4);
+                        v = 0u;          memcpy(c->mem + 0x0EA2002Cu, &v, 4);
+                        v = 1u;          memcpy(c->mem + 0x0EA20000u, &v, 4);
+                        v = 0x00010100u; memcpy(c->mem + 0x003E7770u, &v, 4);
+                    }
+                    c->r[0] = 0x10002800u;
+                    c->r[1] = 0x0EA00000u;
+                    c->r[2] = 0x0E800000u;
+                    c->r[3] = 0x0E800000u;
+                    c->r[13] = 0x0D900000u;
+                    printf("[mount] submit 0x12FD30(ctx=10002800 desc=0EA00000)\n");
+                    fflush(stdout);
+                    arm_call_guest_pub(c, 0x0012FD30u);
+                    printf("[mount] submit -> r0=%u\n", c->r[0]);
+                    fflush(stdout);
+                    if (getenv("HLE_MOUNT_VT") != NULL) {
+                        uint32_t obj = 0x0E800060u, vt = 0, k;
+                        memcpy(&vt, c->mem + obj, 4);
+                        printf("[vt] obj=%08X vtable=%08X\n", obj, vt);
+                        fflush(stdout);
+                        for (k = 1u; k <= 3u; k++) {
+                            uint32_t fn = 0, sv2[16];
+                            memcpy(&fn, c->mem + vt + k * 4u, 4);
+                            if (fn < 0x00100000u || fn >= 0x00500000u)
+                                continue;
+                            memcpy(sv2, c->r, sizeof(sv2));
+                            c->r[0] = obj;
+                            c->r[1] = 0u;
+                            c->r[2] = 0u;
+                            c->r[3] = 0u;
+                            c->r[13] = 0x0CF0A000u;
+                            printf("[vt] call +%u fn=%08X\n", k * 4u, fn);
+                            fflush(stdout);
+                            arm_call_guest_pub(c, fn);
+                            printf("[vt] +%u -> r0=%u\n", k * 4u, c->r[0]);
+                            fflush(stdout);
+                            memcpy(c->r, sv2, sizeof(sv2));
+                        }
+                    }
+                    if (getenv("HLE_MOUNT_LISTPATCH") != NULL) {
+                        uint32_t l = 0x0E810000u, one = 1u, sz = 0x1000u;
+                        uint32_t w0 = 3u, w1 = 0x000F0228u;
+                        uint32_t w2 = 0u, w3 = 0x0000022Eu;
+                        memcpy(c->mem + l, &w0, 4);
+                        memcpy(c->mem + l + 4u, &w1, 4);
+                        memcpy(c->mem + l + 8u, &w2, 4);
+                        memcpy(c->mem + l + 12u, &w3, 4);
+                        memcpy(c->mem + 0x10002818u, &one, 4);
+                        memcpy(c->mem + 0x1000281Cu, &l, 4);
+                        memcpy(c->mem + 0x100028B0u, &sz, 4);
+                        printf("[mount] queue -> list=%08X n=1 size=%X\n",
+                               l, sz);
+                        fflush(stdout);
+                    }
+                    {
+                        uint32_t q;
+                        for (q = 0; q < 0x100u; q += 16u) {
+                            uint32_t a, b, cc, d;
+                            memcpy(&a, c->mem + 0x0E800000u + q, 4);
+                            memcpy(&b, c->mem + 0x0E800000u + q + 4u, 4);
+                            memcpy(&cc, c->mem + 0x0E800000u + q + 8u, 4);
+                            memcpy(&d, c->mem + 0x0E800000u + q + 12u, 4);
+                            printf("[lb] %08X: %08X %08X %08X %08X\n",
+                                   0x0E800000u + q, a, b, cc, d);
+                        }
+                        fflush(stdout);
+                        {
+                            FILE *ef = fopen("out/engine_list.bin", "wb");
+                            if (ef != NULL) {
+                                fwrite(c->mem + 0x0E800000u, 1, 0x1000u, ef);
+                                fclose(ef);
+                            }
+                        }
+                    }
+                    {
+                        uint32_t q;
+                        for (q = 0; q < 0x18u; q += 4u) {
+                            uint32_t v = 0;
+                            memcpy(&v, c->mem + 0x0E800000u + q, 4);
+                            printf("[ls] %08X = %08X\n", 0x0E800000u + q, v);
+                        }
+                        fflush(stdout);
+                    }
+                    {
+                        uint32_t q;
+                        for (q = 0; q < 0x40u; q += 4u) {
+                            uint32_t v = 0;
+                            memcpy(&v, c->mem + 0x10002800u + q, 4);
+                            printf("[qs] %08X = %08X\n", 0x10002800u + q, v);
+                        }
+                        fflush(stdout);
+                    }
+                    memcpy(c->r, sv, sizeof(sv));
+                }
+            }
+            const char *oa = getenv("HLE_MOUNT_ARC");
+            const char *a2 = getenv("HLE_MOUNT_ARG2");
+            if (a2 != NULL && *a2 != 0)
+                arg2 = (uint32_t)strtoul(a2, NULL, 16);
+            if (oa != NULL && *oa != 0) {
+                arc = (uint32_t)strtoul(oa, NULL, 16);
+            } else if (w + 0xbc8u <= c->mem_size) {
+                memcpy(&arc, c->mem + w + 0xbc4u, 4);
+            }
+            if (arc >= 0x00100000u) {
+                static int mount_done = 0;
+                if (!mount_done) {
+                    mount_done = 1;
+                    printf("[mount] pc=%08X world=%08X arc=%08X arg2=%08X\n",
+                           pc, w, arc, arg2);
+                    fflush(stdout);
+                    if (getenv("HLE_MOUNT_CALL") != NULL) {
+                        uint32_t sv[16];
+                        memcpy(sv, c->r, sizeof(sv));
+                        if (oa != NULL && arc + 0x800u <= c->mem_size)
+                            memset(c->mem + arc, 0, 0x800u);
+                        if (arc + 0x714u <= c->mem_size)
+                            memcpy(c->mem + arc + 0x710u,
+                                   (uint32_t[]){1u}, 4);
+                        {
+                            uint32_t fl = 0x00010100u;
+                            memcpy(c->mem + 0x003E7770u, &fl, 4);
+                        }
+                        c->r[0] = arc;
+                        c->r[1] = w;
+                        c->r[2] = arg2;
+                        c->r[3] = arg2;
+                        c->r[13] = 0x0CF0A000u;
+                        if (getenv("HLE_MOUNT_DIRECT") != NULL) {
+                            printf("[mount] call fn_0012493C(%08X,%08X,%08X)\n",
+                                   arc, w, arg2);
+                            fflush(stdout);
+                            arm_call_guest_pub(c, 0x0012493Cu);
+                        } else {
+                            printf("[mount] call fn_0011E494(%08X,%08X)\n",
+                                   arc, w);
+                            fflush(stdout);
+                            arm_call_guest_pub(c, 0x0011E494u);
+                        }
+                        printf("[mount] -> r0=%u\n", c->r[0]);
+                        fflush(stdout);
+                        if (getenv("HLE_MOUNT_QDUMP") != NULL) {
+                            uint32_t q;
+                            for (q = 0; q < 0x40u; q += 4u) {
+                                uint32_t v = 0, v2 = 0;
+                                memcpy(&v, c->mem + 0x100027A8u + q, 4);
+                                memcpy(&v2, c->mem + 0x10002800u + q, 4);
+                                printf("[q] %08X=%08X  %08X=%08X\n",
+                                       0x100027A8u + q, v,
+                                       0x10002800u + q, v2);
+                            }
+                            fflush(stdout);
+                        }
+                        memcpy(c->r, sv, sizeof(sv));
+                    }
+                }
+            }
+        }
+    }
+    if (c != NULL && g_world_called) {
+        static int g_ring_dumped = 0;
+        if (!g_ring_dumped) {
+            uint16_t cnt = 0;
+            uint32_t p8 = 0;
+            g_ring_dumped = 1;
+            memcpy(&cnt, c->mem + 0x40ABCEu, 2);
+            memcpy(&p8, c->mem + 0x40ABC8u, 4);
+            printf("[ring2] cnt=%u p8=%08X\n", cnt, p8);
+            {
+                uint32_t base = 0, stride = 0;
+                memcpy(&base, c->mem + 0x40ABC0u, 4);
+                memcpy(&stride, c->mem + 0x40ABC4u, 4);
+                printf("[ring2] base=%08X stride=%u\n", base, stride);
+                {
+                    uint16_t m40 = 0, m58 = 0, m74 = 0;
+                    memcpy(&m40, c->mem + 0x003EE16Cu, 2);
+                    memcpy(&m58, c->mem + 0x003EE184u, 2);
+                    memcpy(&m74, c->mem + 0x003EE1A0u, 2);
+                    printf("[ring2] m40=%u m58=%u m74=%u\n", m40, m58, m74);
+                }
+                if (base >= 0x00100000u && base < 0x20000000u) {
+                    uint32_t vt = 0;
+                    memcpy(&vt, c->mem + (base & 0x1FFFFFFFu), 4);
+                    printf("[ring2] entry0 vtable=%08X\n", vt);
+                }
+            }
+            if (cnt > 0u && p8 >= 0x00100000u &&
+                (p8 & 0x1FFFFFFFu) + 4u <= c->mem_size) {
+                uint32_t vt = 0;
+                memcpy(&vt, c->mem + (p8 & 0x1FFFFFFFu), 4);
+                printf("[ring2] entry0 vtable=%08X\n", vt);
+            }
+            fflush(stdout);
+        }
+    }
     if (g_te.perfmap && c != NULL) perfmap_sample(c, pc);
     if (g_te.hooks && c != NULL) hook_hit(c, pc);
     if (g_te.perf) {
@@ -2252,7 +2947,335 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
 
     /* 0x101364 bl 0x1034F4 -> bei 0x101370 wird sonst die gesamte
        Asset-Registrierung (0x1013F0) uebersprungen. */
-    if (c != NULL && g_te.force_asset &&
+    if (c != NULL && pc == 0x0028D424u && getenv("HLE_DRAINDUMP") != NULL) {
+        static int dd = 0;
+        if (dd < 3) {
+ 
+            uint16_t n74 = 0, n40 = 0;
+            uint32_t p6c = 0, p38 = 0;
+            dd++;
+            memcpy(&n74, c->mem + (c->r[0] & 0x1FFFFFFFu) + 0x74u, 2);
+            memcpy(&n40, c->mem + (c->r[0] & 0x1FFFFFFFu) + 0x40u, 2);
+            memcpy(&p6c, c->mem + (c->r[0] & 0x1FFFFFFFu) + 0x6Cu, 4);
+            memcpy(&p38, c->mem + (c->r[0] & 0x1FFFFFFFu) + 0x38u, 4);
+            printf("[drain-in] menu=%08X n74=%u n40=%u p6c=%08X p38=%08X\n",
+                   c->r[0], n74, n40, p6c, p38);
+            if (getenv("HLE_CONT_SCAN") != NULL) {
+                static const uint32_t cands[] = {
+                    0x003C6FE4u, 0x00401000u, 0x003D8D8Cu,
+                    0x003EC028u, 0x003EE12Cu, 0x00408808u
+                };
+                unsigned ci;
+                /* 0x288960(&key,...) liest den Key als [r0]; deshalb den
+                   Kandidaten in ein Scratch-Wort schreiben und dessen
+                   Adresse uebergeben (Key == Kandidat). */
+                for (ci = 0; ci < sizeof(cands) / sizeof(cands[0]); ci++) {
+                    uint32_t svc[16], key = cands[ci];
+                    memcpy(svc, c->r, sizeof(svc));
+                    memcpy(c->mem + 0x0CF0A800u, &key, 4);
+                    c->r[0] = 0x0CF0A800u;
+                    c->r[1] = 0u;
+                    c->r[2] = 0x1000u;
+                    c->r[3] = 2u;
+                    c->r[13] = 0x0CF0A000u;
+                    arm_call_guest_pub(c, 0x00288960u);
+                    printf("[cont] key=%08X -> %08X\n", cands[ci], c->r[0]);
+                    fflush(stdout);
+                    memcpy(c->r, svc, sizeof(svc));
+                }
+            }
+            if (dd == 1) {
+                int k;
+                if (getenv("HLE_NODE_CTOR") != NULL) {
+                    uint32_t sv3[16];
+                    memcpy(sv3, c->r, sizeof(sv3));
+                    c->r[0] = 0x003EE12Cu;
+                    c->r[13] = 0x0CF0A000u;
+                    printf("[mobj] ctor 0x2980F4\n");
+                    fflush(stdout);
+                    arm_call_guest_pub(c, 0x002980F4u);
+                    printf("[mobj] ctor -> r0=%08X\n", c->r[0]);
+                    fflush(stdout);
+                    memcpy(c->r, sv3, sizeof(sv3));
+                }
+                for (k = 0; k < 0x30; k += 4) {
+                    uint32_t v = 0;
+                    memcpy(&v, c->mem + (c->r[0] & 0x1FFFFFFFu) + k, 4);
+                    printf("[mobj] +%02X=%08X\n", k, v);
+                }
+                for (k = -0x20; k < 0; k += 4) {
+                    uint32_t v = 0, a = (uint32_t)((int)c->r[0] + k) & 0x1FFFFFFFu;
+                    memcpy(&v, c->mem + a, 4);
+                    printf("[mobj] %+03X=%08X\n", k, v);
+                }
+            }
+            fflush(stdout);
+            if (getenv("HLE_DRAIN_XFER") != NULL && (n74 > 0u || n40 > 0u)) {
+                uint32_t src = (n74 > 0u) ? p6c : p38;
+                uint32_t cnt0 = (n74 > 0u) ? n74 : n40;
+                uint32_t ring = 0x14004440u, str = 0xB4u;
+                uint32_t n = cnt0 > 4u ? 4u : cnt0;
+                uint32_t i;
+                uint16_t n16 = (uint16_t)n;
+                uint16_t z16 = 0;
+                memcpy(c->mem + 0x0040ABC0u, &ring, 4);
+                memcpy(c->mem + 0x0040ABC4u, &str, 4);
+                memcpy(c->mem + 0x0040ABC8u, &z16, 2);
+                memcpy(c->mem + 0x0040ABCCu, &z16, 2);
+                if (getenv("HLE_XFER_DRAW") != NULL) {
+                    uint32_t fn = 0x0010470Cu;
+                    memcpy(c->mem + 0x003EE134u, &fn, 4);
+                }
+                for (i = 0u; i < n; i++) {
+                    uint32_t node = 0, vt = 0, base;
+                    memcpy(&node, c->mem + ((src + i * 4u) & 0x1FFFFFFFu), 4);
+                    if (node < 0x00100000u || node >= 0x20000000u)
+                        continue;
+                    memcpy(&vt, c->mem + (node & 0x1FFFFFFFu), 4);
+                    base = (ring + i * 0xB4u) & 0x1FFFFFFFu;
+                    if (getenv("HLE_XFER_CLASS") != NULL) {
+                        /* Echter Eintrag: {vtable, objekt}. Der Renderer
+                           ruft [[entry]]+8 -> echte Draw-Methode. */
+                        memcpy(c->mem + base, &vt, 4);
+                        memcpy(c->mem + base + 4u, &node, 4);
+                        if (getenv("HLE_XFER_VT") != NULL) {
+                            /* statischer Vtable-Wert ist 0x0011DB84; im RAM
+                               steht 0x0011DB86 (Thumb-Bitversatz). Fuer den
+                               ARM-Renderer den erwarteten Wert setzen. */
+                            uint32_t fn = 0x0011DB84u, rb = 0;
+                            memcpy(c->mem + 0x003C6FECu, &fn, 4);
+                            memcpy(&rb, c->mem + 0x003C6FECu, 4);
+                            printf("[vt] write 3C6FEC=%08X readback=%08X\n",
+                                   fn, rb);
+                            fflush(stdout);
+                        }
+                        if (getenv("HLE_XFER_NODE") != NULL) {
+                            /* Knotenkopf vor dem Objekt: [node-0x10] != 0
+                               und Dirty-Bit in [objekt+0xF] setzen, damit
+                               0x28EF3C -> 0x27A3B4 den Knoten verarbeitet. */
+                            uint32_t nx = node - 0x10u;
+                            uint8_t fl = 0;
+                            memcpy(c->mem + ((node - 0x10u) & 0x1FFFFFFFu),
+                                   &nx, 4);
+                            memcpy(&fl, c->mem + ((node + 0x0Fu) & 0x1FFFFFFFu), 1);
+                            if (getenv("HLE_XFER_SPLIT") != NULL) {
+                                /* Jeder Ring-Eintrag bekommt eine eigene
+                                   Objektkopie, sonst loescht der erste Draw
+                                   (0x273470: bic flag,#1) das Dirty-Bit. */
+                                uint32_t oc = (0x0CFFC000u + i * 0x100u)
+                                              & 0x1FFFFFFFu;
+                                memcpy(c->mem + oc, c->mem + (node & 0x1FFFFFFFu),
+                                       0x40u);
+                                fl |= 1u;
+                                memcpy(c->mem + oc + 0x0Fu, &fl, 1);
+                                nx = oc - 0x10u;
+                                memcpy(c->mem + ((oc - 0x10u) & 0x1FFFFFFFu),
+                                       &nx, 4);
+                                memcpy(&node, &oc, 4);
+                                memcpy(c->mem + base + 4u, &node, 4);
+                            } else {
+                                fl |= 1u;
+                            }
+                            memcpy(c->mem + ((node + 0x0Fu) & 0x1FFFFFFFu), &fl, 1);
+                        }
+                    } else if (getenv("HLE_XFER_DRAW") != NULL) {
+                        uint32_t obj = node;
+                        if (getenv("HLE_XFER_SCRATCH") != NULL) {
+                            static int sp = 0;
+                            if (!sp) {
+                                uint32_t s8 = 0x0010470Cu;
+                                sp = 1;
+                                memcpy(c->mem + 0x003EC030u, &s8, 4);
+                            }
+                            obj = 0x003EC028u;
+                        }
+                        memcpy(c->mem + base, &obj, 4);
+                        memcpy(c->mem + base + 4u, &node, 4);
+                    } else {
+                        memcpy(c->mem + base, &vt, 4);
+                        memcpy(c->mem + base + 4u, &node, 4);
+                    }
+                    printf("[xfer] i=%u node=%08X vt=%08X\n", i, node, vt);
+                }
+                memcpy(c->mem + 0x0040ABCEu, &n16, 2);
+                fflush(stdout);
+                if (getenv("HLE_DRAW_DIRECT") != NULL) {
+                    uint32_t sv4[16], slot = ring;
+                    memcpy(sv4, c->r, sizeof(sv4));
+                    c->r[0] = 0x003EE12Cu;
+                    c->r[1] = 0x00408808u;
+                    c->r[2] = 0u;
+                    c->r[3] = 0u;
+                    c->r[13] = 0x0CF0A000u;
+                    printf("[ddraw] call 0x10470C(node=3EE12C, rnd=408808)\n");
+                    fflush(stdout);
+                    arm_call_guest_pub(c, 0x0010470Cu);
+                    printf("[ddraw] -> r0=%08X ab=%d\n", c->r[0], c->aborted);
+                    fflush(stdout);
+                    memcpy(c->r, sv4, sizeof(sv4));
+                }
+                if (getenv("HLE_XFER_CALL") != NULL) {
+                    uint32_t sv2[16];
+                    memcpy(sv2, c->r, sizeof(sv2));
+                    c->r[0] = 0x00408808u;
+                    c->r[1] = 0u;
+                    c->r[2] = 0u;
+                    c->r[3] = 0u;
+                    c->r[13] = 0x0CF0A000u;
+                    if (getenv("HLE_XFER_GATE") != NULL) {
+                        uint32_t gs = 0x0CFFB300u, gv = 0x003EE12Cu;
+                        uint8_t g1 = 1;
+                        memcpy(c->mem + gs, &gv, 4);
+                        memcpy(c->mem + gs + 4u, &g1, 1);
+                        memcpy(c->mem + 0x004088A4u, &gs, 4);
+                        printf("[xfer] gate=%08X\n", gs);
+                        fflush(stdout);
+                    }
+                    printf("[xfer] call 0x1ED8FC ring=%u\n", (unsigned)n16);
+                    if (getenv("HLE_VT_DUMP") != NULL) {
+                        uint32_t v8 = 0, e0 = 0, e4 = 0, fn = 0x0011DB84u;
+                        memcpy(c->mem + 0x003C6FECu, &fn, 4);
+                        memcpy(&v8, c->mem + 0x003C6FECu, 4);
+                        memcpy(&e0, c->mem + 0x14004440u, 4);
+                        memcpy(&e4, c->mem + 0x14004444u, 4);
+                        printf("[vt] [3C6FE4+8]=%08X entry0=%08X entry4=%08X\n",
+                               v8, e0, e4);
+                        fflush(stdout);
+                    }
+                    {
+                        uint32_t c0 = 0, c4 = 0, e0 = 0, e4 = 0;
+                        uint16_t cc = 0;
+                        memcpy(&c0, c->mem + 0x40ABC0u, 4);
+                        memcpy(&c4, c->mem + 0x40ABC4u, 4);
+                        memcpy(&cc, c->mem + 0x40ABCEu, 2);
+                        memcpy(&e0, c->mem + 0x14004440u, 4);
+                        memcpy(&e4, c->mem + 0x14004444u, 4);
+                        printf("[xfer] cont=%08X/%08X cnt=%u e0=%08X e4=%08X\n",
+                               c0, c4, cc, e0, e4);
+                    }
+                    fflush(stdout);
+                    arm_call_guest_pub(c, 0x001ED8FCu);
+                    printf("[xfer] 0x1ED8FC -> r0=%08X ab=%d\n",
+                           c->r[0], c->aborted);
+                    fflush(stdout);
+                    if (getenv("HLE_NODE_CALL") != NULL) {
+                        /* Echte Draw-Methode 0x11DB84 direkt auf dem
+                           Ring-Eintrag {vtable,objekt} aufrufen; sie ruft
+                           0x277004 und 0x28EF3C -> 0x27A3B4. */
+                        uint32_t sv5[16];
+                        memcpy(sv5, c->r, sizeof(sv5));
+                        c->r[0] = 0x14004440u;
+                        c->r[1] = 0u;
+                        c->r[2] = 0u;
+                        c->r[3] = 0u;
+                        c->r[13] = 0x0CF0A000u;
+                        printf("[nodecall] 0x11DB84(entry=14004440)\n");
+                        fflush(stdout);
+                        arm_call_guest_pub(c, 0x0011DB84u);
+                        printf("[nodecall] -> r0=%08X ab=%d\n",
+                               c->r[0], c->aborted);
+                        fflush(stdout);
+                        memcpy(c->r, sv5, sizeof(sv5));
+                    }
+                    if (getenv("HLE_EMIT_DUMP") != NULL) {
+                        /* 0x1105F8 baut die Engine-2D-Liste in einen
+                           allozierten FCRAM-Puffer; Adresse aus dem
+                           letzten Lauf (0x00665198) dumpen. */
+                        static const uint32_t ad[] = {
+                            0x00665198u, 0x00666618u, 0x00667A98u,
+                            0x00668F18u
+                        };
+                        unsigned ai;
+                        for (ai = 0; ai < 4u; ai++) {
+                            uint32_t k, nz = 0;
+                            uint32_t a = ad[ai] & 0x1FFFFFFFu;
+                            printf("[emit] buf[%u]=%08X:", ai, ad[ai]);
+                            for (k = 0; k < 16u; k++) {
+                                uint32_t v = 0;
+                                memcpy(&v, c->mem + a + k * 4u, 4);
+                                if (v) nz++;
+                                printf(" %08X", v);
+                            }
+                            printf(" (nz=%u)\n", nz);
+                        }
+                        {
+                            unsigned bi;
+                            for (bi = 0; bi < 4u; bi++) {
+                                uint32_t a = ad[bi] & 0x1FFFFFFFu, k, nz = 0;
+                                for (k = 0; k < 0x1380u / 4u; k++) {
+                                    uint32_t v = 0;
+                                    memcpy(&v, c->mem + a + k * 4u, 4);
+                                    if (v) nz++;
+                                }
+                                printf("[emit] full buf[%u] nz=%u/%u  @0x40:",
+                                       bi, nz, 0x1380u / 4u);
+                                for (k = 0x40u / 4u; k < 0x40u / 4u + 12u; k++) {
+                                    uint32_t v = 0;
+                                    memcpy(&v, c->mem + a + k * 4u, 4);
+                                    printf(" %08X", v);
+                                }
+                                printf("\n");
+                            }
+                        }
+                        {
+                            uint32_t k, vt = 0x003C6FE4u & 0x1FFFFFFFu;
+                            printf("[emit] vtable 3C6FE4:");
+                            for (k = 0; k < 10u; k++) {
+                                uint32_t v = 0;
+                                memcpy(&v, c->mem + vt + k * 4u, 4);
+                                printf(" %08X", v);
+                            }
+                            printf("\n");
+                        }
+                        {
+                            uint32_t k, vt = 0x003C6FF8u & 0x1FFFFFFFu;
+                            printf("[emit] vtable 3C6FF8:");
+                            for (k = 0; k < 8u; k++) {
+                                uint32_t v = 0;
+                                memcpy(&v, c->mem + vt + k * 4u, 4);
+                                printf(" %08X", v);
+                            }
+                            printf("\n");
+                        }
+                        fflush(stdout);
+                    }
+                    memcpy(c->r, sv2, sizeof(sv2));
+                }
+            }
+        }
+    }
+    if (c != NULL && pc == 0x001034F4u && getenv("HLE_INITDUMP") != NULL) {
+        uint32_t a = c->r[1] & 0x1FFFFFFFu;
+        printf("[initcall] r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X\n",
+               c->r[0], c->r[1], c->r[2], c->r[3], c->r[14]);
+        if (getenv("HLE_INITCOPY") != NULL &&
+            (c->r[1] & 0x1FFFFFFFu) + 0x800u <= c->mem_size) {
+            memcpy(c->mem + 0x0CFE9800u, c->mem + (c->r[1] & 0x1FFFFFFFu),
+                   0x800u);
+            printf("[initcall] struct -> 0CFE9800 (0x800)\n");
+            g_init_copied = 1;
+        }
+        if (a + 0x570u <= c->mem_size) {
+            int i;
+            for (i = 0; i < 6; i++) {
+                uint32_t v = 0;
+                memcpy(&v, c->mem + a + i * 4u, 4);
+                printf("[initcall] [%08X]=%08X\n", c->r[1] + i * 4u, v);
+            }
+            {
+                uint32_t v = 0;
+                memcpy(&v, c->mem + a + 0x4F8u, 4);
+                printf("[initcall] +4F8=%08X\n", v);
+                memcpy(&v, c->mem + a + 0x500u, 4);
+                printf("[initcall] +500=%08X\n", v);
+                v = 0;
+                memcpy(&v, c->mem + a + 0x564u, 4);
+                printf("[initcall] +564=%08X\n", v);
+            }
+        }
+        fflush(stdout);
+    }
+    if (c != NULL && pc == 0x00101368u && g_te.force_asset &&
         (pc == 0x00101368u || pc == 0x00101370u || pc == 0x00101374u)) {
         static int fc2 = 0;
         if (fc2 < 5) { fc2++; printf("[forceasset] pc=%08X r0=%08X\n", pc, c->r[0]); }
