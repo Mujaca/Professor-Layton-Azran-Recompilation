@@ -6824,3 +6824,42 @@ Gemessene Negativ-Befunde (wichtig fuer dienaechsten Schritte):
 Offen fuer Stufe 3: Material->Textur-Zuordnung (`.txp`/`.mtr`),
 Alpha/Blend, Z-Sortierung und die echte Kamera (f ist bisher gesucht,
 nicht aus `000.mbn`/`002.atr` gelesen).
+
+### Stufe 3 ausgebaut: Per-Quad-Textur + Kamera-Fit; BG-Blend (2026-11-24)
+
+`tools/title3d_render.py` waehlt jetzt **pro Quad** die Textur (lokal
+beste NCC) und sucht danach die Kamera (f, dx, dy) global; gezeichnet
+wird von hinten (kleinstes -z) nach vorne:
+
+```
+prm-Quads 17   best corr 0.426  f=300 dx=-20 dy=-60
+(vorher: 0.342 mit einer Textur fuer alle, f=160)
+```
+
+Der 3D-Render erreicht damit **Paritaet** zum registrierten Asset
+(0.435) - aber nicht mehr. Kombination beider Schichten:
+
+```
+blend 0.65*3D + 0.35*registriert -> corr 0.455  (aber std 16.3, detail-hit 0.63)
+registriert (kanonisch)          -> corr 0.426  (std 29.6, detail-hit 0.77)
+```
+
+`tools/make_bg_v2.py` schreibt `tools/profiles/title_bg_v2.bin`;
+`make_menu_assets.py` nutzt es nur mit `HLE_BG_V2=1`. Kanonisch bleibt
+die schaerfere Variante (mehr Struktur, besserer Diff).
+
+Gemessen und verworfen: Font-Zeilen **auf** dem v2-Blend senken corr
+0.455 -> 0.398 (die zwei Text-Quads verdecken BG-Inhalt).
+
+Kanonisch unveraendert (2 Laeufe `bytegleich True`):
+
+```
+[gspq-engine] sprites=3 len=228 / sprites=1 len=B8
+TOP 68589/90400 (56.22)  BOTTOM 14752/71360 (14.33)
+corr 0.426  std 29.6  detail-hit 0.77
+```
+
+Offen bleibt der grosse Sprung: die Aufnahme zeigt das gerenderte 3D-
+Titelbild mit Logo; unsere 17 Quads sind nur die Karten-Ebene. Kamera
+kommt weiter aus der Suche, nicht aus `000.mbn`/`002.atr`, und die
+Material->Textur-Zuordnung aus `.txp`/`.mtr又是一` ist noch nicht gelesen.

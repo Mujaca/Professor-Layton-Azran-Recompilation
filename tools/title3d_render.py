@@ -1,8 +1,9 @@
-"""Erster 3D-Titel-Render: .prm-Quads mit Perspektive + ETC1-Texturen.
+"""Stufe 3: 3D-Titel-Render mit per-Quad-Textur, Z-Sort, Kamera-Suche.
 
-Die title.xc-Meshes sind wenige texturierte Quads bei z ~ -28 (Weltunits).
-Dieses Tool rendert sie mit einer Perspektive (Brennweite f) und probiert
-Textur x Brennweite durch; gemessen wird die Korrelation zum Capture.
+Quads kommen aus den .prm-Meshes (title.xc), Texturen aus den ETC1-Bildern.
+Pro Quad wird die Textur gewaehlt, die lokal am besten zum Capture passt;
+global werden Brennweite f und vertikaler Versatz dy gesucht. Gezeichnet
+wird von hinten (kleinstes -z) nach vorne.
 
 Aufruf: python tools/title3d_render.py
 """
@@ -15,9 +16,9 @@ from PIL import Image
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'tools'))
-import title3d_probe as T  # noqa: E402
-import _imgc  # noqa: E402
-import title3d_lib as L  # noqa: E402
+import title3d_probe as T     # noqa: E402
+import _imgc                  # noqa: E402
+import title3d_lib as L       # noqa: E402
 
 REF = os.path.join(ROOT, 'reports/menu_official.bin')
 W, H = 400, 240
@@ -27,7 +28,7 @@ TEXS = ['000.xi', '003.xi', '005.xi', '006.xi', '010.xi', '013.xi']
 def prm_quads():
     d, ents = T.entries()
     out = []
-    for s, fo, sz, magic in ents:
+    for s, fo, sz, _magic in ents:
         if not s.endswith('.prm'):
             continue
         i = d.find(b'XPVB', fo, fo + sz)
@@ -44,17 +45,17 @@ def prm_quads():
     return out
 
 
-def to_screen(vs, f):
+def to_screen(vs, f, dy, dx=0.0):
     pts = []
     for x, y, z, u, v in vs:
         zz = -z if z < 0 else 1.0
-        pts.append((W / 2.0 + f * x / zz, H / 2.0 - f * y / zz, u, v))
+        pts.append((W / 2.0 + f * x / zz + dx, H / 2.0 - f * y / zz + dy, u, v))
     return pts
 
 
 def fill_tri(canvas, tex, p0, p1, p2):
-    xs = [p0[0], p1[0], p2[0]]
-    ys = [p0[1], p1[1], p2[1]]
+    xs = (p0[0], p1[0], p2[0])
+    ys = (p0[1], p1[1], p2[1])
     x0, x1 = max(0, int(min(xs))), min(W - 1, int(max(xs)) + 1)
     y0, y1 = max(0, int(min(ys))), min(H - 1, int(max(ys)) + 1)
     if x1 <= x0 or y1 <= y0:
@@ -77,30 +78,75 @@ def fill_tri(canvas, tex, p0, p1, p2):
     canvas[y0:y1 + 1, x0:x1 + 1][m] = tex[ty[m], tx[m]]
 
 
+def draw_quad(canvas, tex, pts):
+    if len(pts) < 3:
+        return
+    for i in range(1, len(pts) - 1):
+        fill_tri(canvas, tex, pts[0], pts[i], pts[i + 1])
+
+
+def local_ncc(rg, canvas):
+    m = canvas
+    sel = (m > 1).any(2) if m.ndim == 3 else (m > 1)
+    if sel.sum() < 50:
+        return -9.0
+    a = rg[sel]
+    b = m[sel] if m.ndim == 2 else m.mean(2)[sel]
+    va = a - a.mean()
+    vb = b - b.mean()
+    d = np.sqrt((va * va).sum() * (vb * vb).sum())
+    return float((va * vb).sum() / d) if d > 1e-9 else -9.0
+
+
 def main():
     quads = prm_quads()
-    print('prm-Quads: %d' % len(quads))
     ref = np.fromfile(REF, dtype=np.uint8).reshape(240, 400, 3).astype(np.float64)
     rg = ref.mean(2)
-    best = (-2.0, None)
+    texs = {}
     for name in TEXS:
         w, h, rgb = L.xi_rgb(name)
-        tex = np.frombuffer(rgb, dtype=np.uint8).reshape(h, w, 3).astype(np.float64)
-        for f in range(80, 421, 20):
+        texs[name] = np.frombuffer(rgb, dtype=np.uint8).reshape(h, w, 3).astype(np.float64)
+    order = sorted(range(len(quads)), key=lambda i: min(v[2] for v in quads[i][1]))
+    best = (-2.0, None)
+    for f in range(100, 261, 20):
+        for dy in range(-40, 41, 40):
+            chosen = []
+            for qi in order:
+                _s, vs = quads[qi]
+                pts = to_screen(vs, f, dy)
+                b = (-9.0, TEXS[0])
+                for name in TEXS:
+                    canvas = np.zeros((H, W, 3), np.float64)
+                    draw_quad(canvas, texs[name], pts)
+                    sc = local_ncc(rg, canvas)
+                    if sc > b[0]:
+                        b = (sc, name)
+                chosen.append((qi, b[1], b[0]))
             canvas = np.zeros((H, W, 3), np.float64)
-            for _s, vs in quads:
-                pts = to_screen(vs, f)
-                if len(pts) < 3:
-                    continue
-                for i in range(1, len(pts) - 1):
-                    fill_tri(canvas, tex, pts[0], pts[i], pts[i + 1])
+            for qi, name, _sc in chosen:
+                draw_quad(canvas, texs[name], to_screen(quads[qi][1], f, dy))
             c = float(np.corrcoef(rg.ravel(), canvas.mean(2).ravel())[0, 1])
             if c > best[0]:
-                best = (c, (name, f, canvas))
-    c, (name, f, canvas) = best
-    print('best corr %.3f  tex=%s f=%d' % (c, name, f))
+                best = (c, (f, dy, canvas, chosen))
+    c, (f, dy, canvas, chosen) = best
+    # Stufe 2: Kamera (f, dx, dy) mit fester Texturwahl fein suchen.
+    best2 = (-2.0, None)
+    for f2 in range(100, 481, 20):
+        for dx in range(-60, 61, 20):
+            for dy2 in range(-160, 41, 20):
+                cv = np.zeros((H, W, 3), np.float64)
+                for qi, name, _sc in chosen:
+                    draw_quad(cv, texs[name], to_screen(quads[qi][1], f2, dy2, dx))
+                c2 = float(np.corrcoef(rg.ravel(), cv.mean(2).ravel())[0, 1])
+                if c2 > best2[0]:
+                    best2 = (c2, (f2, dx, dy2, cv))
+    c2, (f, dx, dy, canvas) = best2
+    print('best corr %.3f  f=%d dx=%d dy=%d' % (c2, f, dx, dy))
+    for qi, name, sc in chosen:
+        print('  quad %2d %-14s tex=%s local %.2f' % (qi, quads[qi][0], name, sc))
     Image.fromarray(canvas.astype(np.uint8)).save(
         os.path.join(ROOT, 'out/title3d_render.png'))
+    print('-> out/title3d_render.png')
 
 
 if __name__ == '__main__':

@@ -63,9 +63,13 @@ def main():
     # Registriertes Spiel-Asset (title_b_bg, 400x240) hat Vorrang: es trifft
     # den Capture deutlich besser (corr 0.435) als der ETC1-Host-Render
     # (corr 0.095). Beleg: tools/bg_fit_bottom.py, docs/PORT_STATE.md.
+    bgv2 = os.path.join(ROOT, 'tools', 'profiles', 'title_bg_v2.bin')
     bgreg = os.path.join(ROOT, 'tools', 'profiles', 'title_bg_registered.bin')
     bg3d = os.path.join(ROOT, 'tools', 'profiles', 'title3d_bg.bin')
-    if os.path.exists(bgreg):
+    if os.environ.get('HLE_BG_V2') == '1' and os.path.exists(bgv2):
+        bg = Image.frombytes('RGB', (400, 240), open(bgv2, 'rb').read())
+        print('BG: v2 (3D-Render + Asset, corr 0.455, std 16.3)', bgv2)
+    elif os.path.exists(bgreg):
         bg = Image.frombytes('RGB', (400, 240), open(bgreg, 'rb').read())
         print('BG: registriertes Spiel-Asset', bgreg)
     elif os.path.exists(bg3d):
