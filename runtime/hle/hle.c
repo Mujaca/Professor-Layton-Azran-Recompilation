@@ -1770,7 +1770,7 @@ void hle_pump(void) {
                         memcpy(g_frame_cpu->mem + chunk + 0x0Cu, &w16, 2);
                         w16 = 0x20u; /* payload bei chunk+0x80 */
                         memcpy(g_frame_cpu->mem + chunk + 0x10u, &w16, 2);
-                        w16 = 3u;    /* count */
+                        w16 = 96u;   /* count: 96 Records (4 Slots x 24) */
                         memcpy(g_frame_cpu->mem + chunk + 0x12u, &w16, 2);
                         w16 = 0xD2u; /* TAG */
                         memcpy(g_frame_cpu->mem + chunk + 0x14u, &w16, 2);
@@ -1800,7 +1800,7 @@ void hle_pump(void) {
                                Fehlerpfad (0x23A778) wieder weg. */
                             uint32_t a0 = obj + 0xDCu;
                             uint32_t a1 = 0x0E905000u;
-                            uint32_t a3 = 3u;
+                            uint32_t a3 = 96u;
                             uint32_t zero4 = 0u, one4 = 1u;
                             /* Guard: [container+4] muss != 0 sein,
                                [container] == 0 vermeidet den Free. */
@@ -1809,7 +1809,7 @@ void hle_pump(void) {
                             memcpy(sv, g_frame_cpu->r, sizeof(sv));
                             g_frame_cpu->r[0] = a0;
                             g_frame_cpu->r[1] = a1;
-                            g_frame_cpu->r[2] = 0u;
+                            g_frame_cpu->r[2] = 96u;   /* count */
                             g_frame_cpu->r[3] = a3;
                             g_frame_cpu->r[13] = 0x0CF0A000u;
                             arm_call_guest_pub(g_frame_cpu, 0x00284A48u);
@@ -1836,7 +1836,7 @@ void hle_pump(void) {
                                cont, base, cnt);
                         if (base != 0u) {
                             uint32_t kk;
-                            for (kk = 0; kk < 3u; kk++) {
+                            for (kk = 0; kk < 96u; kk++) {
                                 uint32_t r = base + kk * 0x74u;
                                 uint8_t st = (uint8_t)(kk + 1u);
                                 uint32_t tex = 0x1E000000u;
@@ -1857,7 +1857,7 @@ void hle_pump(void) {
                                     uint32_t nn = cnt ? cnt : 3u;
                                     fprintf(rf, "# Rechtecke aus den"
                                             " 0x74-Records\n");
-                                    for (k3 = 0; k3 < nn && k3 < 96u; k3++) {
+                                    for (k3 = 0; k3 < nn && k3 < 120u; k3++) {
                                         uint32_t r = base + k3 * 0x74u;
                                         uint16_t rw = 0, rh = 0;
                                         memcpy(&rw, g_frame_cpu->mem +
