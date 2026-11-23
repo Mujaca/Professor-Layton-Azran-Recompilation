@@ -3870,3 +3870,17 @@ ruft deterministisch nach `0x12493C`.
 schreibt aber **nicht** nach `0x0E800000`. Die 16-Zeilen-Kette ist nun
 reproduzierbar (kein Timing-Glueck mehr).
 
+
+### guest-watch laeuft jetzt mit derselben Exe/Args wie der Runner
+
+Vorher: `guest-watch` ohne `--exe/--arg` -> 0 Ereignisse auf 0x0E800000.
+Jetzt (`tools/watch_chain.py` gibt `--exe out\port.exe --arg out\romfs
+--arg=--shot ...` mit):
+
+```
+write 0x0E800000  0x00000001  0x001EDA0C  lr=0x00140154  fn_001ED8FC+0x110
+write 0x0E800000  0x00000001  0x00143F60  lr=0x00140154  fn_00143F60
+```
+
+Damit sind Messlauf und Watch-Lauf konsistent (Reproduzierbarkeit).
+

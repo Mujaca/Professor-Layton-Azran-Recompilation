@@ -18,6 +18,8 @@ def main(argv=None) -> int:
     ap.add_argument("--profile", default=os.path.join(ROOT, "tools", "profiles",
                                                       "chain.json"))
     ap.add_argument("--write")
+    ap.add_argument("--read")
+    ap.add_argument("--range")
     ap.add_argument("--pc")
     ap.add_argument("--timeout", default="45")
     ap.add_argument("--label", default="chainwatch")
@@ -25,9 +27,17 @@ def main(argv=None) -> int:
 
     prof = json.load(open(args.profile, encoding="utf-8"))
     cmd = [sys.executable, os.path.join(ROOT, "tools", "g3ds.py"),
-           "guest-watch", "--timeout", args.timeout, "--label", args.label]
+           "guest-watch", "--timeout", args.timeout, "--label", args.label,
+           "--exe", "out\\port.exe",
+           "--arg", "out\\romfs",
+           "--arg=--shot",
+           "--arg", "out\\shot_watch.bmp"]
     if args.write:
         cmd += ["--write", args.write]
+    if args.read:
+        cmd += ["--read", args.read]
+    if args.range:
+        cmd += ["--range", args.range]
     if args.pc:
         cmd += ["--pc", args.pc]
     for k, v in prof["env"].items():
