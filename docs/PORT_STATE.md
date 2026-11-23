@@ -3900,3 +3900,27 @@ fehlende Ressource), schreibt nicht nach 0x0E800000. `0x297B24` liefert
 Damit ist die Klasse strukturell bekannt; der GPU-Emitter liegt hinter
 `+0x18`/0x284AA8-Allokationen und braucht echte Element-Ressourcen.
 
+
+### 0x297618 erzeugt echte Engine-Eintraege in 0x0E800000
+
+Mit gueltigem Count-Zeiger (`r2=0x0D300100`, `[r2]=4`) und Container
+(`r1=0x3ECB68`):
+
+```
+[postcall2] 0x00297618(003ECB68,003ECB68) -> r0=0 ab=0
+[dumpmem2] 0E800000: 00000004 0 0 0 0 0 003CAC3C 0 0000FFFF 0 0 0
+                     003CAC3C 0 0000FFFF ...
+```
+
+Also: Count 4 plus wiederholte Eintraege `{ptr=0x3CAC3C, 0, mask=0xFFFF}`.
+`0x3CAC3C` ist eine Vtable mit `+8 = 0x2975AC` (Entry-Draw):
+
+```
+002975AC: if ([obj+0x14]) [obj+0x14]->[[vt]+8]() ; Felder reset ; b 0x28EF3C
+```
+
+Der Entry-Draw delegiert an ein **Kind-Objekt bei `+0x14`** und endet im
+bekannten Unlink-Pass `0x28EF3C`. Solange `+0x14` leer ist, gibt es kein
+PICA-Kommando. Der Builder selbst liefert `r0=0` (Status), schreibt aber
+die Eintraege.
+
