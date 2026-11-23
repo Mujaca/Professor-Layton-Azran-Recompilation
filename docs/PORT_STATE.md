@@ -5273,6 +5273,12 @@ fuer nv bedeutungslos (mit `...7070,1` ebenfalls 0 Diff; mit `0` bricht
 
 Messung: TOP 0/90400, BOTTOM 0/71360, byte-identisch, zwei Laeufe gleich.
 
+`HLE_PRECALL` ist inzwischen ganz entfallen: `HLE_PICA_BIND=1` ruft
+`0x27B34C(0x408808, 0x0CFE7100, 0x0CFE7070, 1)` direkt im Submit auf
+(nach den POKEs) und baut damit den Strom; nv steht nur noch im Strom.
+Beleg: Profil ohne `HLE_PRECALL`, `[pica] draw#0 nv=6`, 0 Diff.
+
+
 #### Korrektur: "96 Sprite-Draws" gibt es nicht
 
 `0x11DB84` wird 96x aufgerufen = 4 Ring-Slots x 24 Renderer-Paesse

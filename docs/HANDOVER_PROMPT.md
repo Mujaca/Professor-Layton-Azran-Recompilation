@@ -29,7 +29,7 @@ einer engine-emittierten Liste bei `0x0CFE6000` stammen.
 | Strom @`0x30` steht unter `0x0CFE6000` und wird dort als PICA ausgeführt | `[gspq-engine] stream 00000030 -> 0CFE6000 len=1C8`, `list=0CFE6000 size=1C8 ops=1` |
 | `0x22F`-Draw malt, TOP+BOTTOM == Referenz | `[pica] quad tex=1E000000 400x240 -> fb=1F000000` (Vorstufe) bzw. `[pica] draw#0 nv=6 base=0CFE8000`; `TOP 0/90400, BOTTOM 0/71360` |
 | Strom @`0x30` = 0x70-B-Draw-Block `fn_001323FC`; Records ab +0xA8 = Attribut-Block `fn_001ED65C` (Basis 0) | statische Analyse: `0x1324D0 str r6,[r5]`, `0x132580` letzter Store; `0x823F0203` = cmd 0x203 + 35 Register |
-| `0x22F` liest **echte** Attribute (kein `HLE_PICA_QUAD`) | `[gspq-engine] vertex block @0CFE8000 ... nv=6`; `[pica] draw#0 nv=6 base=0CFE8000 attr0=019FD000 attr1=0x77`; TOP/BOTTOM 0 Diff |
+| `0x22F` liest **echte** Attribute (kein `HLE_PICA_QUAD`, kein `HLE_PRECALL`) | `[gspq-engine] vertex block @0CFE8000 ... nv=6`; `[pica] draw#0 nv=6 base=0CFE8000 attr0=019FD000 attr1=0x77`; TOP/BOTTOM 0 Diff |
 | Strom @`0x30` ist eine **State-Liste** (keine Vertex-Loader/Textur-Regs); `0x228` setzt `HLE_PICA_VERTEX` auf 6 | Dump `@0030 id=228 val=1` vs `val=4` bei `HLE_PRECALL=...,4`; `[pica] draw#0 nv=6`; `out/logs/engine.txt` (`[dumpmem2] 00000030`) |
 
 Aktuelle Pixel (Engine-PICA-Lauf `engine_pica_draw.json`):
