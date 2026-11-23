@@ -267,6 +267,36 @@ void hle_2d_real_stub(ArmCpu *c) {
         inited = 1;
     }
     if (c == NULL) return;
+    /* Draw-List-Pool direkt vor dem 2D-Draw neu setzen: der Gast nullt
+       menu+0x5C/0x60 im Frame (Reset), danach bricht 0x2800C8 bei
+       [menu+0x5C]==0 in 0x280338 ab. HLE_MENU_POOL=1. */
+    if (getenv("HLE_MENU_POOL") != NULL) {
+        uint32_t pool = 0x0CFF1000u, stride = 4u, cap = 0x100u;
+        uint16_t z16 = 0, one16 = 1;
+        uint32_t obj = 0x0CFF2000u, vt = 0x003C91ECu;
+        uint32_t menu = 0x003EE12Cu;
+        memcpy(c->mem + 0x003EE188u, &pool, 4);
+        memcpy(c->mem + 0x003EE18Cu, &stride, 4);
+        memcpy(c->mem + 0x003EE190u, &z16, 2);
+        memcpy(c->mem + 0x003EE192u, &cap, 2);
+        memcpy(c->mem + 0x003EE194u, &z16, 2);
+        memcpy(c->mem + 0x003EE196u, &one16, 2);
+        memcpy(c->mem + 0x003EE16Cu, &one16, 2);   /* [menu+0x40] Gate */
+        {
+            uint32_t arr = 0x0CFF0000u;
+            memcpy(c->mem + 0x003EE198u, &arr, 4);
+            memcpy(c->mem + 0x003EE1A0u, &z16, 2);
+            memcpy(c->mem + 0x003EE1A2u, &cap, 2);
+        }
+        memcpy(c->mem + pool, &obj, 4);
+        memcpy(c->mem + obj, &vt, 4);
+        for (uint32_t k = 0; k < 0x100u; k++) {
+            uint32_t o = 0x0CFF2000u + k * 0x100u;
+            memcpy(c->mem + (pool + k * 4u), &o, 4);
+            memcpy(c->mem + o, &vt, 4);
+        }
+        (void)menu;
+    }
     {
         uint32_t sv[16];
         memcpy(sv, c->r, sizeof(sv));
