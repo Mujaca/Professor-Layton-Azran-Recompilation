@@ -4318,3 +4318,11 @@ Also: Der Builder legt Draw-Items mit Vtable `0x3C4F4C` ab; deren
 `+8`-Methode ist erneut der Unlink-Pass `0x28EF3C`. Die eigentliche
 GPU-Uebersetzung (value,header) liegt hinter `+0x00`/`+0x10`.
 
+
+### Vtable 0x3C4F4C aufgeloest: +0 ist Destruktor/Unlink, kein Emitter
+
+`0x285BEC` (Vtable+0x00): setzt Vtable, laeuft Listen ab und ruft
+`0x27A3B4` (der Unlink-Pass) - also **Lifecycle/Unlink**, kein
+GPU-Emitter. Die Draw-Items selbst sind damit reine Objekte; die
+(value,header)-Erzeugung liegt in einem anderen Pass.
+
