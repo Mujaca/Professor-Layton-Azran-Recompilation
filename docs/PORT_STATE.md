@@ -5014,3 +5014,20 @@ Damit ist der naechste Gate exakt: ein Draw-Item mit einer Vtable, deren
 Writer die 2D-Kommandos erzeugt. Pixel flach: TOP 89358/90400,
 BOTTOM 71353/71360. Tests: 13/13, 12/12.
 
+
+### 2D-Kontext hat keine C-Tabelle; GX-Writer wird indirekt gerufen (2026-11-23)
+
+Weitere Belege:
+
+- Renderer-Objekt `0x00408808` (Vtable `0x3C4F4C`) hat `[+4]=0`
+  (`@0040880C: 00000000 003CAA08 ...`), also keine A/C-Tabelle.
+- Der GX-Writer ist `fn_00140784` (0x140784..0x141060) und ruft den
+  Bit-Packer `0x143F84` (0x140DE0/0x140E18). Er hat **0 statische
+  Aufrufer** und wird indirekt dispatcht; im 2D-Lauf 0 Treffer.
+- `0x1BD720` (Draw-Item) 96x erreicht, aber `[vtable+0x78]=0`;
+  `0x297B24` 96x erreicht, ohne Writer-Treffer.
+
+Damit ist der naechste Gate: den indirekten Dispatcher von `0x140784`
+bzw. die echte Sprite-Vtable (`+0x78` gueltig) zu finden. Pixel flach:
+TOP 89358/90400, BOTTOM 71353/71360. Tests: 13/13, 12/12.
+
