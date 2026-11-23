@@ -1562,37 +1562,57 @@ void hle_pump(void) {
                     if (post_state < 0)
                         post_state = (getenv("HLE_POSTCALL") != NULL) ? 0 : 2;
                     if (post_state == 0) {
-                        const char *s = getenv("HLE_POSTCALL");
-                        char buf[128], *pp = buf;
-                        uint32_t v[5] = {0, 0, 0, 0, 0};
-                        int n = 0;
-                        size_t sl = strlen(s);
-                        if (sl >= sizeof(buf)) sl = sizeof(buf) - 1;
-                        memcpy(buf, s, sl);
-                        buf[sl] = 0;
-                        while (pp != NULL && *pp && n < 5) {
-                            char *c = strchr(pp, ',');
-                            if (c) *c = 0;
-                            v[n++] = (uint32_t)strtoul(pp, NULL, 16);
-                            pp = c ? c + 1 : NULL;
-                        }
+                        char buf[320], *tok;
+                        size_t sl = strlen(getenv("HLE_POSTCALL"));
                         post_state = 1;
-                        if (n >= 1 && v[0] >= 0x00100000u) {
-                            uint32_t sv[16];
-                            memcpy(sv, g_frame_cpu->r, sizeof(sv));
-                            g_frame_cpu->r[0] = v[1];
-                            g_frame_cpu->r[1] = v[2];
-                            g_frame_cpu->r[2] = v[3];
-                            g_frame_cpu->r[3] = v[4];
-                            g_frame_cpu->r[13] = 0x0CF0A000u;
-                            printf("[postcall2] 0x%08X(%08X,%08X)\n",
-                                   v[0], v[1], v[2]);
-                            fflush(stdout);
-                            arm_call_guest_pub(g_frame_cpu, v[0]);
-                            printf("[postcall2] -> r0=%08X ab=%d\n",
-                                   g_frame_cpu->r[0], g_frame_cpu->aborted);
-                            fflush(stdout);
-                            memcpy(g_frame_cpu->r, sv, sizeof(sv));
+                        if (sl >= sizeof(buf)) sl = sizeof(buf) - 1;
+                        memcpy(buf, getenv("HLE_POSTCALL"), sl);
+                        buf[sl] = 0;
+                        for (tok = strtok(buf, ";"); tok != NULL;
+                             tok = strtok(NULL, ";")) {
+                            if (tok[0] == '@') {
+                                char *eq = strchr(tok, '=');
+                                if (eq) {
+                                    uint32_t a = (uint32_t)strtoul(tok + 1,
+                                                                  NULL, 16);
+                                    uint32_t val = (uint32_t)strtoul(eq + 1,
+                                                                     NULL, 16);
+                                    if (a + 4u <= g_frame_cpu->mem_size)
+                                        memcpy(g_frame_cpu->mem + a, &val, 4);
+                                    printf("[postpoke] %08X=%08X\n", a, val);
+                                    fflush(stdout);
+                                }
+                                continue;
+                            }
+                            {
+                                uint32_t v[5] = {0, 0, 0, 0, 0};
+                                char *pp = tok;
+                                int n = 0;
+                                while (pp != NULL && *pp && n < 5) {
+                                    char *c = strchr(pp, ',');
+                                    if (c) *c = 0;
+                                    v[n++] = (uint32_t)strtoul(pp, NULL, 16);
+                                    pp = c ? c + 1 : NULL;
+                                }
+                                if (n >= 1 && v[0] >= 0x00100000u) {
+                                    uint32_t sv[16];
+                                    memcpy(sv, g_frame_cpu->r, sizeof(sv));
+                                    g_frame_cpu->r[0] = v[1];
+                                    g_frame_cpu->r[1] = v[2];
+                                    g_frame_cpu->r[2] = v[3];
+                                    g_frame_cpu->r[3] = v[4];
+                                    g_frame_cpu->r[13] = 0x0CF0A000u;
+                                    printf("[postcall2] 0x%08X(%08X,%08X)\n",
+                                           v[0], v[1], v[2]);
+                                    fflush(stdout);
+                                    arm_call_guest_pub(g_frame_cpu, v[0]);
+                                    printf("[postcall2] -> r0=%08X ab=%d\n",
+                                           g_frame_cpu->r[0],
+                                           g_frame_cpu->aborted);
+                                    fflush(stdout);
+                                    memcpy(g_frame_cpu->r, sv, sizeof(sv));
+                                }
+                            }
                         }
                     }
                 }

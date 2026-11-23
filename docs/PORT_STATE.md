@@ -3942,3 +3942,19 @@ setzt **kein** Engine-Code ein Kind-Sprite-Objekt. Damit ist
 Das ist die praezise fehlende Ressourcen-Bindung: das Kind-Objekt an
 `entry+0x14` (Sprite) wird vom Resource-Loader nicht erzeugt/verknuepft.
 
+
+### HLE_POSTCALL als Sequenz + Kind-Objekt gesetzt
+
+`HLE_POSTCALL` akzeptiert jetzt `addr,r0..r3;@addr=val;...`.
+Damit deterministisch:
+
+```
+[postcall2] 0x00297618(003ECB68,003ECB68) -> r0=0
+[postpoke] 0E80002C=003EE12C        (entry0+0x14 = Menue-Objekt)
+[postcall2] 0x002975AC(0E800018) -> r0=0
+[dumpmem2] 0E800000: 00000004 0 0 0 0 0 003CAC3C 0 0000FFFF ...
+```
+
+Der Entry-Draw laeuft mit gesetztem Kind (Vtable 0x3C6FE4, +8=0x11DB84),
+liefert aber keine PICA-Paare. `ops=4` weiter aus dem Descriptor.
+
