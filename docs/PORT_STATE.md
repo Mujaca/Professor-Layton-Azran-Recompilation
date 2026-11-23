@@ -5926,3 +5926,32 @@ Damit ist der verbleibende Schritt klar: Scene-Renderer (0x28BE34-Familie)
 mit echten Registrierungen laufen lassen, damit 0x27C2BC/0x2794A4 die
 Paare in `ctx+0x8334/8338` und `+0x833C/8340` schreiben; erst dann haben
 die Record-Quads echte Rects.
+
+### UV-Paare: (u0,u1)/(v0,v1), konstant (0,1); 96 = 4 Slots x 24 Items
+
+Statische Analyse (Sub-Agent, disassembliert aus code_decomp.bin):
+
+* `0x27C2BC(ctx=0x408808, rec, sel, float2* u, float2* v)`; liest nur
+  `rec+0x40` (Handle), `+0x66` (w), `+0x68` (h), `+0x60/+0x54+4*sel/+0x3C`
+  (nur Selektor-Pfad). **Kein** x/y/u/v im Record.
+* Die Paare sind **UV-Ranges**: `ctx+0x8334/8338 = (u0,u1)`,
+  `ctx+0x833C/8340 = (v0,v1)`; `w/h` -> `ctx+0xD74/0xB2C`.
+* Im Spiel sind beide Paare **konstant (0.0, 1.0)** (Literale
+  `0x102B54/58`, `0x102D34/38`; Fallback in `0x2721E0` identisch).
+  Die Position kommt aus der Node-Transform (`desc+0x140`).
+* Caller nur `0x11A3E0`/`0x11A444` (Vtable-Methoden des Sprite-Knotens);
+  diese laufen `while (count--)` ueber `[node+0xCC]` Records, Stage-Filter
+  `rec+0x38`.
+
+**Draw-Anzahl:** die 96 sind **4 Ring-Slots x 24 gedrainte Items**
+(`[slot+0xBE]` u16, Drain-Schleife `0x1ED98C`), nicht die Record-Anzahl.
+Der Record-Pfad liefert `count` Draws (Probe: 3).
+
+**Gemessener Scene-Treiber** (`tools/profiles/scene_pairs.json`):
+`HLE_POSTCALL=102D08(3EC028,3)` mit den Gates (0x408A14=1, 0x409574=desc,
+0x40932C=0, 0x409330=0x3F000000, 0x3F000010/24=1, Node
+0x3EC5C4=0D801000) -> `[hook] 102D08 hitsчные=1`, `[hook] 28BE34 hits=1`,
+aber `11A3E0/27C2BC/2794A4/2721E0 = 0` - der Node-Draw wird noch nicht
+erreicht (Node-/Vtable-Pfad in 0x28BE34 pruefen).
+
+Kanonisch unveraendert: TOP 69370/90400 (47.98), BOTTOM 25902/71360.
