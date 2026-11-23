@@ -75,43 +75,50 @@ Dazu die Button-Animationen (`btr01_*`, `btr_*`, `s01_btr_*`, `s_btr_*`)
 mit eigenen Koordinaten, z. B. `btr01_continue_off (99, 86)`,
 `btr_continue_off (108, 108)`, `btr01_setting_off (84, 178)`.
 
-Damit existieren die echten Positionen sehr wohl - bisher hat HLE sie
-durch Grid-Rects und zyklisch wiederholte XPVB-Rects ersetzt. Genau das
-ist der Bruch, den man im Bild sieht.
+Diese Zahlen sind aber **Groessen**, keine Positionen (siehe 3b).
+Bisher hat HLE die echten Groessen/UVs durch Grid-Rects und zyklisch
+wiederholte XPVB-Rects ersetzt - genau das ist der Bruch im Bild.
 
-## 3b. Semantik der ANMC-Zahlen: noch offen (gemessen)
+## 3b. Korrektur: die ANMC-Zahlen sind GROESSEN, keine Positionen
 
-Die Paare sind **noch nicht** als Bildschirmkoordinaten bestaetigt. Probe:
-lokale Helligkeit/Streuung in `reports/menu_official.bin` an diesen
-Punkten (7x7):
+Die erste Deutung `(x,y)` war falsch. Beweis: `title_b.xa/000.pvb`
+enthaelt 23 Quads mit Position, Groesse und UV. Die ANMC-Paare stimmen
+**exakt** mit den XPVB-Groessen ueberein (`tools/menu_elements.py`,
+17 von 18 Zuordnungen, Abweichung nur beim 3x3-Pointer):
 
 ```
-#continue (103,24)  mean 107.8  std  7.1
-#new      (105,24)  mean 106.2  std  7.0
-#scr      ( 99,24)  mean 109.9  std  6.6
-#setting  (150,24)  mean  93.7  std  5.9
-#sound1   ( 24,26)  mean 144.9  std  6.9
-#www      (144,24)  mean  93.7  std  6.8
-#try      (256,66)  mean 213.2  std 67.5   <- im hellen Logo-Band
-#btr01_continue (99,86) mean 110.4 std 95.5
+continue    ANMC 103x24   XPVB 103x22   uv off 0,48-103,70   uv on 0,72-103,94
+new         ANMC 105x24   XPVB 105x22   uv off 0,0-105,22    uv on 0,24-105,46
+scr         ANMC  99x24   XPVB  99x22   uv off 0,96-99,118   uv on 0,120-99,142
+setting     ANMC 150x24   XPVB 150x24   uv off 0,144-150,168  uv on 0,168-150,192
+sound1..3   ANMC  24x26   XPVB  24x26   uv off 160..232,168  uv on +24
+try         ANMC 256x66   XPVB 256x64   uv off 0,296-256,304  uv on 0,224-256,288
+www         ANMC 144x24   XPVB 144x24   uv off 0,192-144,216
+pointer     ANMC   3x3    XPVB  24x6    uv 136,168-160,174   (3x3 = Hotspot)
 ```
 
-Fast alle Punkte liegen auf **flachen** Flaechen (std < 8), obwohl echte
-Menuepunkte Text/Kanten haetten; `256` und `24/26` sind typische
-Atlas-/Power-of-Two-Werte. Arbeitshypothese: die Paare sind
-**element-lokale Offsets bzw. Atlas-Slots**, und die Bildschirmposition
-entsteht erst aus den `#CHP`-Keyframes (Transform je Frame). Das ist
-Stufe 1 der Umsetzung: `#CHP`-Baum dekodieren und die lokale Transform
-auf die Element-Rects anwenden.
+Damit sind **Groesse und UV jedes Menuepunkts aus Spiel-Daten bekannt**
+(`tools/profiles/menu_elements.txt`). Was fehlt, ist nur noch die
+Bildschirmposition: die XPVB-`pos`-Felder sind 0,0/0,2/-21,-3, also
+elternrelativ; die absolute Position kommt aus den `#CHP`-Transformknoten
+der ANMC (Matrizen, noch nicht dekodiert).
+
+Hypothese `(x,y) = Bildschirmposition` ist damit widerlegt; der Test
+steht in `tools/anmc_fit.py` (bestfit 1.25/y-aufwaerts, aber Quad-Treffer
+nur 0.50x Zufall -> Zufallstreffer auf horizontalen Kanten).
+
+Konsequenz fuer den Plan: Stufe  len1 ist **Groesse+UV erledigt**, offen ist
+nur der Transform. Vorschlag: `#CHP`-Rekorde als 4x4-Matrizen lesen (die
+1.0-Diagonalen im RES-Header ab 0x8C sind bereits sichtbar) und den
+Eltern-Transform auf die Element-Rechtecke anwenden.
 
 ## 4. Neuer Plan (4 Stufen, jede mit Abnahmekriterium)
 
-**Stufe 1 - Layout (teilweise fertig):** `tools/anmc_menu.py` liest die
-ANMC-Records. Naechster Schritt: Record-Struktur vollstaendig dekodieren
-(Laenge/Hash/Timeline, `#CHP`-Keyframes), sodass je Element ein Rect
-`(x, y, w, h, uv)` fuer den Ziel-Frame entsteht.
-*Abnahme:* `tools/profiles/anmc_menu.txt` enthaelt je Menuepunkt genau ein
-Rect, Summe der Flaechen plausibel fuer 400x240.
+**Stufe 1 - Layout (halb fertig):** Groesse + UV je Menuepunkt sind aus
+ANMC+XPVB belegt (`tools/profiles/menu_elements.txt`). Offen ist der
+`#CHP`-Transform (4x4-Matrizen ab RES-Offset 0x8C) fuer die Position.
+*Abnahme:* je Element ein Rect `(x, y, w, h, uv)` mit `corr >= 0.8`
+gegen den passenden Capture-Ausschnitt.
 
 **Stufe 2 - Texturen pro Element:** `000.pvb` + `011.xi` (XPVB/IMGC) des
 `title_b.xa`-Archivs je Element zuordnen, IMGC/ETC1 korrekt dekodieren

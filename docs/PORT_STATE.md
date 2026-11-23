@@ -6639,3 +6639,44 @@ Offen: Keyframe-Zuordnung (18 Event-/21 Button-Keyframes, benutzt wurde
 der spaeteste/idle), Alpha im Bottom-Pass (`HLE_PICA_SECOND` bindet RGB8)
 und der Font-Renderer. Werkzeuge: `tools/anmc_*.py`, Profile
 `bottom_quads*.json`, Belege `tools/out/anmc_*.txt`.
+
+### ANMC-Raetsel geloest: Zahlen sind GROESSEN, UVs aus XPVB (2026-11-23)
+
+Die in der Vorrunde als Positionen gedeuteten ANMC-Paare sind
+**Breite x Hoehe**. Beweis: `title_b.xa` enthaelt `000.pvb` (XPVB, 92
+Vertices = 23 Quads) mit Groesse + UV je Menuepunkt. Neues Tool
+`python tools/menu_elements.py` paart ANMC-Namen mit den Quads:
+
+```
+continue    ANMC 103x24   XPVB 103x22   uv off 0,48-103,70   uv on 0,72-103,94
+new         ANMC 105x24   XPVB 105x22   uv off 0,0-105,22    uv on 0,24-105,46
+scr         ANMC  99x24   XPVB  99x22   uv off 0,96-99,118   uv on 0,120-99,142
+setting     ANMC 150x24   XPVB 150x24   uv off 0,144-150,168  uv on 0,168-150,192
+sound1..3   ANMC  24x26   XPVB  24x26   uv off 160/184/208,168
+try         ANMC 256x66   XPVB 256x64   uv off 0,296-256,304  uv on 0,224-256,288
+www         ANMC 144x24   XPVB 144x24   uv off 0,192-144,216
+pointer     ANMC   3x3    XPVB  24x6    uv 136,168-160,174   (Hotspot)
+```
+
+17 von 18 Zuordnungen stimmen exakt (nur der 3x3-Pointer ist skaliert).
+Artefakt: `tools/profiles/menu_elements.txt`. Damit sind **Groesse und UV
+jedes Menuepunkts aus den Spiel-Daten belegt**.
+
+Atlas: `000.xi` = 256x512 RGBA (IMGC00), Alpha-Baender gemessen:
+v=0..22, 48..70, 96..118 (Textzeilen, Coverage 11-15 %), 160..192
+(Glyphs, 22 %), 224..288 (96 %), 288..320 (31 %). Die 'on'-UVs (+24)
+liegen in leeren Baendern - d.h. der An-Zustand ist keine eigene Grafik
+(wird zur Laufzeit eingefaerbt); offener Punkt beim Atlas-Decode.
+
+**Widerlegt:** `(x,y)` = Bildschirmposition. Test `tools/anmc_fit.py`
+findet zwar einen Bestfit (sx 1.25, y von unten), aber die Quad-Treffer
+liegen bei 0.50x Zufall - die Punkte trafen nur horizontale Kanten.
+
+**Offen (klar umrissen):** die Bildschirmposition. Die XPVB-`pos`-Felder
+sind elternrelativ (0,0 / 0,2 / -21,-3); die absolute Position kommt aus
+den `#CHP`-Transformknoten der ANMC (4x4-Matrizen, im RES-Header ab 0x8C
+mit 1.0-Diagonalen sichtbar). Naechster Schritt: diese Matrizen lesen.
+
+Kanonisch unveraendert: `[gspq-engine] sprites=13 len=958` /
+`sprites=1 len=B8`, TOP 65097/90400 (mean 48.27), BOTTOM 14752/71360
+(mean 14.33), `corr 0.354`, `std 41.8`, `detail-hit 0.99`.
