@@ -1,12 +1,44 @@
 ---
 name: 3ds-hle
-description: Debugging-Wissen fuer den statischen 3DS-Port (Professor Layton/Azran Legacy). Nutze diesen Skill bei IPC-/Reply-Layout-Fehlern, fehlenden Diensten (z. B. boss:U), GSP-/Shared-Memory-Fragen, RomFS/IVFC, HLE-Cmd-IDs und fuer die Werkzeuge trace-diff, guest-refs, guest-run, guest-watch, guest-exp. Enthaelt die verifizierten Fallen und bekannten Sackgassen des Projekts.
+description: Debugging-Wissen fuer den statischen 3DS-Port (Professor Layton/Azran Legacy). Nutze diesen Skill bei IPC-/Reply-Layout-Fehlern, fehlenden Diensten (z. B. boss:U), GSP-/Shared-Memory-Fragen, PICA-Registern/-Renderer (0x200..0x22F, Texturen, Alpha/Clear), RomFS/IVFC, HLE-Cmd-IDs und fuer die Werkzeuge trace-diff, guest-refs, guest-run, guest-watch, guest-exp. Enthaelt die verifizierten Fallen und bekannten Sackgassen des Projekts.
 ---
 
 # 3ds-hle: statischer 3DS-Port debuggen
 
 Dieser Skill ist fuer den Port in `C:\Users\user\Documents\Repos\3DS`.
 Kurzpfad: **messen -> vergleichen -> Hypothese -> A/B-Test**.
+
+## Aktueller Stand (Commit `89d30a7`, 2026-11-23)
+
+* Kanonischer Lauf:
+  `python tools\run_chain_direct.py --profile tools\profiles\engine_pica_draw.json --shot out\shot_tmp.bmp`
+  danach `python tools\canon.py --log out\logs\chain_direct.txt --shot out\shot_tmp.bmp --engine`.
+* Messung: `python tools\measure_ref.py out\shot_engine.bmp` (verifiziert):
+  TOP sichtbar `69370/90400` mean `47.98`; BOTTOM sichtbar
+  `25902/71360` mean `20.57`.
+* Der Draw-Block stammt aus dem Engine-Strom @`0x30` -> `0x0CFE6000`;
+  Quads/Vertex-Attribute und Texturen emittiert aber **HLE**
+  (`HLE_PICA_SPRITES`) - also noch kein reiner Engine-Render.
+* Kruecken, die im kanonischen Profil **weg** sind: `HLE_PICA_QUAD`,
+  `HLE_PRECALL` und der `HLE_MENU_TEX`-Override (Default sind jetzt die
+  Spiel-Assets `title_top_atlas.bin`/`title_b_bg.bin`).
+* **Scene-Paar-Kette laeuft jetzt** (`tools/profiles/scene_pairs.json`):
+  `11A3E0 -> 27C2BC -> 2794A4 -> 2721E0` liefern Hits, wenn man
+  `0x11A3E0(scene+0x59C, stage)` je Stage (1/2/3) aufruft und die
+  Records ein Handle mit `[handle+0x10]`/`[+0x24] != 0` haben.
+  Stage-Filter steht in **r1** (`ldrsb [rec+0x38] == r1`).
+  Die UV-Paare `ctx+0x8334/8338`,`+0x833C/8340` sind danach noch 0 -
+  der Consumer `0x12D030`/`0x2721E0` schreibt sie erst beim Layer-Commit.
+* `0x28BE34` ruft die Methode aus `[node+0x10]` mit `r0 = scene+0x59C`
+  (nicht `[node]`); `[scene+0x59C]` = Node-Pointer.
+* 0xD2-Container-Link: Loader setzt die Basis, ein Fehlerpfad
+  (`0x23A778`) loescht sie wieder; HLE setzt sie im Treiber selbst.
+* Record -> Block: `[node+0xC4]` = **Recordbasis**, `+0xCC` = u16 count,
+  `+0xDC` = Stage-Maske (`0x107`), Blockgroesse `size = mult*rec[0x68]`.
+* Die 96 Draws sind **4 Ring-Slots x 24 gedrainte Items**
+  (`[slot+0xBE]`), nicht die Record-Zahl.
+* Details/Belege: `docs/PORT_STATE.md` (letzte Abschnitte) und
+  `docs/HANDOVER_PROMPT.md`.
 
 ## Zuerst die Werkzeuge
 
@@ -134,12 +166,14 @@ TriggerCmdReqQueue, `0x0013` RegisterInterruptRelayQueue,
 `0x0018` ImportDisplayCaptureInfo.
 
 Im Normallauf (Spielcode allein) sieht man nur `0x0010`, `0x0013`, `0x0016`,
-`0x001E`; `0x0006`/`0x000C` werden vom Spielcode nicht erreicht. Fuer den
-Menue-Meilenstein reicht `runtime/hle/hle.c` (`hle_menu_gpu_submit`) eine
-synthetische Kommandoliste durch dieselben Handler: `SubmitCmdList`-Ring
-(id 1) + `0x0006` + `0x000C` + `0x0005`; das ist belegt (0 Pixel Diff),
-aber noch **kein** Engine-Render. Gates/Pfade fuer den echten Render stehen
-in `docs/HANDOVER_PROMPT.md`.
+`0x001E`. Fuer den Menue-/Engine-Pfad gibt es zwei Stufen:
+
+* `hle_menu_gpu_submit` (HLE-eigene Liste, `SubmitCmdList`-Ring + `0x0006` +
+  `0x000C` + `0x0005`) war der erste Present-Beleg, ist aber **nicht** mehr
+  der kanonische Lauf.
+* Kanonisch ist der Engine-Strom @`0x30` -> `0x0CFE6000` (Details im
+  PICA-Abschnitt). Der Submit laeuft ueber `HLE_FRAME_LOOP2=12FD30`; ein
+  echter, natuerlicher Engine-Submit ist noch nicht erreicht.
 
 ### APT:U
 `0x0001` GetLockHandle, `0x0002` Initialize, `0x0003`/`0x0004`
@@ -217,6 +251,125 @@ Archive-ID 3) und liefert `out/romfs_image.bin` (`hle.c:1034`).
 * Relevante Cmds: `0x0005` SetBufferSwap, `0x0006` SetCommandList,
   `0x000C` TriggerCmdReqQueue, `0x0013` RegisterInterruptRelayQueue.
 
+## PICA-Renderer im Port (harte Fakten)
+
+Quellen: `runtime/gpu.c` (`p_regs`, `p_load_attrs`, `p_texel`, `p_draw_arrays`),
+`runtime/hle/hle.c` (Stream-Kopie + Sprite-Emitter), Azahar
+`regs_pipeline.h`/`regs_texturing.h`.
+
+Kommandostrom = Paare `(value, header)`. Header: `cmd_id` Bits 0..15,
+`param_mask` Bits 16..19, `extra_data_length` Bits 20..27, `group` Bit 31.
+Bei `extra>0` folgen weitere Werte; `group=1` schreibt `id+1..id+n`, sonst
+`id` n-mal.
+
+### Register-Kurzmap (verifiziert)
+
+| Register | Bedeutung |
+|---|---|
+| `0x200` | Vertex-Basis: `base = (reg >> 1) * 16` (also `reg = addr >> 3` bei 16-B-Stride) |
+| `0x201` | Attributformate 0..7, 4 bit je Attribut: `fmt = b & 3` (0 BYTE, 1 UBYTE, 2 SHORT, 3 FLOAT), `ncomp = ((b >> 2) & 3) + 1` |
+| `0x202` | Attributformate 8..11 in Bits 0..15; `max_attribute_index` in Bits 28..31 |
+| `0x203 + l*3` | Loader `l` (0..11), Wort 0: `data_offset` in Bits 0..27 |
+| Loader Wort 1 | Zuordnung `comp0..comp7`, ein Nibble je Komponente |
+| Loader Wort 2 | `comp8..comp11` Bits 0..15; **`byte_count`** Bits 16..23 = Stride in Bytes; `component_count` Bits 28..31 |
+| `0x228` | `num_vertices` |
+| `0x22A` | Vertex-Offset (Index in den Puffer) |
+| `0x22E` / `0x22F` | Draw-Trigger (arrays / indexed) |
+| `0x23A`/`0x238` | Command-Buffer-Adresse/Groesse (Kanal je `+0`/`+4`) |
+| `0x23C`/`0x23D` | Trigger fuer verschachtelte Kommandolisten |
+
+Ein Loader ist **3 Woerter** ab `0x203 + l*3`; es gibt keine eigene
+`0xC3`-Loaderkonstante im Port. Die Stride heisst `byte_count` (Wort 2,
+Bits 16..23) - genau das Feld, das in `p_load_attrs` als `bcount` gelesen
+wird.
+
+Textur-Register:
+
+| Register | Bedeutung |
+|---|---|
+| `0x80` | `main_config`; **Bit 0 = texture0_enable** (die Falle: nicht `0x81`!) |
+| `0x81` | `border_color` (kein Enable) |
+| `0x82` | width Bits 16..26, height Bits 0..10 |
+| `0x85` | Texturadresse >> 3 |
+| `0x8E` | Format: `0` RGBA8, `1` RGB8, `3` RGB565, `4` RGBA4, `5` IA8, `7` I8, `8` A8 |
+
+### Engine-Strom @`0x30`
+
+* Der Strom ist eine **State-Liste** (`0x228`, `0x229`, `0x25E`, `0x25F`,
+  `0x227`, `0x245`, `0x253`, `0x232`, `0x111`), **keine** Vertex-Loader und
+  **keine** Textur-Register. Allein gezeichnet ergibt er nichts.
+* `0x228` (nv) wird im Engine-Pfad von `0x27B34C` gesetzt; `HLE_PICA_BIND=1`
+  ruft `0x27B34C(0x408808, 0x0CFE7100, 0x0CFE7070, 1)` direkt vor dem Submit
+  und baut den Draw-Block.
+* Gruppen-Records (Header-Bit 31, `extra > 0`) sind **8-Byte-aligned**: nach
+  den Extras folgt ein Pad-Wort. Ohne `HLE_PICA_ALIGN8=1` liest der Parser
+  danach `(value, header)` vertauscht.
+* **`0x22F`-Semantik im Port:** beide Trigger (`0x22E`/`0x22F`) rufen
+  denselben `p_draw_arrays`; `0x22F` liest **keinen** Indexpuffer,
+  `nv` kommt aus `0x228`. Der Engine-Strom nutzt `0x22F` als reinen
+  Draw-Trigger.
+* Kanonisch kommen echte Attribute aus `HLE_PICA_SPRITES`: je Zeile
+  `x y w h u0 v0 u1 v1` ein Quad mit eigenem Attributblock
+  (`0x200..0x208`) und Draw-Block (`nv=6`). Der Strom liefert nur den
+  Draw-Teil.
+
+### Alpha, Clear und Determinismus
+
+* `put_px_blend` mischt Quell-Alpha ueber das Ziel
+  (`out = src*a + dst*(1-a)`); ein implizites Frame-Clear gibt es **nicht**.
+* Ohne Clear akkumuliert der Shot ueber die Frame-Anzahl: zwei Laeufe
+  ergaben TOP `65707` vs `85271`.
+* Mit `HLE_PICA_CLEAR=1` (loescht das Ziel vor dem Draw, `w*h*3` Bytes) sind
+  drei Laeufe byte-identisch. **Regel:** jede Bildmessung nur mit Clear und
+  mindestens 2x wiederholen.
+
+### NDC-Heuristik
+
+Attribut 0 ist die Position. NDC -> Pixel wird nur angenommen, wenn **alle
+drei** Eckpunkte in `[-1.6, 1.6]` liegen; sonst gelten Pixelkoordinaten.
+Ein Quad `(0,0)-(400,240)` bleibt dadurch im Pixelraum - ohne diese Regel
+landet `(0,0)` in der Bildmitte.
+
+### HLE_PICA_* / HLE_CLASSA_* (Defaults)
+
+| Schalter | Wirkung | Default / kanonisch |
+|---|---|---|
+| `HLE_PICA_LOG=<n>` | loggt die ersten `n` Draws (`[pica] draw#`) | Default `0` = still |
+| `HLE_PICA_RENDER` | heuristischer Rasterizer (Attr0 = Pos, erstes 2-Komp-Attribut = UV) | Default aus; `tests/port.c` setzt es bei `HLE_ENGINE_FRAME` automatisch |
+| `HLE_PICA_ALIGN8` | Pad-Wort nach Gruppen-Records | Default aus; kanonisch **an** |
+| `HLE_PICA_BIND` | ruft `0x27B34C` vor dem Submit (baut Strom) | Default aus; kanonisch **an** |
+| `HLE_ENGINE_STREAM=<src>,<len>` | kopiert Engine-Strom nach `0x0CFE6000` | kanonisch `30,1C8` |
+| `HLE_PICA_TARGET=<addr>,<w>,<h>` | Ziel-Framebuffer + Groesse | kanonisch `1F000000,400,240` |
+| `HLE_PICA_PRIMARY=<tex>,<w>,<h>,<fmt>` | bindet Top-Textur vor jedem Submit | kanonisch `1E000000,1024,1280,0` (RGBA8) |
+| `HLE_PICA_SECOND=<tex>,<w>,<h>,<fb>` | zweiter Pass (Bottom) | kanonisch `1E100000,320,240,1F060000` |
+| `HLE_PICA_SPRITES` / `_SPRITES2=<datei>` | je Zeile ein Quad (`x y w h u0 v0 u1 v1`) | kanonisch `title_top_rects.txt` / `bottom_bg_rect.txt` |
+| `HLE_PICA_UVRECT` / `_UVRECT2=u0,v0,u1,v1` | UV-Fenster fuer den Vollbild-Fallback | Default `0,0,1,1` |
+| `HLE_PICA_VERTEX` | haengt Attributblock + `nv=6` vor den Strom | Default aus; Altpfad, **nicht** kanonisch |
+| `HLE_PICA_QUAD` | Vollbild aus gebundener Textur ohne Attribute | Default aus; **obsolet** im kanonischen Lauf |
+| `HLE_PICA_CLEAR` | loescht das Ziel vor dem Draw | Default aus; kanonisch **an** (Determinismus) |
+| `HLE_MENU_TEX` / `_BOT` | Pfad-Override fuer den Atlas | Default `out/title_top_atlas.bin` / `out/title_b_bg.bin` (Spiel-Assets, nicht Referenz) |
+| `HLE_MENU_TEX_W`/`_H`/`_BPP` | Atlasgroesse und Bytes/texel (`3` oder `4`) | kanonisch `1024`/`1280`/`4`; das PICA-Format kommt aus `HLE_PICA_PRIMARY` |
+| `HLE_CLASSA_DRIVE` / `_RING` / `_RECTS=<datei>` | 0xD2-Chunk-Treiber / Ring-Dump / Rect-Export | Diagnose, nicht kanonisch |
+| `HLE_PRESENT_FILL=0` | schaltet den `#604020`-Present-Fill ab | Default **an** |
+
+## Widerlegte fruehere Annahmen (nicht mehr als Praemisse nutzen)
+
+1. **"Der Strom @`0x30` ist der echte PICA-Draw/Quad."** Falsch: es ist eine
+   State-Liste ohne Vertex-Loader und ohne Textur-Register. Beleg:
+   `@0030 id=228 val=1`, `0x200/0x201/0x202 = 0`, kein `[pica] quad`.
+2. **"96 Draw-Items."** Falsch: `0x11DB84` wird 96x gerufen = **4 Ring-Slots
+   x 24 gedrainte Items** (`[slot+0xBE]`, Drain-Schleife `0x1ED98C`). Der
+   Record-Pfad liefert `count` Draws (Probe: 3).
+3. **"Titel-Texturen sind L4-Nibble; NCC 0.125."** Falsch: `title.xc`
+   enthaelt **ETC1** (IMGC `fmt=0x011B`, bd=4, 32 B/Tile). Der 0.125-NCC war
+   ein Decode-Artefakt des falschen L4-Dekoders.
+4. **"`HLE_PICA_QUAD`/`HLE_PRECALL` sind noetig."** Nur fuer den alten
+   Vollbild-Pfad; kanonisch sind echte `0x200..0x208`-Attribute +
+   `HLE_PICA_SPRITES` aktiv.
+5. **"0 Pixel Diff."** Gilt nur fuer die Referenz-Capture-Kopie
+   (`reports/menu_official*.bin`), nicht fuer Spiel-Assets. Aktuell:
+   TOP `69370/90400` (47.98), BOTTOM `25902/71360` (20.57).
+
 ## libctru-Referenzen
 
 * `ndspInit` / `ndspFinalize`:
@@ -250,11 +403,16 @@ Diese Aenderungen wurden bereits gemessen und brachten **kein** `boss:U`:
    und der Gastaufruf funktionieren; sie erzeugen keinen Spiel-Renderzustand.
 7. Die PICA-Liste ist im Normallauf leer (GSP-Shmem nur ein Nullwort), und
    `fn_0013E3E0` (Trigger `0x000C`) wird nie ausgefuehrt; `ARM_WATCH=13E3E0`
-   ergab 0 Treffer (`reports/PORT.md`). Der Menue-Frame laeuft inzwischen
-   ueber eine HLE-eigene Liste (`hle_menu_gpu_submit`), nicht ueber den
-   Spielcode; die Engine-eigene Draw-Liste waechst mit
-   `HLE_DRAW_LIST=1 HLE_DRAW_FIX=1` (`fn_002800C8`, `count=11`) und ist der
-   naechste Schritt.
+   ergab 0 Treffer (`reports/PORT.md`). **Stand 2026-11-22.** Inzwischen
+   laeuft der Engine-Strom @`0x30` ueber `HLE_ENGINE_STREAM`/`HLE_PICA_BIND`
+   (siehe „Aktueller Stand"); der natuerliche Submit ist weiter offen.
+
+## Skill-Pflege (Prozessregel)
+
+Nach **jedem** belegten Fakt nicht nur `docs/PORT_STATE.md` ergaenzen,
+sondern im selben Commit eine Zeile hier in `3ds-hle` bzw. in
+`.opencode/skills/3ds-port/SKILL.md` aktualisieren. Sonst altern die Skills
+schneller als der Port - genau das ist bei `0x30`, „96 Draws" und L4 passiert.
 
 Wichtig: `boss:U` ist der **erste fehlende Dienst** im kanonischen
 trace-diff, nicht automatisch die Ursache. Erst die Referenzreihenfolge
