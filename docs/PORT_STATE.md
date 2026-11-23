@@ -5801,3 +5801,28 @@ k=1.00 72365/48.13, k=1.20 79083/51.06.
 Zusatz: `pica_emit_sprites` faellt auf einen eigenen Draw-Block
 (0x228=6, 0x25E=0, 0x227=0, 0x22F=1) zurueck, wenn der Engine-Strom in
 einem Frame leer ist - damit ist die Liste selbst dann vollstaendig.
+
+### 0xD2-Treiber: Loader laeuft, Container-Link fehlt (2026-11-23, 962aad7)
+
+`HLE_CLASSA_DRIVE=1` baut einen synthetischen 0xD2-Chunk (Tabelle bei
+`chunk+0x10`, TAG 0xD2, count 3, Payload-Offset 0x20) und ruft die Kette
+`0x238F58 -> 0x3669FC -> 0x366ABC`. Beleg (`tools/profiles/classa_drive.json`):
+
+```
+[hook] count addr=00233B98 hits=2                      # Ctor 2x
+[hook] regs  addr=00284A48 hits=1 r0=0D80B0DC r1=0E905000 r3=3
+[drive] 238F58 -> r0=1 ab=0
+[drive] cont=00000000 base=00000000 cnt=0
+[drive] 3669FC node+0xC4 -> 00000000 count=0
+[drive] 366ABC -> r0=0 ab=0
+[dumpafter] 0D80B0DC: 00000000 ...          # obj+0xDC bleibt 0
+```
+
+Also: der Record-Alloc (`0x23A654` -> `0x284AA8`) und der Ctor laufen,
+`0x284A48` bekommt `obj+0xDC` und das neue Array `0x0E905000`, aber der
+Container-Basiszeiger wird nicht nach `obj+0xDC` geschrieben (die
+Funktion ist ein Reset: sie nullt `+0`, `+8`, `+0xA`). Der Store der
+neuen Basis (bzw. der Aufruf, der ihn setzt) fehlt noch - erst danach
+kann `0x3669FC(node, container)` die Records an `node+0xC4` haengen.
+
+Kanonisch unveraendert (69370/90400 mean 47.98, BOTTOM 25902/71360).
