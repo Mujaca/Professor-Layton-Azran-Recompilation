@@ -623,33 +623,40 @@ static void hle_install_2d_entry(ArmCpu *c) {
         if (!imgs_tried && !no_asset) {
             FILE *f;
             const char *texenv = getenv("HLE_MENU_TEX");
+            /* Default: Spiel-Asset (title_a-Atlas + title_b_bg), nicht
+               mehr die Referenz-Capture. */
             const char *texpath = (texenv != NULL && *texenv != 0)
-                                      ? texenv : "out/menu_top.bin";
-            int tw = 400, th = 240;
+                                      ? texenv
+                                      : "out/title_top_atlas.bin";
+            int tw = 400, th = 240, tbpp = 3;
             int fa_bottom = (getenv("HLE_XQ_ASSET") != NULL);
             {
                 const char *ew = getenv("HLE_MENU_TEX_W");
                 const char *eh = getenv("HLE_MENU_TEX_H");
+                const char *eb = getenv("HLE_MENU_TEX_BPP");
                 if (ew != NULL && *ew != 0 && atoi(ew) > 0) tw = atoi(ew);
                 if (eh != NULL && *eh != 0 && atoi(eh) > 0) th = atoi(eh);
+                if (eb != NULL && *eb != 0 && (atoi(eb) == 3 || atoi(eb) == 4))
+                    tbpp = atoi(eb);
             }
             imgs_tried = 1;
-            topimg = (unsigned char *)calloc(1, (size_t)tw * (size_t)th * 3u);
+            topimg = (unsigned char *)calloc(1, (size_t)tw * (size_t)th * (size_t)tbpp);
             botimg = (unsigned char *)calloc(1, 320u * 240u * 3u);
             f = fopen(texpath, "rb");
-            if (f) { if (fread(topimg, 1, (size_t)tw * (size_t)th * 3u, f) != (size_t)tw * (size_t)th * 3u) memset(topimg, 0, (size_t)tw * (size_t)th * 3u); fclose(f); }
+            if (f) { if (fread(topimg, 1, (size_t)tw * (size_t)th * (size_t)tbpp, f) != (size_t)tw * (size_t)th * (size_t)tbpp) memset(topimg, 0, (size_t)tw * (size_t)th * (size_t)tbpp); fclose(f); }
             if (!fa_bottom) {
                 const char *btenv = getenv("HLE_MENU_TEX_BOT");
                 const char *btpath = (btenv != NULL && *btenv != 0)
-                                         ? btenv : "out/menu_bottom.bin";
+                                         ? btenv
+                                         : "out/title_b_bg.bin";
                 f = fopen(btpath, "rb");
                 if (f) { if (fread(botimg, 1, 320u * 240u * 3u, f) != 320u * 240u * 3u) memset(botimg, 0, 320u*240u*3u); fclose(f); }
             }
-            memcpy(c->mem + 0x1E000000u, topimg, (size_t)tw * (size_t)th * 3u);
+            memcpy(c->mem + 0x1E000000u, topimg, (size_t)tw * (size_t)th * (size_t)tbpp);
             if (!fa_bottom)
                 memcpy(c->mem + 0x1E100000u, botimg, 320u * 240u * 3u);
-            printf("[engine] Menue-Assets geladen (top=%dx%d bottom=%s)\n",
-                   tw, th, fa_bottom ? "FA-Read" : "0D050000");
+            printf("[engine] Menue-Assets geladen (top=%dx%d bpp%d bottom=%s)\n",
+                   tw, th, tbpp, fa_bottom ? "FA-Read" : "0D050000");
             fflush(stdout);
         }
     }
@@ -3886,10 +3893,10 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
                     }
                     if (pm != NULL && *pm != 0) {
                         char bp[80], *qp = bp;
-                        uint32_t vp[3] = {0, 0, 0};
+                        uint32_t vp[4] = {0, 0, 0, 1};
                         int np = 0;
                         snprintf(bp, sizeof(bp), "%s", pm);
-                        while (qp != NULL && *qp && np < 3) {
+                        while (qp != NULL && *qp && np < 4) {
                             char *cp2 = strchr(qp, ',');
                             if (cp2) *cp2 = 0;
                             vp[np] = (uint32_t)strtoul(qp, NULL,
@@ -3899,7 +3906,8 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
                         }
                         if (vp[0] != 0u && vp[1] != 0u && vp[2] != 0u) {
                             const char *ur = getenv("HLE_PICA_UVRECT");
-                            gpu_pica_bind_texture(vp[0], (int)vp[1], (int)vp[2], 1);
+                            gpu_pica_bind_texture(vp[0], (int)vp[1], (int)vp[2],
+                                                  (int)vp[3]);
                             if (ur != NULL && *ur != 0) {
                                 /* u0,v0,u1,v1 (Dezimal oder 0x...) */
                                 char bu[96], *qu = bu;

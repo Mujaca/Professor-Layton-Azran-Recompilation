@@ -1,0 +1,91 @@
+"""Top-Textur fuer den HLE-Render: title_a-Atlas + Ersatz-Hintergrund.
+
+Die 3D-Titel-Map fehlt im Port; als Naeherung wird menu/title_b_bg.xi
+(Spiel-Asset aus lt6_b.fa) auf 400x240 skaliert und unter den Atlas gelegt.
+
+  python tools\\make_menu_assets.py
+
+Erzeugt:
+  out/title_top_atlas.bin   1024x1280 RGBA (Atlas + BG bei (0,1024))
+  tools/profiles/title_top_rects.txt  (BG-Quad zuerst, dann 9 XPVB-Quads)
+  out/title_b_bg.bin        320x240 RGB (Bottom, 1:1)
+"""
+import os
+import struct
+import sys
+
+from PIL import Image
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, 'tools'))
+import _imgc
+
+FA = os.path.join(ROOT, 'out', 'romfs', 'lt6', 'arc', 'lt6_b.fa')
+BG_OFF = 0x0CE43074
+AW = 1024
+AH = 1024
+TW = 1024
+TH = 1280
+
+
+def decode_linear(path):
+    old = _imgc.master_get
+    _imgc.master_get = lambda p, w: (p % w, p // w)
+    try:
+        return _imgc.decode(path)
+    finally:
+        _imgc.master_get = old
+
+
+def main():
+    out = os.path.join(ROOT, 'out')
+    os.makedirs(out, exist_ok=True)
+
+    atlas = Image.open(os.path.join(ROOT, 'tools', 'profiles',
+                                    'title_a_atlas.png')).convert('RGBA')
+    assert atlas.size == (AW, AH)
+
+    data = open(FA, 'rb').read()
+    assert data[BG_OFF:BG_OFF + 6] == b'IMGC00', hex(BG_OFF)
+    s2 = struct.unpack_from('<i', data, BG_OFF + 0x38)[0]
+    sz = struct.unpack_from('<i', data, BG_OFF + 0x3C)[0]
+    tmp = os.path.join(ROOT, 'tools', 'out', 'title_b_bg.xi')
+    open(tmp, 'wb').write(data[BG_OFF:BG_OFF + 0x48 + s2 + sz])
+    w, h, bpp, pic = decode_linear(tmp)
+    rgb = bytearray(w * h * 3)
+    for t in range(w * h):
+        if bpp >= 3:
+            rgb[t * 3] = pic[t * bpp + 2]
+            rgb[t * 3 + 1] = pic[t * bpp + 1]
+            rgb[t * 3 + 2] = pic[t * bpp]
+        else:
+            v = pic[t * bpp]
+            rgb[t * 3] = v
+            rgb[t * 3 + 1] = v
+            rgb[t * 3 + 2] = v
+    bg = Image.frombytes('RGB', (w, h), bytes(rgb))
+    open(os.path.join(out, 'title_b_bg.bin'), 'wb').write(bytes(rgb))
+
+    top = Image.new('RGBA', (TW, TH), (0, 0, 0, 0))
+    top.paste(atlas, (0, 0))
+    top.paste(bg.convert('RGBA').resize((400, 240)), (0, AH))
+    open(os.path.join(out, 'title_top_atlas.bin'), 'wb').write(top.tobytes())
+
+    lines = ['# BG-Ersatz (title_b_bg, 400x240) zuerst, dann 9 XPVB-Quads',
+             '0 0 400 240 0 %.6f 0.390625 %.6f'
+             % (AH / float(TH), (AH + 240) / float(TH))]
+    for ln in open(os.path.join(ROOT, 'tools', 'profiles',
+                                'title_a_rects.txt'), encoding='utf-8'):
+        ln = ln.strip()
+        if not ln or ln.startswith('#'):
+            continue
+        x, y, qw, qh, u0, v0, u1, v1 = [float(v) for v in ln.split()[:8]]
+        lines.append('%g %g %g %g %.8f %.8f %.8f %.8f'
+                     % (x, y, qw, qh, u0, v0 * AH / float(TH), u1,
+                        v1 * AH / float(TH)))
+    open(os.path.join(ROOT, 'tools', 'profiles', 'title_top_rects.txt'),
+         'w', newline='\n').write('\n'.join(lines) + '\n')
+    print('top-atlas %dx%d, rects %d' % (TW, TH, len(lines) - 1))
+
+
+main()

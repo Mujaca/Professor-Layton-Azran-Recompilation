@@ -84,6 +84,27 @@ static void blit_rgb(ArmCpu *c, int x, int y, int w, int h,
     }
 }
 
+static void put_px_blend(ArmCpu *c, int x, int y, uint32_t rgb, uint32_t a)
+{
+    uint32_t off;
+    if (x < 0 || y < 0 || x >= g_fb_w || y >= g_fb_h) return;
+    if (a == 0u) return;
+    off = (g_fb & 0x1FFFFFFFu) + (uint32_t)(y * g_fb_w + x) * 3u;
+    if (off + 3u > c->mem_size) return;
+    if (a >= 255u) {
+        put_px(c, x, y, rgb & 0xFFFFFFu);
+        return;
+    }
+    {
+        uint32_t ia = 255u - (a > 255u ? 255u : a);
+        uint32_t dr = c->mem[off + 0u], dg = c->mem[off + 1u], db = c->mem[off + 2u];
+        uint32_t sr = rgb & 0xFFu, sg = (rgb >> 8) & 0xFFu, sb = (rgb >> 16) & 0xFFu;
+        c->mem[off + 0u] = (uint8_t)((sr * a + dr * ia) / 255u);
+        c->mem[off + 1u] = (uint8_t)((sg * a + dg * ia) / 255u);
+        c->mem[off + 2u] = (uint8_t)((sb * a + db * ia) / 255u);
+    }
+}
+
 static void draw_tri(ArmCpu *c, int x1, int y1, int x2, int y2, int x3, int y3,
                      uint32_t rgb)
 {
@@ -389,8 +410,11 @@ static void p_raster_tri(ArmCpu *c, float x0, float y0, float u0, float v0,
             int ok = 0;
             uint32_t tex = p_texel(c, u, v, &ok);
             uint32_t rgb = ok ? tex : col;
-            if (ok && ((tex >> 24) & 0xFFu) < 128u) continue;
-            put_px(c, x, y, rgb & 0xFFFFFFu);
+            if (ok) {
+                put_px_blend(c, x, y, rgb & 0xFFFFFFu, (tex >> 24) & 0xFFu);
+            } else {
+                put_px(c, x, y, rgb & 0xFFFFFFu);
+            }
         }
     }
 }
