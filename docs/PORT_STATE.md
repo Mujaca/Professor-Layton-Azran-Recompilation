@@ -5876,3 +5876,30 @@ Fuer echte Record-Quads fehlen weiterhin die Position-/UV-Zeigerpaare
 des Scene-Renderers (`0x27C2BC`/`0x2794A4`) - sie stehen nicht im Record.
 
 Kanonisch unveraendert: TOP 69370/90400 (47.98), BOTTOM 25902/71360.
+
+### Record-Quads emittiert (2026-11-23, 01407ae)
+
+`HLE_CLASSA_RECTS=<datei>` schreibt nach dem Klasse-A-Treiber je Record
+eine Zeile `x y w h u0 v0 u1 v1` (w/h aus `rec+0x66/+0x68`, UV 0..1,
+Positionen als Grid-Platzhalter). Damit lasst sich die Record-Kette als
+PICA-Liste rendern:
+
+```
+# tools/profiles/record_rects.txt (aus den 0x74-Records)
+0 0 64 22 0 0 1 1
+100 0 64 22 0 0 1 1
+200 0 64 22 0 0 1 1
+```
+
+Profil `tools/profiles/record_quads.json` (nicht kanonisch):
+
+```
+[gspq-engine] sprites=3 len=228
+TOP sichtbar : 88357/90400  mean 87.79
+```
+
+Damit ist die Kette Record -> Block -> Rect -> PICA-Quad geschlossen
+(3 Records in der Probe). Kanonisch bleibt der visuelle Pfad
+(9 XPVB-Quads + 3D-Grundlayer, 69370/90400 mean 47.98; BOTTOM
+25902/71360). Fuer echte Positionen fehlen weiterhin die Scene-
+Zeigerpaare (`0x27C2BC`/`0x2794A4`).
