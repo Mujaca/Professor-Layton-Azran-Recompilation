@@ -4136,3 +4136,15 @@ Der Handler wird also ausgefuehrt, aber der Stub (`0x0D620000`, Marker
 somit in der Indirektion des Handlers
 (`[node+0x10] -> [[+0] ]+0x14`), nicht im Dispatcher.
 
+
+### Vtable-Layout verifiziert, Stub trotzdem nicht erreicht
+
+`[dumpmem2] 0D610040: 0 0 0 0 0 0D620000 ...` -> Index 5 = `+0x14` ist
+`0x0D620000` (korrekt). Auch nach Verlegen von Stub (`0x0D7F0000`) und
+Vtable (`0x0D7F2000`) und Marke (`0x0D7F1000`) bleibt die Marke 0.
+
+Der Handler `0x142D34` laeuft (`r0=0`), aber die Indirektion
+`[node+0x10] -> [[+0] ]+0x14 -> blx` erreicht den Stub nicht. Naechster
+Verdacht: Laufzeit-Code/Daten weichen von `code_decomp.bin` ab (wie
+schon beim `+2`-Vtable-Wert).
+
