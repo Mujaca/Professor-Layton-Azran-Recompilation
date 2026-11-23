@@ -291,6 +291,10 @@ def generate(res, path, max_funcs=None, trace=False, data=None):
     for fn in res.functions.values():
         for call, _ in fn.calls:
             needed.add(call)
+    if data is not None:
+        for _a in needed:
+            if _a not in res.functions:
+                res.functions[_a] = scanmod.Function(_a)
     all_addrs = sorted(set(res.functions) | needed)
     if data is not None:
         _fill_empty_fns(res, data)
