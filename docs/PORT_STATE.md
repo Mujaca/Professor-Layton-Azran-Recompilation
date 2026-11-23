@@ -4677,3 +4677,39 @@ weiterhin aus der HLE-Liste (0x070FFFFF/0x0CFE6000):
 TOP 90281/90400, BOTTOM 26091/71360 gegen reports/menu_official*.bin.
 Tests: 13/13, 12/12.
 
+
+### FA-Reader liest das Menue-.xq aus lt6_a.fa (2026-11-23)
+
+Profil: `tools/profiles/menu_xq_read.json` (env-only).
+
+Zweig `0x2919DC -> 0x104E44 -> 0x1112C4 -> 0x2808A8 -> 0x280744`
+mit `HLE_POSTCALL=2919DC,3EC028,0,0CF0B200,0CF0B200` gestartet
+(Pfadstring "seq/menu_logo.xq" in Gast-RAM, Handle-Wort 0x400008,
+Tabelle 0x0CFE7400 -> 0x00400000, Gate `[0x3D9440]=0x32335158`).
+
+Ergebnis (`out/logs/fareader5_run.txt`):
+
+```
+[postcall2] 0x002919DC(003EC028,00000000)
+[faread] idx=0 pos=00458CB8 want=00000048 n=72 dst=0CF09D10
+[faread] idx=0 pos=00458D00 want=00000004 n=4 dst=0CF08CC8
+[faread] idx=0 pos=00458D04 want=00000004 n=4 dst=0CF08CC8
+[faread] idx=0 pos=00458D08 want=00000004 n=4 dst=0CF08CC8
+[faread] idx=0 pos=00458D0C want=00000004 n=4 dst=0CF08CC8
+[postcall2] -> r0=00000001 ab=0
+```
+
+Der Reader liest also den XQ-Header (0x48 B) und die vier Chunk-Groessen
+am Offset `0x458CB8`. Kontrolle am Dateiinhalt:
+
+```
+lt6_a.fa@458CB8[:16] = 58513332110008004c0013006900c800   ("XQ32"...)
+out/fa_a/seq/menu_logo.xq[:16] = 58513332110008004c0013006900c800
+identisch: True
+```
+
+**Noch erzwungen:** der Ressourcen-Open `0x268C80` (HLE_RETFORCE auf
+0x0E500000) und der Archiv-Offset (`HLE_FA_FORCE_POS=458CB8`). Beides ist
+der naechste echte Gate (Lookup "seq/menu_logo.xq" -> Archivoffset).
+Pixel unveraendert (HLE-Liste): 90281/90400 + 26091/71360.
+
