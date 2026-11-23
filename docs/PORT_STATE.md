@@ -4001,3 +4001,16 @@ beim Lauf haben **0 Reads** auf die eingefuegte Node-Liste (`ctx+0x16C
 konsumiert sie **niemand** - genau deshalb entstehen keine
 `(value,header)`-Paare. Der Consumer-Pass fehlt.
 
+
+### Consumer gefunden: 0x13A4B0 (Flush) - blockiert im Port
+
+- `0x13A4B0` wird nur von `0x2BC800` gerufen.
+- Dort: `r0 = fn_002758E0()` -> **0x42BB10**, dann `bl 0x13A4B0`.
+- `guest-watch --pc 0x13A4B0` im normalen Lauf: **0 Treffer** (Pass laeuft nie).
+- Direktaufruf `0x13A4B0(0x42BB10)` per HLE_POSTCALL: **kein Rueckgabewert**
+  (haengt/blockiert), waehrend der Rest weiterlaeuft.
+
+`0x13A4B0` ist also der gesuchte Node-/Draw-Flush (walkt Listen +0x1D4/+0x1E0 ,
+ruft `fn_00275994` und `0x13F688(ctx)`), aber er blockiert im Port - vermutlich an
+Lock/Resource-Zustand.
+
