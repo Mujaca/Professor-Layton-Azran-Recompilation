@@ -5055,3 +5055,31 @@ kein Zeiger); der GX-Writer `0x140784` bleibt 0. Pixel weiter flach:
 BOTTOM 71353/71360 (TOP 89358/90400).
 Profil: `tools/profiles/sprite_bind_gates.json`. Tests: 13/13, 12/12.
 
+
+### Engine baut einen echten Sprite-Kommandoblock (0x0CFE7200) (2026-11-23)
+
+Mit den Bind-Gates (`0x409354`, `0x0CFE7090`) erzeugt `0x1323FC` einen
+echten Kommandoblock im Textur-Scratch `texobj+0x60 = 0x0CFE7200`:
+
+```
+@0CFE7200: 0000000C FFFFFFFF 000B02B9 FFFFFFFF
+           00010242 00000000 000F02BB 00000000
+           000F02BC 00000000 802F0200 00000000
+           F0000000 00000000 ...
+```
+
+Das sind echte Engine-Werte (u. a. 0x2B9/0x2BB/0x2BC = Textur-Register).
+Der erste Wert `0x0C` ist ein Container-/Laengen-Praefix, kein PICA-Paar.
+
+Submittiert man den Block als PICA (Ring-Eintrag `0x0CFE7204`, 0x60 Bytes):
+
+```
+[gspq] tid=0 idx=0 id=1 list=0CFE7204 size=60 ops=0
+```
+
+→ `ops=0`, Pixel unveraendert (TOP 89358/90400, BOTTOM 71353/71360).
+Der Block ist also eine Engine-Displaylist/Container, kein roher
+`value,header`-Strom. Naechster Schritt: das Container-Format
+(0x0C-Praefix + Eintraege) dekodieren bzw. die Engine-Funktion finden,
+die ihn in PICA-Kommandos umsetzt.
+
