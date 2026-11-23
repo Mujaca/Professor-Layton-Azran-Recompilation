@@ -5701,3 +5701,42 @@ in diesem Zustand nicht getroffen wird (getestet: 0x10002800,
 
 Weiter offen: die genaue Adressrechnung von `0x34AAC4` (Registerrollen
 r2/r3) bzw. der 0xD2-Loader, der Records + Szene liefert.
+
+### Klasse-A-Block dekodiert + deterministischer Frame (2026-11-23, 0db30f1)
+
+Korrektur der Ringadressen (Sub-Agent, verifiziert): der Block liegt bei
+`dst = P + 4 + 0x1C*slot` mit `P(eye0) = [ctx+0x5C] = 0x10002200`,
+`P(eye1) = [ctx+0x60] = 0x10002240` (`ctx = [[0x276038]+0x1C] =
+0x3D7C40`); `[ctx+0x58] = 0x10002800` ist der 15x0x20-Command-Ring.
+Header-Wort: byte0 = Slot, byte1 = Anzahl (0x100 = gueltig).
+
+`HLE_CLASSA_RING=1` dekodiert beide Augen (Beleg, Probe:
+`tools/profiles/classa_probe.json`):
+
+```
+[classa] g=003D91E8 ctx=003D7C40
+[classa] eye0 P=10002200 hdr=00000101 slot=1 count=1
+[classa]  #Prob ring=00000000 srcA=1E000000 srcB=1E000000 size=88 flags=00000340
+[classa] eye1 P=10002240 hdr=00000101 slot=1 count=1
+[classa]  #Prob ring=00000000 srcA=1E000000 srcB=00000000 size=0 flags=00000300
+```
+
+`size = mult * s8[rec+0x68]` (88 = 4*22, nach Poke `0D8000DC=22`),
+`flags` = `0x300|attr` bzw. `0x100|attr` (+0x40/+0x20 je eye).
+r2/r3 (=0x1E000000 in der Probe) sind Zeiger aus `rec+0x18*idx+4`,
+kein Puffer; 0x1E000000 ist der `ARM_POOL_BASE` des Pokes.
+
+Zusatzfund: `[ctx+0x14C]` wird von `0x23D748` gesetzt, aber mit Basis
+`0x40B370` -> `0x40B4BC`/`0x40B4C0` (nicht `0x408954/58`); Wert toggelt
+0/1 nach jedem Submit und landet als Blockwort `+0` und `+0x14`.
+
+**Determinismus:** Alpha-Blending akkumulierte ueber die Frame-Anzahl
+(zwei Laeufe: TOP 65707 vs 85271). Mit `HLE_PICA_CLEAR=1` (Ziel vor dem
+Draw loeschen) sind drei Laeufe identisch:
+
+```
+TOP sichtbar    : 85271/ 90400  mean 63.86
+BOTTOM sichtbar : 25902/ 71360  mean 20.57
+```
+
+Der frueher dokumentierte Wert 65707 war ein Akkumulations-Artefakt.
