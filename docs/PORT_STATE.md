@@ -5987,3 +5987,23 @@ Die UV-Paare (`ctx+0x8334/8338`, `+0x833C/8340`) sind danach noch 0
 schreibt sie erst beim Layer-Commit - naechster Pruefpunkt.
 
 Kanonisch unveraendert: TOP 69370/90400 (47.98), BOTTOM 25902/71360.
+
+### Adresskorrektur: UV-Paare liegen bei ctx+0xB34/0xB3C (2026-11-23)
+
+`fn_002721E0` berechnet die Zielzeiger als `r4 + 0x800 + 0x334` bzw.
+`+ 0x33C` - also **ctx+0xB34/0xB38** und **ctx+0xB3C/0xB40**, nicht
+`ctx+0x8334/833C` (die 0x800 wurden doppelt gezaehlt).
+
+Dump mit `tools/profiles/scene_pairs.json` nach den drei Stage-Aufrufen:
+
+```
+[dumpafter] 0040933C: FFFFF000 000F0101 FFFFF000 000F0101
+                      000000F0 0E9050E8 00000000 00000000
+```
+
+Die Werte sind keine Float-UVs, sondern PICA-Paare
+(`FFFFF000`/`000F0101` = Register 0x101 mit Wert 0xFFFFF000). Damit ist
+der Bereich ctx+0xB34 Teil des Kommandostroms, nicht der UV-Speicher;
+die UV-Paare werden im Desc-Buffer (`[ctx+0xD6C]`) gehalten.
+
+Kanonisch unveraendert: TOP 69370/90400 (47.98), BOTTOM 25902/71360.

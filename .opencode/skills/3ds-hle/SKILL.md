@@ -27,8 +27,9 @@ Kurzpfad: **messen -> vergleichen -> Hypothese -> A/B-Test**.
   `0x11A3E0(scene+0x59C, stage)` je Stage (1/2/3) aufruft und die
   Records ein Handle mit `[handle+0x10]`/`[+0x24] != 0` haben.
   Stage-Filter steht in **r1** (`ldrsb [rec+0x38] == r1`).
-  Die UV-Paare `ctx+0x8334/8338`,`+0x833C/8340` sind danach noch 0 -
-  der Consumer `0x12D030`/`0x2721E0` schreibt sie erst beim Layer-Commit.
+  Adresskorrektur: `0x2721E0` schreibt `ctx+0xB34/0xB38` und
+  `ctx+0xB3C/0xB40` (nicht `0x8334/833C`); der Dump dort zeigt
+  PICA-Paare (`FFFFF000 000F0101`), keine Float-UVs.
 * `0x28BE34` ruft die Methode aus `[node+0x10]` mit `r0 = scene+0x59C`
   (nicht `[node]`); `[scene+0x59C]` = Node-Pointer.
 * 0xD2-Container-Link: Loader setzt die Basis, ein Fehlerpfad
