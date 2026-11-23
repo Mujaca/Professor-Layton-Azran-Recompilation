@@ -27,9 +27,10 @@ einer engine-emittierten Liste bei `0x0CFE6000` stammen.
 | CFile-Pool `0x40F048` wird vom echten Engine-Loop `0x11ACBC` mit 16 CFiles (Vtable `0x3C9B18`) gefüllt | `out/logs/run.txt`; OBJADDR-Dump |
 | Menü-`.xq` ohne erzwungenen Open lesbar (Pool-Ring + echter ARC0-Index) | `tools/profiles/menu_xq_noforce.json`; `[faread] idx=0 pos=00458CB8 n=72` |
 | Strom @`0x30` steht unter `0x0CFE6000` und wird dort als PICA ausgeführt | `[gspq-engine] stream 00000030 -> 0CFE6000 len=1C8`, `list=0CFE6000 size=1C8 ops=1` |
-| `0x22F`-Draw malt (Textur-Quad), TOP+BOTTOM == Referenz | `[pica] quad tex=1E000000 400x240 -> fb=1F000000`; `tex=1E100000 320x240 -> fb=1F060000`; `TOP 0/90400, BOTTOM 0/71360` |
+| `0x22F`-Draw malt, TOP+BOTTOM == Referenz | `[pica] quad tex=1E000000 400x240 -> fb=1F000000` (Vorstufe) bzw. `[pica] draw#0 nv=6 base=0CFE8000`; `TOP 0/90400, BOTTOM 0/71360` |
 | Strom @`0x30` = 0x70-B-Draw-Block `fn_001323FC`; Records ab +0xA8 = Attribut-Block `fn_001ED65C` (Basis 0) | statische Analyse: `0x1324D0 str r6,[r5]`, `0x132580` letzter Store; `0x823F0203` = cmd 0x203 + 35 Register |
-| Strom @`0x30` ist eine **State-Liste** (keine Vertex-Loader/Textur-Regs); `0x228` = HLE_PRECALL-`r3` | Dump `@0030 id=228 val=1` vs `val=4` bei `HLE_PRECALL=...,4`; `out/logs/engine.txt` (`[dumpmem2] 00000030`) |
+| `0x22F` liest **echte** Attribute (kein `HLE_PICA_QUAD`) | `[gspq-engine] vertex block @0CFE8000 ... nv=6`; `[pica] draw#0 nv=6 base=0CFE8000 attr0=019FD000 attr1=0x77`; TOP/BOTTOM 0 Diff |
+| Strom @`0x30` ist eine **State-Liste** (keine Vertex-Loader/Textur-Regs); `0x228` setzt `HLE_PICA_VERTEX` auf 6 | Dump `@0030 id=228 val=1` vs `val=4` bei `HLE_PRECALL=...,4`; `[pica] draw#0 nv=6`; `out/logs/engine.txt` (`[dumpmem2] 00000030`) |
 
 Aktuelle Pixel (Engine-PICA-Lauf `engine_pica_draw.json`):
 
@@ -53,7 +54,9 @@ Letzter Commit-Stand: `88a816c`.
    (`0x0EA00000…`, count=1) sind synthetisch.
 2. Ring-Strides `0x40F04C/0x40F058/0x40F064 = 4` (Statik-Ctor fehlt).
 3. Bind-Gates `0x409354`, `0x0CFE7090` und `HLE_PRECALL=27B34C,…`.
-4. `HLE_2D_NO_BLIT` (HLE-Liste/Assets aus).
+4. `HLE_2D_NO_BLIT` (HLE-Liste/Assets aus) und `HLE_PICA_VERTEX`
+   (Vollbild-Quad als echte 0x200..0x208-Attribute + nv=6).
+   `HLE_MENU_TEX`/`_BOT` kommen noch aus `reports/menu_official*.bin`.
 5. `rom:`-Registrierung offen: `0x408150` leer; `0x26E95C` erwartet
    UTF-16 `L"rom:/…"`; Registrar ist `0x287BB4` (nicht `0x26E7C0`!), und
    der Eintrag braucht ein echtes ROMFS-Objekt. Der authentische Mount
@@ -69,13 +72,18 @@ Dreiecke aus der Engine-Textur (`0x1E000000`, 400x240, RGB8).
 `out/shot_engine.bmp`: TOP 0/90400 diff. Profil:
 `tools/profiles/engine_pica_draw.json`.
 
-**A2. Nächster Schritt: Textur aus dem Spiel statt aus der Referenz.**
-`HLE_MENU_TEX=reports/menu_official.bin` ist der einzige verbleibende
-Nicht-Engine-Input (der alte `out/menu_top.bin` ist bewiesenermaßen
-Rauschen: per-Kanal mean 96.3, std 68, keine Struktur). Kein einzelnes
-ROM-IMGC ist der Screen (27 x 400x240 geprüft, bester Treffer
-27389/45200) - die 400x240-Ansicht wird aus Sprites komponiert. Also:
-Sprite-Atlas + 96 Draw-Items auf den echten `0x200..0x205`-Strom bringen.
+**A2. Echte Vertexdaten - erledigt in 8fb089b; Textur noch Referenz.**
+HLE_PICA_VERTEX haengt einen echten Attributblock (0x200..0x208) vor den
+Strom und setzt nv=6; der 0x22F-Draw liest float2-Position + float2-UV aus
+0x0CFE8000 (TOP+BOTTOM 0 Diff, HLE_PICA_QUAD entfernt).
+Offen: HLE_MENU_TEX. Kein einzelnes ROM-IMGC ist der Screen (1587
+Atlanten geprueft, bester 512x256 560/1500; 27 x 400x240, bester
+27389/45200) - der Screen ist eine Sprite-Komposition. Die Infrastruktur
+dafuer steht (HLE_MENU_TEX_W/H + HLE_PICA_UVRECT, mit 512x256-Quelle
+0 Diff belegt), es fehlen die per-Item-Rects/UVs. Die Draw-Liste
+menu+0x6C ist heute leer ([dl] count=0); der Builder 0x2800C8 hat 0
+Hooks, der Drain 0x28D424 laeuft. Die "96 Draws" sind 4 Ring-Slots x
+24 Renderer-Paesse (0x11DB84), keine 96 Sprite-Items.
 
 **A3. BOTTOM (320x240) - erledigt in `88a816c`.**
 `HLE_PICA_SECOND=1E100000,320,240,1F060000` führt dieselbe Engine-Liste
