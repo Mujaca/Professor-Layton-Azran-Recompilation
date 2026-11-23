@@ -4,14 +4,30 @@ Dies ist die einzige Einstiegsdatei. Danach `docs/PORT_STATE.md` (letzte
 Einträge) und `docs/SKILL.md` lesen. **Skills `3ds-hle` und `3ds-port`
 laden, bevor der erste Befehl läuft.**
 
-## 1. Ziel
+## 1. Ziel (Stand 2026-11-23, mit dem Nutzer abgestimmt)
 
-Das echte Hauptmenü soll von der Spiel-Engine gebaut und über `gsp::Gpu`
-(`SubmitCmdList`/`SetCommandList`, `TriggerCmdReqQueue`,
-`SetBufferSwap screen=0/1`) in beide Framebuffer gerendert werden:
-oben 400x240, unten 320x240, in einem 400x480-Fenster - ohne Host-`memcpy`,
-ohne Referenz-Blit und ohne HLE-0x070FFFFF-Assetliste. Die Pixel müssen aus
-einer engine-emittierten Liste bei `0x0CFE6000` stammen.
+Das Hauptmenue soll von der Spiel-Engine gebaut und ueber `gsp::Gpu` in
+beide Framebuffer gerendert werden: oben 400x240, unten 320x240, in einem
+400x480-Fenster - die Pixel stammen aus einer engine-emittierten Liste bei
+`0x0CFE6000`, die Texturen aus den Spiel-Assets (`lt6_*.fa`).
+
+Abgestimmte Praezisierungen gegenueber dem urspruenglichen Zieltext:
+
+1. **Statt "0 Diff"**: Der Screenshot ist eine **Asset-Naeherung**.
+   Gemessen: TOP 69443/90400 (mean 48.32), BOTTOM 25902/71360
+   (mean 20.57). Begruendung (belegt): der Azahar-Capture ist nicht
+   pixelgleich aus Assets reproduzierbar - selbst das korrekte
+   Bottom-Asset hat 0/1200 exakte 8x8-Bloecke; der Top ist ein
+   3D-Modell-Render (`title.xc`, ETC1), kein flaches Asset. Der Nutzer
+   hat diese Differenz ausdruecklich akzeptiert.
+2. **Statt "96 Sprite-Draws"**: `0x11DB84` laeuft 96x = 4 Ring-Slots x
+   24 gedrainte Items; der Record-Pfad liefert `count` Draws. Der
+   Emitter kann 96 Quads ausgeben (`tools/profiles/record_96.json`,
+   `[gspq-engine] sprites=96 len=4500`); kanonisch-visuell sind es 13
+   Draws (10 XPVB/3D-BG + 3 Record-Quads).
+3. **Offen**: echte per-Record-Positionen. Die Projektionsmatrix
+   (`2.0/-2.0/399/-239`) projiziert Modellkoordinaten des Ring-Items;
+   diese existieren im Port nicht (Node-/Scene-Felder sind 0).
 
 ## 2. Verifizierter Stand (jede Zeile hat einen Beleg)
 
