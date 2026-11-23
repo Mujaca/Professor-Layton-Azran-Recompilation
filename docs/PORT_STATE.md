@@ -4206,3 +4206,12 @@ Damit ist die Kette **Flush 0x13A4B0 -> Pop 0x13F688 -> Dispatch
 vollstaendig ausgefuehrt. Tests: 13/13 und 12/12. Kanonisch unveraendert
 (65962/26091), weil der kanonische Pfad diese Tabellen nicht nutzt.
 
+
+### Drawable-Versuch: 0x1105F8 als Ziel
+
+Testweise `V+0x14 = 0x1105F8` (2D-Emit, r0=Puffer). Watch auf 0xCFE7000 zeigt
+Schreibzugriffe von Engine-Funktionen (`0x1276A8`, `0x28EEF8` via `0x12173C`),
+aber keine messbare PICA-Ausgabe. Profil wieder auf `0x2812EC` zurueckgestellt.
+Der Drawable-Aufruf ist damit ausfuehrbar; es fehlt der **echte Drawable-Typ**
+mit passenden Feldern/Argumenten.
+
