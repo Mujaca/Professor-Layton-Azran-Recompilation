@@ -6521,3 +6521,57 @@ Neuer 4-Stufen-Plan mit Abnahmekriterien: `docs/PLAN_MENU_REAL.md`
 
 Messregel bestaetigt: der erste Lauf nach dem Rebuild war erneut flach
 (`TOP 87048`, mean 90.72), der zweite `65097` (48.27).
+
+### Paket 6: Abbruch am natuerlichen Submit exakt lokalisiert (2026-11-23)
+
+Der erzwungene Pfad `HLE_FRAME_LOOP2=12FD30` ist nicht mehr noetig, um
+ueberhaupt zu submitten - der natuerliche `0x12493C`-Pfad bricht aber
+weiterhin deterministisch ab:
+
+```
+0x00124974  bl 0x26F130        ; r0 = Pfad-Wrapper (sp+0x10), r1 = 0
+0x00124978  cmp r0,#0
+0x0012497C  beq 0x124C2C       ; BAIL: mov r0,#0 ; pop
+```
+
+`0x26F130` -> `0x2808A8(wrapper,0)`; Guards:
+
+```
+0x2808BC  ldrbne r0,[r5] / cmpne r0,#0 / beq 0x280904   ; Pfad leer
+0x2808CC  bl 0x268C80 (CFile-Manager, Pool 0x40F048) / beq 0x280904
+0x2808E8  blx [[mgr]+0x10] (Lookup) / beq 0x280904
+```
+
+Messung mit natuerlichen Args (`tools/profiles/submit_natural_args.json`,
+Log `tools/out/submit_natural_args.txt`):
+
+```
+[hook] mem 0026B6CC @003EC384: 00000000     (Name leer)
+[hook] regs 0027A750 r6-r4 = 0              (Pfadlaenge 0)
+[hook] regs 0026F130 hits=1 r0=0CF09EE0
+[hook] regs 00280904 hits=4 lr=002808B8     (Leer-Branch)
+[hook] regs 00124C2C hits=1 r0=0 lr=0026F184
+```
+
+`world+0x18` (Basispfad) ist ebenfalls 0. Mit gepoktem Pfad
+(`submit_gate_path.json`) laeuft der Leer-Check durch, aber der
+CFile-Pool `0x40F048` ist leer (0 Schreibzugriffe auf `0x40F06C`,
+`0x11ACBC` 0 Treffer).
+
+**Ohne `HLE_FRAME_LOOP2`, ohne `HLE_RETFORCE`** kommt ein Submit zustande,
+wenn der Engine-Update-Punkt `0x28F7BC` ihn ausloest
+(`tools/profiles/submit_engine_ops3.json`, hier unabhaengig nachgemessen):
+
+```
+[hook-final] 12FD30=1  139914=1  13F2D4=1  13A854=1
+[gspq-engine] tid=0 n=1 list=0E810000 size=1000 ops=1
+```
+
+Mit `26F130=1` laeuft die Kette bis `0x12FC24`; mit echter Groesse stirbt
+sie am naechsten Blocker `0x123D74` (`[obj+0xA0] == 0` ->
+`arm: unbekanntes call-Ziel 0x00000000`). Naechster Schritt: wer setzt
+`obj+0xA0`? Erst danach ist der volle `0x12493C`-Submit ohne Force
+erreichbar. Kanonisch bleibt `HLE_FRAME_LOOP2=12FD30` (13 Draws, ops=14).
+
+Neue Werkzeuge: `tools/submit_run.py`, `tools/submit_patch_26f130.py`,
+Profile `tools/profiles/submit_*.json`.
