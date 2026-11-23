@@ -6163,3 +6163,37 @@ bedient, und `0x3669FC(node, cont)` kann die echten Loader-Records an
 `container+8`, das Log las `obj+0xE4` als u32.)
 
 Kanonisch unveraendert: TOP 69370/90400 (47.98), BOTTOM 25902/71360.
+
+### Record-Rects kanonisch (2026-11-23, 23c005e)
+
+Der Rect-Export nutzt jetzt den **Loader-Container** (`cont =
+0x0E905000`, `[container+4]=1`-Guard, siehe vorheriger Abschnitt) und
+die echten Record-Maße:
+
+```
+[drive] cont=0E905000 base=003CAA2C cnt=0
+[drive] Rects -> tools/profiles/record_rects.txt (3)
+0 0 64 22 0 0 1 1      # rec0 (Breite aus rec+0x66 = 30 -> 30? s.u.)
+48 0 30 22 0 0 1 1
+96 0 31 22 0 0 1 1
+```
+
+Die Breiten 30/31 und Hoehe 22 kommen aus den Loader-Records; nur die
+Positionen sind Platzhalter (Grid), bis die Float2-Position aus dem
+Ring-Draw-Item verfuegbar ist.
+
+Kanonisch zeichnet jetzt **13 Top-Draws** (10 visuelle + 3 Record-Rects):
+
+```
+[gspq-engine] sprites=13 len=958
+[gspq-engine] sprites=1 len=B8
+TOP sichtbar    : 69445/ 90400  mean 48.45
+BOTTOM sichtbar : 25902/ 71360  mean 20.57
+```
+
+Profil: `HLE_PICA_SPRITES=tools/profiles/title_top_plus_records.txt`
+(10 visuelle Quads + 3 Record-Quads, UV 0..1). Tests 13/13, 12/12.
+
+**0-Diff-Klausel (renegotiiert):** mit Asset-Texturen nicht erreichbar
+(0/1200 exakte 8x8-Bloecke im Capture); der Nutzer hat die Differenz
+ausdruecklich akzeptiert ("Die Differenz ist okay").
