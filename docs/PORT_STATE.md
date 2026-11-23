@@ -3832,3 +3832,23 @@ Aber: `[gspq] id=1 list=003EE680 size=20 ops=0` - `gpu_run_pica_list`
 dekodiert dieses Engine-Format nicht als `(value,header)`-Paare
 (Header-Woerter sind 0). `qops=0`.
 
+
+## Objektklasse des Engine-CommandBuffers identifiziert
+
+`guest-refs 0x003C91EC`: Vtable, Konstruktor `fn_0030F944`
+(`str r1,[r0]` mit Pool `0x003C91EC`). Vtable-Slots:
+
+```
++00=0030F97C  +08=00124FA8  +0C=0036CCF0  +10=00269E90
++14=00297B24  +18=00297618  +2C=0030FD30  +38=0030FD48  +3C=001BD9E4
+```
+
+- `+08 = 0x124FA8 -> 0x27A7B8` ist ein **Reset/Unlink** (loescht Felder),
+  kein Draw.
+- `+14 = 0x297B24` iteriert die Einertraege (`+0x78`, Loop nach
+  `0x297D38`) und ist der naechste Draw-Kandidat.
+
+Objekt `0x3ECB68` (Vtable 0x3C91EC) traegt Name ~„…Obj2DManager" und
+Count-Felder 4. `HLE_PRECALL=297B24,3ECB68,...` lief timing-flaky
+(`fl2` feuert nur alle 4096 Ticks), daher noch nicht als Draw belegt.
+
