@@ -1795,6 +1795,31 @@ void hle_pump(void) {
                         }
                         printf("[drive] cont=%08X base=%08X cnt=%u\n",
                                cont, base, cnt);
+                        if (cont == 0u) {
+                            /* Der Loader setzt die Basis und ein
+                               spaeterer Fehlerpfad (0x23A778) loescht
+                               sie wieder. Fuer den Pfad-Test setzen
+                               wir Container und Records selbst. */
+                            uint32_t arr = 0x0D80E000u;
+                            uint16_t c3 = 3u;
+                            uint32_t k;
+                            cont = obj + 0xDCu;
+                            memcpy(g_frame_cpu->mem + cont, &arr, 4);
+                            memcpy(g_frame_cpu->mem + cont + 8u, &c3, 2);
+                            memcpy(g_frame_cpu->mem + cont + 0xAu, &c3, 2);
+                            base = arr;
+                            for (k = 0; k < 3u; k++) {
+                                uint32_t r = arr + k * 0x74u;
+                                uint8_t st = (uint8_t)(k + 1u);
+                                uint32_t tex = 0x1E000000u;
+                                uint32_t hgt = 22u;
+                                memcpy(g_frame_cpu->mem + r + 0x38u, &st, 1);
+                                memcpy(g_frame_cpu->mem + r + 4u, &tex, 4);
+                                memcpy(g_frame_cpu->mem + r + 0x68u, &hgt, 4);
+                            }
+                            printf("[drive] Container selbst gesetzt: "
+                                   "base=%08X count=3\n", arr);
+                        }
                         if (base != 0u) {
                             uint32_t k;
                             for (k = 0; k < 3u; k++) {
@@ -1816,6 +1841,42 @@ void hle_pump(void) {
                             memcpy(&nv2, g_frame_cpu->mem + node + 0xC4u, 4);
                             memcpy(&nc, g_frame_cpu->mem + node + 0xCCu, 2);
                             printf("%08X count=%u\n", nv2, nc & 0xFFFFu);
+                        }
+                        {
+                            uint32_t sm = 0x00000107u; /* stage mask 1|2|3,
+                                                          attach gate 1 */
+                            uint32_t zz = 0;
+                            memcpy(g_frame_cpu->mem + node + 0xDCu, &sm, 4);
+                            memcpy(g_frame_cpu->mem + node + 0xE0u, &zz, 4);
+                        }
+                        {
+                            uint16_t nc2 = 0;
+                            memcpy(&nc2, g_frame_cpu->mem + node + 0xCCu, 2);
+                            if ((nc2 & 0xFFFFu) == 0u) {
+                                nc2 = 3u;
+                                memcpy(g_frame_cpu->mem + node + 0xCCu,
+                                       &nc2, 2);
+                                printf("[drive] node+0xCC = 3 gesetzt\n");
+                            }
+                        }
+                        {
+                            uint32_t nb = 0;
+                            uint16_t n1 = 0, n2 = 0;
+                            {
+                                /* 0x366ABC erwartet in +0xC4 die
+                                   Record-Basis, nicht den Container. */
+                                uint32_t arr2 = 0x0D80E000u;
+                                memcpy(g_frame_cpu->mem + node + 0xC4u,
+                                       &arr2, 4);
+                            }
+                            memcpy(&nb, g_frame_cpu->mem + node + 0xC4u, 4);
+                            memcpy(&n1, g_frame_cpu->mem + node + 0xCCu, 2);
+                            memcpy(&n2, g_frame_cpu->mem + node + 0xCEu, 2);
+                            printf("[drive] vor 366ABC: node=%08X C4=%08X "
+                                   "CC=%u CE=%u DC=%08X\n", node, nb,
+                                   n1 & 0xFFFFu, n2 & 0xFFFFu,
+                                   *(uint32_t *)(void *)(g_frame_cpu->mem +
+                                                         node + 0xDCu));
                         }
                         g_frame_cpu->r[0] = node;
                         g_frame_cpu->r[1] = 3u;
