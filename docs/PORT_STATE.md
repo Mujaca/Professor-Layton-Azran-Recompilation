@@ -5031,3 +5031,27 @@ Damit ist der naechste Gate: den indirekten Dispatcher von `0x140784`
 bzw. die echte Sprite-Vtable (`+0x78` gueltig) zu finden. Pixel flach:
 TOP 89358/90400, BOTTOM 71353/71360. Tests: 13/13, 12/12.
 
+
+### Sprite-Kommando-Builder der Engine laeuft jetzt (2026-11-23)
+
+Die Sprite-Bind-Kette `0x27B34C -> 0x1325AC -> 0x1323FC -> 0x132610`
+wird durch zwei Gates blockiert:
+
+- `[ctx+0xB4C]` (ctx=0x00408808 -> 0x00409354) muss != 0 sein
+- `[desc+0x20]` (desc=0x0CFE7070 -> 0x0CFE7090) muss != 0 sein
+
+Mit `HLE_POKE=409354=1,0CFE7090=1` und
+`HLE_PRECALL=27B34C,408808,0CFE7100,0CFE7070,1` laufen die echten
+Engine-Funktionen:
+
+```
+[hook-final] 0x1323FC hits=2     (Kommando-Template 0xF0228/0x22E)
+[hook-final] 0x132610 hits=2     (Commit)
+[hook-final] 0x13F2D4 hits=19
+```
+
+Das Kommando-Global `0x3DA350` ist danach `0x000000A0` (Groesse/Handle,
+kein Zeiger); der GX-Writer `0x140784` bleibt 0. Pixel weiter flach:
+BOTTOM 71353/71360 (TOP 89358/90400).
+Profil: `tools/profiles/sprite_bind_gates.json`. Tests: 13/13, 12/12.
+
