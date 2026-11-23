@@ -3976,3 +3976,22 @@ laeuft also auf dem Kind-Objekt, liefert aber weiterhin keine
 `(value,header)`-Paare; `0x0E800000` bleibt Count/Descriptor,
 `ops=4` stammt aus gsp_engine_desc.
 
+
+### guest-watch: genaue Schreiber der Engine-Liste
+
+`--range 0x0E800000,0x0E801000`:
+
+```
+write 0x0E800000 0x00000004  0x00143F60  fn_00143F60            (Count)
+write 0x0E800004 0x00000000  0x0012FCB0  fn_0012FC24+0x8C        (Emitter nullt)
+write 0x0E800000 0x003C4F4C  0x00288890  fn_00288890            (Builder)
+write 0x0E800000 0x003CAC3C  0x00288890  fn_00288890            (Entry-Vtable)
+write 0x0E800008 0xFFFFFFFF  0x00288890  fn_00288890            (Maske)
+```
+
+Also: Der Emitter `0x12FC24` schreibt nur Count + Nullwoerter; der
+Builder `0x297618` schreibt Descriptor-Eintraege (Vtable/Maske).
+`0x269248` ist ein **Listen-Insert** (`[ctx+0x170]/[ctx+0x16C]`),
+kein PICA-Schreiber. Die `(value,header)`-Paare entstehen erst beim
+Ausfuehren dieser Engine-Node-Liste - dieser GPU-Pass fehlt im Port.
+
