@@ -4014,3 +4014,12 @@ konsumiert sie **niemand** - genau deshalb entstehen keine
 ruft `fn_00275994` und `0x13F688(ctx)`), aber er blockiert im Port - vermutlich an
 Lock/Resource-Zustand.
 
+
+### Flush-Block eingegrenzt: 0x13F688 laeuft, 0x13A4B0 blockiert davor
+
+- `0x13F688(0x42B7AC)` direkt: `r0=0` — Pool-Loop terminiert also.
+- `0x13A4B0(0x42BB10)` blockiert weiterhin (kein Rueckgabewert).
+=> Der Block liegt in `0x13A4B0` **vor** `0x13F688`, also im List-Walk
+`[r4+0x1D4]`/`[r4+0x1E0]` (vtable `+8`/`+0xC`) von `0x42BB10` bzw. am
+Recursive-Lock `0x42BB10+0x1C4` (`0x287A28`).
+
