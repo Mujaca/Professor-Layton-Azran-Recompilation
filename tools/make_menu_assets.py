@@ -60,8 +60,15 @@ def main():
     open(os.path.join(out, 'title_b_bg.bin'), 'wb').write(rgb)
     # 3D-Titel-Grundlayer (Host-Render aus title.xc, ETC1) bevorzugen,
     # falls vorhanden; sonst Bottom-Asset als Ersatz.
+    # Registriertes Spiel-Asset (title_b_bg, 400x240) hat Vorrang: es trifft
+    # den Capture deutlich besser (corr 0.435) als der ETC1-Host-Render
+    # (corr 0.095). Beleg: tools/bg_fit_bottom.py, docs/PORT_STATE.md.
+    bgreg = os.path.join(ROOT, 'tools', 'profiles', 'title_bg_registered.bin')
     bg3d = os.path.join(ROOT, 'tools', 'profiles', 'title3d_bg.bin')
-    if os.path.exists(bg3d):
+    if os.path.exists(bgreg):
+        bg = Image.frombytes('RGB', (400, 240), open(bgreg, 'rb').read())
+        print('BG: registriertes Spiel-Asset', bgreg)
+    elif os.path.exists(bg3d):
         bg = Image.frombytes('RGB', (400, 240), open(bg3d, 'rb').read())
         print('BG: 3D-Titel-Render', bg3d)
 

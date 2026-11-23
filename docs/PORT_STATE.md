@@ -6743,3 +6743,49 @@ korrekt 1280 hohen Atlas nicht reproduzieren - der damalige Lauf hatte
 den BG-Quad ausserhalb des Atlas (transparent) gesampelt. Mit BG zuletzt
 (deckt) ist es `0.121`; BG *zuerst* ist schlechter (`corr -0.02`,
 TOP 82057). Die 0.354 sind damit als Artefakt dokumentiert.
+
+### Top-Hintergrund: welches Asset trifft den Capture? (2026-11-24)
+
+Statt den ETC1-Host-Render zu raten, wurde registriert (Skalierung +
+Versatz, Korrelation der Helligkeit gegen `reports/menu_official.bin`):
+
+```
+tools/profiles/title3d_bg.bin (bisher, k=0.90)   corr 0.095
+out/title_b_bg.bin  (Spiel-Asset 320x240)        corr 0.373 roh
+  registriert sx=1.10 sy=0.80 dx=-8 dy=-8        corr 0.435
+title.xc-Texturen 000/003/005/006/010.xi         corr 0.230..0.297
+title3d_013.xi                                corr -0.156
+beste 400x240-Crop aus einer Textur               corr 0.275
+```
+
+Kein Asset enthaelt den Top-Screen direkt (bester Crop 0.275); das
+3D-Titelbild wird also aus Modellen gerendert. Fuer den Port ist das
+registrierte Spiel-Asset die beste belegte Naeherung: `tools/bg_fit_bottom.py`
+schreibt `tools/profiles/title_bg_registered.bin`, `make_menu_assets.py`
+bevorzugt es gegenueber `title3d_bg.bin`.
+
+A/B der Draw-Liste (je 2 Laeufe, 2. Lauf gemessen):
+
+| Liste | corr | std | detail-hit | TOP diff |
+|---|---|---|---|---|
+| nur BG (registriert) | **0.435** | 28.3 | 0.77 | 68642 |
+| BG + 2 Font-Zeilen (kanonisch) | 0.426 | **29.6** | 0.77 | **68589** |
+| BG + Font + 9 title_a-XPVB | -0.049 | 57.9 | 1.00 | 84927 |
+
+Die 9 title_a-XPVB-Quads sind damit als schaedlich gemessen (andere
+Artwork-Ebene) und aus der kanonischen Liste entfernt.
+
+Kanonisch (`tools/profiles/title_top_canonical.txt`, 2 Laeufe
+`bytegleich True`):
+
+```
+[gspq-engine] sprites=3 len=228
+[gspq-engine] sprites=1 len=B8
+TOP    : 68589/ 90400  mean 56.22
+BOTTOM : 14752/ 71360  mean 14.33
+corr 0.426   std 29.6   detail-hit 0.77
+```
+
+Damit ist `corr` von 0.121 auf **0.426** gestiegen (Faktor 3.5) und
+`std` von 19.2 auf 29.6; die 0.9-Grenze ist noch nicht erreicht, weil
+der 3D-Titel selbst fehlt (Modell-Render, Stufe 3).
