@@ -5,6 +5,8 @@
 
 #include <stdint.h>
 
+int arm_ldrpc_log_on(void);
+void arm_ldrpc_log(unsigned t);
 struct ArmCpu;
 
 
@@ -25,6 +27,11 @@ void arm_trace_close(void);
 int arm_trace_is_open(void);
 
 void arm_trace_block(struct ArmCpu *c, uint32_t pc, uint32_t thumb);
+/* HLE_RETFORCE=<fnaddr>=<r0>[,<fnaddr>=<r0>...]: laesst die generierte
+   Funktion sofort mit r0=<wert> zurueckkehren (generischer Gate-Force-
+   Hook, ohne Rebuild pro Adresse). Rueckgabe 1 = Funktion wurde ersetzt. */
+int arm_retforce(struct ArmCpu *c, uint32_t addr);
+void arm_retforce_report(void);
 void arm_trace_svc(uint32_t imm);
 void arm_trace_ipc(const char *service, uint32_t cmd_id);
 void arm_trace_frame(void);

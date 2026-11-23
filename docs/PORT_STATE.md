@@ -4189,3 +4189,20 @@ Naechster Verdacht: `c->r[15]` ist im generierten Code nicht 0x142D34
 (Tabelle/Offset oder `arm_ld`-Wert), oder `arm_call_guest` findet das
 Ziel nicht (g_entries).
 
+
+### Jump-Table-Dispatch funktioniert jetzt (grosse Strukturkorrektur)
+
+Nach Recompiler-Fix + Logging (`HLE_LDRPC_LOG`):
+
+```
+[ldrpc] -> 00142D34
+guest-watch --pc 0x142D34: 1 Treffer  r0=0x00000006  lr=0x13F688+0x2C
+guest-watch --pc 0x2812EC: 2 Treffer, davon
+   r0=0x0CFE7000  lr=0x142D5C  (aus dem Typ-6-Handler!)
+```
+
+Damit ist die Kette **Flush 0x13A4B0 -> Pop 0x13F688 -> Dispatch
+0x142BD0 -> Handler 0x142D34 -> Drawable 0x2812EC(0xCFE7000)** erstmals
+vollstaendig ausgefuehrt. Tests: 13/13 und 12/12. Kanonisch unveraendert
+(65962/26091), weil der kanonische Pfad diese Tabellen nicht nutzt.
+

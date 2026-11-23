@@ -736,6 +736,17 @@ static void retforce_init(void) {
     }
 }
 
+int arm_ldrpc_log_on(void)
+{
+    static int on = -1;
+    if (on < 0) on = envset("HLE_LDRPC_LOG");
+    return on;
+}
+void arm_ldrpc_log(unsigned t)
+{
+    printf("[ldrpc] -> %08X\n", t);
+    fflush(stdout);
+}
 int arm_retforce(struct ArmCpu *c, uint32_t addr) {
     static int ba_init = 0;
     static uint32_t ba_val = 0;

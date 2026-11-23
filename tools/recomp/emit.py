@@ -257,6 +257,7 @@ class Emitter:
         if load and rd == 15:
             # Dynamischer Sprung (z. B. ldr pc,[pc,rN,lsl#2]): Ziel
             # ausfuehren, sonst landet die Jump-Table-Dispatch nie im Handler.
+            lines.append("if (arm_ldrpc_log_on()) arm_ldrpc_log(c->r[15]);")
             lines.append("arm_call_guest(c, c->r[15]);")
             lines.append("return;")
         return lines
