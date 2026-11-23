@@ -5327,3 +5327,33 @@ geprueft: 1587 Atlanten, 468 nicht dekodierbar; bester 512x256-Kandidat
 `tools/out/xi/a_lt6_b_a5c3354.xi` mit 560/1500 abweichenden Pixeln,
 bester 400x240-IMGC (27 Kandidaten) 27389/45200. Der Screen ist also eine
 Sprite-Komposition, kein Atlas-Ausschnitt.
+
+### A2: Sprite-Quad-Emitter (N Draws, je eigener 0x200..0x208) (2026-11-23, c672cd2)
+
+`HLE_PICA_SPRITES=<datei>` / `HLE_PICA_SPRITES2=<datei>` emittieren je
+Zeile (`x y w h u0 v0 u1 v1`) ein Quad mit eigenem Vertex-Block
+(0x0CFC0000 + i*0x60, 6 Vertices, Stride 16), eigenem Attributblock
+(0x200..0x208) und dem Draw-Block des Engine-Emitters (Kopie von 0x30,
+nv=6). Beleg (out/logs/engine.txt):
+
+```
+[gspq-engine] sprites=4 len=2E0
+[pica] draw#0 nv=6 base=0CFC0000 attr0=019F8000 attr1=00000077 attr2=10000000
+[pica] draw#1 nv=6 base=0CFC0060 ...
+[gspq-engine] second pass tex=1E100000 320x240 fb=1F060000 ops=4
+```
+
+Mit 2x2-Kacheln (`tools/profiles/sprites_2x2_top.txt` /
+`sprites_2x2_bottom.txt`) sind TOP und BOTTOM byte-identisch zur Referenz
+(0/90400 und 0/71360); das kanonische Profil nutzt jetzt diesen Pfad
+(4 Top- + 4 Bottom-Quads statt 1 Vollbild-Quad).
+
+#### Warum die Textur noch nicht aus einem Atlas kommt
+
+Exakter Blockvergleich (16x16, RGB, ohne Toleranz): 0 Treffer zwischen
+`reports/menu_official.bin` und den drei besten 512x256-Atlanten
+(`lt6_b.fa@0xa5c3354`, `@0xa6ea760`, `@0x18ed158`; je 7625 Atlas-Bloecke
+gegen 1500 Referenzbloecke). Auch der 2x2-/Unterbereichs-Scan und die
+skalierte Variante liefern keinen Treffer (bester 560/1500 bzw.
+12550/24000). Der Top-Screen ist damit kein direkter Atlas-Blit; der
+Hintergrund kommt aus dem 3D-Render, die UI aus mehreren Sprites.
