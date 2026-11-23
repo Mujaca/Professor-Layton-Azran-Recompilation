@@ -19,15 +19,16 @@ python tools\canon.py --log out\logs\chain_direct.txt --shot out\shot_tmp.bmp --
 python tools\measure_ref.py out\shot_engine.bmp
 ```
 
-Aktueller Stand (Commit `a9a88e0`, 2026-11-23, verifiziert): TOP sichtbar
+Aktueller Stand (Commit `1edae74`, 2026-11-23, verifiziert): TOP sichtbar
 `69370/90400` mean `47.98`; BOTTOM sichtbar `25902/71360` mean `20.57`
 (`HLE_PICA_CLEAR=1`, zwei Laeufe identisch). Der Draw-Block stammt aus dem
 Engine-Strom @`0x30` -> `0x0CFE6000`, aber Quads/Vertex-Attribute und
 Texturen emittiert noch HLE (`HLE_PICA_SPRITES`). Die Scene-Paar-Kette
 `11A3E0 -> 27C2BC -> 2794A4 -> 2721E0` laeuft (Profil
-`tools/profiles/scene_pairs.json`); offen: UV-Paare `ctx+0x8334..8340`
-sind danach 0 (Consumer `0x12D030`/`0x2721E0` schreibt erst beim
-Layer-Commit), 0xD2-Container-Link und natuerlicher Submit. Details:
+`tools/profiles/scene_pairs.json`). Adresskorrektur: die Paare liegen bei
+`ctx+0xB34/0xB3C` und sind **PICA-Paare**, keine Float-UVs (UVs im
+Desc-Buffer `[ctx+0xD6C]`). Offen: 0xD2-Container-Link und natuerlicher
+Submit. Details:
 [`docs/PORT_STATE.md`](../../../docs/PORT_STATE.md) (letzte Abschnitte).
 
 Wichtigste Fallstricke: `getenv()` nie im Hot Path (static cachen),

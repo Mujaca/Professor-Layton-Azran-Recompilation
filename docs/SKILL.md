@@ -31,16 +31,18 @@ python tests\mvp_selftest.py                # 13/13
 python tools\selftest_tools.py              # 12/12
 ```
 
-Aktueller Menue-Stand (Commit `a9a88e0`, verifiziert): TOP sichtbar
+Aktueller Menue-Stand (Commit `1edae74`, verifiziert): TOP sichtbar
 `69370/90400` mean `47.98`, BOTTOM sichtbar `25902/71360` mean `20.57`
 (`HLE_PICA_CLEAR=1`). Der Draw-Block stammt aus dem Engine-Strom @`0x30` ->
 `0x0CFE6000`; Quads/Vertex-Attribute und Texturen emittiert jedoch noch HLE
 (`HLE_PICA_SPRITES`). Der fruehere „0 Pixel Diff“ galt nur fuer die
 Referenz-Capture-Kopie, nicht fuer Spiel-Assets. Die Scene-Paar-Kette
 `11A3E0 -> 27C2BC -> 2794A4 -> 2721E0` laeuft (Profil
-`tools/profiles/scene_pairs.json`); offen sind noch die UV-Paare
-`ctx+0x8334..8340` (danach 0, Consumer `0x12D030`/`0x2721E0` schreibt erst
-beim Layer-Commit), der 0xD2-Container-Link und der natuerliche Submit.
+`tools/profiles/scene_pairs.json`). Adresskorrektur: die Paare liegen bei
+`ctx+0xB34/0xB38` und `ctx+0xB3C/0xB40` (nicht `0x8334`/`0x833C`) und sind
+**PICA-Paare**, keine Float-UVs; die UVs stehen im Desc-Buffer
+`[ctx+0xD6C]`. Offen sind der 0xD2-Container-Link und der natuerliche
+Submit.
 
 `python tools\_cmp_shot.py` vergleicht einen einzelnen 400x240-Frame; fuer
 den 400x480-Portshot ist `measure_ref.py` die kanonische Messung (sichtbare
@@ -208,7 +210,7 @@ dekodieren (macht `tools/where.py`).
 Jede Zeile enthaelt `✅`/`❌` und die konkrete Beweiszeile. Kein
 Statusbericht ohne diesen Checker.
 
-## 7. Bekannter Meilenstein-Stand (Commit `a9a88e0`, 2026-11-23)
+## 7. Bekannter Meilenstein-Stand (Commit `1edae74`, 2026-11-23)
 
 - Kanonisch: Engine-Strom @`0x30` -> `0x0CFE6000`; TOP sichtbar
   `69370/90400` mean `47.98`, BOTTOM `25902/71360` mean `20.57`
@@ -216,11 +218,11 @@ Statusbericht ohne diesen Checker.
 - Attribute/Texturen kommen aus `HLE_PICA_SPRITES` (Spiel-Assets
   `title_a.xa` + `title_b_bg`), **nicht** aus `reports/menu_official*.bin`.
   „0 Diff“ ist nur noch der Referenz-Capture-Fall.
-- **Offen:** Scene-Paar-Kette laeuft zwar (`11A3E0`/`27C2BC`/`2794A4`/
-  `2721E0` mit `scene_pairs.json`), aber die UV-Paare
-  `ctx+0x8334..8340` sind danach 0 (Consumer `0x12D030`/`0x2721E0` schreibt
-  erst beim Layer-Commit); dazu 0xD2-Container-Link und natuerlicher
-  Engine-Submit ohne `HLE_FRAME_LOOP2`. Details:
+- **Offen:** 0xD2-Container-Link und natuerlicher Engine-Submit ohne
+  `HLE_FRAME_LOOP2`. Die Scene-Paar-Kette laeuft
+  (`11A3E0`/`27C2BC`/`2794A4`/`2721E0` mit `scene_pairs.json`); die Paare
+  liegen bei `ctx+0xB34/0xB3C` und sind **PICA-Paare**, keine Float-UVs
+  (UVs im Desc-Buffer `[ctx+0xD6C]`). Details:
   [`PORT_STATE.md`](PORT_STATE.md).
 
 Statisch belegter RM-Wartepunkt (weiterhin gueltig):

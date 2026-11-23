@@ -1,4 +1,4 @@
-# HANDOVER - 3DS-Port (Stand 2026-11-23, Commit `a9a88e0`)
+# HANDOVER - 3DS-Port (Stand 2026-11-23, Commit `1edae74`)
 
 Dies ist die einzige Einstiegsdatei. Danach `docs/PORT_STATE.md` (letzte
 Einträge) und `docs/SKILL.md` lesen. **Skills `3ds-hle` und `3ds-port`
@@ -50,7 +50,7 @@ Texturen sind jetzt Spiel-Assets (`out/title_top_atlas.bin` aus
 Byte-Vergleich: TOP == `reports/menu_official.bin`, BOTTOM ==
 `reports/menu_official_bottom.bin` (zwei Läufe identisch).
 
-Letzter Commit-Stand: `a9a88e0`.
+Letzter Commit-Stand: `1edae74`.
 
 ## 3. Was noch erzwungen wird (explizit)
 
