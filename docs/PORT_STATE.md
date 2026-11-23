@@ -4947,3 +4947,30 @@ der HLE-Liste. Profil: `tools/profiles/engine_list_emit.json`.
 Pixel bleiben flach (C-Tabelle hat noch keine GX-Kommandos):
 TOP 89358/90400, BOTTOM 71353/71360.
 
+
+### GX-Kommandos fehlen: Writer 0x140784 laeuft im 2D-Draw nicht (2026-11-23)
+
+Analyse des C-Tabellen-/GX-Pfads:
+
+- `0x140178(ctx,item,out)` -> `[ctx+4]=A`, `[A+0x3C]=C`, `0x143F24(C,item)`
+  liefert pro Item `{value,header}` aus der C-Tabelle.
+- Der GX-Packer `0x140784` (schreibt `value,header`-Paare) wird im 2D-Draw
+  **nie** erreicht:
+
+```
+[hook-final] count addr=002800C8 hits=229
+[hook-final] count addr=0011DB84 hits=23
+(hook-final fuer 0x140784 / 0x143F84 fehlen => 0 Treffer)
+```
+
+- Der echte GX-Kontext `0x100022AC` ist im Teillauf komplett 0
+  (Dump 32 Woerter = 0), und der Emitter-Puffer `0x0E902000` enthaelt nur
+  `00000004` + Nullen (kein PICA-Paar).
+
+Damit ist der naechste Gate klar: Der 2D-Draw (0x11DB84/0x2800C8) baut nur
+Objekte/Knoten, aber keine GX-Kommandos; dafuer muss der echte GX-Kontext
+(C-Tabelle) initialisiert bzw. der passende Writer (nicht 0x140784) getroffen
+werden.
+
+Profil: `tools/profiles/gx_emit_check.json`. Tests: 13/13, 12/12.
+
