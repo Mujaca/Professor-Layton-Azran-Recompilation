@@ -4475,3 +4475,14 @@ Build/Tests gruen (13/13, 12/12).
   Code (weiteres ldr-pc-/Fragment-Loch, Seed 00141C38 half nicht).
 - `0x10002800` weiterhin ungeschrieben.
 
+
+### Globaler ldr-pc-Vor-Pass + Dedupe (Build gruen)
+
+- `_all_split_ldrpc`: splittet vor der Funktionsliste an ldr-pc-Zielen in
+  der Elternfunktion und entfernt leere Duplikate.
+- Block-Dedupe nach Merge/Split (keine doppelten Labels mehr).
+- Merge: 1979 Fragmente, Build gruen, Tests 13/13 + 12/12.
+- `0x1196AC` kehrt zurueck (ab=1), bricht aber weiterhin an
+  `arm: not implemented: empty (pc 0x00141C38)` ab. Die Adresse ist eine
+  gueltige Leaf-Funktion, wird aber als leere Funktion generiert.
+

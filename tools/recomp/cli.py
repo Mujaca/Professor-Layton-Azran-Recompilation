@@ -186,6 +186,32 @@ def _ldrpc_targets(fn, data):
     return out
 
 
+def _all_split_ldrpc(res, data):
+    """Globaler Vor-Pass: an ldr-pc-Zielen in der Elternfunktion splitten und
+    leere Duplikat-Funktionen an diesen Zielen entfernen."""
+    for f in list(res.functions.values()):
+        if f.thumb:
+            continue
+        for t in sorted(_ldrpc_targets(f, data)):
+            idx = None
+            bi = None
+            for i, b in enumerate(f.blocks):
+                for j, x in enumerate(b.insns):
+                    if x.address == t:
+                        idx, bi = j, i
+                        break
+                if idx is not None:
+                    break
+            if idx is not None and idx > 0:
+                b = f.blocks[bi]
+                nb = scanmod.Block(t, b.insns[idx:])
+                b.insns = b.insns[:idx]
+                f.blocks.insert(bi + 1, nb)
+            g = res.functions.get(t)
+            if g is not None and g is not f and not g.blocks and idx is not None:
+                del res.functions[t]
+
+
 def _merge_ldrpc_fragments(funcs, res, data):
     """Fragment-fn_ (ldr-pc-Ziele ohne Prolog) in die Elternfunktion mergen."""
     if data is None:
@@ -210,9 +236,16 @@ def _merge_ldrpc_fragments(funcs, res, data):
                 first = g.blocks[0].insns[0]
                 if first.id in (A.ARM_INS_PUSH, A.ARM_INS_STMDB):
                     continue
-            have = set(b.addr for b in f.blocks)
-            f.blocks.extend([b for b in g.blocks if b.addr not in have])
+            f.blocks.extend(g.blocks)
             f.blocks.sort(key=lambda b: b.addr)
+            seen = set()
+            uniq = []
+            for b in f.blocks:
+                if b.addr in seen:
+                    continue
+                seen.add(b.addr)
+                uniq.append(b)
+            f.blocks = uniq
             try:
                 f.calls |= g.calls
             except TypeError:
@@ -231,6 +264,17 @@ def generate(res, path, max_funcs=None, trace=False, data=None):
         for call, _ in fn.calls:
             needed.add(call)
     all_addrs = sorted(set(res.functions) | needed)
+    if data is not None:
+        _all_split_ldrpc(res, data)
+        for _f in res.functions.values():
+            _seen = set()
+            _u = []
+            for _b in sorted(_f.blocks, key=lambda b: b.addr):
+                if _b.addr in _seen:
+                    continue
+                _seen.add(_b.addr)
+                _u.append(_b)
+            _f.blocks = _u
     funcs = [res.functions[a] for a in all_addrs if a in res.functions and res.functions[a].blocks]
     if max_funcs:
         funcs = funcs[:max_funcs]
