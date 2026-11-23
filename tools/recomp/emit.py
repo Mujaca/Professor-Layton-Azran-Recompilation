@@ -122,6 +122,7 @@ class Emitter:
     def __init__(self, func_addr, thumb=False):
         self.func = func_addr
         self.thumb = thumb
+        self.block_labels = None   # set of local block addresses (for ldr pc)
 
     def pc_value(self, pc):
         if self.thumb:
@@ -255,10 +256,25 @@ class Emitter:
                 lines.append("  c->r[%d] = a;" % base_reg)
         lines.append("}")
         if load and rd == 15:
-            # Dynamischer Sprung (z. B. ldr pc,[pc,rN,lsl#2]): Ziel
-            # ausfuehren, sonst landet die Jump-Table-Dispatch nie im Handler.
+            # Dynamischer Sprung (z. B. ldr pc,[pc,rN,lsl#2]).
+            # Ziele INNERHALB der Funktion muessen per goto auf das lokale
+            # Label springen (sonst wird der Epilog uebersprungen und SP
+            # bleibt unbalanciert). Nur echte Fremd-Eintraege via
+            # arm_call_guest ausfuehren.
             lines.append("if (arm_ldrpc_log_on()) arm_ldrpc_log(c->r[15]);")
-            lines.append("arm_call_guest(c, c->r[15]);")
+            if self.block_labels:
+                labs = sorted(a for a in self.block_labels
+                              if self.func <= a < self.func + 0x10000)
+                if labs:
+                    lines.append("{ uint32_t t = c->r[15]; switch (t) {")
+                    for a in labs:
+                        lines.append("  case 0x%08Xu: goto %s;"
+                                     % (u32(a), self.label(a)))
+                    lines.append("  default: arm_call_guest(c, t); return; } }")
+                else:
+                    lines.append("arm_call_guest(c, c->r[15]);")
+            else:
+                lines.append("arm_call_guest(c, c->r[15]);")
             lines.append("return;")
         return lines
 

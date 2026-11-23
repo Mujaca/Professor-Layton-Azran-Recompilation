@@ -174,6 +174,7 @@ def generate(res, path, max_funcs=None, trace=False):
         else:
             n_arm += 1
         em = emit.Emitter(fn.addr, fn.thumb)
+        em.block_labels = set(b.addr for b in fn.blocks)
         out.append("void fn_%08X(ArmCpu *c) {" % u32(fn.addr))
         out.append("  goto %s;" % em.label(fn.blocks[0].addr))
         for blk in fn.blocks:

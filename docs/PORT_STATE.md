@@ -4426,3 +4426,18 @@ Richtiger Fix: `ldr pc` fuer **lokale Label-Ziele** als `goto
 L_<fn>_<addr>` emittieren (switch ueber die Tabellenwerte), statt
 `arm_call_guest`.
 
+
+### Lokaler ldr-pc-Switch implementiert (Block-Labels)
+
+`emit.py`: `Emitter.block_labels`; fuer `ldr pc` wird jetzt ein `switch
+(target) { case <block>: goto L_<fn>_<addr>; default: arm_call_guest }`
+emittiert. `cli.py` setzt `em.block_labels = set(fn.blocks)`.
+
+Ergebnis: Funktionen, deren Tabellenziele **Blockanfaenge** sind, springen
+jetzt lokal (Epilog bleibt erhalten). Fuer `0x12FAA4` sind die Ziele
+allerdings (noch) keine Blockanfaenge -> weiterhin `arm_call_guest` und
+SP -8. Naechster Schritt: Scanner muss Tabellenziele als Blocks
+splitten.
+
+Tests nach Regen: 13/13, 12/12.
+
