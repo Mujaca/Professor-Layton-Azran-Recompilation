@@ -6672,10 +6672,26 @@ liegen in leeren Baendern - d.h. der An-Zustand ist keine eigene Grafik
 findet zwar einen Bestfit (sx 1.25, y von unten), aber die Quad-Treffer
 liegen bei 0.50x Zufall - die Punkte trafen nur horizontale Kanten.
 
-**Offen (klar umrissen):** die Bildschirmposition. Die XPVB-`pos`-Felder
-sind elternrelativ (0,0 / 0,2 / -21,-3); die absolute Position kommt aus
-den `#CHP`-Transformknoten der ANMC (4x4-Matrizen, im RES-Header ab 0x8C
-mit 1.0-Diagonalen sichtbar). Naechster Schritt: diese Matrizen lesen.
+**Positionen (Nachtrag, parallele Session):** nicht mehr offen. Die
+ANMC-Records tragen 10 Floats; die Platzierung ist
+`Rect = (f1+f4, f2+f5, f7-f4, f8-f5)` und wurde am Capture validiert
+(Sound `(296,-2,24,26)` exakt auf dem Lautsprecher-Block, Pointer
+`(139,117)` auf einer Hellzone, Continue/New `(108,108,103,24)` auf
+dem Diffblock). Belege: `tools/profiles/bottom_quads_real.txt`,
+`tools/out/anmc_placements.txt`. Meine XPVB-Groessen bestaetigen die
+w/h-Felder dieser Formel (103x22, 105x22, 99x22, 150x24, 24x26,
+144x24) - Positions- und Groessenpfad sind damit unabhaengig belegt.
+
+**Warum das Bild trotzdem nicht das Menue ist:** die 23 echten Quads
+mit echten Positionen/UVs wurden gemessen (`bottom_quads.json`, 2x
+byte-identisch) - Diff 30515 statt 14752, also schlechter. Grund:
+`000.xi` ist ein Tile-Muster-Atlas; die sichtbare Schrift
+("New Game"/"Continue") ist Font-/Message-Text. Gegenprobe im
+Capture: Box 100..220/104..132 enthaelt 19 glyph-artige Komponenten
+(Breite 3-7 px, Hoehe 6-13 px) - das ist Typo-Rendering, kein
+Sprite. Konsequenz: der naechste echte Schritt ist der
+Font-/Message-Renderer (oder Engine-Pfad Stufe 4), nicht weitere
+Atlas-Arbeit.
 
 Kanonisch unveraendert: `[gspq-engine] sprites=13 len=958` /
 `sprites=1 len=B8`, TOP 65097/90400 (mean 48.27), BOTTOM 14752/71360
