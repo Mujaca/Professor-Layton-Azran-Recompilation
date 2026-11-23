@@ -4899,3 +4899,32 @@ Der Open scheitert noch in `0x287D10 -> 0x26E95C` (Pfadformat/FS-State),
 daher noch keine `[faread]` in diesem Lauf. Der synthetische CFile-Slot
 ist weg; nur die drei Ring-Strides werden noch gepokt. Tests: 13/13, 12/12.
 
+
+### Engine-Liste an 0x0CFE6000 submittet, HLE-Assetpfad aus (2026-11-23)
+
+Neu: `HLE_2D_NO_BLIT=1` ueberspringt sowohl den Asset-memcpy
+(0x1E000000/0x1E100000) als auch die HLE-0x070FFFFF-Liste+Submit in
+`hle_2d_stub`. Zusaetzlich faellt die GSP-Route fuer 0x0CFE6000 jetzt
+auf den PICA-Parser zurueck, wenn der Legacy-Blit-Parser 0 Ops liefert
+(gsp_process_cmdqueue, Engine-Layout und 0x000C).
+
+Lauf `tools/profiles/engine_list_cfe.json` (kein HLE_RETFORCE):
+
+```
+[gspq-engine] tid=0 n=1 list=0CFE6000 size=1000 ops=1
+[gsp] Trigger lr=0012FE1C addr=00000000 size=0 qops=1
+[hook-final] count addr=0012FD30 hits=19
+[hook-final] count addr=00139914 hits=19
+[hook-final] count addr=0013F2D4 hits=19
+Screenshot: out/shot_engine_cfe4.bmp
+```
+
+Kein `[engine] Menue-Assets geladen` mehr; die Pixel sind flach
+(96,64,32) und **nicht** mehr die Assets:
+`vs out/menu_top.bin diff>60 95368/96000`.
+Gegen `reports/menu_official.bin`: TOP 89358/90400, BOTTOM 71353/71360.
+
+Ehrlich: Listeninhalt an 0x0CFE6000 ist noch der PICA-Teststrom aus
+HLE_POKE; die Engine-Geometrie (Emitter 0x12FC24/C-Tabelle) fehlt noch.
+Tests: 13/13, 12/12.
+

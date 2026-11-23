@@ -478,6 +478,15 @@ void hle_2d_stub(ArmCpu *c) {    uint32_t *buf;
         if (node_draw) {
             lx = 0u; lw = w; ly = 0u; lh = 240u;
         }
+        {
+#ifdef _MSC_VER
+            static int noblit = -1;
+#else
+            static int noblit = -1;
+#endif
+            if (noblit < 0)
+                noblit = (getenv("HLE_2D_NO_BLIT") != NULL);
+        if (!noblit) {
         list[0] = 0x070FFFFFu; list[1] = 7u;
         list[2] = lx; list[3] = ly; list[4] = lw; list[5] = lh;
         list[6] = (node_draw || full_src)
@@ -505,6 +514,8 @@ void hle_2d_stub(ArmCpu *c) {    uint32_t *buf;
         buf[0] = (0x000Cu << 16);
         buf[1] = 0u;
         dispatch_ipc(g_hle_gsp_handle);
+        }
+        }
     }
     memcpy(buf, save, sizeof(save));
     printf("[engine2d] Sprite-Entry idx=%u submitted (lr=%08X)\n", idx, c->r[14]);
@@ -553,7 +564,10 @@ static void hle_install_2d_entry(ArmCpu *c) {
     {
         static unsigned char *topimg = NULL, *botimg = NULL;
         static int imgs_tried = 0;
-        if (!imgs_tried) {
+        static int no_asset = -1;
+        if (no_asset < 0)
+            no_asset = (getenv("HLE_2D_NO_BLIT") != NULL);
+        if (!imgs_tried && !no_asset) {
             FILE *f;
             int fa_bottom = (getenv("HLE_XQ_ASSET") != NULL);
             imgs_tried = 1;
@@ -3582,9 +3596,12 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
             memcpy(&size, c->mem + cb + 8u, 4);
             if ((cmd & 0xFFu) == 0x01u && addr != 0u && size != 0u &&
                 size <= 0x00100000u) {
-                int nops = (addr == 0x08002000u || addr == 0x0CFE2000u || addr == 0x0CFE2100u || addr == 0x0CFE6000u)
-                               ? gpu_run_command_list(c, addr, size)
-                               : gpu_run_pica_list(c, addr, size);
+                int legacy = (addr == 0x08002000u || addr == 0x0CFE2000u ||
+                              addr == 0x0CFE2100u || addr == 0x0CFE6000u);
+                int nops = legacy ? gpu_run_command_list(c, addr, size)
+                                  : gpu_run_pica_list(c, addr, size);
+                if (nops == 0 && legacy)
+                    nops = gpu_run_pica_list(c, addr, size);
                 if (nops == 0) nops = gsp_engine_desc(c, addr);
                 qops += nops;
                 printf("[gspq] tid=%d idx=%u id=%u list=%08X size=%X ops=%d\n",
@@ -3607,10 +3624,12 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
             memcpy(&esize, c->mem + base + 0xB0u, 4);
             if (ecnt != 0u && ecnt <= 0xFu && eaddr >= 0x00100000u &&
                 eaddr < 0x20000000u && esize > 0u && esize <= 0x01000000u) {
-                int nops = (eaddr == 0x08002000u || eaddr == 0x0CFE2000u ||
-                            eaddr == 0x0CFE2100u || eaddr == 0x0CFE6000u)
-                               ? gpu_run_command_list(c, eaddr, esize)
-                               : gpu_run_pica_list(c, eaddr, esize);
+                int legacy = (eaddr == 0x08002000u || eaddr == 0x0CFE2000u ||
+                              eaddr == 0x0CFE2100u || eaddr == 0x0CFE6000u);
+                int nops = legacy ? gpu_run_command_list(c, eaddr, esize)
+                                  : gpu_run_pica_list(c, eaddr, esize);
+                if (nops == 0 && legacy)
+                    nops = gpu_run_pica_list(c, eaddr, esize);
                 if (nops == 0 && gsp_engine_list(c, eaddr)) nops = 1;
                 qops += nops;
                 printf("[gspq-engine] tid=%d n=%u list=%08X size=%X ops=%d\n",
@@ -3749,6 +3768,8 @@ static void gsp_command(Ipc *r, uint32_t *p) {
                 int nops = legacy
                                ? gpu_run_command_list(g_cpu, g_cmdlist_addr, g_cmdlist_size)
                                : gpu_run_pica_list(g_cpu, g_cmdlist_addr, g_cmdlist_size);
+                if (nops == 0 && legacy)
+                    nops = gpu_run_pica_list(g_cpu, g_cmdlist_addr, g_cmdlist_size);
                 if (g_log) printf("[gsp] TriggerCmdReqQueue -> %d Ops%s\n", nops,
                                           legacy ? " (legacy)" : " (pica)");
             }
