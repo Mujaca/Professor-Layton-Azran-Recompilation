@@ -6297,3 +6297,46 @@ TOP 69443/90400 (mean 48.32), BOTTOM 25902/71360 (mean 20.57)
 
 **0-Diff-Klausel:** Asset-Texturen sind nicht pixelgleich zum Capture
 (0/1200 exakte 8x8-Bloecke); vom Nutzer akzeptiert (renegotiiert).
+
+### IMGC: ETC1 + lineare Tile-Ordnung (2026-11-23, Paket 2)
+
+`runtime/imgc.c` akzeptierte nur `bits==24/32` und las die Z-Order
+(`master_get`). Jetzt:
+
+* **ETC1** (`imageFormat 0x011B`, `bits=4`, `bpt=32`): 8x8-Tile = 4
+  PICA-ETC1-Bloecke (Layout wie Azahar `ETC1Tile`), Tabelle wie bei
+  24/32 bpp. 14/14 Texturen aus `menu/title.xc` sind byte-identisch zum
+  Python-Referenzdekoder (`tools/title3d_lib.py`).
+* **8 bpp** (`0x011C`, `bpt=64`) als Graustufe dekodierbar.
+* **Lineare Tile-Ordnung ist Default** (Kachelzeile fuer Kachelzeile,
+  innerhalb der Kachel 8x8 raster). `HLE_IMGC_ZORDER=1` stellt die alte
+  Z-Order wieder her (byte-identisch zum alten Dekoder).
+* `HLE_IMGC_DEBUG=1` loggt Header/Decode-Groessen.
+
+Belege (`python tools\test_imgc_c.py`):
+
+```
+title_b_bg linear   230400 Byte identisch zum Referenzdekoder
+ETC1 000.xi..013.xi 14/14 byte-identisch
+000.xi Z-Order       byte-identisch (Schalter)
+
+Bottom title_b_bg  diff>60  linear 14752/71360 mean 14.33
+                             z-order 26091/71360 mean 20.54
+```
+
+**Bottom-Asset neu gebaut:** `tools/make_menu_assets.py` dekodiert
+`title_b_bg` jetzt kachelbewusst linear (vorher wurde der Tile-Puffer
+faelschlich als Pixelraster gelesen). Kanonischer Lauf:
+
+```
+BOTTOM sichtbar : 14752/71360  mean 14.33   (vorher 25902/71360, 20.57)
+BOTTOM voll     : 19482/76800  mean 15.57   (vorher 30595/76800)
+TOP             : 69443/90400  mean 48.32   (vorher 69370, 47.98; +-2 px
+                                             Laufzeit-Jitter)
+```
+
+**Nebenbefund (wichtig fuer die Asset-Pipeline):** `dectool.exe` liefert
+fuer einige 32-bpp-LZ10-Streams zu wenig Bytes (Beispiel `title_a
+000.xi`: 61280 statt der im Header deklarierten 99840). `tools/_imgc.py`
+macht LZ10 jetzt nativ (`_imgc.lz10`); alle 4735 geprueften IMGCs der drei
+`lt6_*.fa` liefern exakt die deklarierte Groesse.

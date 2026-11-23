@@ -19,6 +19,7 @@ from PIL import Image
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'tools'))
 import _imgc
+import _atest_botscan as BS
 
 FA = os.path.join(ROOT, 'out', 'romfs', 'lt6', 'arc', 'lt6_b.fa')
 BG_OFF = 0x0CE43074
@@ -29,12 +30,15 @@ TH = 1280
 
 
 def decode_linear(path):
-    old = _imgc.master_get
-    _imgc.master_get = lambda p, w: (p % w, p // w)
-    try:
-        return _imgc.decode(path)
-    finally:
-        _imgc.master_get = old
+    """Lineare Tile-Ordnung: Kachelraster 8x8, keine Z-Order.
+
+    Nutzt denselben Referenzdekoder wie tools/test_imgc_c.py (der
+    Runtime-Dekoder in runtime/imgc.c ist damit byte-identisch).
+    Rueckgabe: (w, h, rgb24-Bytes)."""
+    d = open(path, 'rb').read()
+    w = struct.unpack_from('<h', d, 0x10)[0]
+    h = struct.unpack_from('<h', d, 0x12)[0]
+    return w, h, BS.decode_linear(d, 0).tobytes()
 
 
 def main():
@@ -51,20 +55,9 @@ def main():
     sz = struct.unpack_from('<i', data, BG_OFF + 0x3C)[0]
     tmp = os.path.join(ROOT, 'tools', 'out', 'title_b_bg.xi')
     open(tmp, 'wb').write(data[BG_OFF:BG_OFF + 0x48 + s2 + sz])
-    w, h, bpp, pic = decode_linear(tmp)
-    rgb = bytearray(w * h * 3)
-    for t in range(w * h):
-        if bpp >= 3:
-            rgb[t * 3] = pic[t * bpp + 2]
-            rgb[t * 3 + 1] = pic[t * bpp + 1]
-            rgb[t * 3 + 2] = pic[t * bpp]
-        else:
-            v = pic[t * bpp]
-            rgb[t * 3] = v
-            rgb[t * 3 + 1] = v
-            rgb[t * 3 + 2] = v
-    bg = Image.frombytes('RGB', (w, h), bytes(rgb))
-    open(os.path.join(out, 'title_b_bg.bin'), 'wb').write(bytes(rgb))
+    w, h, rgb = decode_linear(tmp)
+    bg = Image.frombytes('RGB', (w, h), rgb)
+    open(os.path.join(out, 'title_b_bg.bin'), 'wb').write(rgb)
     # 3D-Titel-Grundlayer (Host-Render aus title.xc, ETC1) bevorzugen,
     # falls vorhanden; sonst Bottom-Asset als Ersatz.
     bg3d = os.path.join(ROOT, 'tools', 'profiles', 'title3d_bg.bin')

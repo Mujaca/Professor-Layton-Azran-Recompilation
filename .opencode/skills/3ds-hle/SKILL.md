@@ -8,14 +8,21 @@ description: Debugging-Wissen fuer den statischen 3DS-Port (Professor Layton/Azr
 Dieser Skill ist fuer den Port in `C:\Users\user\Documents\Repos\3DS`.
 Kurzpfad: **messen -> vergleichen -> Hypothese -> A/B-Test**.
 
-## Aktueller Stand (Commit `1edae74`, 2026-11-23)
+## Aktueller Stand (2026-11-23)
 
 * Kanonischer Lauf:
   `python tools\run_chain_direct.py --profile tools\profiles\engine_pica_draw.json --shot out\shot_tmp.bmp`
   danach `python tools\canon.py --log out\logs\chain_direct.txt --shot out\shot_tmp.bmp --engine`.
 * Messung: `python tools\measure_ref.py out\shot_engine.bmp` (verifiziert):
-  TOP sichtbar `69370/90400` mean `47.98`; BOTTOM sichtbar
-  `25902/71360` mean `20.57`.
+  TOP sichtbar `69443/90400` mean `48.32` (Jitter +-2 px); BOTTOM sichtbar
+  `14752/71360` mean `14.33`.
+* **IMGC-Dekoder (`runtime/imgc.c`)**: ETC1 (`fmt 0x011B`, bits=4,
+  32 B/Tile), lineare Tile-Ordnung als Default, 8 bpp (`0x011C`).
+  `HLE_IMGC_ZORDER=1` = alte Z-Order; `HLE_IMGC_DEBUG=1` loggt Header.
+  Test `python tools\test_imgc_c.py` (ETC1 14/14, 24/32 bpp, Z-Order).
+* Bottom-Asset (`out/title_b_bg.bin`) ist jetzt kachelbewusst linear
+  dekodiert (`tools/make_menu_assets.py`); das senkte BOTTOM von
+  `25902/71360` (20.57) auf `14752/71360` (14.33).
 * Der Draw-Block stammt aus dem Engine-Strom @`0x30` -> `0x0CFE6000`;
   Quads/Vertex-Attribute und Texturen emittiert aber **HLE**
   (`HLE_PICA_SPRITES`) - also noch kein reiner Engine-Render.

@@ -19,9 +19,13 @@ python tools\canon.py --log out\logs\chain_direct.txt --shot out\shot_tmp.bmp --
 python tools\measure_ref.py out\shot_engine.bmp
 ```
 
-Aktueller Stand (Commit `1edae74`, 2026-11-23, verifiziert): TOP sichtbar
-`69370/90400` mean `47.98`; BOTTOM sichtbar `25902/71360` mean `20.57`
-(`HLE_PICA_CLEAR=1`, zwei Laeufe identisch). Der Draw-Block stammt aus dem
+Aktueller Stand (2026-11-23, verifiziert): TOP sichtbar
+`69443/90400` mean `48.32` (Laufzeit-Jitter +-2 px); BOTTOM sichtbar
+`14752/71360` mean `14.33` (`HLE_PICA_CLEAR=1`). Der Bottom-Fortschritt
+kommt aus dem linearen IMGC-Tile-Decoder (vorher 25902/71360):
+`runtime/imgc.c` dekodiert ETC1 (`fmt 0x011B`) und lineare Kacheln,
+`HLE_IMGC_ZORDER=1` schaltet die alte Z-Order zurueck; Regressionstest
+`python tools\test_imgc_c.py`. Der Draw-Block stammt aus dem
 Engine-Strom @`0x30` -> `0x0CFE6000`, aber Quads/Vertex-Attribute und
 Texturen emittiert noch HLE (`HLE_PICA_SPRITES`). Die Scene-Paar-Kette
 `11A3E0 -> 27C2BC -> 2794A4 -> 2721E0` laeuft (Profil

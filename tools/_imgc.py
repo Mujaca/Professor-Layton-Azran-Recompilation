@@ -82,6 +82,45 @@ def huffman(data, bit_depth):
     return bytes(res)
 
 
+def lz10(data):
+    """Level-5 LZ10 (method 1): 24-bit Zielgroesse im Header, dann
+    Flag-Byte + Literal/LZ-Kopie (12-bit Laenge, 12-bit Distanz).
+    Wichtig: dectool.exe liefert fuer einige 32-bpp-Streams zu wenig
+    Bytes (z. B. title_a 000.xi: 61280 statt 99840) - daher hier nativ."""
+    size = ((data[0] >> 3) | (data[1] << 5) | (data[2] << 13) |
+            (data[3] << 21))
+    p = 4
+    out = bytearray()
+    n = len(data)
+    while len(out) < size:
+        if p >= n:
+            break
+        flags = data[p]
+        p += 1
+        for bit in range(8):
+            if len(out) >= size:
+                break
+            if flags & (0x80 >> bit):
+                if p + 2 > n:
+                    return bytes(out)
+                v = (data[p] << 8) | data[p + 1]
+                p += 2
+                ln = (v >> 12) + 3
+                disp = (v & 0xFFF) + 1
+                if disp > len(out):
+                    return bytes(out)
+                for _ in range(ln):
+                    if len(out) >= size:
+                        break
+                    out.append(out[-disp])
+            else:
+                if p >= n:
+                    return bytes(out)
+                out.append(data[p])
+                p += 1
+    return bytes(out)
+
+
 def decomp(data):
     method = data[0] & 7
     if method == 4:  # Level-5 RLE
@@ -90,6 +129,8 @@ def decomp(data):
         return huffman(data, 4)
     if method == 3:  # Level-5 Huffman8Bit
         return huffman(data, 8)
+    if method == 1:  # Level-5 LZ10
+        return lz10(data)
     if method == 0:  # uncompressed, 4-byte header
         return data[4:]
     with tempfile.TemporaryDirectory() as td:
