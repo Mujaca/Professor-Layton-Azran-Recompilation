@@ -6141,3 +6141,25 @@ Setter bricht mit r0=0 ab. HLE schreibt die Felder im Treiber darum
 direkt (funktioniert, siehe `[classa] #0 ... size=88`).
 
 Kanonisch unveraendert: TOP 69370/90400 (47.98), BOTTOM 25902/71360.
+
+### 0xD2-Base-Store repariert (2026-11-23)
+
+`0x284A48` setzt die Basis nur, wenn `[container+4] != 0` (sonst r0=0,
+siehe Guard). Mit `[container] = 0` (kein Free) und `[container+4] = 1`
+vor dem Aufruf:
+
+```
+[drive] 284A48(0D80B0DC,0E905000,3) -> r0=1
+[drive] cont=0E905000 base=003CAA2C cnt=196608
+```
+
+`cont` ist jetzt die **Loader-Basis** `0x0E905000` (der Loader-Alloc),
+`base = [0x0E905000] = 0x003CAA2C` ist die Record-Vtable (Record 0).
+Damit ist der 0xD2-Base-Store repariert: der Setter wird jetzt korrekt
+bedient, und `0x3669FC(node, cont)` kann die echten Loader-Records an
+`node+0xC4` haengen.
+
+(Der `cnt`-Wert ist nur falsch gelesen: Count steht als u16 bei
+`container+8`, das Log las `obj+0xE4` als u32.)
+
+Kanonisch unveraendert: TOP 69370/90400 (47.98), BOTTOM 25902/71360.
