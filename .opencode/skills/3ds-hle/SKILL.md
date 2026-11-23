@@ -24,6 +24,17 @@ Kurzpfad: **messen -> vergleichen -> Hypothese -> A/B-Test**.
 * Bottom-Asset (`out/title_b_bg.bin`) ist jetzt kachelbewusst linear
   dekodiert (`tools/make_menu_assets.py`); das senkte BOTTOM von
   `25902/71360` (20.57) auf `14752/71360` (14.33).
+* **ANMC (`title_b.xa/RES.bin`)**: 18 Event-Keyframes, Node-Geometrie,
+  21 Button-/9 Sound-Platzierungen; Record = CRC32 + Keyframe-u32 +
+  10 Floats (`Rect = f1+f4, f2+f5, f7-f4, f8-f5`). Die 23 Quads sind
+  als Sprite-List belegt, aber alle zusammen ergeben BOTTOM
+  `30515/71360` (33.13) - schlechter als der 1:1-Hintergrund; Schrift
+  ist Font-Text, `000.xi` ein Tile-Muster. Kanonisch bleibt 1:1.
+* **Natuerlicher Submit**: `0x12493C -> 0x26F130 -> 0x2808A8` bricht ab,
+  weil `world+0x18`/`world+0x35C` leer und Pool `0x40F048` unbelegt ist.
+  Ohne `HLE_FRAME_LOOP2`/`HLE_RETFORCE` submittet der Engine-Update
+  `0x28F7BC` (`submit_engine_ops3.json`, `ops=1`); naechster Blocker ist
+  `0x123D74` (`[obj+0xA0]==0`).
 * Der Draw-Block stammt aus dem Engine-Strom @`0x30` -> `0x0CFE6000`;
   Quads/Vertex-Attribute und Texturen emittiert aber **HLE**
   (`HLE_PICA_SPRITES`) - also noch kein reiner Engine-Render.
