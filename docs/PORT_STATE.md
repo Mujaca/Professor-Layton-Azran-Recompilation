@@ -5903,3 +5903,26 @@ Damit ist die Kette Record -> Block -> Rect -> PICA-Quad geschlossen
 (9 XPVB-Quads + 3D-Grundlayer, 69370/90400 mean 47.98; BOTTOM
 25902/71360). Fuer echte Positionen fehlen weiterhin die Scene-
 Zeigerpaare (`0x27C2BC`/`0x2794A4`).
+
+### Position-/UV-Paare: im Klasse-A-Pfad nicht erzeugt (2026-11-23)
+
+Hooks im kanonischen Profil und im Klasse-A-Treiber
+(`classa_drive.json`):
+
+| Adresse | Rolle | kanonisch | Treiber |
+|---|---|---|---|
+| 0x20AD94 | Klasse-A-Submit | 0 | 2 |
+| 0x271F3C | Anim-/Name-Lookup (rec+0x70) | 0 | 2 |
+| 0x27C2BC | Paar-Setup | 0 | **0** |
+| 0x2794A4 | Paar-Setup | 0 | **0** |
+| 0x2721E0 | Paar-Konsument | 0 | **0** |
+
+Also liefert der Klasse-A-Submit **keine** Positionen/UVs; die Paare
+entstehen nur im Scene-Renderer (der im Port mangels Szene nicht laeuft).
+`[dumpafter] 00408930` (ctx+0x128..0x170) ist komplett 0 - auch
+`ctx+0x14C`/`+0x150`.
+
+Damit ist der verbleibende Schritt klar: Scene-Renderer (0x28BE34-Familie)
+mit echten Registrierungen laufen lassen, damit 0x27C2BC/0x2794A4 die
+Paare in `ctx+0x8334/8338` und `+0x833C/8340` schreiben; erst dann haben
+die Record-Quads echte Rects.
