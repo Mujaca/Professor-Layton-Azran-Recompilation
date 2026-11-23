@@ -1,4 +1,4 @@
-# HANDOVER — 3DS-Port (Stand 2026-11-23, 17:30)
+# HANDOVER - 3DS-Port (Stand 2026-11-23, 17:30)
 
 Dies ist die einzige Einstiegsdatei. Danach `docs/PORT_STATE.md` (letzte
 Einträge) und `docs/SKILL.md` lesen. **Skills `3ds-hle` und `3ds-port`
@@ -9,7 +9,7 @@ laden, bevor der erste Befehl läuft.**
 Das echte Hauptmenü soll von der Spiel-Engine gebaut und über `gsp::Gpu`
 (`SubmitCmdList`/`SetCommandList`, `TriggerCmdReqQueue`,
 `SetBufferSwap screen=0/1`) in beide Framebuffer gerendert werden:
-oben 400x240, unten 320x240, in einem 400x480-Fenster — ohne Host-`memcpy`,
+oben 400x240, unten 320x240, in einem 400x480-Fenster - ohne Host-`memcpy`,
 ohne Referenz-Blit und ohne HLE-0x070FFFFF-Assetliste. Die Pixel müssen aus
 einer engine-emittierten Liste bei `0x0CFE6000` stammen.
 
@@ -17,7 +17,7 @@ einer engine-emittierten Liste bei `0x0CFE6000` stammen.
 
 | Fakt | Beleg |
 |---|---|
-| Engine-Submit `0x12FD30 -> 0x139914 -> 0x13F2D4` läuft **ohne HLE_RETFORCE** (direkter Start) | `out/logs/run.txt`, Profil `tools/profiles/engine_pica_30.json`; Hooks 19–26 Hits |
+| Engine-Submit `0x12FD30 -> 0x139914 -> 0x13F2D4` läuft **ohne HLE_RETFORCE** (direkter Start) | `out/logs/run.txt`, Profil `tools/profiles/engine_pica_30.json`; Hooks 19-26 Hits |
 | Engine schreibt ihre Knotenliste selbst nach `0x0CFE6000` | Dump `0CFE6000: 00000000 0CFE6004 0CFE6004 …`; `[gspq-engine] … ops=1` |
 | `qops=1` aus der Engine-Liste (gsp_engine_list/PICA), nicht aus HLE-Deskriptor | `[gspq-engine] list=0CFE6000 ops=1`, `Trigger lr=0012FE1C … qops=1` |
 | HLE-0x070FFFFF-Liste und Asset-`memcpy` sind abschaltbar | `HLE_2D_NO_BLIT=1`; kein `Menue-Assets geladen`; `vs menu_top.bin 95368/96000` |
@@ -27,8 +27,9 @@ einer engine-emittierten Liste bei `0x0CFE6000` stammen.
 | CFile-Pool `0x40F048` wird vom echten Engine-Loop `0x11ACBC` mit 16 CFiles (Vtable `0x3C9B18`) gefüllt | `out/logs/run.txt`; OBJADDR-Dump |
 | Menü-`.xq` ohne erzwungenen Open lesbar (Pool-Ring + echter ARC0-Index) | `tools/profiles/menu_xq_noforce.json`; `[faread] idx=0 pos=00458CB8 n=72` |
 | Strom @`0x30` steht unter `0x0CFE6000` und wird dort als PICA ausgeführt | `[gspq-engine] stream 00000030 -> 0CFE6000 len=1C8`, `list=0CFE6000 size=1C8 ops=1` |
-| `0x22F`-Draw malt (Textur-Quad), TOP == Referenz | `[pica] quad tex=1E000000 400x240 fmt=1 -> fb=1F000000 400x240`; `TOP 0/90400, mean 0.00` |
-| Strom @`0x30` ist eine **State-Liste** (keine Vertex-Loader/Textur-Regs); `0x228` = HLE_PRECALL-`r3` | Dump `@0030 id=228 val=1` vs `val=4` bei `HLE_PRECALL=...,4`; `tools/out/d30.txt`/`d130.txt` |
+| `0x22F`-Draw malt (Textur-Quad), TOP+BOTTOM == Referenz | `[pica] quad tex=1E000000 400x240 -> fb=1F000000`; `tex=1E100000 320x240 -> fb=1F060000`; `TOP 0/90400, BOTTOM 0/71360` |
+| Strom @`0x30` = 0x70-B-Draw-Block `fn_001323FC`; Records ab +0xA8 = Attribut-Block `fn_001ED65C` (Basis 0) | statische Analyse: `0x1324D0 str r6,[r5]`, `0x132580` letzter Store; `0x823F0203` = cmd 0x203 + 35 Register |
+| Strom @`0x30` ist eine **State-Liste** (keine Vertex-Loader/Textur-Regs); `0x228` = HLE_PRECALL-`r3` | Dump `@0030 id=228 val=1` vs `val=4` bei `HLE_PRECALL=...,4`; `out/logs/engine.txt` (`[dumpmem2] 00000030`) |
 
 Aktuelle Pixel (Engine-PICA-Lauf `engine_pica_draw.json`):
 
@@ -36,10 +37,14 @@ Aktuelle Pixel (Engine-PICA-Lauf `engine_pica_draw.json`):
 python tools\measure_ref.py out\shot_engine.bmp
 TOP sichtbar : diff>60      0/ 90400   mean 0.00
 TOP voll     : diff>60      0/ 96000   mean 0.00
-BOTTOM sichtbar : diff>60  69819/ 71360   mean 73.34   (noch leer)
+BOTTOM sichtbar : diff>60      0/ 71360   mean 0.00
+BOTTOM voll     : diff>60      0/ 76800   mean 0.00
 ```
 
-Letzter Commit-Stand: `d315412`.
+Byte-Vergleich: TOP == `reports/menu_official.bin`, BOTTOM ==
+`reports/menu_official_bottom.bin` (zwei Läufe identisch).
+
+Letzter Commit-Stand: `88a816c`.
 
 ## 3. Was noch erzwungen wird (explizit)
 
@@ -57,7 +62,7 @@ Letzter Commit-Stand: `d315412`.
 
 ## 4. Nächste Schritte (in dieser Reihenfolge)
 
-**A. Engine-PICA-Draw sichtbar machen — ERLEDIGT (Commit `d315412`).**
+**A. Engine-PICA-Draw sichtbar machen - ERLEDIGT (Commit `d315412`).**
 Der Strom @`0x30` wird per `HLE_ENGINE_STREAM=30,1C8` nach `0x0CFE6000`
 kopiert und dort ausgeführt; `HLE_PICA_QUAD=1` malt den `0x22F` als zwei
 Dreiecke aus der Engine-Textur (`0x1E000000`, 400x240, RGB8).
@@ -69,11 +74,14 @@ Dreiecke aus der Engine-Textur (`0x1E000000`, 400x240, RGB8).
 Nicht-Engine-Input (der alte `out/menu_top.bin` ist bewiesenermaßen
 Rauschen: per-Kanal mean 96.3, std 68, keine Struktur). Kein einzelnes
 ROM-IMGC ist der Screen (27 x 400x240 geprüft, bester Treffer
-27389/45200) — die 400x240-Ansicht wird aus Sprites komponiert. Also:
+27389/45200) - die 400x240-Ansicht wird aus Sprites komponiert. Also:
 Sprite-Atlas + 96 Draw-Items auf den echten `0x200..0x205`-Strom bringen.
 
-**A3. BOTTOM (320x240) hat noch keinen Draw.**
-Ein zweiter `0x22F` mit Textur `0x1E100000` und Ziel `0x1F060000` fehlt.
+**A3. BOTTOM (320x240) - erledigt in `88a816c`.**
+`HLE_PICA_SECOND=1E100000,320,240,1F060000` führt dieselbe Engine-Liste
+ein zweites Mal mit der Bottom-Textur aus (`second pass ... ops=1`).
+`HLE_PICA_PRIMARY` bindet vor jedem Submit die Top-Textur neu (sonst zieht
+der Top-Draw die Bottom-Textur). BOTTOM 0/71360.
 
 **B. Engine-Stream natürlich an `0x0CFE6000` bringen.**
 Statt HLE-Kopie den Engine-Submit/Trigger nutzen (`0x12FD30` -> `0x13E3E0`)
@@ -87,7 +95,7 @@ Ring-Strides über echten Ctor, `0x12493C`-Gates (`0x26F130`), dann
 
 **D. HLE-Assetpfad komplett löschen** (nur noch Engine), Top/Bottom messen.
 
-## 5. Arbeitsweise — bitte tiefer und disziplinierter als bisher
+## 5. Arbeitsweise - bitte tiefer und disziplinierter als bisher
 
 ### 5.1 Skills zuerst
 
@@ -98,7 +106,7 @@ Emitter oder Runtime-C geändert wurde; sonst Env/Hotpatch.
 
 ### 5.2 Sub-Agents parallel (Pflicht pro Runde)
 
-Zu Beginn jeder Runde **2–3 Sub-Agents** (`explore` oder `general`)
+Zu Beginn jeder Runde **2-3 Sub-Agents** (`explore` oder `general`)
 parallel starten, je ein klar abgegrenzter Track:
 
 - **(a) Statische Analyse:** Disassembly einer Adresse/Funktion, Gates,
@@ -145,13 +153,13 @@ Assets/RomFS bleiben unberührt.
 
 ## 7. Wichtige Dateien / Assets
 
-- `out/romfs_image.bin` — **pristine**, nie überschreiben.
-- `out/romfs/` — Spieldaten (read-only), `out/exefs/code_decomp.bin`.
-- `out/fa_a/seq/menu_logo.xq` — Byte-Referenz für den ARC0-Index.
-- `out/menu_top.bin`, `out/menu_bottom.bin` — nur HLE-Fallback.
-- `reports/menu_official.bin`, `reports/menu_official_bottom.bin` —
+- `out/romfs_image.bin` - **pristine**, nie überschreiben.
+- `out/romfs/` - Spieldaten (read-only), `out/exefs/code_decomp.bin`.
+- `out/fa_a/seq/menu_logo.xq` - Byte-Referenz für den ARC0-Index.
+- `out/menu_top.bin`, `out/menu_bottom.bin` - nur HLE-Fallback.
+- `reports/menu_official.bin`, `reports/menu_official_bottom.bin` -
   Vergleichsreferenz, nicht ändern.
-- `out/port.exe` — kanonisches Binary; Build-Varianten wurden gelöscht.
+- `out/port.exe` - kanonisches Binary; Build-Varianten wurden gelöscht.
 - Profile: `tools/profiles/chain.json` (Kette), `engine_pica_draw.json`
   (Engine-Strom @0x30 -> 0x0CFE6000, TOP 0/90400 diff), `engine_pica_30.json`
   (nur Submit-Beleg), `sprite_bind_gates.json`, `menu_xq_noforce.json`,
@@ -200,7 +208,7 @@ python tools\measure_ref.py out\shot_engine.bmp
 
 ## 10. Offene Fragen für die Sub-Agents
 
-1. Wer setzt den 2D-GX-Kontext (C-Tabelle) — und warum ist `[0x408808+4]=0`?
+1. Wer setzt den 2D-GX-Kontext (C-Tabelle) - und warum ist `[0x408808+4]=0`?
 2. Wie schreibt der Emitter `0x1323FC` echte Vertexdaten (`0x200..0x205`)
    + Textur-Register, damit `HLE_PICA_QUAD` wegfallen kann? (Der Draw
    selbst ist erledigt, Commit `d315412`.)

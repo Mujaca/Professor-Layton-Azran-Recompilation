@@ -1175,7 +1175,7 @@ Zusatz-Diagnose direkt im recompilierten `fn_001B9938`
 
 Der Renderer wird also mit `r0=0x00422200` und aktivem Enable aufgerufen,
 bricht **nicht** am Early-Exit ab, erreicht aber den Unit-Block
-`0x1BA364` gar nicht — er laeuft auf einem anderen Pfad (Modus-/State-
+`0x1BA364` gar nicht - er laeuft auf einem anderen Pfad (Modus-/State-
 Abhaengigkeit im Renderer-Objekt). Deshalb ist der Node-Typ/Format noch
 nicht die einzige Luecke.
 
@@ -1256,7 +1256,7 @@ von `0x138D70` den Namen `"gsp::Gpu"` nach `0x3D91F8` und Laenge 9 nach
 ```
 
 Der Client (`0x3D91E8`) hat also ein echtes Handle (4) und den State-Zeiger
-`0x3D7C40` in `+0x1C` — wie im echten Boot.
+`0x3D7C40` in `+0x1C` - wie im echten Boot.
 
 **Trigger laeuft, schreibt aber nichts:** `0x13E3E0` wird mit
 `r0=0x3D7C40` periodisch aufgerufen (`ARM_WATCH=13E3E0`: 11 Treffer),
@@ -1338,7 +1338,7 @@ ein echtes `SetCommandList` mit Adresse+Size fehlt weiterhin.
 
 Nachtrag: Der Client-State-Init `0x13EAAC` speichert das Ergebnis von
 `0x28771C` nach `[state+0x2C]`; im Port ist das **5** (kein
-Shared-Memory-Zeiger) — `[gspengine] shm(base+0x2C)=00000005`
+Shared-Memory-Zeiger) - `[gspengine] shm(base+0x2C)=00000005`
 (`out/logs/shm_log.txt`). Wo die Engine ihren Kommandopuffer ablegt, ist
 damit noch offen.
 
@@ -1448,7 +1448,7 @@ Argumente/Zustand (nicht nur `this = 0x3CA494`).
 Der Renderer uebergibt also **nur `r0` = Zeiger auf den Ring-Eintrag**;
 `r1/r2/r3` sind Reste aus `0x284A38`. Ein echter Engine-Eintrag muss
 demnach ein Objekt an `r0` liefern, dessen Felder die Draw-Methode liest
-(unsere Engine-Methoden lesen z. B. `[r0+0xA34]`) — der Ring-Eintrag ist
+(unsere Engine-Methoden lesen z. B. `[r0+0xA34]`) - der Ring-Eintrag ist
 nur 0xB4 Byte gross, also muessen die echten Eintraege per eigenem Stub
 `r0 = [entry+4]` (Objektzeiger) laden.
 
@@ -1464,7 +1464,7 @@ sets=0 unk=0 TOP=95368 BOT=70954 lr=[]
 
 Kein Kandidat erzeugt eine `SetCommandList`; das Bild bleibt der
 HLE-Present-Clear. Die getesteten Scene-Methoden sind also nicht der
-Sprite-/Mesh-Renderpfad — die echten Drawable-Objekte (Sprites) fehlen
+Sprite-/Mesh-Renderpfad - die echten Drawable-Objekte (Sprites) fehlen
 weiterhin.
 
 ### Write-Watch: das Spiel fuellt den Drawable-Pool nie
@@ -1473,11 +1473,11 @@ weiterhin.
 (`out/logs/poolw_log.txt`): nur BSS-Clear (`pc=0x100030`) und der
 Konstruktor (`pc=0x288398`) schreiben in den Pool. **Keine** Spiel-
 Schreibzugriffe auf `{array,stride,start,end}` (`menu+0x5C..`) waehrend
-120 Frames — der Menue-Loop erzeugt also selbst keine Drawables. Das
+120 Frames - der Menue-Loop erzeugt also selbst keine Drawables. Das
 erklaert `sets=0` fuer alle Kandidaten-Objekte.
 
 Statische Suche nach dem Add-Writer (`tools/_find_pool_writers.py`):
-569 Treffer fuer `+0x5C`, 27 fuer `+0x6A` — viele davon sind aber
+569 Treffer fuer `+0x5C`, 27 fuer `+0x6A` - viele davon sind aber
 gefaltete Offsets (z. B. `add r0,r0,#0x100` + `strh [r0,#0x6A]` =
 `obj+0x16A`, siehe `fn_001C3950`). Ein eindeutiger Add-Drawable-Aufruf
 fuer `0x3EE12C+0x6A` ist damit noch nicht identifiziert.
@@ -1553,14 +1553,14 @@ Typ-5/6-Pfad ruft deshalb ins Leere.
 **Write-Watch `0x3EE164..0x3EE174` (`menu+0x38/+0x40`)** ueber 120 Frames
 (`out/logs/m38_log.txt`): nur BSS-Clear (`pc=0x100030`) und Konstruktor
 (`pc=0x288398`) schreiben. Das Spiel registriert **keine** Objekte in
-`menu+0x38` — Menue-Node-Liste **und** Objektliste sind im Port leer.
+`menu+0x38` - Menue-Node-Liste **und** Objektliste sind im Port leer.
 Damit ist klar: Nicht der Renderer, sondern die **Befuellung des
 Menue-Objekts** fehlt.
 
 Das Spiel ruft `0x28D424` selbst mit `r0=0x003EE12C` auf
 (`ARM_WATCH=28D424`, `out/logs/w28_log.txt`); ein Zeiger auf
 `0x3EE12C` existiert aber nirgends im RAM (`[menuscan] ptr(3EE12C):`
-leer) — die Adresse wird berechnet (Basis `0x3EC028` + Offset).
+leer) - die Adresse wird berechnet (Basis `0x3EC028` + Offset).
 
 **Aufrufkette des Menue-Loops:**
 
@@ -1572,7 +1572,7 @@ fn_0035FF14 (Scene-Builder, kein statischer Aufrufer)
     0x3610F8  bl 0x277004
 ```
 
-`0x3C6FE4+8` ist genau `fn_0011DB84` — das State-Objekt ruft also den
+`0x3C6FE4+8` ist genau `fn_0011DB84` - das State-Objekt ruft also den
 Menue-Drain. Das Menue-Objekt ist ein **eingebettetes Member** der Scene
 (Adresse ueber Container `0x265DD0` berechnet), daher kein Literal und
 kein Pointer im RAM. Ohne die echte Scene-Konstruktion (`fn_0035FF14`)
@@ -1660,7 +1660,7 @@ Das Spiel ruft seinen eigenen 3D-Welt-Update also **nie** auf; deshalb
 bleibt `[0x422200+0x1530]=0`. Ein erzwungener Aufruf
 (`HLE_ENGINE_WORLD=1`, `HLE_WORLD_ARG=<ptr>`) mit `0x003CA494` oder
 `0x00422200` bricht mit `unbekanntes call-Ziel 0x00000000 (Block
-0x0028EF94)` ab — das echte World-Objekt fehlt (Menue-Flow nicht erreicht).
+0x0028EF94)` ab - das echte World-Objekt fehlt (Menue-Flow nicht erreicht).
 
 ## Offline-IMGC-Dekoder ist fuer den Menue-Atlas falsch
 
@@ -1669,11 +1669,11 @@ bleibt `[0x422200+0x1530]=0`. Ein erzwungener Aufruf
 Form `block*4096 + row*16 + col` (`block` 0..7, `row`/`col` 0..15). Der
 Kuriimu-Ansatz `offset = entry * bytesPerTile` liefert deshalb **schwarz**
 (`_imgc.decode`), und auch die Permutationsvarianten
-(`s = (e>>12)*256 + (e&0xFFF)`) ergeben nur Rauschen (Korrelation 0.01–0.11).
+(`s = (e>>12)*256 + (e&0xFFF)`) ergeben nur Rauschen (Korrelation 0.01-0.11).
 Der entpackte Texturstrom selbst ist ein Farbverlauf (Korrelation 0.08).
 
 Damit sind die frueheren Aussagen "kein Asset matcht die Referenz" **nicht
-belastbar** – sie beruhen auf einem falschen Dekoder. Werkzeuge:
+belastbar** - sie beruhen auf einem falschen Dekoder. Werkzeuge:
 `tools/_list_imgc.py`, `tools/_show_blob.py`, `tools/_menu_decode3.py`,
 `tools/_title_etc1.py`, `tools/_scan_imgs.py`.
 
@@ -1947,10 +1947,10 @@ Damit sind lt6_a, lt6_b und lt6_uk vollstaendig indexiert.
   leere erste Pfadbestandteil (fuehrendes `/`) als `stream` (0xF0) aufgeloest
   wird; der erste Lookup (`product.bcsar`) funktioniert noch.
 - Werkzeuge (idempotent):
-  - `tools/_romfs_fullchain.py`  — alle File-Buckets -> vollstaendige Kette
-  - `tools/_romfs_dirchain.py`   — alle Dir-Buckets -> vollstaendige Kette
-  - `tools/_romfs_rootbucket.py` — Bucket 0 -> Root-Record 0
-  - `tools/_patch_lookup_noparent.py` — Parent-/Laengenpruefung neutralisieren
+  - `tools/_romfs_fullchain.py`  - alle File-Buckets -> vollstaendige Kette
+  - `tools/_romfs_dirchain.py`   - alle Dir-Buckets -> vollstaendige Kette
+  - `tools/_romfs_rootbucket.py` - Bucket 0 -> Root-Record 0
+  - `tools/_patch_lookup_noparent.py` - Parent-/Laengenpruefung neutralisieren
 - Laufzeit-Schalter: `HLE_HASH_FIX` (Dir-/File-Cursor getrennt),
   `HLE_PATH_SKIPabs` (fuehrendes `/` inkl. Laenge entfernen), `HLE_DIR_RESET`.
 - Ergebnis: der `.fa`-Device-Open liefert weiterhin FS `PathNotFound`
@@ -2099,7 +2099,7 @@ Messung (60-s-Lauf mit `HLE_FRAME_LOOP=28F7BC`,
 weiterhin keine Pixel (Screenshot byte-identisch), weil dem Draw-Objekt die
 geladenen Asset-Daten (Dimensionen/Textur) fehlen.
 
-Zusatzmessung: der Menue-Zustand loest noch **keine** Archiv-Lookups aus —
+Zusatzmessung: der Menue-Zustand loest noch **keine** Archiv-Lookups aus -
 `[key]` = 0, `[path]` nur `$coin:/gamecoin.dat`, `[file] Read` = 7
 (nur Metadaten). Die Namensaufloesung fuer `menu_logo` passiert also erst
 im Ressourcen-Manager, der ohne geladene `.fa`-Tabelle nicht arbeitet.
@@ -2170,7 +2170,7 @@ Aufgerufen bei gsp-Cmd `0x000C` und optional im Frame-Pump (`HLE_GSPQ_PUMP=1`).
 
 **Messung:** Im Port ist der Bereich `0x10002800..` komplett null
 (`HLE_DUMP_RANGE=10002800,10003200` → alle Werte `00000000`), und es erscheint
-kein `[gspq]`. Das Spiel fuellt den Kommandopuffer also gar nicht — passend
+kein `[gspq]`. Das Spiel fuellt den Kommandopuffer also gar nicht - passend
 dazu, dass `0x000C` nie gesendet wird. Die eigentliche Ursache liegt damit
 weiterhin im Grafik-Flush des Spiels (Render-Thread/Frame-Pfad).
 
@@ -2274,23 +2274,23 @@ sich nicht). Reihenfolge/Adressen siehe `tools/apply_all_patches.py`.
 
 - Die Init-Schleife `0x101508`/`0x10151C` wartet auf `*(u16*)(0x3EC028+0x2144)`
   (= `0x3EE16C`). Memwatch zeigt: **nur** BSS-Clear und ein Write von `0`
-  (`pc=0x288398`, `lr=0x2BA728`) — der Loader setzt das Flag nie auf 1.
+  (`pc=0x288398`, `lr=0x2BA728`) - der Loader setzt das Flag nie auf 1.
   In 90 s läuft die Schleife ~6400×, `0x101540` wird nie erreicht.
 - Ein `STR [Rn,#0x2144]` existiert im Image nicht (auch kein `ADD #0x2144`);
   gefunden wurde nur **ein** Paar `ADD #0x2000` + `ADD #0x144`
-  (`0x115D8C`/`0x115D90`, `fn_00115C18`) — dort wird das 0x200-Byte-Objekt
+  (`0x115D8C`/`0x115D90`, `fn_00115C18`) - dort wird das 0x200-Byte-Objekt
   bei `scene+0x2144` per `0x28EED0` **genullt** (Reset, nicht Setter).
   Zusätzlich 20 Stellen `add #0x2000` + `STR [.,#0x144]` (u. a. `0x21B408`,
-  `0x2FE1CC`) — Kandidaten für den Setter, aber Index-/Array-Stores.
+  `0x2FE1CC`) - Kandidaten für den Setter, aber Index-/Array-Stores.
 - Es gibt **keinen** gespeicherten Zeiger auf `0x3EE16C` im Scene-Bereich
-  (Dump 0x3EC028..0x3EE200, kein Wert `003EE16C`) — der Setter muss die
+  (Dump 0x3EC028..0x3EE200, kein Wert `003EE16C`) - der Setter muss die
   Adresse selbst bilden.
 - `.fa`-Dateien werden **nicht über FS** geöffnet: `HLE_FS_PATHS` zeigt nur
   SelfNCCH, `OpenArchive id=7`, `/gamecoin.dat` und drei `file 0x0802`-Reads.
   Die `.fa`-Geräte bekommen also entweder leere Synthese-Dateien oder werden
   gar nicht geöffnet.
 - Die `0x0802`-Reads tragen **Binärpfade** (Azahar: `NCCHFilePath`, 0x14 Byte:
-  `{open_type, content_index, filepath_type, exefs_filepath[8]}`) — unser
+  `{open_type, content_index, filepath_type, exefs_filepath[8]}`) - unser
   `find_path` wertet sie nicht aus und liefert damit falsche/leere Daten.
 - Mit `HLE_SCENE_READY=1` erreicht die Engine die RM-Frame-Schleife
   (`0x288AF8/0x288B34`) und sendet `gsp 0x0006/0x000C` samt `[gpusubmit]`.
@@ -2317,13 +2317,13 @@ sich nicht). Reihenfolge/Adressen siehe `tools/apply_all_patches.py`.
   `[[obj+4]+0x3C] = P` liefern `0x140140` **und** `0x14015C` einen Count von 1.
   Ergebnis (voller Pfad, Copy-Bypass): alle vier Allocs gelingen
   (`0x00F3DE78`, `0x00F3DE78`, `8`, `0x5E0`, `0xA000`) und der Lader erreicht
-  erstmals `0x124AD8` (hinter `0x12FD30`) — vorher brach er bei `0x124A28` ab.
+  erstmals `0x124AD8` (hinter `0x12FD30`) - vorher brach er bei `0x124A28` ab.
   `0x12FD30` selbst liefert 0 (Abbruch ueber `beq 0x124C30`); mit
   `0x12FD30 = mov r0,#1` laeuft der Lader weiter, erreicht `0x124C30` aber
   nicht in 120 s (Hauptthread idle bei `0x283488`, `sp=0x0CF0F000`).
   `HLE_FLAG_FIX` (Byte `0x3E7771`, gelesen von `0x139844`) aenderte daran
   nichts: der Wert ist bereits `1` (Wort `0x3E7770 = 0x00010100`), `0x139844`
-  liefert also 1 — der 0-Rueckweg von `0x12FD30` kommt aus einem spaeteren
+  liefert also 1 - der 0-Rueckweg von `0x12FD30` kommt aus einem spaeteren
   Zweig. Auch mit Stub (0x12FD30 = mov r0,#1) bleibt der Lader nach `0x124AD8` in 240 s stecken
   (`0x124C30` wird nicht erreicht, Watchdog `0x283488`).
 - Mit dem kurzen Pfad (`0x1249CC → 0x124C30`) bleibt der Mount-Erfolg
@@ -2333,7 +2333,7 @@ sich nicht). Reihenfolge/Adressen siehe `tools/apply_all_patches.py`.
 ### Screenshot-Timing (wichtig!)
 
 `tests/port.c` speicherte `--shot` frueher bei **Frame 3** (~48 ms) und brach
-bei Frame 6 ab. Das Spiel hat zu diesem Zeitpunkt noch nichts gerendert —
+bei Frame 6 ab. Das Spiel hat zu diesem Zeitpunkt noch nichts gerendert -
 alle bisherigen "288.054 B, 0 Unterschiede"-Befunde waren dadurch
 vorbestimmt. Neu: `PORT_SHOT_FRAMES=<n>` legt den Aufnahmezeitpunkt fest
 (Default 3). Beleg mit `HLE_GPU_SUBMIT=1` (synthetischer Frame):
@@ -2344,7 +2344,7 @@ PORT_SHOT_FRAMES=200 -> shot_late.bmp: 288054 B, Unterschiede: 284003
 
 Damit ist bewiesen: die VRAM-Pixel werden korrekt in den Screenshot
 uebernommen, sobald sie existieren. Ohne Fremd-Submit (nur Spiel-Pixel)
-bleibt es bei 0 Unterschieden — das Spiel schreibt weiterhin nichts in den
+bleibt es bei 0 Unterschieden - das Spiel schreibt weiterhin nichts in den
 VRAM (siehe GSP-Kommandopuffer).
 
 ### Langlauf ohne Submit (neu)
@@ -2359,7 +2359,7 @@ kein 0x000C, kein 0x0005
 
 Auch nach 5 Minuten wird also kein Kommando submitted. Nebenbefund: an
 `0x1292A8` (`blxne r0`) wird `[obj+0x170] = 0xF0` als Callback benutzt
-("unbekanntes call-Ziel 0x000000F0 von Block 0x001292BC") — ein korrupter
+("unbekanntes call-Ziel 0x000000F0 von Block 0x001292BC") - ein korrupter
 Funktionszeiger, aber nicht fatal (der Lauf geht weiter).
 
 ### Zweite Gastfunktion pro Tick (`HLE_FRAME_LOOP2`, neu)
@@ -2524,7 +2524,7 @@ Der Literal-Scan nach `0x0035F3B4` findet die Funktion in einer statischen Tabel
 0x3CA3AC 0037EF94
 ```
 
-Damit ist klar, wie der Builder aufgerufen wird: als **Vtable-Methode bei +0x04** eines Objekts, dessen `[0] = 0x3CA370` ist. Im Port zeigt die Scene (`0x3CA494`) aber `[0]=0x003653CC` — also eine andere/aeltere Klasse; ein Aufruf von +0x04 der 0x3CA370-Tabelle wurde nie beobachtet (`ARM_WATCH=3610F8`: 0).
+Damit ist klar, wie der Builder aufgerufen wird: als **Vtable-Methode bei +0x04** eines Objekts, dessen `[0] = 0x3CA370` ist. Im Port zeigt die Scene (`0x3CA494`) aber `[0]=0x003653CC` - also eine andere/aeltere Klasse; ein Aufruf von +0x04 der 0x3CA370-Tabelle wurde nie beobachtet (`ARM_WATCH=3610F8`: 0).
 
 **Vtable-Test:** `HLE_SCENEBUILD=1 HLE_SB_ARG=3CA494` setzt zusaetzlich `[scene]=0x3CA370` (Klassen-Vtable) und ruft den Builder. Ergebnis (`out/logs/vt2_log.txt`): weiterhin 200x `unbekanntes call-Ziel` (0xE5900008/0), keine Engine-`SetCommandList` (192, alle `lr=001ED9C8`), `units=0`. Der Builder braucht also weitere initialisierte Sub-Objekte, nicht nur die Vtable.
 
@@ -2532,7 +2532,7 @@ Damit ist klar, wie der Builder aufgerufen wird: als **Vtable-Methode bei +0x04*
 
 **Frisches Scene-Objekt getestet:** `HLE_SB_NEW=1` legt ein genulltes 0x4000-Byte-Objekt bei `0x0D200000` an, setzt die Klassen-Vtable `0x3CA370` und ruft den Builder. Ergebnis (`out/logs/sbnew_log.txt`): weiterhin 200x `unbekanntes call-Ziel` (jetzt 0x0), keine Engine-`SetCommandList`, `units=0`, `menu`-Listen leer. Der Builder setzt also bereits initialisierte Sub-Objekte voraus.
 
-**`0x265DD0` ist ein Clear-/Teardown-Helfer**, kein Container-Get: `ldr r1,[r0]; ...; str r1,[r0]; strh r1,[r0,#0xa]; strh r1,[r0,#8]; bx lr` — er nullt `[r0]`, `[r0+8]`, `[r0+0xa]` und laesst `r0` unveraendert. Die Kette `bl 0x265DD0; sub r0,r0,#0xc; ...` im Aufrufer `0x3610xx` ist damit eher ein Abbau/Pop einer Member-Kette als ein Aufbau. Die eigentliche Menue-Konstruktion liegt also woanders.
+**`0x265DD0` ist ein Clear-/Teardown-Helfer**, kein Container-Get: `ldr r1,[r0]; ...; str r1,[r0]; strh r1,[r0,#0xa]; strh r1,[r0,#8]; bx lr` - er nullt `[r0]`, `[r0+8]`, `[r0+0xa]` und laesst `r0` unveraendert. Die Kette `bl 0x265DD0; sub r0,r0,#0xc; ...` im Aufrufer `0x3610xx` ist damit eher ein Abbau/Pop einer Member-Kette als ein Aufbau. Die eigentliche Menue-Konstruktion liegt also woanders.
 
 **Add-Node-Matrix:** Kandidaten aus dem Menue-Code (Funktionen, die `+0x74` und `+0x6C` nutzen) per `HLE_FRAME_LOOP2` mit `r0=0x3EE12C, r1=0x0CFF2100` aufgerufen (`tools/_addnode_matrix.py`):
 
@@ -2557,7 +2557,7 @@ Instrumentierung in `fn_00100F98` (`build/gen_boot.c`, initdbg/loader-Prints):
 [initdbg] fail
 ```
 
-`fn_00100F98` springt also bei `0x101030` in den Fail-Pfad `0x1014E4`, weil der erste Loader `fn_001036B4` 0 liefert. Dessen erster Check ist `fn_0010FC9C` (liest `*(s8*)0x3D8CE0`); ein dauerhaftes Setzen von `[0x3D8CE0]=1]` (HLE_PUMP bei `HLE_ENGINE_MENU`) aendert nichts — der Fehlschlag liegt also tiefer in `0x1036B4` (`0x1036C8`, `0x103724` oder Folgeschritte).
+`fn_00100F98` springt also bei `0x101030` in den Fail-Pfad `0x1014E4`, weil der erste Loader `fn_001036B4` 0 liefert. Dessen erster Check ist `fn_0010FC9C` (liest `*(s8*)0x3D8CE0`); ein dauerhaftes Setzen von `[0x3D8CE0]=1]` (HLE_PUMP bei `HLE_ENGINE_MENU`) aendert nichts - der Fehlschlag liegt also tiefer in `0x1036B4` (`0x1036C8`, `0x103724` oder Folgeschritte).
 
 ### gate3-Stub: Menue-Init laeuft jetzt erfolgreich
 
@@ -2574,9 +2574,9 @@ Der Loader `fn_001036B4` scheiterte am dritten Check `fn_0010F8C4` (Unterpruefun
 
 `fn_00100F98` nimmt also jetzt den Erfolgszweig und laeuft in die Menue-Schleife. `menu+0x38/+0x6C` bleiben aber weiterhin leer (Write-Watch `3EE164`: nur BSS/Ctor), und es gibt keine Engine-`SetCommandList` (192, alle `lr=001ED9C8`), Pixel 0/0.
 
-**Nach erfolgreichem Init:** Write-Watch auf `0x3EE198`/`0x3EE1A0` zeigt weiterhin nur BSS/Ctor (`out/logs/c1_log.txt`, `c2_log.txt`). Ein zusaetzlicher Welt-Update-Aufruf `0x10F0B4(0x3EC028)` (`HLE_FRAME_LOOP2`) endet wieder in Null-Calls (`0x28EF94`), `units=0`, keine Engine-`SetCommandList` (`out/logs/wu_log.txt`). Auch ein erfolgreicher Menue-Init legt im Port also keine Nodes an — die Inhalte kommen offenbar erst aus spaeteren Zustands-/Sequenzschritten (Eingaben/Events).
+**Nach erfolgreichem Init:** Write-Watch auf `0x3EE198`/`0x3EE1A0` zeigt weiterhin nur BSS/Ctor (`out/logs/c1_log.txt`, `c2_log.txt`). Ein zusaetzlicher Welt-Update-Aufruf `0x10F0B4(0x3EC028)` (`HLE_FRAME_LOOP2`) endet wieder in Null-Calls (`0x28EF94`), `units=0`, keine Engine-`SetCommandList` (`out/logs/wu_log.txt`). Auch ein erfolgreicher Menue-Init legt im Port also keine Nodes an - die Inhalte kommen offenbar erst aus spaeteren Zustands-/Sequenzschritten (Eingaben/Events).
 
-**Frame-Callback 0x101750 laeuft:** `ARM_WATCH=101750` zeigt 51 Treffer in 120 Frames (r0=0x400, r1=0x101750). Der Callback ist ein Thunk `-> 0x103C18 -> 0x10FFA8`, das die Submodule `0x28E40C`, `0x11AF00`, `0x11B02C`, `0x121F3C` updated. Trotzdem bleiben `menu+0x38/+0x6C` leer — die Node-Erzeugung liegt tiefer in diesen Submodulen bzw. ist event-/eingabeabhaengig.
+**Frame-Callback 0x101750 laeuft:** `ARM_WATCH=101750` zeigt 51 Treffer in 120 Frames (r0=0x400, r1=0x101750). Der Callback ist ein Thunk `-> 0x103C18 -> 0x10FFA8`, das die Submodule `0x28E40C`, `0x11AF00`, `0x11B02C`, `0x121F3C` updated. Trotzdem bleiben `menu+0x38/+0x6C` leer - die Node-Erzeugung liegt tiefer in diesen Submodulen bzw. ist event-/eingabeabhaengig.
 
 **Es werden keine Menue-Sequenzen geladen:** Im Lauf mit erfolgreichem Init (`out/logs/xq_log.txt`) sind die einzigen Datei-Requests 4x `/gamecoin.dat` (jeweils 0 KiB). Kein `.xq` (menu_title/menu_logo/...) und kein `.xi` wird angefordert. Die Menue-Inhalte (Sequenzen/Assets) werden also gar nicht erst geladen -> keine Nodes. Das erklaert die leeren Listen trotz erfolgreichem Init.
 
@@ -2592,13 +2592,13 @@ In der Exe stehen die Menue-Sequenznamen als Inline-Strings:
 0x290024 "menu_bag", "menu_invest", "menu_fukamaru", "menu_jiten" ...
 ```
 
-Davor/dazwischen stehen Code-Zeiger (`0x104420`, `0x104428`, `0x104440`, `0x1045E0`, `0x1045E8`, `0x10470C`, `0x1047DC`, `0x1047E4`, ...) — offenbar eine Tabelle von Menue-Seiten mit Handlern und Sequenznamen.
+Davor/dazwischen stehen Code-Zeiger (`0x104420`, `0x104428`, `0x104440`, `0x1045E0`, `0x1045E8`, `0x10470C`, `0x1047DC`, `0x1047E4`, ...) - offenbar eine Tabelle von Menue-Seiten mit Handlern und Sequenznamen.
 
 **Test:** Diese Handler (`10470C/1047DC/1047E4/104420/104428/104440`) per `HLE_FRAME_LOOP2` mit `r0=0x3EE12C` aufgerufen (`tools/_seq_matrix.py`): keine `.xq`-Datei wird geoeffnet, `menu+0x74` bleibt 0. Der eigentliche Sequenz-Loader ist also nicht darunter.
 
 **MOVW/MOVT-Scan:** `tools/_movwt.py` sucht nach gepaarten MOVW/MOVT, die eine Adresse in `0x28FF90..0x290050` bilden. Ergebnis: **0 Kandidaten** (beide Rd gleich, Abstand <= 80 B). Die Menue-Namenstabelle wird also weder per Literal noch per MOVW/MOVT adressiert; sie ist vermutlich reine Debug-/Animations-Benennung oder wird ueber eine Laufzeit-Basis (Zeiger in .data) erreicht.
 
-**FA-Read-Pfad im Menue nicht aktiv:** Hook auf den FA-Stream-Leser `0x280744` (Build-Patch fuer `hle_fa_read`) zeigt im Menue-Lauf **0 Treffer**; nur `0x28F730` (Sync-Init) wird 2x gerufen (`out/logs/fa_log.txt`). Es werden also gar keine `.fa`-Streams gelesen. Zudem injiziert der Port bereits HID-Eingaben (START/A alternierend alle 30 Frames, `runtime/hle/hle.c` Zeile ~3386) — Eingaben sind also nicht der Blocker.
+**FA-Read-Pfad im Menue nicht aktiv:** Hook auf den FA-Stream-Leser `0x280744` (Build-Patch fuer `hle_fa_read`) zeigt im Menue-Lauf **0 Treffer**; nur `0x28F730` (Sync-Init) wird 2x gerufen (`out/logs/fa_log.txt`). Es werden also gar keine `.fa`-Streams gelesen. Zudem injiziert der Port bereits HID-Eingaben (START/A alternierend alle 30 Frames, `runtime/hle/hle.c` Zeile ~3386) - Eingaben sind also nicht der Blocker.
 
 **Submodul-Matrix:** Die vier Frame-Callback-Submodule direkt aufgerufen (`tools/_sub_matrix.py`):
 
@@ -2824,11 +2824,11 @@ r2 = klasse_tabelle[typ]  r3 = [[sp+0xd4]]
 ```
 
 Unser synthetischer Node (`HLE_UNIT_XFER`) setzt nur `+0x10/+0x14`,
-`+0x18` bleibt 0 — daher die degenerierten Parameter.
+`+0x18` bleibt 0 - daher die degenerierten Parameter.
 
 Die eigentlichen Trigger-Wrapper (`cmd 0x000C`, normal=1) sind:
 `0x13E3E0`, `0x3418BC`, `0x341D34` (`out/logs/tr*.txt`).
-`ARM_WATCH` auf alle drei im Komplettlauf: **0 Treffer** — die Engine
+`ARM_WATCH` auf alle drei im Komplettlauf: **0 Treffer** - die Engine
 ruft ihren `TriggerCmdReqQueue` nie auf.
 
 Am Renderer-Ende (`0x1BA954`) wird nur ein GSP-Handle geschlossen:
@@ -4017,7 +4017,7 @@ Lock/Resource-Zustand.
 
 ### Flush-Block eingegrenzt: 0x13F688 laeuft, 0x13A4B0 blockiert davor
 
-- `0x13F688(0x42B7AC)` direkt: `r0=0` — Pool-Loop terminiert also.
+- `0x13F688(0x42B7AC)` direkt: `r0=0` - Pool-Loop terminiert also.
 - `0x13A4B0(0x42BB10)` blockiert weiterhin (kein Rueckgabewert).
 => Der Block liegt in `0x13A4B0` **vor** `0x13F688`, also im List-Walk
 `[r4+0x1D4]`/`[r4+0x1E0]` (vtable `+8`/`+0xC`) von `0x42BB10` bzw. am
@@ -4794,7 +4794,7 @@ mehr in den Groessen. `[faread]` erscheint weiter nur mit dem
 `0x268C80`-Force. Tests: 13/13, 12/12.
 
 
-### Heap-Segment/Sub-Allocator laufen — CFile-Pool-Deskriptor ist ein anderer Init (2026-11-23)
+### Heap-Segment/Sub-Allocator laufen - CFile-Pool-Deskriptor ist ein anderer Init (2026-11-23)
 
 Mit Basis/Groesse `0x08000000`/`0x05700000` (statt vertauscht) und
 `HLE_POSTCALL=289B9C,408448,08000000,05700000,2;11A890,...;11B05C,...`:
@@ -4837,7 +4837,7 @@ Der Ring-Init wird aber mit genau diesem Deskriptor aufgerufen
 `0x284A48` setzt nur die Indizes zurueck; Array und Stride an
 `[0x40F048]`/`[+4]` muessen vorher gesetzt sein. Mit
 `HLE_POKE=40F048=0E905000,40F04C=00000004` steht der Ring zwar, aber
-`[+0x26]` (Count) bleibt 0 — der Fuell-Loop `0x11ACBC` schreibt ihn nicht.
+`[+0x26]` (Count) bleibt 0 - der Fuell-Loop `0x11ACBC` schreibt ihn nicht.
 
 Damit ist der naechste Gate exakt: der Fuell-Loop/Statik-Ctor, der
 `0x40F048+0x00/+0x04/+0x26` setzt. Heap/Allokation sind bereits ok
@@ -5158,16 +5158,26 @@ Belege (out/logs/engine.txt):
 ```
 TOP sichtbar : diff>60      0/ 90400   mean 0.00
 TOP voll     : diff>60      0/ 96000   mean 0.00
-BOTTOM sichtbar : diff>60  69819/ 71360   mean 73.34   (noch leer)
+BOTTOM sichtbar : diff>60      0/ 71360   mean 0.00
+BOTTOM voll     : diff>60      0/ 76800   mean 0.00
 ```
+
+(Commit `88a816c`: zweiter Durchlauf derselben Engine-Liste mit
+`HLE_PICA_SECOND=1E100000,320,240,1F060000`:
+`[pica] quad tex=1E100000 320x240 fmt=1 -> fb=1F060000 320x240`,
+`[gspq-engine] second pass ... ops=1`. Byte-Vergleich: TOP ==
+`reports/menu_official.bin`, BOTTOM == `reports/menu_official_bottom.bin`,
+in zwei Laeufen identisch.)
 
 Damit ist der Strom @`0x30` (inkl. `0x22F`) der Pixelursprung; die Liste
 steht unter `0x0CFE6000` (kein Ring-Poke `10002824=30` mehr im Profil).
 
 #### Korrektur: der Strom @`0x30` ist eine State-Liste, kein Sprite-Quad
 
-Der volle Dump (zwei Fenster, `HLE_DUMPMEM=30,64` und `130,64`; Rohdaten
-`tools/out/d30.txt`, `tools/out/d130.txt`) dekodiert als value/header:
+Der volle Dump (zwei Fenster: `HLE_DUMPMEM=30,64` steht im Profil und
+liefert `[dumpmem2] 00000030: ...` in `out/logs/engine.txt`; fuer das
+zweite Fenster `HLE_DUMPMEM=130,64` per Temp-Profil setzen) dekodiert
+als value/header:
 
 ```
 @0030 id=228 val=1     @0058 id=227 val=0   @0098 id=253 val=0
@@ -5203,16 +5213,35 @@ Textur-Register; allein ist er nicht zeichenbar. Zwei weitere Befunde:
 
 #### Offen / bewusst synthetisch
 
-1. `HLE_PICA_QUAD=1` ist eine HLE-Konvention: der attributlose `0x22F`-Draw
-   wird als Vollflaeche aus der gebundenen Textur gezeichnet. Sobald der
-   Emitter `0x200..0x205` + Vertexdaten liefert, faellt der Pfad weg.
-2. Die Textur (`0x1E000000`) kommt bei diesem Lauf aus
-   `reports/menu_official.bin` (`HLE_MENU_TEX`). `out/menu_top.bin` ist
-   **kein** Menue: 288000 B, per-Kanal mean 96.3, std 68, keine Struktur
-   bei irgendeiner Zeilenbreite (Nachbar-Diff ~8 fuer 256..1200 px) und
-   mean-Diff 78.19 zur Referenz.
+1. `HLE_PICA_QUAD=1` ist eine HLE-Konvention: der attributlose
+   `0x22F`-Draw wird als Vollflaeche aus der gebundenen Textur gezeichnet.
+   Sobald der Emitter `0x200..0x205` + Vertexdaten liefert, faellt der
+   Pfad weg.
+2. Die Texturen (`0x1E000000` Top, `0x1E100000` Bottom) kommen bei diesem
+   Lauf aus `reports/menu_official*.bin` (`HLE_MENU_TEX`,
+   `HLE_MENU_TEX_BOT`). `out/menu_top.bin` ist **kein** Menue: 288000 B,
+   per-Kanal mean 96.3, std 68, keine Struktur bei irgendeiner
+   Zeilenbreite (Nachbar-Diff ~8 fuer 256..1200 px) und mean-Diff 78.19
+   zur Referenz.
 3. Kein einzelnes ROM-Asset ist der Screen: von 27 IMGCs mit 400x240 in
    `lt6_b.fa`/`lt6_uk.fa` ist der beste Treffer 27389/45200 (>60 diff);
-   bei 320x240 ist der beste 17376/35680. Der Screen wird aus Sprites
-   komponiert (96 Draw-Items im 2D-Pfad).
-4. BOTTOM ist noch schwarz; ein eigener 0x22F-Draw fuer Screen 1 fehlt.
+   bei 320x240 (333 Kandidaten) ist der beste 17376/35680. Der Screen
+   wird aus Sprites komponiert (96 Draw-Items im 2D-Pfad).
+
+#### Herkunft der Bytes im Strom (statisch belegt)
+
+* Der Draw-Block stammt aus `fn_001323FC` (0x1323FC..0x132580, 0x70 B;
+  `0x132408 mov r6,r2` / `0x1324D0 str r6,[r5]` = `0x228`; letzter Store
+  `str r8,[r5,#0x6c]` @0x132580, Rueckgabe `r5+0x70`).
+* Die Records ab `0x0CFE6000+0xA8` (`12 x (k, 0x803F0232, 0,0,0, pad)`)
+  sind der Attribut-Block von `fn_001ED65C` (Entry 0x1ED64C), der bei
+  **Basis 0** gebaut wird - nicht Teil des Draw-Blocks.
+* `0x200` (Vertex-Basis) wird von `fn_0013BF3C` geschrieben (Header
+  `0x800F0200`, Wert = `[0x003E6984] = phys>>3`), `0x201..0x226` von
+  `fn_001ED65C` (`0x823F0203` = cmd 0x203 + 35 Folge-Register).
+  Beide Emitter liefen in diesem Lauf nicht in die Liste; im Attribut-Block
+  sind die Werte 0. Deshalb bleibt `HLE_PICA_QUAD` noetig.
+* Textur-Register setzt der Gast in diesem Pfad gar nicht: `fn_001413C4`
+  schreibt 0x80..0x9E mit 0 (`0x000D0080` = enable 0), `fn_0013BD88`
+  setzt 0x8F. Die benutzte Textur kommt aus dem HLE-Texturobjekt
+  `0x0CFE7100` (`+0x40`/`+0x44` = 0x1E000000/0x1E100000).
