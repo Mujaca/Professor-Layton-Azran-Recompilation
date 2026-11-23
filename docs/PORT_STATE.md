@@ -3924,3 +3924,21 @@ bekannten Unlink-Pass `0x28EF3C`. Solange `+0x14` leer ist, gibt es kein
 PICA-Kommando. Der Builder selbst liefert `r0=0` (Status), schreibt aber
 die Eintraege.
 
+
+### Blocker exakt: entry+0x14 (Kind-Sprite) wird nie gesetzt
+
+`guest-watch 0x0E80002C` (entry0+0x14) mit aktivem Builder:
+
+```
+5 Schreibzugriffe, ALLE Wert 0x00000000
+  pc=0x00288890 (fn_00288890) lr=0x002976F8  [Builder 0x297618+0xE0]
+  pc=0x00279E50 (fn_00279E50) lr=0x002896C4  [0x2895D0/Fill]
+```
+
+Der Builder initialisiert `+0x14` also **explizit mit 0**; in unserem Lauf
+setzt **kein** Engine-Code ein Kind-Sprite-Objekt. Damit ist
+`0x2975AC` korrekt, aber ohne Draw-Ziel -> keine PICA-Paare.
+
+Das ist die praezise fehlende Ressourcen-Bindung: das Kind-Objekt an
+`entry+0x14` (Sprite) wird vom Resource-Loader nicht erzeugt/verknuepft.
+
