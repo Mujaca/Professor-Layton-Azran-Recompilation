@@ -3995,3 +3995,9 @@ Builder `0x297618` schreibt Descriptor-Eintraege (Vtable/Maske).
 kein PICA-Schreiber. Die `(value,header)`-Paare entstehen erst beim
 Ausfuehren dieser Engine-Node-Liste - dieser GPU-Pass fehlt im Port.
 
+
+beim Lauf haben **0 Reads** auf die eingefuegte Node-Liste (`ctx+0x16C
+= 0x42B918`). Der Emitter baut/verlinkt die Liste, aber in unserem Lauf
+konsumiert sie **niemand** - genau deshalb entstehen keine
+`(value,header)`-Paare. Der Consumer-Pass fehlt.
+
