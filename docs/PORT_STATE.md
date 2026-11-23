@@ -4023,3 +4023,17 @@ Lock/Resource-Zustand.
 `[r4+0x1D4]`/`[r4+0x1E0]` (vtable `+8`/`+0xC`) von `0x42BB10` bzw. am
 Recursive-Lock `0x42BB10+0x1C4` (`0x287A28`).
 
+
+### Flush-Consumer 0x13A4B0 entblockt
+
+Nach Belegen von Lock `0x42BB10+0x1C4` (Owner/Count=0) und leerer Listen
+`+0x1D4`/`+0x1E0` (Selbstzeiger):
+
+```
+[postcall2] 0x0013A4B0(0042BB10,00000000) -> r0=0042BCD4 ab=0
+```
+
+Der Pass laeuft jetzt durch. Er konsumiert den Pool (`ctx+0xB4` via
+`0x13F688`) - die separat gemessene Liste `ctx+0x16C` (aus `0x269248`)
+hat weiterhin 0 Reads, ist also eine andere (Pending-)Liste.
+
