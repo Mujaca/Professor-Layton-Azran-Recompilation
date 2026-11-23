@@ -6045,3 +6045,25 @@ Bewusst dokumentierte Abweichungen (Nutzer akzeptiert):
 3. Record-Positionen fehlen (Ring-Draw-Item 0x11C000/0x278B68).
 
 Tests: 13/13 (mvp_selftest), 12/12 (selftest_tools).
+
+### 0x11C000/0x278B68 laufen, desc+0x140 bleibt 0 (2026-11-23)
+
+Mit `HLE_POSTCALL=...;11C000,3EC5C4,0,0D80F000,0` (Float2-Position
+`(200,120)` auf `0x0D80F000`) und dem laufenden Paar-Profil:
+
+```
+[hook] count addr=0011C000 hits=1
+[hook] count addr=00278B68 hits=1
+[hook] count addr=0011A3E0 hits=1
+[dumpafter] 0E910140: 00000000 ... (12 Woerter)
+```
+
+`0x11C000` liest `[r2]`/`[r2+4]` (Float2) und ruft `0x278B68`; die
+2x3-Matrix landet aber nicht bei `[ctx+0xD6C]+0x140` (weiter 0). Der
+Schreibpfad ist `0x278B84` (gen_boot.c:1771268), das von der
+Draw-Item-Methode mit dem Desc-Zeiger aufgerufen wird - nicht von
+`0x278B68` direkt. Fuer echte Positionen muss also `0x278B84` mit
+`[ctx+0xD6C]` laufen.
+
+Kanonisch unveraendert (A2 abgeschlossen): TOP 69370/90400 (47.98),
+BOTTOM 25902/71360 (20.57).
