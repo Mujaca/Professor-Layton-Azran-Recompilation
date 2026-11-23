@@ -6109,3 +6109,35 @@ einen anderen Desc/Offset - der genaue Schreibpfad ist noch offen.
 Status A2 (abgeschlossen, Nutzer-Entscheidung): TOP 69370/90400
 (47.98), BOTTOM 25902/71360 (20.57); dokumentierte Abweichungen:
 kein 0 Diff (Asset-Textur), keine 96 Draws (4 Slots x 24 Items).
+
+### Warum 0x284A48 die Basis nicht setzt: Guard auf [container+4] (2026-11-23)
+
+`0x284A48` (Container-Setter) prueft in beiden Einstiegen
+`[r0]` und `[r0+4]`:
+
+```asm
+00284A48 ldr r12,[r0]      ; alter Base
+          cmp r12,#0 ; beq 0x284A64
+0x284A64  ldr r12,[r0,#4]  ; <- Guard
+          cmp r12,#0 ; cmpne r1,#0 ; cmpne r3,#0
+          moveq r0,#0 ; beq return   ; alle 0 -> r0=0, kein Store
+0x284A7C  str r1,[r0]      ; Base
+          strh r2,[r0,#8]  ; count
+          strh r3,[r0,#0xA]; cap
+          mov r0,#1
+```
+
+Beleg (Drive-Log):
+
+```
+[drive] 284A48(0D80B0DC,0E905000,3) -> r0=0
+[drive] cont=00000000 base=00000000 cnt=0
+```
+
+D.h. `[container+4]` muss != 0 sein (es ist der Slot fuer die *alte*
+Basis, die die Funktion freigibt). Deshalb verliert der 0xD2-Loader seine
+Basis im Fehlerpfad: der Container ist leer (`+0` und `+4` = 0), und der
+Setter bricht mit r0=0 ab. HLE schreibt die Felder im Treiber darum
+direkt (funktioniert, siehe `[classa] #0 ... size=88`).
+
+Kanonisch unveraendert: TOP 69370/90400 (47.98), BOTTOM 25902/71360.

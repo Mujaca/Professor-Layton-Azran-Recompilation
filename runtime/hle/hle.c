@@ -1793,6 +1793,29 @@ void hle_pump(void) {
                                    (cont & 0x1FFFFFFFu), 4);
                             memcpy(&cnt, g_frame_cpu->mem + obj + 0xE4u, 4);
                         }
+                        if (cont == 0u) {
+                            /* Loader-Alloc direkt mit dem Setter
+                               0x284A48(container, base, count) eintragen:
+                               der Loader selbst raeumt die Basis im
+                               Fehlerpfad (0x23A778) wieder weg. */
+                            uint32_t a0 = obj + 0xDCu;
+                            uint32_t a1 = 0x0E905000u;
+                            uint32_t a3 = 3u;
+                            memcpy(sv, g_frame_cpu->r, sizeof(sv));
+                            g_frame_cpu->r[0] = a0;
+                            g_frame_cpu->r[1] = a1;
+                            g_frame_cpu->r[2] = 0u;
+                            g_frame_cpu->r[3] = a3;
+                            g_frame_cpu->r[13] = 0x0CF0A000u;
+                            arm_call_guest_pub(g_frame_cpu, 0x00284A48u);
+                            printf("[drive] 284A48(%08X,%08X,3) -> r0=%u\n",
+                                   a0, a1, g_frame_cpu->r[0]);
+                            memcpy(g_frame_cpu->r, sv, sizeof(sv));
+                            memcpy(&cont, g_frame_cpu->mem + a0, 4);
+                            memcpy(&base, g_frame_cpu->mem +
+                                   (cont & 0x1FFFFFFFu), 4);
+                            memcpy(&cnt, g_frame_cpu->mem + obj + 0xE4u, 4);
+                        }
                         printf("[drive] cont=%08X base=%08X cnt=%u\n",
                                cont, base, cnt);
                         if (cont == 0u) {
