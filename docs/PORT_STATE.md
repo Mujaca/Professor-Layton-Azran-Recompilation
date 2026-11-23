@@ -5245,3 +5245,79 @@ Textur-Register; allein ist er nicht zeichenbar. Zwei weitere Befunde:
   schreibt 0x80..0x9E mit 0 (`0x000D0080` = enable 0), `fn_0013BD88`
   setzt 0x8F. Die benutzte Textur kommt aus dem HLE-Texturobjekt
   `0x0CFE7100` (`+0x40`/`+0x44` = 0x1E000000/0x1E100000).
+
+### A2: echte 0x200..0x205-Vertexdaten, HLE_PICA_QUAD weg (2026-11-23, 8fb089b)
+
+Mit `HLE_PICA_VERTEX=1` haengt HLE vor den Engine-Strom einen Attributblock
+(0x48 B) und setzt das nv-Wort des Stroms auf 6; die 6 Vertices stehen in
+`0x0CFE8000` (2 Dreiecke, Attribut 0 = float2 Position, Attribut 1 =
+float2 UV, Stride 16). Beleg (out/logs/engine.txt):
+
+```
+[gspq-engine] vertex block @0CFE8000 -> 0CFE6000 nv=6 stream @0CFE6048 len=1C8
+[pica] draw#0 nv=6 voff=0 base=0CFE8000 attr0=019FD000 attr1=00000077 attr2=10000000
+[pica]  v1: a0=(400.000,0.000) a1=(1.000,0.000)
+[pica]  v2: a0=(400.000,240.000) a1=(1.000,1.000)
+```
+
+Registerbelegung (Azahar `regs_pipeline.h`):
+`0x200 = VB>>3` (base = (reg>>1)*16), `0x201 = 0x77` (FLOAT, 2 Elemente),
+`0x202 = 0x10000000` (max_attribute_index 1), Loader 0/1:
+`0x203/0x206` = Offset 0/8, `0x204/0x207` = comp0 = Attr 0/1,
+`0x205/0x208` = `0x10100000` (Stride 16, component_count 1).
+
+`HLE_PICA_QUAD` ist damit aus dem Profil entfernt; `HLE_PRECALL`-`r3` ist
+fuer nv bedeutungslos (mit `...7070,1` ebenfalls 0 Diff; mit `0` bricht
+`0x1323FC` komplett ab, Dump @0x30 = 0). `HLE_PICA_RENDER` muss an sein
+(setzt tests/port.c bei HLE_ENGINE_FRAME automatisch).
+
+Messung: TOP 0/90400, BOTTOM 0/71360, byte-identisch, zwei Laeufe gleich.
+
+#### Korrektur: "96 Sprite-Draws" gibt es nicht
+
+`0x11DB84` wird 96x aufgerufen = 4 Ring-Slots x 24 Renderer-Paesse
+(`real_entry.json`). Die Draw-Liste `menu+0x6C` hat 0 Eintraege (Dump
+`[dl] arr=00000000 count=0 cap=0`); der Builder `0x2800C8` hat 0 Hooks
+(mit HLE_DRAW_LIST+HLE_DRAW_FIX), der Drain `0x28D424` laeuft. Es gibt
+also aktuell keine 96 Items mit Geometrie.
+
+#### Engine-Emitter fn_0013BF3C schreibt, aber degeneriert
+
+Mit `HLE_POKE=3DA350=0CFD0000` (PICA-Cursor) und `HLE_PRECALL`-`r3=6`
+schreibt der echte Emitter:
+
+```
+0CFD0000: FFFFFFFF 000B02B9 | FFFFFFFF 00010242 | 00000000 000F02BB
+          00000000 000F02BC | 00000000 802F0200 | 00000006 000F0228
+          ... 00000001 000F022F
+```
+
+`0x200/0x201` = 0, `0x202` = 0xF0000000 (max_attribute_index 15), keine
+Loader (extra=2), weil das Mesh keinen VRAM-Stream liefert
+(`[0x003E6984]=0`; `fn_00382460` hat 0 Aufrufer und laeuft nie). Der
+Emitter ist also da, aber ohne Vertexdaten; `0x0CFE6000` ist zudem von der
+Knotenliste `0x13F2D4` belegt.
+
+#### Textur: Atlas-Infrastruktur belegt (512x256 + UV-Rechteck)
+
+`HLE_MENU_TEX_W/H` + `HLE_PICA_UVRECT`/`HLE_PICA_UVRECT2` erlauben eine
+Textur groesser als der Screen. Nachweis mit einer 512x256-Quelle
+(Referenz bei (0,0)) und `HLE_PICA_UVRECT=0,0,0.78125,0.9375`:
+
+```
+[engine] Menue-Assets geladen (top=512x256 bottom=0D050000)
+TOP 0/90400, BOTTOM 0/71360   (ohne UVRECT2: BOTTOM 24519/71360)
+```
+
+Damit ist der Weg frei, sobald ein echter 512x256-Atlas mit einem
+400x240-Menuebereich gefunden ist.
+
+#### Atlas-Scan: kein einzelnes IMGC ist der 400x240-Screen
+
+Alle IMGCs mit 512x256/512x512/256x256/1024x512/490x512/256x512 in
+`lt6_b.fa` + `lt6_uk.fa` dekodiert und jeden 400x240-Unterbereich
+(8-px-Raster, Feinsuche +-8 px) gegen `reports/menu_official.bin`
+geprueft: 1587 Atlanten, 468 nicht dekodierbar; bester 512x256-Kandidat
+`tools/out/xi/a_lt6_b_a5c3354.xi` mit 560/1500 abweichenden Pixeln,
+bester 400x240-IMGC (27 Kandidaten) 27389/45200. Der Screen ist also eine
+Sprite-Komposition, kein Atlas-Ausschnitt.
