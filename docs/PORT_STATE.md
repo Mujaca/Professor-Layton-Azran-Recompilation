@@ -6249,3 +6249,27 @@ anwenden, statt eine (x,y)-Zahl zu erwarten.
 
 Kanonisch: 13 Top-Draws, TOP 69445/90400 (48.45), BOTTOM 25902/71360
 (20.57). Tests 13/13, 12/12.
+
+### Matrix auf Einheits-Quad angewandt: 2x2-Box bei (399,-239) (2026-11-23)
+
+Die gedumpte Matrix (`@0CF09FA8`: `2.0`, `-2.0`, `-0.0001`, `399`, `-239`,
+`-0.5`, `1.0`) auf die Einheits-Quad-Ecken angewandt:
+
+```
+(0,0) -> (399.0, -239.0)
+(1,1) -> (401.0, -241.0)
+```
+
+Sie bildet das Einheitsquad also auf eine 2x2-Box ausserhalb des
+Screens ab (y negativ). Als Probe gerendert (3 Record-Quads
+`0 0 399 239 0 0 1 1`): `TOP 75217/90400 (62.06)` - schlechter als der
+kanonische Stand. Der kanonische Pfad bleibt daher bei
+`title_top_plus_records.txt` (10 visuelle + 3 Record-Quads,
+`TOP 69443/90400`, mean 48.32).
+
+Damit ist klar: die Matrix ist eine Projektion fuer die *Modellkoordinaten*
+des Draw-Items, nicht fuer das Einheitsquad. Fuer echte Record-Positionen
+braucht es diese Modellkoordinaten aus dem Ring-Item (nicht im Port).
+
+**0-Diff-Klausel (renegotiiert):** mit Asset-Texturen nicht erreichbar;
+vom Nutzer akzeptiert.
