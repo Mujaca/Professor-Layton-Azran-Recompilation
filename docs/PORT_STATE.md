@@ -5563,3 +5563,44 @@ Screen-Zahlenbereich) - darunter ist die Titel-Map nicht ohne
 Textur-/Kamera-Zuordnung identifizierbar. Die 9 Quads aus
 `menu/uk/title_a.xa` bleiben die einzige belegte 2D-Sprite-Liste
 (absolute Screen-Positionen).
+
+### 0x74-Records: Format und warum sie im Port fehlen (2026-11-23)
+
+Die Sprite-Records des 2D-Renderers sind **kein** .xq-Eventarray, sondern
+ein Heap-Array aus einem **0xD2-Resource-Chunk**: Parser `0x209404` /
+`0x238F58`, Allokation `0x23A654` (`count*0x74` via `0x284AA8`),
+Konstruktor `0x233B98`.
+
+Record (Stride `0x74`):
+
+| Offset | Typ | Bedeutung |
+|---|---|---|
+| +0x00/+0x18 | 0x18 B | Inline-Slots (Texturbindungen) |
+| +0x30 | u32 | Slot-Index (`entry = rec + idx*0x18`) |
+| +0x34 | u32 | Partner-/Endindex (wird getauscht) |
+| +0x38 | s8 | Stage 1/2/3 |
+| +0x3C | u32* | Anim-/Frame-Objekt |
+| +0x40 | u32* | Handle |
+| +0x54+4*sel | u32 | Tabelle je Selektor |
+| +0x60 | s8 | Selektor 0..3 |
+| +0x66 | u16 | Breite |
+| +0x68 | u16/s16 | Hoehe bzw. Scale (statisch doppelt belegt, Live-Dump fehlt) |
+| +0x6C/+0x70 | u32 | Listen-Links |
+
+Inline 0x18: `+0` Index in `0x003AE382` (u16 -> PICA-Textur-Cmd, z.B.
+0x8057/0x8058), `+4` Wert/VRAM-Zeiger. **Keine** UVs.
+Position und UV kommen als zwei Zeigerpaare von aussen
+(`0x27C2BC`/`0x2794A4` -> `ctx+0x8334/8338` und `+0x833C/8340`),
+nicht aus dem Record.
+
+Im Port existieren die Records **nicht**:
+
+* `menu+0xC4/+0xCC` (`0x3EE1F0`/`0x3EE1F8`) = 0 (32x gedumpt).
+* `0x366ABC`, `0x1E93E8`, `0x3669FC` = 0 Hooks im `real_entry`-Lauf.
+* `[0x00408968]` (Node-Array) = 0.
+* Pro `0x366ABC`-Aufruf entstehen max. **2** Draws, nicht 24.
+
+Fuer die echte Liste fehlen also: 0xD2-Loader (`0x238F58`), Klasse-A-
+Nodes (`0xD0`, `0x1E93E8`) + `0x3669FC`-Setter, ein Aufrufer fuer
+Vtable `+0x1C` (`0x366AB4`), und ein Decoder fuer den 0x24-Byte-
+Kommandoblock aus `0x34AAC4`.
