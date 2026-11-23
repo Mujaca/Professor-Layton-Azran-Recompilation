@@ -327,3 +327,25 @@ out/backup/                     romfs_image.hashpatch.bak
 
 `out/` und `build/` sind nicht versioniert; die Referenzframes unter
 `reports/` schon.
+
+## 6. Kanonische Profile und Regressionstests (2026-11-23)
+
+| Datei | Zweck |
+|---|---|
+| `tools/profiles/canonical_shot.json` | **eingefrorene Messbasis** (Engine-Strom @0x30, `title_top_plus_records.txt`, `bottom_bg_rect.txt`); Ziel der Shot-Hash-/Diff-Tests |
+| `tools/profiles/engine_pica_draw.json` | Arbeitsprofil des Engine-PICA-Laufs (wird weiterentwickelt, nicht fuer Regressionszahlen) |
+| `tools/profiles/classa_drive.json` | 0xD2-Loader -> Records -> Klasse-A-Block (Beleg `284A48(...,0E905000,3)`) |
+| `tools/profiles/record_quads.json` | Record-Quads als PICA-Liste (`sprites=3`) |
+
+Deterministischer Screenshot: `PORT_SHOT_FRAMES` ist nur die Untergrenze;
+der Shot kommt nach `PORT_SHOT_LISTS` abgeschlossenen PICA-Listen und
+`PORT_SHOT_STABLE` byte-identischen Frames (Default 2). Das Log zeigt
+`[shot] frames=.. lists=.. draws=.. stable=..`.
+
+Tests:
+
+```powershell
+python tools\test_imgc_c.py     # ETC1/linear/Z-Order byte-exakt gegen Python
+python tools\test_pica_c.py     # PICA-Registermap ohne Gast-Code
+python tools\selftest_tools.py  # u. a. Shot-Hash, Record->Block, PICA, IMGC
+```
