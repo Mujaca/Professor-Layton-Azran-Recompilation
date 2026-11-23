@@ -1,4 +1,4 @@
-# HANDOVER - 3DS-Port (Stand 2026-11-23, Commit `1edae74`)
+# HANDOVER - 3DS-Port (Stand 2026-11-23, Commit `854975c`)
 
 Dies ist die einzige Einstiegsdatei. Danach `docs/PORT_STATE.md` (letzte
 Einträge) und `docs/SKILL.md` lesen. **Skills `3ds-hle` und `3ds-port`
@@ -14,8 +14,8 @@ beide Framebuffer gerendert werden: oben 400x240, unten 320x240, in einem
 Abgestimmte Praezisierungen gegenueber dem urspruenglichen Zieltext:
 
 1. **Statt "0 Diff"**: Der Screenshot ist eine **Asset-Naeherung**.
-   Gemessen: TOP 69443/90400 (mean 48.32), BOTTOM 25902/71360
-   (mean 20.57). Begruendung (belegt): der Azahar-Capture ist nicht
+   Gemessen: TOP 69443/90400 (mean 48.32), BOTTOM 14752/71360
+   (mean 14.33). Begruendung (belegt): der Azahar-Capture ist nicht
    pixelgleich aus Assets reproduzierbar - selbst das korrekte
    Bottom-Asset hat 0/1200 exakte 8x8-Bloecke; der Top ist ein
    3D-Modell-Render (`title.xc`, ETC1), kein flaches Asset. Der Nutzer
@@ -49,25 +49,29 @@ Abgestimmte Praezisierungen gegenueber dem urspruenglichen Zieltext:
 | `0x22F` liest **echte** Attribute (kein `HLE_PICA_QUAD`, kein `HLE_PRECALL`) | `[gspq-engine] vertex block @0CFE8000 ... nv=6`; `[pica] draw#0 nv=6 base=0CFE8000 attr0=019FD000 attr1=0x77`; TOP/BOTTOM 0 Diff (historisch) |
 | Strom @`0x30` ist eine **State-Liste** (keine Vertex-Loader/Textur-Regs); `0x228` setzt `HLE_PICA_VERTEX` auf 6 | Dump `@0030 id=228 val=1` vs `val=4` bei `HLE_PRECALL=...,4`; `[pica] draw#0 nv=6`; `out/logs/engine.txt` (`[dumpmem2] 00000030`) |
 
-Aktuelle Pixel (Engine-PICA-Lauf `engine_pica_draw.json`):
+Aktuelle Pixel (stabile Messbasis `tools/profiles/canonical_shot.json`;
+`out/title_*.bin` vorher mit `python tools\make_menu_assets.py` neu bauen):
 
 ```
 python tools\measure_ref.py out\shot_engine.bmp
-TOP sichtbar    : 69370/ 90400  mean 47.98
-TOP voll        : 74970/ 96000  mean 49.38
-BOTTOM sichtbar : 25902/ 71360  mean 20.57
-BOTTOM voll     : 30595/ 76800  mean 21.33
+TOP sichtbar    : 69443/ 90400  mean 48.32
+TOP voll        : 75043/ 96000  mean 49.70
+BOTTOM sichtbar : 14752/ 71360  mean 14.33
+BOTTOM voll     : 19482/ 76800  mean 15.57
 ```
 
+Der Shot ist deterministisch: `[shot] frames=60 lists=30 draws=210
+stable=..` (wartet auf abgeschlossene Engine-Listen + stabile Frames).
+
 Texturen sind jetzt Spiel-Assets (`out/title_top_atlas.bin` aus
-`title_a.xa` + `title_b_bg`; `out/title_b_bg.bin` aus `lt6_b.fa`),
-`HLE_MENU_TEX` ist aus dem Profil entfernt. Der Top-Rest ist die fehlende
-3D-Titel-Map (`title.xc`).
+`title_a.xa` + `title_b_bg`; `out/title_b_bg.bin` aus `lt6_b.fa`,
+kachelbewusst linear dekodiert), `HLE_MENU_TEX` ist aus dem Profil
+entfernt. Der Top-Rest ist die fehlende 3D-Titel-Map (`title.xc`).
 
 Byte-Vergleich: TOP == `reports/menu_official.bin`, BOTTOM ==
 `reports/menu_official_bottom.bin` (zwei Läufe identisch).
 
-Letzter Commit-Stand: `1edae74`.
+Letzter Commit-Stand: `854975c` (Pakete 1-3/5).
 
 ## 3. Was noch erzwungen wird (explizit)
 
@@ -92,7 +96,7 @@ Letzter Commit-Stand: `1edae74`.
 
 > Die `0/90400`-Zahlen in A/A2/A3 sind **historisch** (Zeitpunkt mit
 > Referenztextur `reports/menu_official*.bin`). Aktueller kanonischer Stand
-> mit Spiel-Assets: TOP `69370/90400` (47.98), BOTTOM `25902/71360` (20.57).
+> mit Spiel-Assets: TOP `69443/90400` (48.32), BOTTOM `14752/71360` (14.33).
 
 **A. Engine-PICA-Draw sichtbar machen - ERLEDIGT (Commit `d315412`).**
 Der Strom @`0x30` wird per `HLE_ENGINE_STREAM=30,1C8` nach `0x0CFE6000`
@@ -108,7 +112,7 @@ Kanonisch laeuft der Engine-Strom @`0x30` -> `0x0CFE6000` mit echten
 `tools/profiles/title3d_bg.bin` aus `title.xc` (ETC1) + `out/title_b_bg.bin`
 aus `lt6_b.fa`). `HLE_PICA_QUAD`, nv-`HLE_PRECALL` und `HLE_MENU_TEX` sind
 aus dem Profil entfernt. Messung (deterministisch mit `HLE_PICA_CLEAR=1`):
-TOP `69370/90400` (mean 47.98), BOTTOM `25902/71360` (mean 20.57).
+TOP `69443/90400` (mean 48.32), BOTTOM `14752/71360` (mean 14.33).
 
 Bewusst dokumentierte Abweichungen vom urspruenglichen Zieltext:
 1. **Kein 0 Diff**: Spiel-Asset-Texturen sind nicht pixelgleich zum
@@ -211,7 +215,7 @@ Assets/RomFS bleiben unberührt.
   Vergleichsreferenz, nicht ändern.
 - `out/port.exe` - kanonisches Binary; Build-Varianten wurden gelöscht.
 - Profile: `tools/profiles/chain.json` (Kette), `engine_pica_draw.json`
-  (kanonisch: Stream @`0x30` + Sprite-Quads, TOP `69370/90400`),
+  (kanonisch: Stream @`0x30` + Sprite-Quads, TOP `69443/90400`),
   `engine_pica_30.json` (nur Submit-Beleg), `sprite_bind_gates.json`,
   `menu_xq_noforce.json`, `real_entry.json`.
 
@@ -248,7 +252,7 @@ python tools\selftest_tools.py
 python tools\run_chain_direct.py --profile tools\profiles\chain.json --shot out\shot_tmp.bmp
 python tools\canon.py --log out\logs\chain_direct.txt --shot out\shot_tmp.bmp --clean
 
-# Engine-PICA-Draw @0x30 (kanonisch, TOP 69370/90400)
+# Engine-PICA-Draw @0x30 (kanonisch, TOP 69443/90400)
 python tools\run_chain_direct.py --profile tools\profiles\engine_pica_draw.json --shot out\shot_tmp.bmp
 python tools\canon.py --log out\logs\chain_direct.txt --shot out\shot_tmp.bmp --engine --clean
 
