@@ -4742,3 +4742,33 @@ Ohne den `0x268C80`-Force (HLE_RETFORCE entfernt) gibt es **keine**
 `[faread]`-Zeile und `r0=0`; der CFile-Pool-Open ist damit der letzte
 erzwungene Teil (kein Offset-Force mehr). Tests: 13/13, 12/12.
 
+
+### CFile-Pool-Gate isoliert: Engine-Heap fehlt (2026-11-23)
+
+`0x268C80` liest den Pool-Deskriptor `0x40F048` (Literal `0x268D70`).
+Messung mit `HLE_DUMPMEM=40F048,10`:
+
+```
+[dumpmem2] 0040F048: 00000000 ... (16x)
+```
+
+Der Pool ist also im Teillauf komplett 0 (`[+0x26]` count=0) -> `0x268C80`
+liefert 0, `0x2808A8` bricht ab, keine `[faread]`-Zeile.
+
+Der Engine-Initialisierer ist `fn_0011A890` (einziger BL-Aufrufer
+`0x10F8CC`). Manuell aufgerufen
+(`HLE_POSTCALL=11A890,0CF0B300,0,0,0` mit count=16) laeuft er bis zur
+Allokation:
+
+```
+[hook] regs addr=0027B49C hits=1 r0=00000754 ... lr=0011A8EC
+```
+
+`0x27B49C` = `0x289AC0(heap=0x408448, size, 2)` liefert 0, weil das
+Heap-Objekt `0x408448` im Teillauf nicht initialisiert ist (BSS). Danach
+bleibt `[0x40F048]` 0 und `0x268C80` weiter 0.
+
+Damit ist die Kette exakt:
+`0x2808A8 -> 0x268C80 -> Pool 0x40F048 -> fn_0011A890 -> 0x27B49C ->
+Heap 0x408448`. Der letzte erzwungene Teil ist der Heap, nicht der Pfad.
+
