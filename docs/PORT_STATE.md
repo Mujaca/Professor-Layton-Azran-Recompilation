@@ -5357,3 +5357,31 @@ gegen 1500 Referenzbloecke). Auch der 2x2-/Unterbereichs-Scan und die
 skalierte Variante liefern keinen Treffer (bester 560/1500 bzw.
 12550/24000). Der Top-Screen ist damit kein direkter Atlas-Blit; der
 Hintergrund kommt aus dem 3D-Render, die UI aus mehreren Sprites.
+
+### A2-Textur: Top-Screen ist ein 3D-Render, nicht aus 2D-Atlanten (2026-11-23)
+
+Ergebnis der Asset-Analyse (Skripte `tools/_atest_*.py`, Artefakt
+`tools/out/atest_compose_top.bin`):
+
+* Kein einzelner IMGC ist der Top-Screen. 512x256-Unterbereiche: bester
+  69627/96000 (27.5 % Abdeckung); 400x240-Assets: bester 84372/96000.
+* Kohaerente 16x16-SAD-Suche ueber 375 Kacheln: max 6.1 % aus einem
+  Atlas (`menu/title_b_bg.xi`, meanSAD 10.2); keine einzige Translation
+  mehrfach. Freie 16x16-Mosaik (jede Kachel frei gewaehlt): 40284/96000
+  (42 % Diff) - das ist die Obergrenze der Aehnlichkeit, keine Platzierung.
+* Der Top-Screen ist die 3D-Titel-Map: `menu/title.xc` (XPCK,
+  `lt6_b.fa@0x0CD691E0`) enthaelt 14 L4-Texturen (3x 512x512, 10x 512x256,
+  1x 256x256) plus `.mtr/.prm/.atr/.mbn/.mtninf/.mtn2`;
+  `menu/uk/title_a.xa` enthaelt 6 32bpp-FIMGCs plus XPVB/XPVI-Vertex- und
+  Indexpuffer. Fuer die 4bpp-Texturen gibt es im `.fa` keine CLUT
+  (`.txp` = 36-Byte-Parameter), NCC als Flach-Unterbereich max 0.29.
+* Der Capture ist nicht pixelgenau: selbst fuer den bekannten
+  Bottom-Hintergrund (`menu/title_b_bg.xi`, 320x240) gibt es 0/1200 exakte
+  8x8-Bloecke und 0/19200 exakte 2x2-Bloecke. Eigene Messung gegen
+  `reports/menu_official_bottom.bin`: Dekodierung 6802/76800 (linear) bzw.
+  6927/76800 (Z-Order) - also ~9 % Diff trotz richtigem Asset.
+
+Folge: Mit Content aus den Assets ist **kein 0 Diff** moeglich; 0 Diff
+erzwingt den Referenz-Capture. `HLE_MENU_TEX` bleibt, bis der 3D- +
+Sprite-Render des Spiels selbst laeuft (dann kommt die Textur aus dem
+Framebuffer/den Shadern, nicht aus einer Datei).
