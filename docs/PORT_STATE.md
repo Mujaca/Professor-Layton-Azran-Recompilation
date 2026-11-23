@@ -6441,3 +6441,38 @@ TOP 69443/90400 (48.32), BOTTOM 14752/71360 (14.33)
 (zwei identische Shot-Hashes + BOTTOM <= 16000). `canonical_shot.json` ist
 die eingefrorene Messbasis; das Arbeitsprofil `engine_pica_draw.json` wird
 parallel weiterentwickelt.
+
+### 96 Draws kanonisch und deterministisch (2026-11-23)
+
+**Ursache der Frame-Drops gefunden:** die Sprite-Liste lag bei `eaddr`
+(`0x0CFE6000`), derselben Adresse, an die die Engine ihre Knotenliste
+(0x1000 B) schreibt - je nach Timing ueberschrieb sie die ersten Quads,
+daher die Schwankung 53.96–88.04. Fix: der Sprite-Emitter schreibt die
+Liste jetzt nach **`eaddr + 0x1000`** (`0x0CFE7000`) und die Ausfuehrung
+laeuft von dort; der Second-Pass akzeptiert beide Adressen.
+
+Kanonisch (`HLE_PICA_SPRITES=tools/profiles/title_96_realpos.txt` =
+10 visuelle Quads + 86 aus den 9 echten XPVB-Rects):
+
+```
+[gspq-engine] sprites=96 len=4500
+[gspq-engine] sprites=1 len=B8
+[gspq-engine] second pass tex=1E100000 320x240 fb=1F060000 ops=1
+TOP sichtbar    : 75911/ 90400  mean 53.96
+BOTTOM sichtbar : 14752/ 71360  mean 14.33
+```
+
+Zwei Laeufe sind **byte-identisch** (`bytegleich True`) - die 96 Draws
+sind damit deterministisch kanonisch und enthalten echte echte
+`0x200..0x208`-Bloecke je Quad (Positionen aus dem Engine-XPVB).
+
+Zusatzfix: `0xD2`-Recordbasis ist `cont` selbst; `[cont]` ist die
+Vtable von Record 0 (vorher falsch als Basis gelesen). Damit liefert der
+Treiber korrekt `[drive] cont=0E905000 base=0E905000` und der Klasse-A-
+Block `size=88`.
+
+Tests: **16/16** (selftest_tools) und **13/13** (mvp_selftest).
+
+Vergleich (fuer die Wahl): 13-Draw-Variante bleibt mit mean 48.32 etwas
+naeher am Capture; die 96-Draw-Variante ist jetzt aber kanonisch,
+deterministisch und zeigt echte Engine-Positionen.

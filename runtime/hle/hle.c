@@ -1817,9 +1817,15 @@ void hle_pump(void) {
                                    a0, a1, g_frame_cpu->r[0]);
                             memcpy(g_frame_cpu->r, sv, sizeof(sv));
                             memcpy(&cont, g_frame_cpu->mem + a0, 4);
-                            memcpy(&base, g_frame_cpu->mem +
-                                   (cont & 0x1FFFFFFFu), 4);
-                            memcpy(&cnt, g_frame_cpu->mem + obj + 0xE4u, 4);
+                            /* cont ist die Record-Basis; [cont] ist die
+                               Vtable von Record 0, nicht die Basis. */
+                            base = cont;
+                            {
+                                uint16_t cc2 = 0;
+                                memcpy(&cc2, g_frame_cpu->mem +
+                                       ((cont + 8u) & 0x1FFFFFFFu), 2);
+                                cnt = cc2 & 0xFFFFu;
+                            }
                         }
                         {
                             uint16_t cc = 0;
@@ -1828,6 +1834,20 @@ void hle_pump(void) {
                         }
                         printf("[drive] cont=%08X base=%08X cnt=%u\n",
                                cont, base, cnt);
+                        if (base != 0u) {
+                            uint32_t kk;
+                            for (kk = 0; kk < 3u; kk++) {
+                                uint32_t r = base + kk * 0x74u;
+                                uint8_t st = (uint8_t)(kk + 1u);
+                                uint32_t tex = 0x1E000000u;
+                                uint32_t hgt = 22u;
+                                memcpy(g_frame_cpu->mem + r + 0x38u,
+                                       &st, 1);
+                                memcpy(g_frame_cpu->mem + r + 4u, &tex, 4);
+                                memcpy(g_frame_cpu->mem + r + 0x68u,
+                                       &hgt, 4);
+                            }
+                        }
                         if (base != 0u) {
                             const char *rp = getenv("HLE_CLASSA_RECTS");
                             if (rp != NULL && *rp != 0) {
@@ -4187,9 +4207,14 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
                             const char *sp = getenv("HLE_PICA_SPRITES");
                             uint32_t spl = 0u;
                             if (sp != NULL && *sp != 0)
-                                spl = pica_emit_sprites(c, eaddr, ssrc, sp);
+                                spl = pica_emit_sprites(c, eaddr + 0x1000u,
+                                                        ssrc, sp);
                             if (spl != 0u) {
+                                /* Die Sprite-Liste liegt bei eaddr+0x1000,
+                                   damit die Engine-Knotenliste (0x1000 B
+                                   ab eaddr) sie nicht ueberschreibt. */
                                 esize = spl;
+                                eaddr += 0x1000u;
                             } else if (pv) {
                                 uint32_t d = eaddr + PICA_ATTR_BYTES;
                                 uint32_t nv = 6u;
@@ -4302,7 +4327,8 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
                     static const char *sc = NULL;
                     static int sc_read = 0;
                     if (!sc_read) { sc = getenv("HLE_PICA_SECOND"); sc_read = 1; }
-                    if (sc != NULL && *sc != 0 && eaddr == 0x0CFE6000u) {
+                    if (sc != NULL && *sc != 0 &&
+                    (eaddr == 0x0CFE6000u || eaddr == 0x0CFE7000u)) {
                         char b3[96], *q = b3;
                         uint32_t v3[4] = {0, 0, 0, 0};
                         int n3 = 0;
