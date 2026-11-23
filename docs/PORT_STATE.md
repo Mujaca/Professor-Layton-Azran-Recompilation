@@ -4215,3 +4215,18 @@ aber keine messbare PICA-Ausgabe. Profil wieder auf `0x2812EC` zurueckgestellt.
 Der Drawable-Aufruf ist damit ausfuehrbar; es fehlt der **echte Drawable-Typ**
 mit passenden Feldern/Argumenten.
 
+
+### Echter Drawable: Handler ruft Engine-Draw 0x11DB84
+
+Drawable-Vtable `0x0D7F2000` mit `+0x14 = 0x0011DB84` (echte Menue-Draw-
+Methode), `node+0x10 = 0x0D7F2000`:
+
+```
+guest-watch --pc 0x11DB84 : 1 Treffer
+  pc 0x0011DB84  r0=0x0D7F2000  lr=0x142D34+0x28
+```
+
+Damit ruft der Typ-6-Handler `0x142D34` jetzt eine **echte Engine-Draw-
+Methode** mit `r0`=Drawable auf (statt nur eines HLE-Stubs). Das ist die
+produktive Form des Drawable-Aufrufs.
+
