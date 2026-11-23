@@ -4486,3 +4486,16 @@ Build/Tests gruen (13/13, 12/12).
   `arm: not implemented: empty (pc 0x00141C38)` ab. Die Adresse ist eine
   gueltige Leaf-Funktion, wird aber als leere Funktion generiert.
 
+
+### 0x141C38-Abort weg (Fill ohne Merge)
+
+Ohne kontiguierlichen Merge, aber mit `_fill_empty_fns` (+ Functions fuer
+needed), hat `0x141C38` einen echten Block; der Abort
+`empty (pc 0x00141C38)` tritt nicht mehr auf.
+
+`0x1196AC` kommt weiter, endet aber in indirekten Zielen:
+```
+arm: unbekanntes call-Ziel 0xFF8001FF (von Block 0x0028AB04)
+arm: unbekanntes call-Ziel 0x00000000 (von Block 0x0028BE0C)
+```
+

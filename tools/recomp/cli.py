@@ -249,6 +249,10 @@ def _merge_ldrpc_fragments(funcs, res, data):
         for c, _ in f.calls:
             call_targets.add(c)
     by_addr = {f.addr: f for f in funcs}
+    owners = {}
+    for f in funcs:
+        for t in _ldrpc_targets(f, data):
+            owners.setdefault(t, set()).add(f.addr)
     drop = set()
     changed = True
     while changed:
@@ -259,6 +263,8 @@ def _merge_ldrpc_fragments(funcs, res, data):
             end = max(b.addr + 4 * len(b.insns) for b in f.blocks)
             g = by_addr.get(end)
             if g is None or g is f or g.thumb or end in call_targets:
+                continue
+            if not owners.get(end, set()) <= {f.addr}:
                 continue
             if g.blocks and g.blocks[0].insns:
                 first = g.blocks[0].insns[0]
@@ -308,10 +314,16 @@ def generate(res, path, max_funcs=None, trace=False, data=None):
                 _seen.add(_b.addr)
                 _u.append(_b)
             _f.blocks = _u
+    _dbg = 0x00141C38
+    _f = res.functions.get(_dbg)
+    print("DBG 141C38: in_res=%s thumb=%s blocks=%d needed=%s all=%s" % (
+        _f is not None, getattr(_f, 'thumb', None),
+        len(_f.blocks) if _f else -1, _dbg in needed, _dbg in all_addrs))
     funcs = [res.functions[a] for a in all_addrs if a in res.functions and res.functions[a].blocks]
+    print("DBG in_funcs=%s nfuncs=%d" % (
+        any(f.addr == 0x00141C38 for f in funcs), len(funcs)))
     if max_funcs:
         funcs = funcs[:max_funcs]
-    funcs = _merge_ldrpc_fragments(funcs, res, data)
     generated = set(fn.addr for fn in funcs)
 
     out = ["/* generiert vom Recompiler-MVP */", '#include "arm_cpu.h"',
