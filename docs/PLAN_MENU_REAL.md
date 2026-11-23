@@ -79,6 +79,31 @@ Damit existieren die echten Positionen sehr wohl - bisher hat HLE sie
 durch Grid-Rects und zyklisch wiederholte XPVB-Rects ersetzt. Genau das
 ist der Bruch, den man im Bild sieht.
 
+## 3b. Semantik der ANMC-Zahlen: noch offen (gemessen)
+
+Die Paare sind **noch nicht** als Bildschirmkoordinaten bestaetigt. Probe:
+lokale Helligkeit/Streuung in `reports/menu_official.bin` an diesen
+Punkten (7x7):
+
+```
+#continue (103,24)  mean 107.8  std  7.1
+#new      (105,24)  mean 106.2  std  7.0
+#scr      ( 99,24)  mean 109.9  std  6.6
+#setting  (150,24)  mean  93.7  std  5.9
+#sound1   ( 24,26)  mean 144.9  std  6.9
+#www      (144,24)  mean  93.7  std  6.8
+#try      (256,66)  mean 213.2  std 67.5   <- im hellen Logo-Band
+#btr01_continue (99,86) mean 110.4 std 95.5
+```
+
+Fast alle Punkte liegen auf **flachen** Flaechen (std < 8), obwohl echte
+Menuepunkte Text/Kanten haetten; `256` und `24/26` sind typische
+Atlas-/Power-of-Two-Werte. Arbeitshypothese: die Paare sind
+**element-lokale Offsets bzw. Atlas-Slots**, und die Bildschirmposition
+entsteht erst aus den `#CHP`-Keyframes (Transform je Frame). Das ist
+Stufe 1 der Umsetzung: `#CHP`-Baum dekodieren und die lokale Transform
+auf die Element-Rects anwenden.
+
 ## 4. Neuer Plan (4 Stufen, jede mit Abnahmekriterium)
 
 **Stufe 1 - Layout (teilweise fertig):** `tools/anmc_menu.py` liest die
