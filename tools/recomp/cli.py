@@ -196,24 +196,29 @@ def _merge_ldrpc_fragments(funcs, res, data):
             call_targets.add(c)
     by_addr = {f.addr: f for f in funcs}
     drop = set()
-    for f in funcs:
-        if f.thumb:
-            continue
-        for t in _ldrpc_targets(f, data):
-            g = by_addr.get(t)
-            if g is None or g is f or g.thumb or t in call_targets:
+    changed = True
+    while changed:
+        changed = False
+        for f in list(funcs):
+            if f.thumb or not f.blocks:
+                continue
+            end = max(b.addr + 4 * len(b.insns) for b in f.blocks)
+            g = by_addr.get(end)
+            if g is None or g is f or g.thumb or end in call_targets:
                 continue
             if g.blocks and g.blocks[0].insns:
                 first = g.blocks[0].insns[0]
                 if first.id in (A.ARM_INS_PUSH, A.ARM_INS_STMDB):
                     continue
-            f.blocks.extend(g.blocks)
+            have = set(b.addr for b in f.blocks)
+            f.blocks.extend([b for b in g.blocks if b.addr not in have])
             f.blocks.sort(key=lambda b: b.addr)
             try:
                 f.calls |= g.calls
             except TypeError:
                 f.calls = set(f.calls) | set(g.calls)
-            drop.add(t)
+            drop.add(end)
+            changed = True
     if drop:
         funcs = [f for f in funcs if f.addr not in drop]
         print("ldr-pc-Fragmente gemerged: %d" % len(drop))
@@ -229,6 +234,7 @@ def generate(res, path, max_funcs=None, trace=False, data=None):
     funcs = [res.functions[a] for a in all_addrs if a in res.functions and res.functions[a].blocks]
     if max_funcs:
         funcs = funcs[:max_funcs]
+    funcs = _merge_ldrpc_fragments(funcs, res, data)
     generated = set(fn.addr for fn in funcs)
 
     out = ["/* generiert vom Recompiler-MVP */", '#include "arm_cpu.h"',

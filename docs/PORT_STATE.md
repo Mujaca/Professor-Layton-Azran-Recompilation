@@ -4463,3 +4463,15 @@ existierenden Blocks der Elternfunktion liegt (echtes In-Funktions-Label),
 nicht bei echten Quer-Funktions-Eintraegen. Merge-Aufruf wieder entfernt,
 Build/Tests gruen (13/13, 12/12).
 
+
+### Enger ldr-pc-Merge aktiv (Build gruen) + neuer Blocker 0x141C38
+
+- `_merge_ldrpc_fragments` mergt nur **direkt angrenzende** Fragmente
+  (Ende des letzten Blocks == Zieladresse), dedupliziert Blocks.
+- Build gruen, Tests 13/13/12/12. Die alte SP-Korrektur bei `0x12FAA4`
+  ist **verschwunden** (jetzt 0x28EA8C/0x1385D0/0x28E838).
+- `0x1196AC` haengt nicht mehr, kehrt mit `ab=1` zurueck, bricht aber an
+  `arm: not implemented: empty (pc 0x00141C38)` ab - dort fehlt kompilierter
+  Code (weiteres ldr-pc-/Fragment-Loch, Seed 00141C38 half nicht).
+- `0x10002800` weiterhin ungeschrieben.
+
