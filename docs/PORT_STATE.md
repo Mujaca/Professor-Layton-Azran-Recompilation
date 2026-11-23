@@ -5740,3 +5740,29 @@ BOTTOM sichtbar : 25902/ 71360  mean 20.57
 ```
 
 Der frueher dokumentierte Wert 65707 war ein Akkumulations-Artefakt.
+
+### 0xD2-Loader: Signatur und die fehlende Bruecke (2026-11-23)
+
+`0x238F58` (Chunk-Loader) erwartet:
+
+| Reg | Bedeutung |
+|---|---|---|
+| r0 | Ziel-Objekt (Container-Besitzer) |
+| r1 | Owner/Allocator (`r1+0x2C` = Heap-Handle fuer `0x284AA8`) |
+| r2 | Chunk-Zeiger (0xD2-Container) |
+| r3 | optionaler Asset/Lookup-Zeiger |
+
+Chunk-Format: `u16[chunk+0xC]` = Wort-Offset zur Section-Tabelle
+(`chunk + 4*val`), Eintraege 8 Byte (`payload_off_words`, `count`, `TAG`).
+Tag `0xD2` -> Zweig ab `0x23A654`: allokiert `count*0x74` via
+`0x284AA8`, ruft je Element `0x233B98` (Ctor), haengt sortiert ein
+(`0x284A48`) und setzt `rec+0x70` aus `0x271F3C`.
+
+**Die Luecke:** der Loader schreibt nach `obj+0xDC`, waehrend
+`0x366ABC` aus `node+0xC4` liest; `0x3669FC` setzt `[node+0xC4]=r1`
+(Container) und `[node+0xCE]=[r1+0xCC]-1`. Der Transfer `obj+0xDC ->
+node+0xC4` bzw. ein Aufruf von `0x3669FC` fehlt.
+
+Gemessen: keiner der 7 Loader-Wrapper (`0x1EF240`, `0x1F3FA8`,
+`0x1F59B4`, `0x1F7E90`, `0x1FB3B4`, `0x200F04`, `0x2BB760`) und auch
+`0x209404` laufen im Port (0 Hooks).
