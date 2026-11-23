@@ -4121,3 +4121,18 @@ entstehen noch keine Zeichendaten.
 `0x142D34 -> Stub` wird (per Marke) nicht ausgefuehrt. Die Typ-Auswahl
 im Dispatcher ist damit der naechste Punkt.
 
+
+### Typ-6-Handler laeuft, ruft aber den Stub nicht
+
+Direktaufruf (minimale POSTCALL-Sequenz):
+
+```
+[postcall2] 0x00142D34(0D600000,00000000) -> r0=00000000 ab=0
+[dumpmem2] 0CFE7000: 0D610040 0CFE7100     (Drawable -> Vtable)
+```
+
+Der Handler wird also ausgefuehrt, aber der Stub (`0x0D620000`, Marker
+`CAFEBABE`) wird **nicht** erreicht (Marke bleibt 0). Der Fehler liegt
+somit in der Indirektion des Handlers
+(`[node+0x10] -> [[+0] ]+0x14`), nicht im Dispatcher.
+
