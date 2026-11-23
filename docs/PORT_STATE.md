@@ -3958,3 +3958,21 @@ Damit deterministisch:
 Der Entry-Draw laeuft mit gesetztem Kind (Vtable 0x3C6FE4, +8=0x11DB84),
 liefert aber keine PICA-Paare. `ops=4` weiter aus dem Descriptor.
 
+
+### Echter Sprite-Deskriptor als Kind gesetzt; 0x2812EC/0x27B34C laufen
+
+`HLE_POSTCALL`-Sequenz:
+
+```
+[postcall2] 0x00297618(003ECB68,003ECB68) -> r0=0
+[postpoke] 0E80002C=0CFE7000        (entry0+0x14 = HLE-Sprite-Deskriptor)
+[postcall2] 0x002812EC(0,0CFE7000) -> r0=0
+[tex] 0x132370(tex=0CFE7100) -> r0=1
+[tex] 0x27B34C bind -> r0=0
+```
+
+Der echte Sprite-Emitter (`0x2812EC -> 0x27B34C`, Textur 0xCFE7100)
+laeuft also auf dem Kind-Objekt, liefert aber weiterhin keine
+`(value,header)`-Paare; `0x0E800000` bleibt Count/Descriptor,
+`ops=4` stammt aus gsp_engine_desc.
+
