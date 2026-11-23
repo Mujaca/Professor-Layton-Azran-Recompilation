@@ -3648,27 +3648,34 @@ static void pica_pair_put(ArmCpu *c, uint32_t a, uint32_t n, uint32_t value,
 }
 
 /* 6 Vertices = 2 Dreiecke; Attribut 0 = float2 Position, Attribut 1 =
-   float2 UV, Stride 16 Byte. */
+   float2 UV, Stride 16 Byte. Beliebiges Ziel/Rechteck. */
+static void pica_quad_at(ArmCpu *c, uint32_t vb, float x, float y,
+                         float w, float h,
+                         float u0, float v0, float u1, float v1)
+{
+    float v[6][4];
+    v[0][0] = x;         v[0][1] = y;         v[0][2] = u0; v[0][3] = v0;
+    v[1][0] = x + w;     v[1][1] = y;         v[1][2] = u1; v[1][3] = v0;
+    v[2][0] = x + w;     v[2][1] = y + h;     v[2][2] = u1; v[2][3] = v1;
+    v[3][0] = x;         v[3][1] = y;         v[3][2] = u0; v[3][3] = v0;
+    v[4][0] = x + w;     v[4][1] = y + h;     v[4][2] = u1; v[4][3] = v1;
+    v[5][0] = x;         v[5][1] = y + h;     v[5][2] = u0; v[5][3] = v1;
+    for (int i = 0; i < 6; i++)
+        memcpy(c->mem + ((vb + (uint32_t)i * 16u) & 0x1FFFFFFFu), v[i], 16);
+}
+
 static void pica_quad_vertices(ArmCpu *c, int w, int h)
 {
     float u0 = 0.0f, v0 = 0.0f, u1 = 1.0f, v1 = 1.0f;
-    float v[6][4];
     gpu_pica_get_uv(&u0, &v0, &u1, &v1);
-    v[0][0] = 0.0f; v[0][1] = 0.0f; v[0][2] = u0; v[0][3] = v0;
-    v[1][0] = (float)w; v[1][1] = 0.0f; v[1][2] = u1; v[1][3] = v0;
-    v[2][0] = (float)w; v[2][1] = (float)h; v[2][2] = u1; v[2][3] = v1;
-    v[3][0] = 0.0f; v[3][1] = 0.0f; v[3][2] = u0; v[3][3] = v0;
-    v[4][0] = (float)w; v[4][1] = (float)h; v[4][2] = u1; v[4][3] = v1;
-    v[5][0] = 0.0f; v[5][1] = (float)h; v[5][2] = u0; v[5][3] = v1;
-    for (int i = 0; i < 6; i++)
-        memcpy(c->mem + ((PICA_VB_ADDR + (uint32_t)i * 16u) & 0x1FFFFFFFu),
-               v[i], 16);
+    pica_quad_at(c, PICA_VB_ADDR, 0.0f, 0.0f, (float)w, (float)h,
+                 u0, v0, u1, v1);
 }
 
-static void pica_attr_block(ArmCpu *c, uint32_t dst)
+static void pica_attr_block_at(ArmCpu *c, uint32_t dst, uint32_t vb)
 {
     uint32_t n = 0;
-    pica_pair_put(c, dst, n, (PICA_VB_ADDR >> 3) & 0x1FFFFFFFu, 0x200u, 0xFu);
+    pica_pair_put(c, dst, n, (vb >> 3) & 0x1FFFFFFFu, 0x200u, 0xFu);
     n += 2;
     pica_pair_put(c, dst, n, 0x77u, 0x201u, 0xFu);         /* attr0/1 float2 */
     n += 2;
@@ -3685,6 +3692,43 @@ static void pica_attr_block(ArmCpu *c, uint32_t dst)
     pica_pair_put(c, dst, n, 1u, 0x207u, 0xFu);            /* comp0 = Attribut 1 */
     n += 2;
     pica_pair_put(c, dst, n, 0x10100000u, 0x208u, 0xFu);
+}
+
+/* Mehrere Sprite-Quads aus einer Rechteckliste: je Zeile
+   "x y w h u0 v0 u1 v1". Jedes Quad bekommt eigene Vertexdaten (6 Vertices,
+   eigener VB-Block), einen Attributblock und den Draw-Block des
+   Engine-Emitters (Kopie von 0x30, nv=6). Rueckgabe: Listenlaenge in Byte. */
+static uint32_t pica_emit_sprites(ArmCpu *c, uint32_t dst, uint32_t tmpl,
+                                  const char *path)
+{
+    FILE *f = fopen(path, "r");
+    uint32_t n = 0;
+    char line[256];
+    if (!f) return 0;
+    while (fgets(line, sizeof(line), f) != NULL && n < 96u) {
+        float x, y, w, h, u0, v0, u1, v1;
+        uint32_t vb;
+        if (line[0] == '#' || line[0] == '\n') continue;
+        if (sscanf(line, "%f %f %f %f %f %f %f %f",
+                   &x, &y, &w, &h, &u0, &v0, &u1, &v1) != 8)
+            continue;
+        vb = 0x0CFC0000u + n * 0x60u;
+        pica_quad_at(c, vb, x, y, w, h, u0, v0, u1, v1);
+        pica_attr_block_at(c, dst, vb);
+        memcpy(c->mem + ((dst + PICA_ATTR_BYTES) & 0x1FFFFFFFu),
+               c->mem + (tmpl & 0x1FFFFFFFu), 0x70u);
+        {
+            uint32_t nv = 6u;
+            memcpy(c->mem + ((dst + PICA_ATTR_BYTES) & 0x1FFFFFFFu), &nv, 4);
+        }
+        dst += PICA_ATTR_BYTES + 0x70u;
+        n++;
+    }
+    fclose(f);
+    if (n == 0u) return 0;
+    printf("[gspq-engine] sprites=%u len=%X\n", n, n * (PICA_ATTR_BYTES + 0x70u));
+    fflush(stdout);
+    return n * (PICA_ATTR_BYTES + 0x70u);
 }
 
 static int gsp_process_cmdqueue(ArmCpu *c) {
@@ -3768,12 +3812,18 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
                                             : 0u;
                         if (ssrc != 0u && slen >= 8u && slen <= 0x1000u &&
                             (uint64_t)(ssrc & 0x1FFFFFFFu) + slen <= c->mem_size) {
-                            if (pv) {
+                            const char *sp = getenv("HLE_PICA_SPRITES");
+                            uint32_t spl = 0u;
+                            if (sp != NULL && *sp != 0)
+                                spl = pica_emit_sprites(c, eaddr, ssrc, sp);
+                            if (spl != 0u) {
+                                esize = spl;
+                            } else if (pv) {
                                 uint32_t d = eaddr + PICA_ATTR_BYTES;
                                 uint32_t nv = 6u;
                                 memcpy(c->mem + d, c->mem + (ssrc & 0x1FFFFFFFu),
                                        slen);
-                                pica_attr_block(c, eaddr);
+                                pica_attr_block_at(c, eaddr, PICA_VB_ADDR);
                                 /* nv des Engine-Stroms auf die 6 Vertices des
                                    Quads setzen (erstes Wort = 0x228-Wert). */
                                 memcpy(c->mem + (d & 0x1FFFFFFFu), &nv, 4);
@@ -3909,6 +3959,14 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
                                 }
                                 gpu_pica_set_uv(a2, b2, c2, d2);
                                 pica_quad_vertices(c, (int)v3[1], (int)v3[2]);
+                            }
+                            {
+                                const char *sp2 = getenv("HLE_PICA_SPRITES2");
+                                if (sp2 != NULL && *sp2 != 0) {
+                                    uint32_t l2 = pica_emit_sprites(c, eaddr,
+                                                                    0x30u, sp2);
+                                    if (l2 != 0u) esize = l2;
+                                }
                             }
                             n2nd = legacy ? gpu_run_command_list(c, eaddr, esize)
                                           : gpu_run_pica_list(c, eaddr, esize);
