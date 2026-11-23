@@ -1782,6 +1782,58 @@ void hle_pump(void) {
                     }
                 }
                 {
+                    /* Klasse-A-Command-Ring dekodieren:
+                       ctx = [[0x276038]+0x1C]; P0=[ctx+0x5C]; P1=[ctx+0x60].
+                       Header: byte0 = Slot, byte1 = Count (0x100 = gueltig).
+                       Eintrag (0x1C B): +0 Ringwort, +4/+8 Quelle A/B,
+                       +0xC Groesse, +0x10 Flags, +0x14 Ringwort, +0x18 0. */
+                    if (getenv("HLE_CLASSA_RING") != NULL) {
+                        uint32_t g = 0, ctx = 0;
+                        memcpy(&g, g_frame_cpu->mem + 0x00276038u, 4);
+                        if (g != 0u) memcpy(&ctx, g_frame_cpu->mem +
+                                            ((g + 0x1Cu) & 0x1FFFFFFFu), 4);
+                        printf("[classa] g=%08X ctx=%08X\n", g, ctx);
+                        if (ctx != 0u) {
+                            for (int e = 0; e < 2; e++) {
+                                uint32_t P = 0;
+                                memcpy(&P, g_frame_cpu->mem +
+                                       ((ctx + 0x5Cu + (uint32_t)e * 4u) &
+                                        0x1FFFFFFFu), 4);
+                                if (P == 0u || (P & 0x1FFFFFFFu) + 0x200u >
+                                               g_frame_cpu->mem_size)
+                                    continue;
+                                {
+                                    uint32_t hdr = 0;
+                                    uint32_t slot, cnt, i;
+                                    memcpy(&hdr, g_frame_cpu->mem +
+                                           (P & 0x1FFFFFFFu), 4);
+                                    slot = hdr & 0xFFu;
+                                    cnt = (hdr >> 8) & 0xFFu;
+                                    printf("[classa] eye%d P=%08X hdr=%08X "
+                                           "slot=%u count=%u\n", e, P, hdr,
+                                           slot, cnt);
+                                    /* Der zuletzt geschriebene Slot steht
+                                       in hdr byte0; count = gueltige Slots. */
+                                    for (i = 0; i < 2u; i++) {
+                                        uint32_t si = (i == 0u) ? slot
+                                                               : (slot ^ 1u);
+                                        uint32_t b = (P + 4u + si * 0x1Cu) &
+                                                     0x1FFFFFFFu;
+                                        uint32_t w[7];
+                                        memcpy(w, g_frame_cpu->mem + b, 28);
+                                        printf("[classa]  #%u(slot) ring=%08X "
+                                               "srcA=%08X srcB=%08X size=%u "
+                                               "flags=%08X ring2=%08X\n",
+                                               i, w[0], w[1], w[2], w[3],
+                                               w[4], w[5]);
+                                    }
+                                    fflush(stdout);
+                                }
+                            }
+                        }
+                    }
+                }
+                {
                     static int pc_done = 0;
                     if (pc_done < 6) {
                         uint32_t j, v, dsc = 0;
@@ -3972,6 +4024,15 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
                         }
                         if (v2[0] != 0u) {
                             gpu_set_fb_size(v2[0], (int)v2[1], (int)v2[2]);
+                            /* Deterministischer Frame: Ziel vor dem Draw
+                               loeschen (sonst akkumuliert Alpha-Blending
+                               ueber die Frame-Anzahl). */
+                            if (getenv("HLE_PICA_CLEAR") != NULL &&
+                                (uint64_t)(v2[0] & 0x1FFFFFFFu) +
+                                    (uint64_t)v2[1] * v2[2] * 3u <=
+                                    c->mem_size)
+                                memset(c->mem + (v2[0] & 0x1FFFFFFFu), 0,
+                                       (size_t)v2[1] * v2[2] * 3u);
                             if (getenv("HLE_PICA_VERTEX") != NULL)
                                 pica_quad_vertices(c, (int)v2[1], (int)v2[2]);
                         }
