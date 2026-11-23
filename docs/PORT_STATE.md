@@ -6067,3 +6067,24 @@ Draw-Item-Methode mit dem Desc-Zeiger aufgerufen wird - nicht von
 
 Kanonisch unveraendert (A2 abgeschlossen): TOP 69370/90400 (47.98),
 BOTTOM 25902/71360 (20.57).
+
+### 0x278B84 schreibt desc+0x16C (Scale), Translation bleibt 0 (2026-11-23)
+
+Mit `HLE_POSTCALL=...;@0D80F12C=3F800000;278B84,408808,0,0D80F100,0`
+laeuft die Matrix-Funktion, und der Desc-Buffer zeigt erstmals einen
+Wert:
+
+```
+[hook] count addr=00278B84 hits=1
+[dumpafter] 0E910140: 00000000 ... 00000000 3F800000 00000000 ...
+                       ^ desc+0x16C = 1.0f (Scale)
+```
+
+Die Translation (`desc+0x140..0x15C`) bleibt 0, weil das uebergebene
+Objekt (`0D80F100`) keine Positionsfelder hat (nur `+0x2C = 1.0f`).
+Fuer echte Positionen braucht es das Ring-Draw-Item mit seinen
+Float2-Koordinaten; die Kette `0x11C000 -> 0x278B68 -> 0x278B84` ist
+damit aber vollstaendig ansteuerbar.
+
+Kanonisch unveraendert (A2 abgeschlossen): TOP 69370/90400 (47.98),
+BOTTOM 25902/71360 (20.57).
