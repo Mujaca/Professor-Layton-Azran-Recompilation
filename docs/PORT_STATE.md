@@ -4928,3 +4928,22 @@ Ehrlich: Listeninhalt an 0x0CFE6000 ist noch der PICA-Teststrom aus
 HLE_POKE; die Engine-Geometrie (Emitter 0x12FC24/C-Tabelle) fehlt noch.
 Tests: 13/13, 12/12.
 
+
+### Engine emittiert die Liste selbst an 0x0CFE6000 (2026-11-23)
+
+Ohne Listen-Pokes, nur mit Descriptor (`0x0EA00000` -> C-Tabelle count=1),
+schreibt `0x13F2D4` ihre Knotenliste selbst nach 0x0CFE6000:
+
+```
+[dumpmem2] 0CFE6000: 00000000 0CFE6004 0CFE6004 00000000
+                     0CFE6010 0CFE6010 00000000 0CFE601C 0CFE601C
+                     00000001 7FFFFFFF 3F800000 ...
+[gspq-engine] tid=0 n=1 list=0CFE6000 size=1000 ops=1
+[hook-final] 12FD30/139914/13F2D4 = 26 Hits   (kein HLE_RETFORCE)
+```
+
+`qops=1` kommt jetzt aus `gsp_engine_list` (Engine-Layout), nicht aus
+der HLE-Liste. Profil: `tools/profiles/engine_list_emit.json`.
+Pixel bleiben flach (C-Tabelle hat noch keine GX-Kommandos):
+TOP 89358/90400, BOTTOM 71353/71360.
+
