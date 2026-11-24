@@ -130,7 +130,9 @@ gebaut und mit `tools/frontier.py` gemessen; der Stand blieb **9/10
 
 **Host-Eingabe (kein Workaround):** `runtime/platform/window.c` bildet Tastatur
 (A/B/X/Y, L/R, Start/Select, Steuerkreuz, Circle-Pad) und die Maus ueber dem
-unteren Screen auf `HleHidInput` ab (`runtime/platform/hid_ring.h`); das
+unteren Screen auf `HleHidInput` ab (`runtime/platform/hid_ring.h`); die
+Tastenbelegung steht in `port.ini` neben `port.exe` (Standard und Format:
+`docs/FRONTEND.md`), ein XInput-Pad wird optional zusaetzlich gelesen. Das
 Circle-Pad der Tastatur wird wie Azahar `analog_from_button`/`hid.cpp` auf den
 Einheitskreis normiert und mit `0x9A` skaliert (Diagonale also 109, nicht
 154/154). `hle_hid_set_input` schreibt nur in den Host-Puffer; die HID-Ringe
@@ -145,7 +147,11 @@ Zeitstempeln, Touch ohne Druck `x=y=0`, Accelerometer-Ruhelage `(0,-512,0)`
 die vom Spiel gemeldeten Puffer spaltenweise (`address + x*stride +
 (239-y)*bpp`) und decodiert die fuenf GSP-Pixelformate; Fenster und
 `--shot datei.bmp` zeigen beide Screens untereinander (oben 400x240, unten
-320x240). `runtime/platform/gsp_fb.h` bildet `GPU::SetBufferSwap` nach
+320x240). Das Fenster skaliert ganzzahlig und seitenverhaeltnistreu
+(Letterbox), F11 schaltet Vollbild, die Titelzeile zeigt Host-fps und
+Gast-Frames (`docs/FRONTEND.md`); Anzeige und GSP-VBlank laufen im exakten
+3DS-Takt 268111856/4481136 Hz (`runtime/platform/frame_clock.h`).
+`runtime/platform/gsp_fb.h` bildet `GPU::SetBufferSwap` nach
 (address_left1/2 nach `active_fb`, Register-`active_fb` aus `shown_fb`), und
 `runtime/kernel/hle.c` uebernimmt den sichtbaren Puffer erst beim VBlank. Der
 VBlank-Thread liest die FrameBufferInfo und loescht ihr dirty-Flag atomar
@@ -362,6 +368,46 @@ ignorierten FPSCR (Default-NaN/FTZ) und Doppelpraezisions-VMLA sowie
 `tools/recomp/emit.py`; Belege/Fuzz: `tools/vfp_difftest.py` (Unicorn-Referenz)
 und feste Faelle in `tests/mvp_selftest.py`. Kein Code-Patch, kein Eintrag in
 `tools/workarounds/`.
+
+### Offset-Tabellen-Spruenge im Bilddecoder – behoben 2026-11-24
+
+**Befund:** Der natuerliche Boot blieb nach 46-48 Gast-Frames (rund 317
+PICA-Listen) stehen. Im Frontier-Log folgte auf die letzte Liste
+`[svc] Break bei Block 0x00276344` (svcBreak aus dem libc-Fehlerpfad) und
+danach nur noch Spins. `out/missing_calls.txt` sammelte 151.544 Aufrufe des
+Ziels `0x0016A6F8` von Block `0x0016A7D0`; `HLE_STALLDUMP` zeigte Thread 0
+dauerhaft zwischen `0x0016BC64` und `0x0016A7D0`.
+
+**Ursache (Recompiler):** `fn_0016A7D0` ist der Format-Dispatcher eines
+Bilddecoders. Er springt per `ldr r5,[r6,r5,lsl #2]` + `add pc,r5,r6` ueber
+eine Tabelle aus **relativen 32-Bit-Offsets** (Basis `0x16A6C4`). Die
+Handler (`0x16A6F8`, `0x16A720`, ...) liegen *vor* dem Funktionsanfang und
+wurden vom Scanner nie dekodiert; der dynamische Sprung endete im No-op
+(`arm_call_guest` ohne Ziel). Der Decoder kehrte dadurch ohne Ergebnis
+zurueck und liess SP unbalanciert (`[sp] ... (korrigiert)`). Ein
+Folgepfad rief `ClearEvent(0)`/`WaitSynchronizationN(0)` auf; das
+fehlschlagende `ClearEvent` ging in `0x28ECC0` -> `0x29225C` (`_exit`), der
+Prozess endete.
+
+**Korrektur (`tools/recomp/scan.py`):** `offset_table_targets()` liest die
+Tabelle, wenn vor einem `add pc,rX,rB` ein `ldr rX,[rB,rI]` bzw.
+`ldr rX,[rB,rI,lsl #2]` mit pc-relativer Basis steht (Basis und Offset
+duerfen in beliebiger Reihenfolge stehen), und seedet jeden dekodierbaren
+Eintrag als eigene Funktion. Die relativen Offsets werden mit 32-Bit-Wrap
+gerechnet, damit auch negative Eintraege (Tabelle `0x16CF38` ->
+`0x16CEE4`) vor die Tabelle zeigen. Test:
+`tools/selftest_tools.py::test_offset_table_seed`.
+
+**Beleg:** `0x16A6F8`/`0x16A720`/`0x16A738`/`0x16CEE4` stehen danach als
+Funktionen im generierten C; die Missing-Calls fuer diese Ziele sind 0
+(vorher 151.544 kumuliert fuer `0x16A6F8`), es bleibt nur der Datenzeiger
+`0x0035649C` (2x). Der Boot laeuft ohne Break weiter: 30-s-Lauf 3023
+PICA-Listen (vorher 317 in 45 s), 300-s-Lauf 31.348 Listen und 4401
+Gast-Frames, `[sp]`-Korrekturen 4 statt dutzender. Frontier bleibt 10/10,
+M1/M2 ja.
+**M3 weiter offen:** alle Listen haben weiterhin `draws=0`; der
+Intro-Film wird ueber Y2R in den Framebuffer geschrieben (kein PICA-Draw),
+die Listen sind Setup fuer die spaetere Szene.
 
 ### Gast-Threads liefen nie – behoben 2026-11-24
 
