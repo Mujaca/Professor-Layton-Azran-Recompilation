@@ -125,7 +125,34 @@ Wandzeit in Lock-Abgaben, Zeit mit freiem Gast-Lock; je ~1 s eine Zeile
 `HLE_STALLDUMP=1` (bei jedem 300. Host-Frame die letzten 12 Bloecke, den
 letzten Registerstand (`r0`–`r12`, `sp`, `lr`), acht Woerter an `r0`/`r1`/`r12`
 sowie 40 Stackwoerter je Gast-Thread auf stderr, um Haenger ohne IPC zu
-lokalisieren).
+lokalisieren),
+`ARM_WATCH_DUMP="n,addr,size[,addr,size …]"` (beim n-ten `ARM_WATCH`-Treffer
+bis zu vier Gastspeicherbereiche nach `out/watchdump_<addr>.bin` und alle
+Register nach `out/watchdump_regs.txt`; ab dann schreibt derselbe Gast-Thread
+je Blockanfang `pc r0–r14 NZCV` nach `out/btrace.txt`,
+`ARM_BTRACE_MAX=<n>` Bloecke, Standard 40000).
+
+## Co-Simulation gegen Unicorn (`tools/cosim/`)
+
+Findet Recompiler-Fehler in echtem Spielcode: Speicherabbild und Blockspur des
+Ports an einem Funktionseinstieg, dieselbe Ausfuehrung in Unicorn auf den
+Originalbytes, Vergleich Block fuer Block (pc, Register, Flags; Versatz durch
+inline uebernommene Bloecke wird toleriert).
+
+```powershell
+$env:W="0x17A6A0"; $env:N="64"; $env:START="17A6A0"; bash tools/cosim/lockstep_run.sh
+```
+
+* `replay.py <dumpdir>`: einen Aufruf ab dem Abbild in Unicorn nachrechnen
+  (Ende an der echten Ruecksprungadresse; meldet den hoechsten Lesezugriff ab
+  `r1`).
+* `lockstep.py <dumpdir> <btrace>`: erste Abweichung Port/Unicorn.
+* `moflex.py <datei.moflex>`: unabhaengiger MOFLEX-Parser (Bloecke, Teilpakete,
+  Bildgroessen je Stream).
+
+Grenzen: Unicorn fuehrt keine SVCs aus (Lauf endet am ersten `svc`/IPC-Puffer
+im TLS); Abweichungen an Speicher, den andere Gast-Threads gleichzeitig
+aendern (Locks), sind keine Recompiler-Fehler.
 
 ## Assets
 

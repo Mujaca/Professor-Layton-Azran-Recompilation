@@ -378,6 +378,10 @@ void arm_perfmap_report(void)
     g_pm_on = 0;
 }
 
+ArmCpu *g_bt_cpu = NULL;
+FILE *g_bt_file = NULL;
+unsigned g_bt_left = 0;
+
 void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
     static int init = 0;
     arm_last_block = pc;
@@ -407,6 +411,25 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         g_lr_ring[g_pc_pos] = c->r[14];
         g_pc_pos = (g_pc_pos + 1) & (PC_RING - 1);
     }
+    {
+        /* Diagnose (nur lesend): nach dem ARM_WATCH_DUMP-Treffer schreibt
+           derselbe Gast-Thread je Blockanfang pc, r0-r14 und NZCV nach
+           out/btrace.txt (ARM_BTRACE_MAX Bloecke, Standard 40000). */
+        extern ArmCpu *g_bt_cpu;
+        extern FILE *g_bt_file;
+        extern unsigned g_bt_left;
+        if (g_bt_file != NULL && c == g_bt_cpu) {
+            if (g_bt_left > 0) {
+                g_bt_left--;
+                fprintf(g_bt_file, "%08X", pc);
+                for (int k = 0; k < 15; k++) fprintf(g_bt_file, " %08X", c->r[k]);
+                fprintf(g_bt_file, " %u%u%u%u\n", c->n & 1, c->z & 1, c->c & 1, c->v & 1);
+            } else {
+                fclose(g_bt_file);
+                g_bt_file = NULL;
+            }
+        }
+    }
     if (arm_watch_pc != 0 && pc == arm_watch_pc && c != NULL && g_watch_hits < 600) {
         g_watch_hits++;
         fprintf(stderr, "[watch] 0x%08X r0=%08X r1=%08X r2=%08X r3=%08X "
@@ -414,6 +437,50 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
                 pc, c->r[0], c->r[1], c->r[2], c->r[3], c->r[4], c->r[5], c->r[6],
                 c->r[7], c->r[13], c->r[14]);
         fflush(stderr);
+        {
+            /* Diagnose (nur lesend): ARM_WATCH_DUMP="n,addr,size[,addr,size]"
+               schreibt beim n-ten Treffer Gastspeicher nach out/watchdump_<addr>.bin. */
+            static int dump_n = -1;
+            static unsigned long dump_a[4], dump_s[4];
+            static int dump_cnt = 0;
+            if (dump_n == -1) {
+                const char *e = getenv("ARM_WATCH_DUMP");
+                dump_n = 0;
+                if (e) {
+                    dump_cnt = sscanf(e, "%d,%lx,%lx,%lx,%lx,%lx,%lx,%lx,%lx", &dump_n, &dump_a[0], &dump_s[0],
+                                      &dump_a[1], &dump_s[1], &dump_a[2], &dump_s[2], &dump_a[3], &dump_s[3]);
+                    dump_cnt = (dump_cnt - 1) / 2;
+                }
+            }
+            if (dump_n > 0 && (int)g_watch_hits == dump_n) {
+                for (int k = 0; k < dump_cnt; k++) {
+                    char path[96];
+                    uint32_t a = (uint32_t)dump_a[k] & 0x1FFFFFFFu;
+                    FILE *f;
+                    snprintf(path, sizeof(path), "out/watchdump_%08lX.bin", dump_a[k]);
+                    f = fopen(path, "wb");
+                    if (f && a + dump_s[k] <= c->mem_size) fwrite(c->mem + a, 1, dump_s[k], f);
+                    if (f) fclose(f);
+                    fprintf(stderr, "[watchdump] %s\n", path);
+                }
+                {
+                    const char *mx = getenv("ARM_BTRACE_MAX");
+                    g_bt_cpu = c;
+                    g_bt_left = mx ? (unsigned)strtoul(mx, NULL, 10) : 40000u;
+                    g_bt_file = fopen("out/btrace.txt", "w");
+                }
+                {
+                    FILE *f = fopen("out/watchdump_regs.txt", "w");
+                    if (f) {
+                        for (int k = 0; k < 16; k++) fprintf(f, "r%d %08X\n", k, c->r[k]);
+                        fprintf(f, "n %u\nz %u\nc %u\nv %u\nt %u\n", c->n, c->z, c->c, c->v, c->t);
+                        fprintf(f, "tpidruro %08X\nfpscr %08X\n", c->tpidruro, c->fpscr);
+                        for (int k = 0; k < 64; k++) fprintf(f, "s%d %08X\n", k, c->sreg[k]);
+                        fclose(f);
+                    }
+                }
+            }
+        }
     }
     if (!g_file) return;
     if (g_records >= g_max_records) return;
