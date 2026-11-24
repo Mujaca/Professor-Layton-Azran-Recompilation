@@ -263,6 +263,32 @@ def test_ldrpc_veneer():
          "Thumb-Ziel nicht als Thumb-Funktion angelegt")
 
 
+def test_veneer_thumb_seed():
+    """Veneer (`add r12,pc,#1; bx r12`) und `ldr pc`-Stub seeden Thumb-Ziele."""
+    import struct
+    from recomp import isa, scan
+
+    code = bytearray(0x40)
+    code[0:8] = bytes.fromhex("01c08fe21cff2fe1")   # add r12,pc,#1; bx r12
+    code[8:14] = bytes.fromhex("00b500207047")      # push {lr}; movs r0,#0; bx lr
+    res = scan.scan(bytes(code), [(isa.ARM_BASE, "entry", False)])
+    need(0x00100008 in res.functions,
+         "Thumb-Ziel des Veneers nicht geseedet: %s"
+         % sorted("%08X" % a for a in res.functions))
+    need(res.functions[0x00100008].thumb,
+         "Veneer-Ziel als ARM statt Thumb dekodiert")
+
+    code = bytearray(0x60)
+    code[0:4] = struct.pack("<I", 0xEA000006)       # b 0x100020
+    code[0x20:0x24] = bytes.fromhex("04f01fe5")     # ldr pc,[pc,#-4]
+    code[0x24:0x28] = struct.pack("<I", 0x00100039) # Literal 0x100039 (Thumb)
+    code[0x38:0x3E] = bytes.fromhex("00b500207047")
+    res = scan.scan(bytes(code), [(isa.ARM_BASE, "entry", False)])
+    need(0x00100038 in res.functions and res.functions[0x00100038].thumb,
+         "ldr-pc-Stub-Ziel nicht als Thumb-Funktion geseedet: %s"
+         % sorted("%08X" % a for a in res.functions))
+
+
 TESTS = [
     ("guest-refs 0x40B4C4", test_guest_refs),
     ("trace-diff boss:U", test_trace_diff),
@@ -279,6 +305,7 @@ TESTS = [
     ("IMGC ETC1/linear", test_imgc_decoder),
     ("BLX-Zielmodus im Scan", test_call_mode),
     ("ldr-pc-Veneer-Ziel im Scan", test_ldrpc_veneer),
+    ("Veneer-Seed Thumb", test_veneer_thumb_seed),
 ]
 
 
