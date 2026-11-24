@@ -21,6 +21,42 @@ uint32_t arm_watch_pc = 0;
 static int g_watch_hits = 0;
 
 /* ------------------------------------------------------------------ *
+ * HLE_PERF=1: Blockrate des generierten Codes (reine Diagnose).
+ * Zaehlt jeden ausgefuehrten Basisblock und meldet beim Prozessende
+ * "[perf] N blocks in M ms (R/s)" (Format von tools/g3ds/runner.py).
+ * Ohne HLE_PERF bleibt nur der Branch auf g_perf_on.
+ * ------------------------------------------------------------------ */
+static int g_perf_on = 0;
+static int g_perf_armed = 0;
+static uint64_t g_perf_blocks = 0;
+static uint64_t g_perf_t0 = 0;
+
+static uint64_t perf_now_ns(void) {
+    LARGE_INTEGER f, c;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c);
+    return (uint64_t)((double)c.QuadPart * 1e9 / (double)f.QuadPart);
+}
+
+static void perf_report(void) {
+    uint64_t dt = perf_now_ns() - g_perf_t0;
+    uint64_t ms = dt / 1000000u;
+    double rate = dt ? ((double)g_perf_blocks * 1e9 / (double)dt) : 0.0;
+    printf("[perf] %llu blocks in %llu ms (%.0f/s)\n",
+           (unsigned long long)g_perf_blocks, (unsigned long long)ms, rate);
+    fflush(stdout);
+}
+
+static void perf_arm(void) {
+    if (g_perf_on || g_perf_armed) return;
+    g_perf_armed = 1;
+    if (getenv("HLE_PERF") == NULL) return;
+    g_perf_on = 1;
+    g_perf_t0 = perf_now_ns();
+    atexit(perf_report);
+}
+
+/* ------------------------------------------------------------------ *
  * perfmap: Block-Histogramm pro Thread/Funktion und Rueckwaertskanten.
  * Nur aktiv mit HLE_PERFMAP=1 oder HLE_PERFMAP_FILE=<pfad>. Kein
  * printf pro Block; der Speicher wird periodisch als Textdatei
@@ -51,6 +87,11 @@ void arm_perfmap_report(void);
 static void perfmap_sample(ArmCpu *c, uint32_t pc);
 static void perfmap_init(void);
 
+
+/* Ringpuffer der zuletzt ausgefuehrten Bloecke (Diagnose bei Abbruch).
+ * Wird nur aufgezeichnet, wenn eine Diagnose sie braucht: die vier Stores
+ * plus Zaehler je Block kosten im Hot Path messbar Zeit. */
+static int g_ring_on = 0;
 
 /* Ringpuffer der zuletzt ausgefuehrten Bloecke (Diagnose bei Abbruch). */
 #define PC_RING 65536
@@ -327,23 +368,38 @@ void arm_perfmap_report(void)
 void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
     static int init = 0;
     arm_last_block = pc;
+    if (g_perf_on) g_perf_blocks++;
     if (!init) {
         init = 1;
+        perf_arm();
         if (getenv("HLE_PERFMAP") != NULL || getenv("HLE_PERFMAP_FILE") != NULL)
             perfmap_init();
+        /* Ring nur, wenn eine Diagnose ihn auswertet (HLE_STALLDUMP,
+           ARM_WATCH, Perfmap, ARM_RING). Default aus = schneller Hot Path. */
+        if (getenv("ARM_RING") != NULL || getenv("HLE_STALLDUMP") != NULL ||
+            getenv("ARM_WATCH") != NULL || getenv("HLE_PERFMAP") != NULL ||
+            getenv("HLE_PERFMAP_FILE") != NULL)
+            g_ring_on = 1;
     }
     if (g_pm_on && c != NULL) perfmap_sample(c, pc);
     if (arm_pump_hook != NULL) arm_pump_hook();
     if (c != NULL) {
-        uint32_t ti = (c->tpidruro >> 12) & 0xFu;
-        arm_thread_last_pc[ti] = pc;
-        arm_thread_last_lr[ti] = c->r[14];
-        g_t_ring[ti][g_t_pos[ti] & 63u] = pc;
-        g_t_ring_lr[ti][g_t_pos[ti] & 63u] = c->r[14];
-        g_t_pos[ti]++;
-        g_pc_ring[g_pc_pos] = pc;
-        g_lr_ring[g_pc_pos] = c->r[14];
-        g_pc_pos = (g_pc_pos + 1) & (PC_RING - 1);
+        if (g_ring_on) {
+            uint32_t ti = (c->tpidruro >> 12) & 0xFu;
+            arm_thread_last_pc[ti] = pc;
+            arm_thread_last_lr[ti] = c->r[14];
+            g_t_ring[ti][g_t_pos[ti] & 63u] = pc;
+            g_t_ring_lr[ti][g_t_pos[ti] & 63u] = c->r[14];
+            g_t_pos[ti]++;
+            g_pc_ring[g_pc_pos] = pc;
+            g_lr_ring[g_pc_pos] = c->r[14];
+            g_pc_pos = (g_pc_pos + 1) & (PC_RING - 1);
+        } else {
+            /* Nur der letzte Block je Thread (fuer Statuszeile/Fehlermeldungen). */
+            uint32_t ti = (c->tpidruro >> 12) & 0xFu;
+            arm_thread_last_pc[ti] = pc;
+            arm_thread_last_lr[ti] = c->r[14];
+        }
     }
     if (arm_watch_pc != 0 && pc == arm_watch_pc && c != NULL && g_watch_hits < 600) {
         g_watch_hits++;

@@ -96,6 +96,15 @@ NaN-Weitergabe der VMLA-Familie ist architektonisch
 implementierungsabhaengig; der Generator verwendet dort keine NaN-Eingaben
 (VCMP/VCVT/Arithmetik decken NaN-Faelle ab).
 
+Der generierte Code bindet die heißen Helfer (`arm_ld`/`arm_st`,
+`arm_cond`, `arm_mul`, `arm_shift_imm`/LSL, `arm_restore_sp`) als
+`static inline` aus `runtime/cpu/arm_cpu.h` ein; die langsamen Fallbacks
+(`*_slow`) behalten Diagnose (ARM_MEMWATCH*) und Fehlzugriffsbehandlung.
+Häufige Datenverarbeitung ohne Shift (add/sub/mov/and/orr/bic/eor/cmp/cmn/
+tst/teq) emittiert `emit.py::dp_inline` direkt als C-Ausdruck statt als
+`arm_dp()`-Aufruf. Blockrate messen: `HLE_PERF=1 out/port.exe out/romfs
+--frames 600`.
+
 `tools/recomp/seeds.txt`: zusätzliche Funktionseinstiege (z. B. aus
 `out/missing_calls.txt`).
 
@@ -144,6 +153,8 @@ absichtlich nicht zum Commit-Gate.
 `ARM_WATCH=<hex>`, `ARM_MEMWATCH=<hex>`, `ARM_MEMWATCHRD=<hex>[,size]`,
 `ARM_MEMWATCHRANGE=<hex>,<size>`, `ARM_STRICT=1`,
 `HLE_PERFMAP_FILE=<pfad>`, `HLE_DET_SCHED=1`,
+`HLE_PERF=1` (zählt Gast-Bloecke und meldet beim Prozessende
+`[perf] N blocks in M ms (R/s)`; Format von `tools/g3ds/runner.py`),
 `HLE_PICA_DIAG=1` (PICA-Register-Histogramm je Liste inkl. Kanal-Spruengen,
 Rohdump nach `scratch/pica/list_<addr>_<size>.bin`),
 `HLE_STALLDUMP=1` (bei jedem 300. Host-Frame die letzten 12 Bloecke je

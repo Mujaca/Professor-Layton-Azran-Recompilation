@@ -344,6 +344,65 @@ class Emitter:
         return "arm_shift_reg(%s, %s, %s, &sh)" % (kind, raddr, base), "sh"
 
     # ---------- instruction classes ----------
+    def dp_inline(self, code, rd, rn, o2, sf, sc, writes):
+        """Haeufige DP-Formen ohne Shift als direkten C-Ausdruck.
+
+        Semantik identisch zu arm_dp() (runtime/cpu/arm_cpu.c): gleiche
+        NZCV-Berechnung, gleiche Shifter-Carry-Regel. Rueckgabe None, wenn
+        die Form nicht abgedeckt ist (dann bleibt es beim arm_dp-Aufruf).
+        """
+        if rd == 15:
+            return None
+        if code in ("DP_AND", "DP_EOR", "DP_ORR", "DP_BIC", "DP_MOV", "DP_MVN",
+                    "DP_TST", "DP_TEQ"):
+            if code in ("DP_TST", "DP_TEQ"):
+                if not sf or sc != -1:
+                    return None
+                expr = "(%s & %s)" if code == "DP_TST" else "(%s ^ %s)"
+                return ["{ uint32_t r = " + expr % (rn, o2) + ";",
+                        "  c->n = r >> 31; c->z = (r == 0); }"]
+            if sc >= 0:
+                return None            # C-Flag haengt an der Immediate-Rotation
+            if code == "DP_MOV":
+                expr = o2
+            elif code == "DP_MVN":
+                expr = "(~" + o2 + ")"
+            elif code == "DP_AND":
+                expr = "(%s & %s)" % (rn, o2)
+            elif code == "DP_EOR":
+                expr = "(%s ^ %s)" % (rn, o2)
+            elif code == "DP_ORR":
+                expr = "(%s | %s)" % (rn, o2)
+            else:
+                expr = "(%s & ~%s)" % (rn, o2)
+            if not sf:
+                return ["c->r[%d] = %s;" % (rd, expr)]
+            return ["{ uint32_t r = " + expr + ";",
+                    "  c->n = r >> 31; c->z = (r == 0); c->r[%d] = r; }" % rd]
+        if code in ("DP_ADD", "DP_SUB", "DP_CMN", "DP_CMP"):
+            sub = code in ("DP_SUB", "DP_CMP")
+            if not sf:
+                if code not in ("DP_ADD", "DP_SUB"):
+                    return None
+                op = "-" if sub else "+"
+                return ["c->r[%d] = %s %s %s;" % (rd, rn, op, o2)]
+            if sub:
+                body = "  c->c = (a >= b); c->v = (((a ^ b) & (a ^ r)) >> 31) & 1u;"
+                res = "r = a - b;"
+            else:
+                body = "  c->c = (r < a); c->v = ((~(a ^ b) & (a ^ r)) >> 31) & 1u;"
+                res = "r = a + b;"
+            lines = ["{ uint32_t a = %s, b = %s, r;" % (rn, o2),
+                     "  " + res,
+                     "  c->n = r >> 31; c->z = (r == 0);",
+                     body]
+            if writes:
+                lines.append("  c->r[%d] = r; }" % rd)
+            else:
+                lines[-1] += " }"
+            return lines
+        return None
+
     def dp(self, ins, in_it=False):
         code, uses_rn, writes = DP_OPS[ins.id]
         ops = isa.split_operands(ins.op_str)
@@ -373,6 +432,11 @@ class Emitter:
                 and rest[0].strip().startswith("#"):
             # Immediate-Operand: C kann vom Rotationsteil abhaengen.
             sc = self.imm_shifter_carry(ins)
+        supp = None
+        if sh is None:
+            supp = self.dp_inline(code, rd, rn, o2, sf, sc, writes)
+        if supp is not None:
+            return supp
         if sh:
             lines = ["{", "  int sh = -1;",
                      "  arm_dp(c, %s, %d, %s, %s, %d, sh);" % (code, rd, rn, o2, sf),

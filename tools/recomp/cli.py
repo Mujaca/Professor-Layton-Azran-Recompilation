@@ -426,22 +426,47 @@ def generate(res, path, max_funcs=None, trace=False, data=None):
         key = u32(a) | (1 if (fn is not None and fn.thumb) else 0)
         out.append("    { 0x%08Xu, fn_%08X }," % (key, u32(a)))
     out.append("};")
+    # Hash-Tabelle fuer arm_call_guest: offene Adressierung (linear probing)
+    # ueber die Eintragsindizes. Der Dispatcher laeuft im Hot Path (jeder
+    # indirekte Aufruf/Tail-Call); zwei Binaersuchen ueber 13k Eintraege
+    # kosteten dort ~14 gestreute Speicherzugriffe, jetzt 1-2.
+    n_entries = len(all_addrs)
+    nb = 1
+    while nb < n_entries * 4 and nb < (1 << 16):
+        nb <<= 1
+    nbits = nb.bit_length() - 1
+    bucket = [0] * nb
+    for idx, a in enumerate(all_addrs):
+        fn = res.functions.get(a)
+        key = u32(a) | (1 if (fn is not None and fn.thumb) else 0)
+        h = ((key * 2654435761) & 0xFFFFFFFF) >> (32 - nbits)
+        for probe in range(nb):
+            slot = (h + probe) & (nb - 1)
+            if bucket[slot] == 0:
+                bucket[slot] = idx + 1
+                break
     out.append("static int g_miss_printed = 0, g_miss_logged = 0;")
+    out.append("#define ARM_CALL_BUCKETS %du" % nb)
+    out.append("#define ARM_CALL_SHIFT %du" % (32 - nbits))
+    out.append("#define ARM_CALL_MASK %du" % (nb - 1))
+    out.append("static const uint16_t g_call_bucket[ARM_CALL_BUCKETS] = {")
+    for i in range(0, nb, 16):
+        out.append("    " + " ".join("%uu," % v for v in bucket[i:i + 16]))
+    out.append("};")
+    out.append("static const ArmEntry *arm_call_lookup(uint32_t addr) {")
+    out.append("    uint32_t h = (addr * 2654435761u) >> ARM_CALL_SHIFT;")
+    out.append("    for (uint32_t i = 0; i < 24u; i++) {")
+    out.append("        uint32_t k = g_call_bucket[(h + i) & ARM_CALL_MASK];")
+    out.append("        if (k == 0) return 0;")
+    out.append("        if (g_entries[k - 1].addr == addr) return &g_entries[k - 1];")
+    out.append("    }")
+    out.append("    return 0;")
+    out.append("}")
     out.append("static void arm_call_guest(ArmCpu *c, uint32_t addr) {")
-    out.append("    int lo = 0, hi = (int)(sizeof(g_entries) / sizeof(g_entries[0])) - 1;")
-    out.append("    uint32_t alt = addr ^ 1u;")
-    out.append("    while (lo <= hi) {")
-    out.append("        int mid = (lo + hi) / 2;")
-    out.append("        if (g_entries[mid].addr == addr) { g_entries[mid].fn(c); return; }")
-    out.append("        if (g_entries[mid].addr < addr) lo = mid + 1; else hi = mid - 1;")
-    out.append("    }")
-    out.append("    lo = 0; hi = (int)(sizeof(g_entries) / sizeof(g_entries[0])) - 1;")
-    out.append("    while (lo <= hi) {")
-    out.append("        int mid2 = (lo + hi) / 2;")
-    out.append("        if (g_entries[mid2].addr == alt) { g_entries[mid2].fn(c); return; }")
-    out.append("        if (g_entries[mid2].addr < alt) lo = mid2 + 1; else hi = mid2 - 1;")
-    out.append("    }")
-    out.append("    /* lineare Suche als Fallback (falls die Tabelle nicht exakt sortiert ist) */")
+    out.append("    const ArmEntry *e = arm_call_lookup(addr);")
+    out.append("    if (e != 0) { e->fn(c); return; }")
+    out.append("    e = arm_call_lookup(addr ^ 1u);   /* Thumb-Bit */")
+    out.append("    if (e != 0) { e->fn(c); return; }")
     out.append("    { unsigned i; for (i = 0; i < sizeof(g_entries)/sizeof(g_entries[0]); i++) {")
     out.append("        if (g_entries[i].addr == addr) { g_entries[i].fn(c); return; } } }")
     out.append("    if (g_miss_printed < 200) { g_miss_printed++;")

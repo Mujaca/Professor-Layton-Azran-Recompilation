@@ -6,6 +6,7 @@
 #include <math.h>
 #include <fenv.h>
 
+int arm_mem_traced = 0;   /* ARM_MEMWATCH* aktiv -> langsame Speicherpfade */
 static uint32_t g_memwatchrd = 0;
 static uint32_t g_memwatchrd_end = 0;
 static int g_memwatchrd_prints = 0;
@@ -51,6 +52,7 @@ void arm_cpu_init(ArmCpu *c, void *mem, uint32_t size) {
             }
         }
     }
+    arm_mem_traced = (g_memwatchrd != 0 || g_memwatch != 0);
 }
 
 /* ---------------- memory ---------------- */
@@ -110,7 +112,7 @@ typedef struct {
 } ArmExclSlot;
 static ArmExclSlot g_excl[ARM_EXCL_SLOTS];
 static unsigned g_excl_rr = 0;
-static volatile int g_excl_active = 0;
+volatile int arm_excl_live = 0;
 static void arm_excl_invalidate(uint32_t addr, uint32_t size);
 
 void arm_mem_write(ArmCpu *c, uint32_t addr, int size, uint32_t val) {
@@ -118,7 +120,7 @@ void arm_mem_write(ArmCpu *c, uint32_t addr, int size, uint32_t val) {
     /* Jede Schreiboperation auf einen ueberwachten Bereich macht die
      * Reservierung ungueltig (ARMv6K: lokaler Monitor wird von einem
      * Store auf die ueberwachte Adresse geloescht). */
-    if (g_excl_active) arm_excl_invalidate(addr, (uint32_t)size);
+    if (arm_excl_live) arm_excl_invalidate(addr, (uint32_t)size);
     if (g_memwatch != 0 &&
         ((g_memwatch_end != 0) ? (addr >= g_memwatch && addr < g_memwatch_end)
                                : ((addr & ~3u) == g_memwatch)) &&
@@ -152,7 +154,7 @@ static void arm_excl_invalidate(uint32_t addr, uint32_t size) {
         /* Byte-Bereiche ueberlappen sich? */
         if (addr < g_excl[i].addr + g_excl[i].size && g_excl[i].addr < end) {
             g_excl[i].used = 0;
-            if (g_excl_active > 0) g_excl_active--;
+            if (arm_excl_live > 0) arm_excl_live--;
         }
     }
 }
@@ -174,7 +176,7 @@ static void excl_reserve(ArmCpu *c, uint32_t addr, uint32_t size) {
         }
         slot = (free_slot >= 0) ? free_slot
                                 : (int)(g_excl_rr++ % ARM_EXCL_SLOTS);
-        if (!g_excl[slot].used) g_excl_active++;
+        if (!g_excl[slot].used) arm_excl_live++;
         g_excl[slot].used = 1;
         g_excl[slot].addr = addr;
         g_excl[slot].size = size;
@@ -217,7 +219,7 @@ uint32_t arm_excl_store(ArmCpu *c, uint32_t addr, int size, uint32_t value) {
         if (s->used && s->gen == c->excl_gen && s->addr == addr &&
             s->size == (uint32_t)size) {
             s->used = 0;
-            if (g_excl_active > 0) g_excl_active--;
+            if (arm_excl_live > 0) arm_excl_live--;
             arm_mem_write(c, addr, size, value);
             ok = 1;
         }
@@ -236,7 +238,7 @@ uint32_t arm_excl_store64(ArmCpu *c, uint32_t addr, uint32_t lo, uint32_t hi) {
         if (s->used && s->gen == c->excl_gen && s->addr == addr &&
             s->size == 8u) {
             s->used = 0;
-            if (g_excl_active > 0) g_excl_active--;
+            if (arm_excl_live > 0) arm_excl_live--;
             arm_mem_write(c, addr, 4, lo);
             arm_mem_write(c, addr + 4u, 4, hi);
             ok = 1;
@@ -251,7 +253,7 @@ void arm_excl_clear(ArmCpu *c) {
         ArmExclSlot *s = &g_excl[c->excl_slot];
         if (s->used && s->addr == c->excl_addr && s->size == c->excl_size) {
             s->used = 0;
-            if (g_excl_active > 0) g_excl_active--;
+            if (arm_excl_live > 0) arm_excl_live--;
         }
     }
     c->excl_valid = 0;
@@ -259,34 +261,15 @@ void arm_excl_clear(ArmCpu *c) {
 
 void arm_excl_clear_all(void) {
     for (int i = 0; i < ARM_EXCL_SLOTS; i++) g_excl[i].used = 0;
-    g_excl_active = 0;
+    arm_excl_live = 0;
 }
 
 /* ---------------- conditions ---------------- */
-
-int arm_cond(const ArmCpu *c, int cc) {
-    switch (cc) {
-        case 0x0: return c->z;                     /* EQ */
-        case 0x1: return !c->z;                    /* NE */
-        case 0x2: return c->c;                     /* CS */
-        case 0x3: return !c->c;                    /* CC */
-        case 0x4: return c->n;                     /* MI */
-        case 0x5: return !c->n;                    /* PL */
-        case 0x6: return c->v;                     /* VS */
-        case 0x7: return !c->v;                    /* VC */
-        case 0x8: return c->c && !c->z;            /* HI */
-        case 0x9: return !c->c || c->z;            /* LS */
-        case 0xA: return c->n == c->v;             /* GE */
-        case 0xB: return c->n != c->v;             /* LT */
-        case 0xC: return !c->z && (c->n == c->v);  /* GT */
-        case 0xD: return c->z || (c->n != c->v);   /* LE */
-        default:  return 1;                        /* AL */
-    }
-}
+/* arm_cond() steht als static inline in arm_cpu.h. */
 
 /* ---------------- shifts ---------------- */
 
-uint32_t arm_shift_imm(int type, uint32_t amount, uint32_t value, int *carry) {
+uint32_t arm_shift_imm_slow(int type, uint32_t amount, uint32_t value, int *carry) {
     switch (type) {
         case SH_LSL:
             if (amount == 0) return value;
@@ -446,12 +429,6 @@ void arm_dp(ArmCpu *c, int op, int rd, uint32_t rn, uint32_t op2,
 
 /* ---------------- multiply ---------------- */
 
-uint32_t arm_mul(ArmCpu *c, uint32_t a, uint32_t b, int set_flags) {
-    uint32_t res = a * b;
-    if (set_flags) set_nz(c, res);
-    return res;
-}
-
 void arm_mla(ArmCpu *c, int rd, uint32_t rn, uint32_t rm, uint32_t ra, int set_flags) {
     uint32_t res = rn * rm + ra;
     if (set_flags) set_nz(c, res);
@@ -485,23 +462,34 @@ void arm_mull(ArmCpu *c, int rdlo, int rdhi, uint32_t rn, uint32_t rm,
 
 /* ---------------- load / store ---------------- */
 
-uint32_t arm_ld(ArmCpu *c, uint32_t addr, int size, int is_signed) {
-    uint32_t v = arm_mem_read(c, addr, size);
-    if (is_signed) {
-        if (size == 1) v = (uint32_t)(int32_t)(int8_t)v;
-        else if (size == 2) v = (uint32_t)(int32_t)(int16_t)v;
-    }
-    return v;
+uint32_t arm_ld32_slow(ArmCpu *c, uint32_t addr) {
+    return arm_mem_read(c, addr, 4);
 }
-
-void arm_st(ArmCpu *c, uint32_t addr, int size, uint32_t val) {
-    arm_mem_write(c, addr, size, val);
+uint32_t arm_ld16_slow(ArmCpu *c, uint32_t addr) {
+    return arm_mem_read(c, addr, 2);
+}
+uint32_t arm_ld16s_slow(ArmCpu *c, uint32_t addr) {
+    return (uint32_t)(int32_t)(int16_t)arm_mem_read(c, addr, 2);
+}
+uint32_t arm_ld8_slow(ArmCpu *c, uint32_t addr) {
+    return arm_mem_read(c, addr, 1);
+}
+uint32_t arm_ld8s_slow(ArmCpu *c, uint32_t addr) {
+    return (uint32_t)(int32_t)(int8_t)arm_mem_read(c, addr, 1);
+}
+void arm_st32_slow(ArmCpu *c, uint32_t addr, uint32_t val) {
+    arm_mem_write(c, addr, 4, val);
+}
+void arm_st16_slow(ArmCpu *c, uint32_t addr, uint32_t val) {
+    arm_mem_write(c, addr, 2, val);
+}
+void arm_st8_slow(ArmCpu *c, uint32_t addr, uint32_t val) {
+    arm_mem_write(c, addr, 1, val);
 }
 
 int arm_ldm_stm(ArmCpu *c, int base, int load, int writeback, int mode, uint32_t mask) {
     uint32_t addr = c->r[base];
-    int count = 0;
-    for (int i = 0; i < 16; i++) if (mask & (1u << i)) count++;
+    int count = __builtin_popcount(mask);
     int total = 4 * count;
 
     if (mode == 1) addr += 4;
@@ -510,10 +498,16 @@ int arm_ldm_stm(ArmCpu *c, int base, int load, int writeback, int mode, uint32_t
 
     uint32_t start = addr;
     int pc_loaded = 0;
+    /* Schnellpfad: ein zusammenhaengender Bereich im Gast-RAM ohne Diagnose
+     * und ohne offene Exklusiv-Reservierung -> direkter Wortzugriff. */
+    int fast = !arm_mem_traced && start < 0x20000000u &&
+               (uint64_t)start + (uint64_t)total <= (uint64_t)c->mem_size &&
+               (load || !arm_excl_live);
     for (int i = 0; i < 16; i++) {
         if (!(mask & (1u << i))) continue;
         if (load) {
-            c->r[i] = arm_mem_read(c, addr, 4);
+            if (fast) memcpy(&c->r[i], c->mem + addr, 4);
+            else c->r[i] = arm_mem_read(c, addr, 4);
             if (i == ARM_PC) {
                 /* Laden von PC ist ein Interworking-Sprung: Bit 0 waehlt den
                  * Befehlssatz (ARM ARM A8.8.107). */
@@ -522,7 +516,8 @@ int arm_ldm_stm(ArmCpu *c, int base, int load, int writeback, int mode, uint32_t
                 pc_loaded = 1;
             }
         } else {
-            arm_mem_write(c, addr, 4, c->r[i]);
+            if (fast) memcpy(c->mem + addr, &c->r[i], 4);
+            else arm_mem_write(c, addr, 4, c->r[i]);
         }
         addr += 4;
     }
@@ -1256,7 +1251,7 @@ void arm_sp_check(ArmCpu *c, uint32_t sp0, uint32_t tgt) {
 
 /* ABI-Garantie: ein Guest-Aufruf darf SP nicht veraendern. Falls doch
  * (Recompiler-Bug), SP wiederherstellen und einmalig melden. */
-void arm_restore_sp(ArmCpu *c, uint32_t sp0) {
+void arm_restore_sp_slow(ArmCpu *c, uint32_t sp0) {
     if (c->r[13] != sp0) {
         static int n = 0;
         if (n++ < 40)
