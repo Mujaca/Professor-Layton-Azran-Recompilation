@@ -109,9 +109,16 @@ static uint32_t g_fog_lut[128];
    gefuellt ueber 0x1C8..0x1CF mit Typ/Index aus 0x1C5. */
 #define LIGHT_LUT_COUNT 24
 static uint32_t g_light_lut[LIGHT_LUT_COUNT][256];
+/* Vorberechnete float-Felder derselben Eintraege (Wert und Differenz).
+ * Der Schreibpfad 0x1C8..0x1CF ist der einzige, der die Eintraege aendert;
+ * die Umrechnung ist exakt die aus p_light_lut_lookup, nur einmal statt je
+ * Fragment. */
+static float g_light_lut_fval[LIGHT_LUT_COUNT][256];
+static float g_light_lut_fdiff[LIGHT_LUT_COUNT][256];
 
 static void p_vs_reset(void);
 static void p_vs_reset_draw_state(void);
+static void p_light_draw_invalidate(void);
 static void p_proctex_reset(void);
 
 uint32_t gpu_pica_phys_to_guest(uint32_t paddr)
@@ -147,9 +154,12 @@ void gpu_pica_reset(void)
     memset(p_regs, 0, sizeof(p_regs));
     memset(g_fog_lut, 0, sizeof(g_fog_lut));
     memset(g_light_lut, 0, sizeof(g_light_lut));
+    memset(g_light_lut_fval, 0, sizeof(g_light_lut_fval));
+    memset(g_light_lut_fdiff, 0, sizeof(g_light_lut_fdiff));
     p_regs[0x020] = 0x12345678u;
     p_regs[0x030] = 0xFFFFFFF0u;
     p_regs[0x034] = 0x00000001u;
+    p_light_draw_invalidate();
     p_proctex_reset();
     p_vs_reset();
     p_vs_reset_draw_state();
@@ -1301,7 +1311,13 @@ static void p_light_lut_write(uint32_t value)
     uint32_t cfg = p_regs[0x1C5];
     uint32_t type = (cfg >> 8) & 0x1Fu;
     uint32_t idx = cfg & 0xFFu;
-    if (type < LIGHT_LUT_COUNT) g_light_lut[type][idx] = value;
+    if (type < LIGHT_LUT_COUNT) {
+        float diff = (float)((value >> 12) & 0x7FFu) / 2047.0f;
+        if (value & (1u << 23)) diff = -diff;
+        g_light_lut[type][idx] = value;
+        g_light_lut_fval[type][idx] = (float)(value & 0xFFFu) / 4095.0f;
+        g_light_lut_fdiff[type][idx] = diff;
+    }
     p_regs[0x1C5] = (cfg & ~0xFFu) | ((idx + 1u) & 0xFFu);
 }
 
@@ -1309,11 +1325,9 @@ static void p_light_lut_write(uint32_t value)
    Bit23 neg_difference. */
 static float p_light_lut_lookup(uint32_t lut, unsigned index, float delta)
 {
-    uint32_t e = g_light_lut[lut % LIGHT_LUT_COUNT][index & 0xFFu];
-    float value = (float)(e & 0xFFFu) / 4095.0f;
-    float diff = (float)((e >> 12) & 0x7FFu) / 2047.0f;
-    if (e & (1u << 23)) diff = -diff;
-    return value + diff * delta;
+    unsigned l = lut % LIGHT_LUT_COUNT;
+    unsigned i = index & 0xFFu;
+    return g_light_lut_fval[l][i] + g_light_lut_fdiff[l][i] * delta;
 }
 
 /* Pica::LightingRegs::LightColor: 10-Bit-Felder, 255 entspricht 1.0. */
@@ -1390,6 +1404,29 @@ static void p_quat_rotate(const float q[4], const float v[3], float o[3])
     for (i = 0; i < 3; i++) o[i] = v[i] + 2.0f * c[i];
 }
 
+/* Dieselbe Rotation fuer die feste Basis (0,0,1) bzw. (1,0,0) des
+ * Default-Zustands (bump_mode None). Bit-identisch zu p_quat_rotate: die
+ * Multiplikationen mit exakt 0/1 sind exakt und entfallen hier nur. */
+static void p_quat_rotate_z(const float q[4], float o[3])
+{
+    float c0 = q[1] * q[3] + q[2] * q[0];
+    float c1 = q[2] * q[1] - q[0] * q[3];
+    float c2 = -(q[0] * q[0]) - q[1] * q[1];
+    o[0] = 2.0f * c0;
+    o[1] = 2.0f * c1;
+    o[2] = 1.0f + 2.0f * c2;
+}
+
+static void p_quat_rotate_x(const float q[4], float o[3])
+{
+    float c0 = -(q[1] * q[1]) - q[2] * q[2];
+    float c1 = q[2] * q[3] + q[0] * q[1];
+    float c2 = q[0] * q[2] - q[1] * q[3];
+    o[0] = 1.0f + 2.0f * c0;
+    o[1] = 2.0f * c1;
+    o[2] = 2.0f * c2;
+}
+
 typedef struct {
     const float *normal;
     const float *half_vector;
@@ -1401,51 +1438,44 @@ typedef struct {
     uint32_t light_cfg;          /* LightSrc::config (Bit1 = two_sided_diffuse) */
 } LightCtx;
 
-/* Azahar sw_lighting.cpp get_lut_value. */
-static float p_light_lut_value(const LightCtx *ctx, uint32_t input, int abs_val,
-                               uint32_t scale_enum, uint32_t sampler)
-{
-    float result = 0.0f, nh[3];
-    unsigned index;
-    float delta, scale;
+#define P_LIGHT_LUT_SLOTS 8u
 
+/* Azahar get_lut_value, Rohwert vor Abs/Index/Skalierung. `nh` ist der
+ * bereits normalisierte Halbvektor (wird nur bei NH/VH/CP gebraucht). */
+static float p_light_lut_raw(const LightCtx *ctx, uint32_t input,
+                             const float nh[3])
+{
+    float proj[3];
+    int i;
     switch (input) {
     case 0u:                                  /* NH */
-        p_v3_normalized(ctx->half_vector, nh);
-        result = p_v3_dot(ctx->normal, nh);
-        break;
+        return p_v3_dot(ctx->normal, nh);
     case 1u:                                  /* VH */
-        p_v3_normalized(ctx->half_vector, nh);
-        result = p_v3_dot(ctx->norm_view, nh);
-        break;
+        return p_v3_dot(ctx->norm_view, nh);
     case 2u:                                  /* NV */
-        result = p_v3_dot(ctx->normal, ctx->norm_view);
-        break;
+        return p_v3_dot(ctx->normal, ctx->norm_view);
     case 3u:                                  /* LN */
-        result = p_v3_dot(ctx->light_vector, ctx->normal);
-        break;
+        return p_v3_dot(ctx->light_vector, ctx->normal);
     case 4u:                                  /* SP */
-        result = p_v3_dot(ctx->light_vector, ctx->spot_dir);
-        break;
+        return p_v3_dot(ctx->light_vector, ctx->spot_dir);
     case 5u:                                  /* CP */
         if (ctx->config == 8u) {
-            float proj[3];
-            int i;
-            p_v3_normalized(ctx->half_vector, nh);
-            {
-                float d = p_v3_dot(ctx->normal, nh);
-                for (i = 0; i < 3; i++) proj[i] = nh[i] - ctx->normal[i] * d;
-            }
-            result = p_v3_dot(proj, ctx->tangent);
+            float d = p_v3_dot(ctx->normal, nh);
+            for (i = 0; i < 3; i++) proj[i] = nh[i] - ctx->normal[i] * d;
+            return p_v3_dot(proj, ctx->tangent);
         }
-        break;
+        return 0.0f;
     default:
-        break;
+        return 0.0f;
     }
+}
 
+/* Azahar get_lut_value, Index/Fraktionsteil (Abs-Klemmung + floorf). */
+static void p_light_lut_index(const LightCtx *ctx, float result, int abs_val,
+                              unsigned *index, float *delta)
+{
     if (abs_val) {
-        /* Azahar get_lut_value: nur bei two_sided_diffuse fabsf, sonst
-           max(result, 0). */
+        /* Nur bei two_sided_diffuse fabsf, sonst max(result, 0). */
         if (ctx->light_cfg & 2u) {
             result = (result < 0.0f) ? -result : result;
         } else if (result < 0.0f) {
@@ -1455,8 +1485,8 @@ static float p_light_lut_value(const LightCtx *ctx, uint32_t input, int abs_val,
             float flr = floorf(result * 256.0f);
             if (flr < 0.0f) flr = 0.0f;
             if (flr > 255.0f) flr = 255.0f;
-            index = (unsigned)flr;
-            delta = result * 256.0f - (float)index;
+            *index = (unsigned)flr;
+            *delta = result * 256.0f - (float)*index;
         }
     } else {
         float flr = floorf(result * 128.0f);
@@ -1464,11 +1494,185 @@ static float p_light_lut_value(const LightCtx *ctx, uint32_t input, int abs_val,
         if (flr < -128.0f) flr = -128.0f;
         if (flr > 127.0f) flr = 127.0f;
         signed_index = (int8_t)flr;
-        delta = result * 128.0f - (float)signed_index;
-        index = (unsigned)(uint8_t)signed_index;
+        *delta = result * 128.0f - (float)signed_index;
+        *index = (unsigned)(uint8_t)signed_index;
     }
-    scale = p_light_scale(scale_enum);
-    return scale * p_light_lut_lookup(sampler, index, delta);
+}
+
+/* Zwischenspeicher je Licht: mehrere Sampler lesen im Regelfall dieselbe
+ * LUT-Eingangs-Id. Rohwert je Id und Index/Delta je (Id, Abs-Modus) werden
+ * deshalb nur einmal je Fragment/Licht berechnet; das Ergebnis ist exakt
+ * dasselbe wie eine Neuberechnung. */
+typedef struct {
+    float nh[3];
+    int have_nh;
+    uint32_t raw_done;
+    float raw[P_LIGHT_LUT_SLOTS];
+    uint32_t idx_done[2];
+    unsigned idx[2][P_LIGHT_LUT_SLOTS];
+    float delta[2][P_LIGHT_LUT_SLOTS];
+} LightLut;
+
+static void p_light_lut_prepare(LightLut *lc)
+{
+    lc->have_nh = 0;
+    lc->raw_done = 0;
+    lc->idx_done[0] = 0;
+    lc->idx_done[1] = 0;
+}
+
+static float p_light_lut_sample(const LightCtx *ctx, LightLut *lc, uint32_t input,
+                                int abs_val, float scale, uint32_t sampler)
+{
+    unsigned slot = input & (P_LIGHT_LUT_SLOTS - 1u);
+    unsigned a = abs_val ? 1u : 0u;
+
+    if (!(lc->raw_done & (1u << slot))) {
+        if ((input == 0u || input == 1u || input == 5u) && !lc->have_nh) {
+            p_v3_normalized(ctx->half_vector, lc->nh);
+            lc->have_nh = 1;
+        }
+        lc->raw[slot] = p_light_lut_raw(ctx, input, lc->nh);
+        lc->raw_done |= 1u << slot;
+    }
+    if (!(lc->idx_done[a] & (1u << slot))) {
+        p_light_lut_index(ctx, lc->raw[slot], abs_val ? 1 : 0,
+                          &lc->idx[a][slot], &lc->delta[a][slot]);
+        lc->idx_done[a] |= 1u << slot;
+    }
+    return scale * p_light_lut_lookup(sampler, lc->idx[a][slot], lc->delta[a][slot]);
+}
+
+/* ===== Pro Draw konstante Lichtterme =====================================
+ * Die Register 0x140..0x1D9 aendern sich waehrend einer Kommandoliste nur
+ * zwischen Draws. Alles, was nicht von quat/view/tex abhaengt, wird deshalb
+ * beim ersten Fragment nach der letzten Registeraenderung einmal berechnet.
+ * Die Werte sind exakt die der frueheren Berechnung je Fragment. */
+typedef struct {
+    uint32_t num, lcfg;
+    float position[3];
+    float spot_dir[3];
+    float spec0[3], spec1[3], diffuse[3], ambient[3];
+    float dist_scale, dist_bias;
+    uint32_t dist_lut;
+    int directional;               /* lcfg Bit0 = directional */
+    int dist_on, spot_on, d0_on, d1_on, fresnel_on;
+    int shadow_p_on, shadow_s_on;
+    int refl_on[3];
+    uint32_t spot_input, d0_input, d1_input, fresnel_input;
+    uint32_t refl_input[3];
+    int spot_abs, d0_abs, d1_abs, fresnel_abs;
+    int refl_abs[3];
+    float spot_scale, d0_scale, d1_scale, fresnel_scale;
+    float refl_scale[3];
+} LightSlot;
+
+typedef struct {
+    int valid;
+    uint32_t config0, config1, config, max_light, nlights;
+    float gal[3];
+    LightSlot s[8];
+} LightDraw;
+
+static LightDraw g_light_draw;
+
+static void p_light_draw_invalidate(void)
+{
+    g_light_draw.valid = 0;
+}
+
+static float p_light_scale_reg(uint32_t lut_scale, unsigned shift)
+{
+    return p_light_scale((lut_scale >> shift) & 7u);
+}
+
+static const LightDraw *p_light_draw_get(void)
+{
+    LightDraw *d = &g_light_draw;
+    uint32_t li;
+
+    if (d->valid) return d;
+    d->config0 = p_regs[0x1C3];
+    d->config1 = p_regs[0x1C4];
+    d->config = (d->config0 >> 4) & 0xFu;
+    d->max_light = p_regs[0x1C2] & 7u;
+    d->nlights = d->max_light + 1u;
+    p_light_color(p_regs[0x1C0], d->gal);
+    {
+        const uint32_t lut_input = p_regs[0x1D1];
+        const uint32_t lut_scale = p_regs[0x1D2];
+        const uint32_t abs_lut = p_regs[0x1D0];
+        const uint32_t en = p_regs[0x1D9];
+        for (li = 0; li <= d->max_light; li++) {
+            LightSlot *s = &d->s[li];
+            uint32_t lb;
+            s->num = (en >> (li * 4u)) & 7u;
+            lb = 0x140u + s->num * 0x10u;
+            s->lcfg = p_regs[lb + 9u];
+            s->position[0] = p_pica_small_float(p_regs[lb + 4u] & 0xFFFFu, 10, 5);
+            s->position[1] = p_pica_small_float((p_regs[lb + 4u] >> 16) & 0xFFFFu, 10, 5);
+            s->position[2] = p_pica_small_float(p_regs[lb + 5u] & 0xFFFFu, 10, 5);
+            {
+                int32_t sx = ((int32_t)(p_regs[lb + 6u] << 19)) >> 19;
+                int32_t sy = ((int32_t)((p_regs[lb + 6u] >> 16) << 19)) >> 19;
+                int32_t sz = ((int32_t)(p_regs[lb + 7u] << 19)) >> 19;
+                s->spot_dir[0] = (float)sx / 2047.0f;
+                s->spot_dir[1] = (float)sy / 2047.0f;
+                s->spot_dir[2] = (float)sz / 2047.0f;
+            }
+            s->dist_scale = p_pica_small_float(p_regs[lb + 0xBu] & 0xFFFFFu, 12, 7);
+            s->dist_bias = p_pica_small_float(p_regs[lb + 0xAu] & 0xFFFFFu, 12, 7);
+            s->dist_lut = 16u + s->num;
+            p_light_color(p_regs[lb + 0u], s->spec0);
+            p_light_color(p_regs[lb + 1u], s->spec1);
+            p_light_color(p_regs[lb + 2u], s->diffuse);
+            p_light_color(p_regs[lb + 3u], s->ambient);
+            s->directional = (s->lcfg & 1u) != 0u;
+            s->dist_on = !(d->config1 & (1u << (24u + s->num)));
+            s->shadow_p_on = (d->config0 & (1u << 16))
+                             && !(d->config1 & (1u << s->num));
+            s->shadow_s_on = (d->config0 & (1u << 17))
+                             && !(d->config1 & (1u << s->num));
+            s->spot_on = !(d->config1 & (1u << (8u + s->num))) &&
+                         p_light_sampler_supported(d->config, 8u);
+            s->d0_on = !(d->config1 & (1u << 16)) &&
+                       p_light_sampler_supported(d->config, 0u);
+            s->d1_on = !(d->config1 & (1u << 17)) &&
+                       p_light_sampler_supported(d->config, 1u);
+            s->refl_on[0] = !(d->config1 & (1u << 20)) &&
+                            p_light_sampler_supported(d->config, 6u);
+            s->refl_on[1] = !(d->config1 & (1u << 21)) &&
+                            p_light_sampler_supported(d->config, 5u);
+            s->refl_on[2] = !(d->config1 & (1u << 22)) &&
+                            p_light_sampler_supported(d->config, 4u);
+            s->fresnel_on = (li == d->max_light) &&
+                            !(d->config1 & (1u << 19)) &&
+                            p_light_sampler_supported(d->config, 3u);
+            s->spot_input = (lut_input >> 8) & 7u;
+            s->d0_input = lut_input & 7u;
+            s->d1_input = (lut_input >> 4) & 7u;
+            s->fresnel_input = (lut_input >> 12) & 7u;
+            s->refl_input[0] = (lut_input >> 24) & 7u;
+            s->refl_input[1] = (lut_input >> 20) & 7u;
+            s->refl_input[2] = (lut_input >> 16) & 7u;
+            s->spot_abs = ((abs_lut >> 9) & 1u) == 0;
+            s->d0_abs = ((abs_lut >> 1) & 1u) == 0;
+            s->d1_abs = ((abs_lut >> 5) & 1u) == 0;
+            s->fresnel_abs = ((abs_lut >> 13) & 1u) == 0;
+            s->refl_abs[0] = ((abs_lut >> 25) & 1u) == 0;
+            s->refl_abs[1] = ((abs_lut >> 21) & 1u) == 0;
+            s->refl_abs[2] = ((abs_lut >> 17) & 1u) == 0;
+            s->spot_scale = p_light_scale_reg(lut_scale, 8);
+            s->d0_scale = p_light_scale_reg(lut_scale, 0);
+            s->d1_scale = p_light_scale_reg(lut_scale, 4);
+            s->fresnel_scale = p_light_scale_reg(lut_scale, 12);
+            s->refl_scale[0] = p_light_scale_reg(lut_scale, 24);
+            s->refl_scale[1] = p_light_scale_reg(lut_scale, 20);
+            s->refl_scale[2] = p_light_scale_reg(lut_scale, 16);
+        }
+    }
+    d->valid = 1;
+    return d;
 }
 
 /* Azahar SwRenderer::ComputeFragmentsColors. */
@@ -1476,23 +1680,20 @@ static void p_compute_fragments(const PicaColor tex[4], const float quat_in[4],
                                 const float view_in[3], PicaColor *out_primary,
                                 PicaColor *out_secondary)
 {
-    const uint32_t config0 = p_regs[0x1C3];
-    const uint32_t config1 = p_regs[0x1C4];
-    const uint32_t lut_input = p_regs[0x1D1];
-    const uint32_t lut_scale = p_regs[0x1D2];
-    const uint32_t abs_lut = p_regs[0x1D0];
-    const uint32_t config = (config0 >> 4) & 0xFu;
-    const uint32_t max_light = p_regs[0x1C2] & 7u;
+    const LightDraw *ld = p_light_draw_get();
+    const uint32_t config0 = ld->config0;
+    const uint32_t config1 = ld->config1;
     float shadow[4] = {1.0f, 1.0f, 1.0f, 1.0f};
     /* Wie Azahar: ohne gueltigen Bump-Modus bleiben Normal/Tangente 0. */
     float surface_normal[3] = {0.0f, 0.0f, 0.0f};
     float surface_tangent[3] = {0.0f, 0.0f, 0.0f};
     float normal[3], tangent[3];
     float quat[4], view[3];
+    float frag_norm_view[3];
+    int default_basis = 0;
     float diffuse_sum[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     float specular_sum[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-    float gal[3];
-    uint32_t num, i, li;
+    uint32_t i, li;
 
     quat[0] = quat_in[0]; quat[1] = quat_in[1];
     quat[2] = quat_in[2]; quat[3] = quat_in[3];
@@ -1516,6 +1717,7 @@ static void p_compute_fragments(const PicaColor tex[4], const float quat_in[4],
         float perturbation[3];
         for (i = 0; i < 3u; i++)
             perturbation[i] = (float)tex[sel].c[i] / 127.5f - 1.0f;
+        default_basis = 0;
         if (bump_mode == 1u) {                /* NormalMap */
             if (!(config0 & (1u << 30))) {    /* disable_bump_renorm */
                 float z2 = 1.0f - (perturbation[0] * perturbation[0] +
@@ -1555,179 +1757,162 @@ static void p_compute_fragments(const PicaColor tex[4], const float quat_in[4],
         surface_tangent[0] = 1.0f;
         surface_tangent[1] = 0.0f;
         surface_tangent[2] = 0.0f;
+        default_basis = 1;
     }
 
-    p_quat_rotate(quat, surface_normal, normal);
-    p_quat_rotate(quat, surface_tangent, tangent);
+    if (default_basis) {
+        p_quat_rotate_z(quat, normal);
+        p_quat_rotate_x(quat, tangent);
+    } else {
+        p_quat_rotate(quat, surface_normal, normal);
+        p_quat_rotate(quat, surface_tangent, tangent);
+    }
+    /* Der normierte Sichtvektor ist je Fragment konstant (nur vom
+       interpolierten view abhaengig), nicht je Lichtquelle. */
+    {
+        float nv[3];
+        p_v3_normalized(view, nv);
+        for (i = 0; i < 3u; i++) frag_norm_view[i] = nv[i];
+    }
 
-    for (li = 0; li <= max_light; li++) {
-        num = (p_regs[0x1D9] >> (li * 4u)) & 7u;
-        {
-            const uint32_t lb = 0x140u + num * 0x10u;
-            const uint32_t lcfg = p_regs[lb + 9u];
-            float position[3], light_vector[3], norm_view[3], half_vector[3];
-            float refl_value[3], specular_0[3], specular_1[3];
-            float light_diffuse[3], light_ambient[3];
-            float shadow_p[3] = {1.0f, 1.0f, 1.0f};
-            float shadow_s[3] = {1.0f, 1.0f, 1.0f};
-            float dist_atten = 1.0f, spot_atten = 1.0f;
-            float d0_lut = 1.0f, d1_lut = 1.0f;
-            float dot_product, clamp_highlights = 1.0f;
-            float length;
-            LightCtx ctx;
-            int abs_val;
+    for (li = 0; li < ld->nlights; li++) {
+        const LightSlot *ls = &ld->s[li];
+        const uint32_t lcfg = ls->lcfg;
+        float light_vector[3], half_vector[3];
+        float refl_value[3], specular_0[3], specular_1[3];
+        float shadow_p[3] = {1.0f, 1.0f, 1.0f};
+        float shadow_s[3] = {1.0f, 1.0f, 1.0f};
+        float dist_atten = 1.0f, spot_atten = 1.0f;
+        float d0_lut = 1.0f, d1_lut = 1.0f;
+        float dot_product, clamp_highlights = 1.0f;
+        float length;
+        LightCtx ctx;
+        LightLut lut_cache;
 
-            position[0] = p_pica_small_float(p_regs[lb + 4u] & 0xFFFFu, 10, 5);
-            position[1] = p_pica_small_float((p_regs[lb + 4u] >> 16) & 0xFFFFu, 10, 5);
-            position[2] = p_pica_small_float(p_regs[lb + 5u] & 0xFFFFu, 10, 5);
+        if (ls->directional) {
+            light_vector[0] = ls->position[0];
+            light_vector[1] = ls->position[1];
+            light_vector[2] = ls->position[2];
+        } else {
+            light_vector[0] = ls->position[0] + view[0];
+            light_vector[1] = ls->position[1] + view[1];
+            light_vector[2] = ls->position[2] + view[2];
+        }
+        length = p_v3_normalize(light_vector);
+        half_vector[0] = frag_norm_view[0] + light_vector[0];
+        half_vector[1] = frag_norm_view[1] + light_vector[1];
+        half_vector[2] = frag_norm_view[2] + light_vector[2];
 
-            if (lcfg & 1u) {
-                light_vector[0] = position[0];
-                light_vector[1] = position[1];
-                light_vector[2] = position[2];
-            } else {
-                light_vector[0] = position[0] + view[0];
-                light_vector[1] = position[1] + view[1];
-                light_vector[2] = position[2] + view[2];
-            }
-            length = p_v3_normalize(light_vector);
-            p_v3_normalized(view, norm_view);
-            half_vector[0] = norm_view[0] + light_vector[0];
-            half_vector[1] = norm_view[1] + light_vector[1];
-            half_vector[2] = norm_view[2] + light_vector[2];
+        if (ls->dist_on) {                        /* dist attenuation */
+            float sample_loc = ls->dist_scale * length + ls->dist_bias;
+            float flr;
+            unsigned lutindex;
+            float delta;
+            if (sample_loc < 0.0f) sample_loc = 0.0f;
+            if (sample_loc > 1.0f) sample_loc = 1.0f;
+            flr = floorf(sample_loc * 256.0f);
+            if (flr < 0.0f) flr = 0.0f;
+            if (flr > 255.0f) flr = 255.0f;
+            lutindex = (unsigned)flr;
+            delta = sample_loc * 256.0f - (float)lutindex;
+            dist_atten = p_light_lut_lookup(ls->dist_lut, lutindex, delta);
+        }
 
-            if (!(config1 & (1u << (24u + num)))) {   /* dist attenuation */
-                float scale = p_pica_small_float(p_regs[lb + 0xBu] & 0xFFFFFu, 12, 7);
-                float bias = p_pica_small_float(p_regs[lb + 0xAu] & 0xFFFFFu, 12, 7);
-                float sample_loc = scale * length + bias;
-                float flr;
-                unsigned lutindex;
-                float delta;
-                if (sample_loc < 0.0f) sample_loc = 0.0f;
-                if (sample_loc > 1.0f) sample_loc = 1.0f;
-                flr = floorf(sample_loc * 256.0f);
-                if (flr < 0.0f) flr = 0.0f;
-                if (flr > 255.0f) flr = 255.0f;
-                lutindex = (unsigned)flr;
-                delta = sample_loc * 256.0f - (float)lutindex;
-                dist_atten = p_light_lut_lookup(16u + num, lutindex, delta);
-            }
+        ctx.normal = normal;
+        ctx.half_vector = half_vector;
+        ctx.norm_view = frag_norm_view;
+        ctx.light_vector = light_vector;
+        ctx.tangent = tangent;
+        ctx.config = ld->config;
+        ctx.light_cfg = lcfg;
+        ctx.spot_dir[0] = ls->spot_dir[0];
+        ctx.spot_dir[1] = ls->spot_dir[1];
+        ctx.spot_dir[2] = ls->spot_dir[2];
+        p_light_lut_prepare(&lut_cache);
 
-            ctx.normal = normal;
-            ctx.half_vector = half_vector;
-            ctx.norm_view = norm_view;
-            ctx.light_vector = light_vector;
-            ctx.tangent = tangent;
-            ctx.config = config;
-            ctx.light_cfg = lcfg;
-            {
-                int32_t sx = ((int32_t)(p_regs[lb + 6u] << 19)) >> 19;
-                int32_t sy = ((int32_t)((p_regs[lb + 6u] >> 16) << 19)) >> 19;
-                int32_t sz = ((int32_t)(p_regs[lb + 7u] << 19)) >> 19;
-                ctx.spot_dir[0] = (float)sx / 2047.0f;
-                ctx.spot_dir[1] = (float)sy / 2047.0f;
-                ctx.spot_dir[2] = (float)sz / 2047.0f;
-            }
+        if (ls->spot_on) {
+            spot_atten = p_light_lut_sample(&ctx, &lut_cache, ls->spot_input,
+                                            ls->spot_abs, ls->spot_scale,
+                                            8u + ls->num);
+        }
 
-            if (!(config1 & (1u << (8u + num))) &&
-                p_light_sampler_supported(config, 8u)) {
-                abs_val = ((abs_lut >> 9) & 1u) == 0;
-                spot_atten = p_light_lut_value(&ctx, (lut_input >> 8) & 7u,
-                                               abs_val, (lut_scale >> 8) & 7u, 8u + num);
-            }
+        if (ls->d0_on) {
+            d0_lut = p_light_lut_sample(&ctx, &lut_cache, ls->d0_input,
+                                        ls->d0_abs, ls->d0_scale, 0u);
+        }
+        specular_0[0] = d0_lut * ls->spec0[0];
+        specular_0[1] = d0_lut * ls->spec0[1];
+        specular_0[2] = d0_lut * ls->spec0[2];
 
-            if (!(config1 & (1u << 16)) &&
-                p_light_sampler_supported(config, 0u)) {
-                abs_val = ((abs_lut >> 1) & 1u) == 0;
-                d0_lut = p_light_lut_value(&ctx, lut_input & 7u, abs_val,
-                                           lut_scale & 7u, 0u);
-            }
-            p_light_color(p_regs[lb + 0u], specular_1);   /* specular_0 Kanal */
-            specular_0[0] = d0_lut * specular_1[0];
-            specular_0[1] = d0_lut * specular_1[1];
-            specular_0[2] = d0_lut * specular_1[2];
+        if (ls->refl_on[0]) {
+            refl_value[0] = p_light_lut_sample(&ctx, &lut_cache, ls->refl_input[0],
+                                               ls->refl_abs[0], ls->refl_scale[0], 6u);
+        } else {
+            refl_value[0] = 1.0f;
+        }
+        if (ls->refl_on[1]) {
+            refl_value[1] = p_light_lut_sample(&ctx, &lut_cache, ls->refl_input[1],
+                                               ls->refl_abs[1], ls->refl_scale[1], 5u);
+        } else {
+            refl_value[1] = refl_value[0];
+        }
+        if (ls->refl_on[2]) {
+            refl_value[2] = p_light_lut_sample(&ctx, &lut_cache, ls->refl_input[2],
+                                               ls->refl_abs[2], ls->refl_scale[2], 4u);
+        } else {
+            refl_value[2] = refl_value[0];
+        }
 
-            if (!(config1 & (1u << 20)) && p_light_sampler_supported(config, 6u)) {
-                abs_val = ((abs_lut >> 25) & 1u) == 0;
-                refl_value[0] = p_light_lut_value(&ctx, (lut_input >> 24) & 7u,
-                                                  abs_val, (lut_scale >> 24) & 7u, 6u);
-            } else {
-                refl_value[0] = 1.0f;
-            }
-            if (!(config1 & (1u << 21)) && p_light_sampler_supported(config, 5u)) {
-                abs_val = ((abs_lut >> 21) & 1u) == 0;
-                refl_value[1] = p_light_lut_value(&ctx, (lut_input >> 20) & 7u,
-                                                  abs_val, (lut_scale >> 20) & 7u, 5u);
-            } else {
-                refl_value[1] = refl_value[0];
-            }
-            if (!(config1 & (1u << 22)) && p_light_sampler_supported(config, 4u)) {
-                abs_val = ((abs_lut >> 17) & 1u) == 0;
-                refl_value[2] = p_light_lut_value(&ctx, (lut_input >> 16) & 7u,
-                                                  abs_val, (lut_scale >> 16) & 7u, 4u);
-            } else {
-                refl_value[2] = refl_value[0];
-            }
+        if (ls->d1_on) {
+            d1_lut = p_light_lut_sample(&ctx, &lut_cache, ls->d1_input,
+                                        ls->d1_abs, ls->d1_scale, 1u);
+        }
+        specular_1[0] = d1_lut * refl_value[0] * ls->spec1[0];
+        specular_1[1] = d1_lut * refl_value[1] * ls->spec1[1];
+        specular_1[2] = d1_lut * refl_value[2] * ls->spec1[2];
 
-            if (!(config1 & (1u << 17)) &&
-                p_light_sampler_supported(config, 1u)) {
-                abs_val = ((abs_lut >> 5) & 1u) == 0;
-                d1_lut = p_light_lut_value(&ctx, (lut_input >> 4) & 7u, abs_val,
-                                           (lut_scale >> 4) & 7u, 1u);
-            }
-            p_light_color(p_regs[lb + 1u], specular_1);
-            specular_1[0] = d1_lut * refl_value[0] * specular_1[0];
-            specular_1[1] = d1_lut * refl_value[1] * specular_1[1];
-            specular_1[2] = d1_lut * refl_value[2] * specular_1[2];
+        if (ls->fresnel_on) {
+            float fresnel = p_light_lut_sample(&ctx, &lut_cache, ls->fresnel_input,
+                                               ls->fresnel_abs, ls->fresnel_scale, 3u);
+            if (config0 & (1u << 2)) diffuse_sum[3] = fresnel;
+            if (config0 & (1u << 3)) specular_sum[3] = fresnel;
+        }
 
-            if (li == max_light && !(config1 & (1u << 19)) &&
-                p_light_sampler_supported(config, 3u)) {
-                float fresnel;
-                abs_val = ((abs_lut >> 13) & 1u) == 0;
-                fresnel = p_light_lut_value(&ctx, (lut_input >> 12) & 7u, abs_val,
-                                            (lut_scale >> 12) & 7u, 3u);
-                if (config0 & (1u << 2)) diffuse_sum[3] = fresnel;
-                if (config0 & (1u << 3)) specular_sum[3] = fresnel;
-            }
+        dot_product = p_v3_dot(light_vector, normal);
+        if (lcfg & 2u) {                  /* two_sided_diffuse */
+            dot_product = fabsf(dot_product);
+        } else if (dot_product < 0.0f) {
+            dot_product = 0.0f;
+        }
 
-            dot_product = p_v3_dot(light_vector, normal);
-            if (lcfg & 2u) {                  /* two_sided_diffuse */
-                dot_product = fabsf(dot_product);
-            } else if (dot_product < 0.0f) {
-                dot_product = 0.0f;
-            }
+        if (config0 & (1u << 27))         /* clamp_highlights */
+            clamp_highlights = (dot_product == 0.0f) ? 0.0f : 1.0f;
 
-            if (config0 & (1u << 27))         /* clamp_highlights */
-                clamp_highlights = (dot_product == 0.0f) ? 0.0f : 1.0f;
+        if (lcfg & 0xCu) {                /* geometric_factor_0/1 */
+            float geo = p_v3_dot(half_vector, half_vector);
+            geo = (geo == 0.0f) ? 0.0f : (dot_product / geo < 1.0f ? dot_product / geo : 1.0f);
+            if (lcfg & 4u) {
+                specular_0[0] *= geo; specular_0[1] *= geo; specular_0[2] *= geo;
+            }
+            if (lcfg & 8u) {
+                specular_1[0] *= geo; specular_1[1] *= geo; specular_1[2] *= geo;
+            }
+        }
 
-            if (lcfg & 0xCu) {                /* geometric_factor_0/1 */
-                float geo = p_v3_dot(half_vector, half_vector);
-                geo = (geo == 0.0f) ? 0.0f : (dot_product / geo < 1.0f ? dot_product / geo : 1.0f);
-                if (lcfg & 4u) {
-                    specular_0[0] *= geo; specular_0[1] *= geo; specular_0[2] *= geo;
-                }
-                if (lcfg & 8u) {
-                    specular_1[0] *= geo; specular_1[1] *= geo; specular_1[2] *= geo;
-                }
-            }
+        if (ls->shadow_p_on) {
+            shadow_p[0] = shadow[0]; shadow_p[1] = shadow[1]; shadow_p[2] = shadow[2];
+        }
+        if (ls->shadow_s_on) {
+            shadow_s[0] = shadow[0]; shadow_s[1] = shadow[1]; shadow_s[2] = shadow[2];
+        }
 
-            if ((config0 & (1u << 16)) && !(config1 & (1u << num))) {
-                shadow_p[0] = shadow[0]; shadow_p[1] = shadow[1]; shadow_p[2] = shadow[2];
-            }
-            if ((config0 & (1u << 17)) && !(config1 & (1u << num))) {
-                shadow_s[0] = shadow[0]; shadow_s[1] = shadow[1]; shadow_s[2] = shadow[2];
-            }
-
-            p_light_color(p_regs[lb + 2u], light_diffuse);
-            p_light_color(p_regs[lb + 3u], light_ambient);
-            for (i = 0; i < 3u; i++) {
-                float diffuse = (light_diffuse[i] * dot_product * shadow_p[i] +
-                                 light_ambient[i]) * dist_atten * spot_atten;
-                float specular = (specular_0[i] + specular_1[i]) * clamp_highlights *
-                                 dist_atten * spot_atten * shadow_s[i];
-                diffuse_sum[i] += diffuse;
-                specular_sum[i] += specular;
-            }
+        for (i = 0; i < 3u; i++) {
+            float diffuse = (ls->diffuse[i] * dot_product * shadow_p[i] +
+                             ls->ambient[i]) * dist_atten * spot_atten;
+            float specular = (specular_0[i] + specular_1[i]) * clamp_highlights *
+                             dist_atten * spot_atten * shadow_s[i];
+            diffuse_sum[i] += diffuse;
+            specular_sum[i] += specular;
         }
     }
 
@@ -1735,8 +1920,7 @@ static void p_compute_fragments(const PicaColor tex[4], const float quat_in[4],
         if (config0 & (1u << 2)) diffuse_sum[3] *= shadow[3];
         if (config0 & (1u << 3)) specular_sum[3] *= shadow[3];
     }
-    p_light_color(p_regs[0x1C0], gal);
-    for (i = 0; i < 3u; i++) diffuse_sum[i] += gal[i];
+    for (i = 0; i < 3u; i++) diffuse_sum[i] += ld->gal[i];
 
     for (i = 0; i < 4u; i++) {
         float d = diffuse_sum[i], s = specular_sum[i];
@@ -3794,6 +3978,9 @@ static void p_write_reg(ArmCpu *c, uint32_t id, uint32_t value, uint32_t mask,
     ctx->ops++;
     if (p_diag_mode()) g_diag_hist[id]++;
 
+    /* Beleuchtung ist je Draw konstant (0x140..0x1D9); jede Aenderung
+       verwirft den vorberechneten Draw-Zustand. */
+    if (id >= 0x140u && id <= 0x1D9u) p_light_draw_invalidate();
     p_vs_reg_write(c, id, value);
     if (id >= 0xE8u && id <= 0xEFu) p_fog_lut_write(value);
     if (id >= 0x1C8u && id <= 0x1CFu) p_light_lut_write(value);
@@ -4338,6 +4525,7 @@ void gpu_gsp_write_reg_masked(ArmCpu *c, uint32_t addr, uint32_t value,
         uint32_t i = (addr - (GPU_MMIO_VADDR + 0x1000u)) / 4u;
         if (i >= PICA_NREGS) return;
         p_regs[i] = p_merge(p_regs[i], value, mask);
+        if (i >= 0x140u && i <= 0x1D9u) p_light_draw_invalidate();
         /* GPU::WriteReg behandelt nur den Kommandopuffer-Trigger als
          * Aktion; Draws/Finalize bleiben Kommandolisten vorbehalten. */
         if (i == 0x23Cu) p_ext_submit_cmdlist(c, 0);
