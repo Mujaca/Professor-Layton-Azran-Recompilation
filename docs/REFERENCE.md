@@ -61,6 +61,30 @@ Referenzreihenfolge der Dienste im echten Boot (Azahar-Log
 `reports/azahar_trace.txt`): APT:U, ndm:u, fs:USER, hid:USER, ptm:u, cfg:u,
 gsp::Gpu, y2r:u, dsp::DSP, boss:U.
 
+## cfg (Konfigurationsblöcke)
+
+* `GetConfig(size, block_id)` (cfg:u `0x0001`) schreibt den Block in einen
+  Mapped-/StaticBuffer; ein Puffer-Deskriptor mit Adresse 0 bedeutet „nur
+  prüfen, nicht schreiben“.
+* Wichtige Block-IDs (Azahar `core/hle/service/cfg/cfg.h`): Username
+  `0x000A0000` (0x1C, 10 UTF-16-Zeichen + zero + ng_word), Birthday
+  `0x000A0001` (2), Language `0x000A0002` (1), CountryInfo `0x000B0000`
+  (4: unknown[2], state, country), CountryName `0x000B0001` (16×0x40
+  UTF-16), StateName `0x000B0002`, StereoCameraSettings `0x00050005`
+  (8 floats), SoundOutputMode `0x00070001` (1), ConsoleModel `0x000F0004`
+  (4), EULAVersion `0x000D0000` (4).
+* `SystemLanguage`: 0 JP, 1 EN, 2 FR, 3 DE, 4 IT, 5 ES, 6 ZH, 7 KO,
+  8 NL, 9 PT, 10 RU, 11 TW.
+* Region: 0 JPN, 1 USA, 2 EUR, 3 AUS, 4 CHN, 5 KOR, 6 TWN. Land wird als
+  Index in Azahars `country_codes` geliefert (z. B. 110 = „GB“); Region 2
+  und Land 110 sind eine gültige EUR/UK-Konsole.
+* `GetRegion` (cfg:u `0x0002`, cfg:s `0x0406`, cfg:i `0x0816`) liefert die
+  Region aus SecureInfo; auf einer EUR-Konsole ist das 2.
+* Azahar-Defaults, angepasst auf eine EUR-Konsole: Sprache EN (1), Land GB
+  (110), Modell Old3DS (0), Stereo-Kamera 62/289/76.8/46.08/10/5/55.58/21.57,
+  Sound stereo (1), EULA 0x7F7F. (Azahar selbst nutzt für das Modell
+  NEW_3DS_XL; der Port bildet eine Old3DS ab.)
+
 ## RomFS (SelfNCCH, Archive-ID 3)
 
 IVFC-Header: Magic `IVFC`, Level-Größen als u32 bei `0x10/0x18/0x20`. Die

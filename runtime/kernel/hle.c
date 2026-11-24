@@ -1356,27 +1356,115 @@ static void file_command(Ipc *r, uint32_t *p) {
 }
 
 
+/* ---- cfg:u: echte Config-Bloecke einer EUR-Konsole ---------------------- *
+ * Referenz: Azahar core/hle/service/cfg/cfg.{h,cpp} und cfg_defaults.cpp.
+ * Konsole: Old3DS, Region EUR, Sprache Englisch, Land GB (Code 110).      */
+enum {
+    CFG_REGION_EUR = 2,
+    CFG_LANGUAGE_EN = 1,
+    CFG_COUNTRY_GB = 110,
+};
+
+static void cfg_write_block(uint32_t block, uint8_t *dst, uint32_t size) {
+    memset(dst, 0, size);
+    switch (block) {
+        case 0x00030001:  /* UserTimeOffsetBlock */
+        case 0x000B0003:  /* LatitudeLongitudeBlock */
+        case 0x00130000:  /* DebugModeBlock */
+        case 0x00150000:  /* ClockSequenceBlock */
+            break;
+        case 0x00050001:  /* BacklightControls { power_saving, brightness } */
+            if (size >= 2) dst[1] = 2;
+            break;
+        case 0x00050005: { /* StereoCameraSettings, 8 floats (Azahar-Default) */
+            static const float cam[8] = {
+                62.0f, 289.0f, 76.80000305175781f, 46.08000183105469f,
+                10.0f, 5.0f, 55.58000183105469f, 21.56999969482422f,
+            };
+            uint32_t n = (size < sizeof(cam)) ? size : (uint32_t)sizeof(cam);
+            memcpy(dst, cam, n);
+            break;
+        }
+        case 0x00070001:  /* SoundOutputModeBlock: stereo */
+            if (size >= 1) dst[0] = 1;
+            break;
+        case 0x00090000:  /* ConsoleUniqueID1 */
+        case 0x00090001: { /* ConsoleUniqueID2: fester, deterministischer Wert */
+            static const uint8_t id[8] = {1, 0, 0, 0, 1, 0, 0, 0};
+            uint32_t n = (size < sizeof(id)) ? size : (uint32_t)sizeof(id);
+            memcpy(dst, id, n);
+            break;
+        }
+        case 0x000A0000: { /* UsernameBlock: 10 UTF-16-Zeichen, zero, ng_word */
+            static const char name[] = "LAYTON";
+            uint32_t i;
+            for (i = 0; name[i] && i < 10 && (i + 1) * 2 <= size; i++)
+                dst[i * 2] = (uint8_t)name[i];
+            break;
+        }
+        case 0x000A0001:  /* BirthdayBlock { month, day } */
+            if (size >= 2) { dst[0] = 11; dst[1] = 7; }
+            break;
+        case 0x000A0002:  /* LanguageBlock: Englisch */
+            if (size >= 1) dst[0] = (uint8_t)CFG_LANGUAGE_EN;
+            break;
+        case 0x000B0000:  /* CountryInfoBlock { unknown[2], state, country } */
+            if (size >= 4) { dst[2] = 2; dst[3] = (uint8_t)CFG_COUNTRY_GB; }
+            break;
+        case 0x000B0001:  /* CountryNameBlock: 16 Slots a 0x40 Byte UTF-16 */
+        case 0x000B0002: { /* StateNameBlock */
+            static const char country[] = "United Kingdom";
+            static const char state[] = "England";
+            const char *text = (block == 0x000B0001) ? country : state;
+            uint32_t slot, i;
+            for (slot = 0; slot < 16; slot++) {
+                uint32_t base = slot * 0x40;
+                if (base >= size) break;
+                for (i = 0; text[i] && i < 0x1F; i++) {
+                    if (base + i * 2 + 1 >= size) break;
+                    dst[base + i * 2] = (uint8_t)text[i];
+                }
+            }
+            break;
+        }
+        case 0x000D0000:  /* EULAVersionBlock { minor, major } */
+            if (size >= 2) { dst[0] = 0x7F; dst[1] = 0x7F; }
+            break;
+        case 0x000F0004:  /* ConsoleModelBlock: Old3DS */
+            if (size >= 1) dst[0] = 0;
+            break;
+        case 0x00110000:  /* SystemSetupRequiredBlock: Setup erledigt */
+            if (size >= 1) dst[0] = 1;
+            break;
+        default:
+            /* Unbekannte Bloecke bleiben genullt. */
+            break;
+    }
+}
+
 static void cfg_command(Ipc *r, uint32_t *p) {
     switch (r->cmd) {
-        case 0x0001: { /* GetConfig(size, block_id) */
+        case 0x0001: { /* GetConfig(size, block_id) + Puffer-Deskriptor */
             uint32_t size = p[0];
             uint32_t block = p[1];
             uint32_t addr = ipc_out_buffer(p, r->normal, r->translate);
-            if (size > 0x200) size = 0x200;
-            if (addr) {
-                uint8_t *dst = g_cur_mem + (addr & 0x1FFFFFFFu);
-                memset(dst, 0, size);
-                if (block == 0x000A0000) {         /* UsernameBlock (UTF-16) */
-                    const char *name = "LAYTON";
-                    for (int i = 0; name[i] && (uint32_t)(i * 2 + 1) < size; i++) {
-                        dst[i * 2] = (uint8_t)name[i];
-                    }
-                } else if (block == 0x000A0002) {  /* LanguageBlock */
-                    dst[0] = 1;                    /* Englisch */
-                } else if (block == 0x000B0000) {  /* CountryInfoBlock */
-                    dst[2] = 49;                   /* USA */
-                }
+            uint32_t limit = size;
+
+            /* Geschuetzte Puffergroesse aus dem Translate-Deskriptor lesen,
+               damit nie hinter den Gastpuffer geschrieben wird. */
+            if (r->translate >= 2) {
+                uint32_t d0 = p[r->normal];
+                uint32_t type = d0 & 0xFu;
+                uint32_t cap = 0;
+                if (type == 0x2u) cap = d0 >> 14;        /* StaticBuffer */
+                else if (d0 & 0x8u) cap = d0 >> 4;       /* MappedBuffer */
+                if (cap != 0 && limit > cap) limit = cap;
             }
+            if (addr == 0) limit = 0;
+            if (limit > 0x1000) limit = 0x1000;
+            if (limit != 0)
+                cfg_write_block(block, g_cur_mem + (addr & 0x1FFFFFFFu), limit);
+
             if (g_log) printf("[cfg] GetConfig block=0x%08X size=%u buf=0x%08X\n", block, size, addr);
             /* Azahar (cfg.cpp): MakeBuilder(1,2), Push(result), PushMappedBuffer. */
             ipc_begin(r, 0x0001, 1, 2);
@@ -1384,10 +1472,12 @@ static void cfg_command(Ipc *r, uint32_t *p) {
             for (int i = 0; i < 2; i++) ipc_put(r, (r->translate >= 2) ? p[r->normal + i] : 0u);
             break;
         }
-        case 0x0002: { /* GetRegion: Result + Region-Code */
-            ipc_begin(r, 0x0002, 2, 0);
+        case 0x0002:   /* GetRegion */
+        case 0x0406:   /* cfg:s GetRegion */
+        case 0x0816: { /* cfg:i GetRegion (SecureInfo) */
+            ipc_begin(r, r->cmd, 2, 0);
             put_result(r);
-            ipc_put(r, 2);      /* EUR */
+            ipc_put(r, CFG_REGION_EUR);   /* EUR, auch in SecureInfo so hinterlegt */
             break;
         }
         case 0x0003: { /* GetTransferableId(salt): Result + u64 */

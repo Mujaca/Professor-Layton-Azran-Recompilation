@@ -8,11 +8,11 @@ Anzeigen/abbauen:
 
 ```powershell
 python tools/build.py --pristine                       # ohne Code-Patches bauen
-python tools/workarounds/apply.py --skip 0x003CBEFC    # einzelnen Patch auslassen
+python tools/workarounds/apply.py --skip 0x0010F8C4    # einzelnen Patch auslassen
 rg "WORKAROUND\(" runtime                              # Runtime-Workarounds
 ```
 
-## 1. Patches am Spielcode – `tools/workarounds/code_patches.json` (23)
+## 1. Patches am Spielcode – `tools/workarounds/code_patches.json` (22)
 
 Werden vor dem Recompilieren auf `code.bin` angewendet. Gruppiert nach
 vermuteter Ursache:
@@ -22,10 +22,19 @@ vermuteter Ursache:
 | **Locale/`mblen` liefert -1** (ctype-/TLS-Init oder Recompiler) | 0x13023C, 0x130270, 0x13028C, 0x130308, 0x13A0D4–0x13A170, Caves 0x399F00/0x399FA0 | widecopy, narrowcopy, conv_success, mblen |
 | **RomFS-Lookup** findet Dateien nicht (Recompiler-Semantik? Hash `ror`/`udiv`) | 0x212F3C, 0x399244, Caves 0x399F40/0x399FE8 | namelen_exact, chain_end, empty_component |
 | **Archiv-Loader / Datei-Größe** | 0x1300C8, 0x1301C0, 0x13C46C, 0x13C4EC, 0x28F33C | bufreturn, real_loader, size_stub (feste BCSAR-Größe!) |
-| **cfg:u Sprache/Region** | 0x3CBEFC (`jp`→`uk`) | lang_uk |
 | **Thumb-Interworking** | 0x2927B8 | interwork_2927b8 |
 | Frame-Callback-Registrierung | 0x11BA98 | frame_callback |
 | Menü-Abkürzung (vermutlich überflüssig) | 0x10F8C4 | build_port |
+
+**Entfernt:** `0x3CBEFC` (`jp`→`uk`, `lang_uk`). Der Patch war
+überflüssig: Das Spiel setzt beim Boot Region 2 (EUR) und Sprache 2 in
+`0x3D8E68/0x3D8E69`; seine interne Sprachcodetabelle ab `0x3D8EEC` liefert
+für Index 2 bereits `uk`. Beleg: `guest-watch --write 0x003D8E68`, Frontier
+9/10 mit 22 statt 23 Patches. Die `cfg:u`-Blöcke liefern jetzt echte
+EUR-Werte (Sprache EN, Land GB, Modell Old3DS plausibel: der Zeiger auf
+`0x3CBEFE` („jp“) steht in der Tabelle `0x3D8EEC` nur an Index 0
+(`0x12B60C` wählt `table[sprache]`); der Patch änderte also ausschließlich
+den JP-Eintrag, nie den von EUR verwendeten Index 2.
 
 Wichtig: Das Spiel läuft auf echter Hardware mit denselben RomFS-Daten. Dass
 der Lookup scheitert, deutet stark auf einen **Semantikfehler im Recompiler**

@@ -358,18 +358,6 @@
    "source": "patch_empty_component.py",
    "what": "Code-Cave: leere Pfadkomponente ueberspringen.",
    "suspected_root_cause": "Siehe 0x399244."
-  },
-  {
-   "addr": "0x003CBEFC",
-   "orig": [
-    "706A006F"
-   ],
-   "new": [
-    "6B75006F"
-   ],
-   "source": "patch_lang_uk.py",
-   "what": "Regions-String 'jp' -> 'uk' in .rodata.",
-   "suspected_root_cause": "cfg:u liefert falsche Sprache/Region (GetConfig 0xA0002 Sprache, Region EUR) - im cfg-Service beheben."
   }
  ]
 }
