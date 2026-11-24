@@ -105,3 +105,4 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | 2026-11-24 | m3-erster-draw-2 | 10/10 | None | 0 |
 | 2026-11-24 | listen-flut | 10/10 | None | 0 |
 | 2026-11-24 | m3-erster-draw-3 | 10/10 | None | 0 |
+| 2026-11-24 | ipc-folge-3 | 10/10 | None | 0 |
