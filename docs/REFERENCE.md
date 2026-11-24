@@ -226,6 +226,38 @@ MMU/Seitentabelle hat.
   (x = Downcounter, y = aL-Start, z = aL-Inkrement); aL ist
   `address_register[2]`. Bei nicht-invertierten Befehlen ist `src1` das
   7-Bit-Register (Uniform/adressierbar), `src2` nur 5 Bit (Input/Temp).
+* **SrcInversed** (nihstro `OpCode::Info::SrcInversed`): `DPHI 0x18`,
+  `DSTI 0x19`, `SGEI 0x1A`, `SLTI 0x1B` und `MADI 0x30..0x37`. Bei den
+  Common-Befehlen 0x18..0x1B ist `src1` 5 Bit (`src1i` Bits14..18) und
+  `src2` 7 Bit (`src2i` Bits7..13); MADI hat `src1` 5, `src2` 5 und `src3`
+  7 Bit (`src3i` Bits5..11). Das Adressregister wirkt auf die 7-Bit-Quelle
+  (common: `src2`; MAD normal: `src2`; MADI: `src3`).
+* Opcode-Formate (Quelle: nihstro `shader_bytecode.h`, Azahar
+  `shader_interpreter.cpp`/`shader_jit_x64_compiler.cpp`):
+
+  | Opcodes | Name | Operanden |
+  |---|---|---|
+  | `0x00` `0x01` `0x02` `0x03` | ADD, DP3, DP4, DPH | 2 (DP3 nur xyz, DPH/DPHI setzen `src1.w=1`) |
+  | `0x04` `0x08` `0x09` `0x0A` `0x0C` `0x0D` | DST, MUL, SGE, SLT, MAX, MIN | 2 |
+  | `0x05` `0x06` `0x07` `0x0B` `0x0E` `0x0F` `0x13` | EX2, LG2, LIT, FLR, RCP, RSQ, MOV | 1 (`exp`/`log`/`rcp`/`rsq` lesen nur `src1.x`) |
+  | `0x12` | MOVA | 1, schreibt `a0.x/y` nach Dest-Maske (kein Dest-Register) |
+  | `0x18` `0x19` `0x1A` `0x1B` | DPHI, DSTI, SGEI, SLTI | 2, invertiert |
+  | `0x20` `0x21` `0x22` `0x2A` `0x2B` | BREAK, NOP, END, EMIT, SETEMIT | 0 (trivial; EMIT/SETEMIT nur GS) |
+  | `0x23` `0x2C` `0x2D` | BREAKC, JMPC, JMPU | Flow, `num`/`dest_offset`/Bedingung |
+  | `0x24` `0x25` `0x26` `0x27` `0x28` `0x29` | CALL, CALLC, CALLU, IFU, IFC, LOOP | Flow |
+  | `0x2E` `0x2F` | CMP | 2, Opcode-LSB ignoriert, schreibt `conditional_code` |
+  | `0x30..0x37` | MADI | 3, invertiert (src3 7 Bit) |
+  | `0x38..0x3F` | MAD | 3 (src2 7 Bit), untere 3 Opcode-Bits ignoriert |
+
+  `DST`/`LIT` sind definiert, werden aber auch von Azahar nicht ausgeführt
+  (Interpreter meldet „Unhandled instruction“, kein Register-Schreibzugriff).
+* Common-Format: `opcode` 26..31, `operand_desc_id` 0..6, `src2` 7..11,
+  `src1` 12..18, `address_register_index` 19..20, `dest` 21..25. Invertiert:
+  `src2i` 7..13, `src1i` 14..18. MAD: `operand_desc_id` 0..4, `src3` 5..9,
+  `src2` 10..16, `src1` 17..21, `address_register_index` 22..23, `dest`
+  24..28; invertiert `src3i` 5..11, `src2i` 12..16. Flow-Format:
+  `num` 0..7, `dest_offset` 10..21, `op` 22..23 bzw.
+  `bool_uniform_id`/`int_uniform_id` 22..25, `refy` 24, `refx` 25.
 
 Das Titelbild ist ein 3D-Render (`title.xc`): korrekte Darstellung braucht
 zusätzlich **TEV** und die Rasterizer-Zustände (Viewport/Clip/Depth).

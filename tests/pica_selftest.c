@@ -108,6 +108,17 @@ static uint32_t ins_common(uint32_t op, uint32_t desc, uint32_t src1,
            ((src1 & 0x7Fu) << 12) | ((ari & 3u) << 19) | ((dest & 0x1Fu) << 21);
 }
 
+/* SrcInversed-Format (nihstro Info::SrcInversed): DPHI 0x18, DSTI 0x19,
+   SGEI 0x1A, SLTI 0x1B. src1i = Bits14..18 (5 Bit), src2i = Bits7..13
+   (7 Bit); nur src2i kann eine Float-Uniform adressieren. */
+static uint32_t ins_common_inv(uint32_t op, uint32_t desc, uint32_t src1i,
+                               uint32_t src2i, uint32_t dest, uint32_t ari)
+{
+    return (op << 26) | (desc & 0x7Fu) | ((src2i & 0x7Fu) << 7) |
+           ((src1i & 0x1Fu) << 14) | ((ari & 3u) << 19) |
+           ((dest & 0x1Fu) << 21);
+}
+
 static uint32_t ins_flow(uint32_t op, uint32_t num, uint32_t dest,
                          uint32_t bid, uint32_t refx, uint32_t refy)
 {
@@ -1015,11 +1026,16 @@ static void test_vs_entrypoint(ArmCpu *c, unsigned char *mem)
 
 static void test_vs_dphi(ArmCpu *c, unsigned char *mem)
 {
-    /* DPHI (Opcode 0x18) wie DPH: src1.w = 1.
-       c0=(1,2,3,4), v0=(5,6,7,8) => 1*5+2*6+3*7+1*8 = 46
-       (mit faelschlich 4*8 waere es 78). */
+    /* DPHI (Opcode 0x18) ist SrcInversed (nihstro:
+       TwoArguments | SrcInversed): src1i = Bits14..18 (5 Bit),
+       src2i = Bits7..13 (7 Bit). Hier src1i = v0 (0x00),
+       src2i = c0 (0x20). DPH/DPHI setzt src1.w = 1.
+       v0=(5,6,7,8), c0=(1,2,3,4) => 5*1+6*2+7*3+1*4 = 42.
+       Ein nicht-invertiertes Dekodieren (src1=(instr>>12)&0x7F,
+       src2=(instr>>7)&0x1F) liest stattdessen v1 (nicht gemappt, also 0)
+       und v0 und ergibt 1*8 = 8. */
     uint32_t words[2], pack[3], *q, size;
-    float pos[4];
+    float pos[4], expect;
 
     gpu_pica_reset();
     t_pos4(c, 0, 5.0f, 6.0f, 7.0f);
@@ -1029,7 +1045,7 @@ static void test_vs_dphi(ArmCpu *c, unsigned char *mem)
     q = emit(q, 0x2C0, 0u);
     f24_pack3(1.0f, 2.0f, 3.0f, 4.0f, pack);
     q = emit(q, 0x2C1, pack[0]); q = emit(q, 0x2C1, pack[1]); q = emit(q, 0x2C1, pack[2]);
-    words[0] = ins_common(0x18u, 0u, 0x20u, 0u, 0u, 0u);   /* dphi o0,c0,v0 */
+    words[0] = ins_common_inv(0x18u, 0u, 0x00u, 0x20u, 0u, 0u); /* dphi o0,v0,c0 */
     words[1] = 0x22u << 26;
     q = emit_program(q, words, 2);
     q = emit_swizzle0(q, swz_xyzw());
@@ -1038,8 +1054,58 @@ static void test_vs_dphi(ArmCpu *c, unsigned char *mem)
     size = (uint32_t)((unsigned char *)q - (mem + LIST));
     gpu_run_pica_list(c, LIST, size);
     gpu_pica_last_vertex(pos, NULL, NULL);
-    check(pos[0] == 46.0f && pos[1] == 46.0f && pos[2] == 46.0f && pos[3] == 46.0f,
-          "DPHI 0x18 setzt src1.w=1 => Skalarprodukt 46");
+    expect = 5.0f * 1.0f + 6.0f * 2.0f + 7.0f * 3.0f + 1.0f * 4.0f;
+    check(pos[0] == expect && pos[1] == expect &&
+          pos[2] == expect && pos[3] == expect &&
+          expect == 42.0f,
+          "DPHI 0x18 invertiert: src1i=v0 (5 Bit), src2i=c0 (7 Bit) => 42");
+}
+
+static void test_vs_inverted_ops(ArmCpu *c, unsigned char *mem)
+{
+    /* SGEI 0x1A und SLTI 0x1B nutzen dasselbe SrcInversed-Format wie
+       DPHI/DSTI (src1i 5 Bit, src2i 7 Bit). Erwartung je Komponente
+       unabhaengig aus den Quellwerten berechnet; im nicht-invertierten
+       Format waere src1=v1 (0) und src2=v0, das Ergebnis also anders. */
+    static const uint32_t ops[2] = {0x1Au, 0x1Bu};
+    static const float cvals[2][4] = {{1.0f, 2.0f, 3.0f, 4.0f},
+                                      {6.0f, 6.0f, 8.0f, 9.0f}};
+    static const float v0[4] = {5.0f, 6.0f, 7.0f, 8.0f};
+    int pass, i;
+
+    for (pass = 0; pass < 2; pass++) {
+        uint32_t words[2], pack[3], *q, size;
+        float pos[4], expect[4];
+
+        gpu_pica_reset();
+        t_pos4(c, 0, v0[0], v0[1], v0[2]);
+        ((float *)(mem + ((VTX & 0x1FFFFFFFu))))[3] = v0[3];
+        q = (uint32_t *)(mem + LIST);
+        q = t_emit_pos_setup(q);
+        q = emit(q, 0x2C0, 0u);
+        f24_pack3(cvals[pass][0], cvals[pass][1], cvals[pass][2],
+                  cvals[pass][3], pack);
+        q = emit(q, 0x2C1, pack[0]); q = emit(q, 0x2C1, pack[1]);
+        q = emit(q, 0x2C1, pack[2]);
+        words[0] = ins_common_inv(ops[pass], 0u, 0x00u, 0x20u, 0u, 0u);
+        words[1] = 0x22u << 26;
+        q = emit_program(q, words, 2);
+        q = emit_swizzle0(q, swz_xyzw());
+        q = emit(q, 0x228, 1u);
+        q = emit(q, 0x22E, 0u);
+        size = (uint32_t)((unsigned char *)q - (mem + LIST));
+        gpu_run_pica_list(c, LIST, size);
+        gpu_pica_last_vertex(pos, NULL, NULL);
+        for (i = 0; i < 4; i++) {
+            int r = (ops[pass] == 0x1Au) ? (v0[i] >= cvals[pass][i])
+                                         : (v0[i] < cvals[pass][i]);
+            expect[i] = r ? 1.0f : 0.0f;
+        }
+        check(pos[0] == expect[0] && pos[1] == expect[1] &&
+              pos[2] == expect[2] && pos[3] == expect[3],
+              pass ? "SLTI 0x1B invertiert: src1i=v0, src2i=c0 => (1,0,1,1)"
+                   : "SGEI 0x1A invertiert: src1i=v0, src2i=c0 => (1,1,1,1)");
+    }
 }
 
 static void test_cull_keep_clockwise(ArmCpu *c, unsigned char *mem)
@@ -2416,6 +2482,7 @@ int main(void) {
     test_blend(&c, mem);
     test_vs_entrypoint(&c, mem);
     test_vs_dphi(&c, mem);
+    test_vs_inverted_ops(&c, mem);
     test_cull_keep_clockwise(&c, mem);
     test_triangle_strip(&c, mem);
     test_immediate_topology(&c, mem);

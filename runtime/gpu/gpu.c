@@ -2179,7 +2179,8 @@ static void p_raster_tri(ArmCpu *c, const PicaVertex *a, const PicaVertex *b,
  * Instruktionskodierung: nihstro shader_bytecode.h
  *   opcode = instr >> 26 (6 Bit)
  *   common: desc = bits 0..6, src2 7..11, src1 12..18
- *           (invertiert: src1i 14..18, src2i 7..13)
+ *           (invertiert: src1i 14..18, src2i 7..13; gilt fuer
+ *            0x18..0x1B DPHI/DSTI/SGEI/SLTI und 0x30..0x37 MADI)
  *           addr_reg 19..20, dest 21..25
  *   flow:   num = 0..7, dest_offset = 10..21, op 22..23, refx/y 24/25
  */
@@ -2271,7 +2272,7 @@ static void p_vs_execute(VsUnit *u)
         op = instr >> 26;
 
         if (op <= 0x1Fu || (op & ~1u) == 0x2Eu) {
-            int inv = (op >= 0x1Au && op <= 0x1Bu);
+            int inv = (op >= 0x18u && op <= 0x1Bu);
             uint32_t desc = instr & 0x7Fu;
             uint32_t s1r = inv ? ((instr >> 14) & 0x1Fu) : ((instr >> 12) & 0x7Fu);
             uint32_t s2r = inv ? ((instr >> 7) & 0x7Fu) : ((instr >> 7) & 0x1Fu);
