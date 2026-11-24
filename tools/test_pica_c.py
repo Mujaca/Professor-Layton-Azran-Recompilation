@@ -52,6 +52,15 @@ negative NH/LN, FlipQuaternionIfOpposite vor Clipping, bump_mode 3
 (Normal/Tangente 0), Mehrfach-Licht, Spot-Daempfung, D0/D1-Specular,
 Reflect RGB, Clamp-Highlights und globales Ambient.
 
+Prozedurale Textur Einheit 3 (Azahar sw_proctex.cpp, pica_core.cpp):
+LUT-Upload 0x0AF/0xB0..0xB7 (Index-Inkrement, 128er/256er-Modulo),
+Noise (Rand1D/Rand2D, Frequenz/Phase/Amplitude, Noise-LUT), Shift
+(Odd/Even), Clamp (ToZero/ToEdge/SymRepeat/MirrorRepeat/Pulse), alle
+zehn Combiner, Color-Map/Alpha-Map, separate_alpha, Nearest-/Linear-
+Filter inkl. Mipmap-Aliase, lut_offset/width und die Koordinatenwahl
+0x80 texture3_coordinates (TEXCOORD0/1). Erwartungswerte aus den
+Azahar-Formeln unabhaengig berechnet (Rot-Rampe, floor/round).
+
 Geometrie-Shader (Azahar pica/geometry_pipeline.cpp, shader_unit.cpp
 GeometryEmitter, pica_core.cpp HandleSpecialReg, regs_pipeline.h): eigene
 Shader-Einheit 3 mit Registern 0x280..0x2AF (Programm 0x29B/0x29C, Swizzle

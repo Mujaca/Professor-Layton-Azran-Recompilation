@@ -172,6 +172,9 @@ Die Maske wird byteweise angewandt (`Azahar ExpandBitsToBytes`, z. B. `0x5`
 | `0x239`/`0x23B`/`0x23D` | Kanal 1: dieselben Felder |
 | `0x2C0`–`0x2FF` | Vertex-Shader (Uniforms, Programm, Swizzle) |
 | `0x0C0`–`0x0FF` | TEV-Stufen |
+| `0x0A8`–`0x0AD` | Prozedurale Textur (Einheit 3): Konfiguration, Noise, LUT-Parameter |
+| `0x0AF` | Proctex-LUT-Index (Bits0..7) und Tabelle (Bits8..11) |
+| `0x0B0`–`0x0B7` | Proctex-LUT-Daten; jedes Wort schreibt bei `index` und erhöht ihn |
 
 Ein Schreibzugriff auf `0x23C`/`0x23D` startet die Liste des Kanals und
 **ersetzt** die laufende Liste (Azahar `cmd_list.Reset`): der Rest der alten
@@ -376,6 +379,28 @@ Quelle: Azahar `renderer_software/sw_rasterizer.cpp`, `sw_clipper.cpp`,
   `t = height - 1 - t`. Der Azahar-Software-Renderer wertet Min-/Mag-Filter
   nicht aus (`TODO: Apply the min and mag filters`), sondern liest immer den
   nächsten Texel.
+* **Prozedurale Textur (Einheit 3, `sw_proctex.cpp`):** eigener Zustand in
+  0x0A8..0x0AD/0x0AF/0xB0..0xB7, kein adressiertes Bild. 0x0A8: `u_clamp`
+  Bits0..2, `v_clamp` 3..5, `color_combiner` 6..9, `alpha_combiner` 10..13,
+  `separate_alpha` Bit14, `noise_enable` Bit15, `u_shift` 16..17,
+  `v_shift` 18..19. 0x0A9/0x0AA: Amplitude (fix1.3.12, Bits0..15 signed)
+  und Phase (float16, Bits16..31). 0x0AB: Frequenz u/v je float16.
+  0x0AC: Filter Bits0..2, `width` Bits11..18. 0x0AD: LUT-Offset `level0`
+  Bits0..7. 0x0AF: `index` Bits0..7, `ref_table` Bits8..11 (0 Noise,
+  2 ColorMap, 3 AlphaMap, 4 Color, 5 ColorDiff); 0xB0..0xB7 schreiben je
+  ein Wort bei `index` und erhöhen ihn (mod 256; 128er-Tabellen modulo 128).
+  Wertetabellen: 128 Einträge, Bits0..11 value/4095, Bits12..23 signed
+  diff/4095. Farbtabellen: 256 × RGBA8; ColorDiff je Kanal signed Byte ×2.
+  Ablauf: `u=|u|`, `v=|v|`; Shift-Offset `0.5` (`1.0` bei MirroredRepeat)
+  aus `((int)v/2)%2` (Odd) bzw. `(((int)v+1)/2)%2` (Even); optional Rauschen
+  (Rand1D/Rand2D-Tabellen, bilinear mit der Noise-LUT); Shift, Clamp
+  (0 ToZero, 1 ToEdge, 2 SymmetricalRepeat, 3 MirroredRepeat, 4 Pulse),
+  Combiner (U, U², V, V², (u+v)/2, (u²+v²)/2, sqrt(u²+v²), Min, Max,
+  RMax) durch die ColorMap-LUT; Farbe = ColorTable[offset + c*(width-1)]
+  (Nearest oder Linear mit Diff-Tabelle). `separate_alpha` ersetzt Alpha
+  durch die AlphaMap desselben Combiners. Die Min-/Mag-Filter der Textur-
+  einheit wertet Azahar nicht aus; Mipmap-LOD ist dort ebenfalls TODO, die
+  Mipmap-Filter verhalten sich wie Nearest/Linear.
 * **Texturtypen (nur Einheit 0, 3dbrew/Azahar `TextureColor`):** Typ in
   0x83 Bits28..30: 0 Texture2D, 1 TextureCube, 2 Shadow2D, 3 Projection2D,
   4 ShadowCube, 5 Disabled (liefert 0,0,0,0). Einheiten 1/2 ignorieren den
@@ -893,6 +918,9 @@ ungerader Länge ein Pad-Wort (8-Byte-Ausrichtung).
 | `0x238`–`0x23D` | Kommandopuffer-Kanäle (Größe/Adresse/Jump) |
 | `0x2C0`–`0x2FF` | Vertex-Shader (Uniforms, Programm, Swizzle) |
 | `0x0C0`–`0x0FF` | TEV-Stufen |
+| `0x0A8`–`0x0AD` | Prozedurale Textur (Einheit 3): Konfiguration, Noise, LUT-Parameter |
+| `0x0AF` | Proctex-LUT-Index (Bits0..7) und Tabelle (Bits8..11) |
+| `0x0B0`–`0x0B7` | Proctex-LUT-Daten; jedes Wort schreibt bei `index` und erhöht ihn |
 
 Das Titelbild ist ein 3D-Render (`title.xc`): korrekte Darstellung braucht
 einen **Vertex-Shader-Interpreter/Übersetzer** und **TEV**.

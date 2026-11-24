@@ -501,6 +501,355 @@ static void test_texture_filter(ArmCpu *c, unsigned char *mem)
     }
 }
 
+/* ================= Prozedurale Texturen (Einheit 3) =================
+ * Azahar sw_proctex.cpp + pica_core.cpp (LUT-Upload). Die Erwartungswerte
+ * sind unabhaengig aus den Azahar-Formeln abgeleitet (scratch-Skript):
+ * color_map/alpha_map = lineare Rampe value=i*32 (diff 0), Farbtabelle
+ * color[i] = (i,0,0,255), width 128, offset 0. Rot = floor/round von
+ * lut_coord*127. */
+
+/* Wertetabelle laden: 0xAF = Tabellen-Nr/Startindex, danach je Datenwort
+ * ein Eintrag (Azahar PicaCore::ProcTex inkrementiert den Index). */
+static uint32_t *t_emit_proctex_lut(uint32_t *q, uint32_t table, uint32_t start,
+                                    const uint32_t *values, int n)
+{
+    int i;
+    q = emit(q, 0xAF, ((table & 0xFu) << 8) | (start & 0xFFu));
+    for (i = 0; i < n; i++)
+        q = emit(q, 0xB0u + (uint32_t)(i & 7), values[i]);
+    return q;
+}
+
+/* Lineare Rampen fuer color_map/alpha_map (value=i*32) und Farbtabelle
+ * (color[i]=i, Alpha 255); optional die Noise-LUT komplett auf 4095. */
+static uint32_t *t_emit_proctex_ramps(uint32_t *q, int noise_lut_full)
+{
+    uint32_t buf[256];
+    int i;
+
+    if (noise_lut_full) {
+        for (i = 0; i < 128; i++) buf[i] = 0x0FFFu;
+        q = t_emit_proctex_lut(q, 0u, 0u, buf, 128);
+    }
+    for (i = 0; i < 128; i++) buf[i] = (uint32_t)i * 32u;
+    q = t_emit_proctex_lut(q, 2u, 0u, buf, 128);
+    q = t_emit_proctex_lut(q, 3u, 0u, buf, 128);
+    memset(buf, 0, sizeof(buf));
+    q = t_emit_proctex_lut(q, 5u, 0u, buf, 256);
+    for (i = 0; i < 256; i++) buf[i] = (uint32_t)i | 0xFF000000u;
+    q = t_emit_proctex_lut(q, 4u, 0u, buf, 256);
+    return q;
+}
+
+/* Ein Quad mit konstantem (u,v) zeichnen; TEV-Quelle 6 = Texture3.
+   Liefert die RGBA8-Bytes von Pixel (4,4). */
+static int t_proctex_render(ArmCpu *c, unsigned char *mem, float u, float v,
+                            uint32_t cfg, uint32_t lut, uint32_t off,
+                            int noise_lut_full, unsigned char out[4])
+{
+    uint32_t *q, size, o;
+
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_quad_vertices(c, VTX, 0.0f, u, v, u, v);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad(q, VTX, 8, 8);
+    q = emit(q, 0x80, 1u << 10);               /* texture3_enable */
+    q = emit(q, 0xA9, 0x00000FFFu);            /* Amplitude u/v */
+    q = emit(q, 0xAA, 0x00000FFFu);
+    q = emit(q, 0xAB, 0x38003800u);            /* Frequenz u/v = 0.5 */
+    q = emit(q, 0xA8, cfg);
+    q = emit(q, 0xAC, lut);
+    q = emit(q, 0xAD, off);
+    q = t_emit_proctex_ramps(q, noise_lut_full);
+    q = emit_tev0(q, 6u, 6u, 0u);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    if (size > LIST2 - LIST) return 0;
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    out[0] = mem[o + 3];
+    out[1] = mem[o + 2];
+    out[2] = mem[o + 1];
+    out[3] = mem[o + 0];
+    return 1;
+}
+
+static void test_proctex_combiner(ArmCpu *c, unsigned char *mem)
+{
+    static const struct { uint32_t comb; float u, v; int red; const char *name; } cases[] = {
+        {0u, 0.50f, 0.50f, 64,  "U"},
+        {1u, 0.50f, 0.50f, 32,  "U2"},
+        {2u, 0.75f, 0.25f, 32,  "V"},
+        {3u, 0.50f, 0.25f, 8,   "V2"},
+        {4u, 0.25f, 0.75f, 64,  "Add"},
+        {5u, 0.25f, 0.75f, 40,  "Add2"},
+        {6u, 0.25f, 0.75f, 100, "SqrtAdd2"},
+        {7u, 0.25f, 0.75f, 32,  "Min"},
+        {8u, 0.25f, 0.75f, 95,  "Max"},
+        {9u, 0.25f, 0.75f, 81,  "RMax"},
+    };
+    int i;
+    for (i = 0; i < (int)(sizeof(cases) / sizeof(cases[0])); i++) {
+        unsigned char px[4];
+        uint32_t cfg = 9u | (cases[i].comb << 6);   /* clamp ToEdge, Combiner */
+        char msg[96];
+        int ok = t_proctex_render(c, mem, cases[i].u, cases[i].v, cfg,
+                                  (128u << 11) | 0u, 0u, 0, px);
+        sprintf(msg, "Proctex-Combiner %s => Rot %d", cases[i].name, cases[i].red);
+        check(ok && px[0] == (unsigned char)cases[i].red && px[3] == 255, msg);
+    }
+}
+
+static void test_proctex_clamp_shift(ArmCpu *c, unsigned char *mem)
+{
+    static const struct { uint32_t clamp; float u, v; int red; const char *name; } cases[] = {
+        {0u, 2.5f, 0.5f, 0,   "ToZero"},
+        {1u, 2.5f, 0.5f, 126, "ToEdge"},
+        {2u, 2.5f, 0.5f, 64,  "SymmetricalRepeat"},
+        {3u, 2.5f, 0.5f, 64,  "MirroredRepeat"},
+        {4u, 2.5f, 0.5f, 126, "Pulse"},
+        {5u, 2.5f, 0.5f, 126, "unbekannt => ToEdge"},
+        {0u, -2.5f, 0.5f, 0, "ToZero mit abs(u)"},
+    };
+    int i;
+    for (i = 0; i < (int)(sizeof(cases) / sizeof(cases[0])); i++) {
+        unsigned char px[4];
+        uint32_t cfg = cases[i].clamp | (1u << 3);   /* v_clamp ToEdge */
+        char msg[96];
+        int ok = t_proctex_render(c, mem, cases[i].u, cases[i].v, cfg,
+                                  (128u << 11), 0u, 0, px);
+        sprintf(msg, "Proctex-Clamp %s => Rot %d", cases[i].name, cases[i].red);
+        check(ok && px[0] == (unsigned char)cases[i].red, msg);
+    }
+
+    /* Shift: u_shift=Odd, v=2.6 => +0.5 auf u (0.25 -> 0.75 => 95).
+       v_shift=Even mit u=1.6 => +0.5 auf v (0.25 -> 0.75 => Combiner V 95).
+       u_clamp MirroredRepeat verdoppelt den Shift-Offset auf 1.0;
+       1.25 wird gespiegelt zu 0.75. */
+    {
+        unsigned char px[4];
+        int ok;
+
+        ok = t_proctex_render(c, mem, 0.25f, 2.6f, 9u | (1u << 16),
+                              (128u << 11), 0u, 0, px);
+        check(ok && px[0] == 95, "Proctex-Shift u=Odd (v=2.6) => u 0.75, Rot 95");
+
+        ok = t_proctex_render(c, mem, 0.25f, 2.6f,
+                              3u | (1u << 3) | (1u << 16), (128u << 11), 0u, 0, px);
+        check(ok && px[0] == 95,
+              "Proctex-Shift Odd + MirroredRepeat: Offset 1.0, 1.25 -> 0.75");
+
+        ok = t_proctex_render(c, mem, 1.6f, 0.25f,
+                              9u | (2u << 6) | (2u << 18), (128u << 11), 0u, 0, px);
+        check(ok && px[0] == 95, "Proctex-Shift v=Even (u=1.6) => v 0.75, Rot 95");
+    }
+}
+
+static void test_proctex_noise(ArmCpu *c, unsigned char *mem)
+{
+    /* u=0.3, v=0.4, Frequenz je 0.5 (f16 0x3800), Phase 0, Amplitude
+       4095 (=-1.0). NoiseCoef liefert -0.69 bei leerer Noise-LUT bzw.
+       -0.85 bei LUT=4095; danach abs() und Combiner U => Rot 48 bzw. 69. */
+    unsigned char px[4];
+    int ok;
+    uint32_t cfg = 9u | (1u << 15);
+    uint32_t lut = (128u << 11);
+    uint32_t *q, size, o;
+
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_quad_vertices(c, VTX, 0.0f, 0.3f, 0.4f, 0.3f, 0.4f);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad(q, VTX, 8, 8);
+    q = emit(q, 0x80, 1u << 10);
+    q = emit(q, 0xA8, cfg);
+    q = emit(q, 0xA9, 0x00000FFFu);
+    q = emit(q, 0xAA, 0x00000FFFu);
+    q = emit(q, 0xAB, 0x38003800u);
+    q = emit(q, 0xAC, lut);
+    q = emit(q, 0xAD, 0u);
+    q = t_emit_proctex_ramps(q, 0);
+    q = emit_tev0(q, 6u, 6u, 0u);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    check(mem[o + 3] == 49,
+          "Proctex-Rauschen (leere Noise-LUT): -0.69, Rot 49");
+
+    ok = t_proctex_render(c, mem, 0.3f, 0.4f, cfg, lut, 0u, 1, px);
+    check(ok && px[0] == 69,
+          "Proctex-Rauschen (Noise-LUT=4095): -0.85, Rot 69");
+}
+
+static void test_proctex_alpha_filter(ArmCpu *c, unsigned char *mem)
+{
+    unsigned char px[4];
+    int ok;
+
+    /* separate_alpha: Alpha aus Alpha-Map mit Combiner V, v=0.25 =>
+       value 1024/4095 * 255 = 63.76 => 63. Farbe bleibt Rot 64. */
+    ok = t_proctex_render(c, mem, 0.5f, 0.25f, 9u | (2u << 10) | (1u << 14),
+                          (128u << 11), 0u, 0, px);
+    check(ok && px[0] == 64 && px[3] == 63,
+          "Proctex separate_alpha: Alpha-Map V => 63, Farbe 64");
+
+    /* Filter: Nearest rundet den Index (64), Linear schneidet ab (63).
+       Mipmap-Varianten verhalten sich wie in Azahar (TODO mipmap). */
+    ok = t_proctex_render(c, mem, 0.5f, 0.5f, 9u, (128u << 11) | 0u, 0u, 0, px);
+    check(ok && px[0] == 64, "Proctex-Filter Nearest: Index 63.5 => 64");
+    ok = t_proctex_render(c, mem, 0.5f, 0.5f, 9u, (128u << 11) | 1u, 0u, 0, px);
+    check(ok && px[0] == 63, "Proctex-Filter Linear: 63.5 => 63");
+
+    ok = t_proctex_render(c, mem, 0.5f, 0.5f, 9u, (128u << 11) | 2u, 0u, 0, px);
+    check(ok && px[0] == 64, "Proctex NearestMipmapNearest = Nearest (64)");
+    ok = t_proctex_render(c, mem, 0.5f, 0.5f, 9u, (128u << 11) | 3u, 0u, 0, px);
+    check(ok && px[0] == 63, "Proctex LinearMipmapNearest = Linear (63)");
+    ok = t_proctex_render(c, mem, 0.5f, 0.5f, 9u, (128u << 11) | 4u, 0u, 0, px);
+    check(ok && px[0] == 64, "Proctex NearestMipmapLinear = Nearest (64)");
+    ok = t_proctex_render(c, mem, 0.5f, 0.5f, 9u, (128u << 11) | 5u, 0u, 0, px);
+    check(ok && px[0] == 63, "Proctex LinearMipmapLinear = Linear (63)");
+
+    /* lut_offset level0 = 100, width = 20: index = 100 + 0.500122*19
+       = 109.502 => Nearest 110, Linear 109. */
+    ok = t_proctex_render(c, mem, 0.5f, 0.5f, 9u, (20u << 11), 100u, 0, px);
+    check(ok && px[0] == 110,
+          "Proctex lut_offset 100 + width 20 (Nearest) => 110");
+    ok = t_proctex_render(c, mem, 0.5f, 0.5f, 9u, (20u << 11) | 1u, 100u, 0, px);
+    check(ok && px[0] == 109, "Proctex lut_offset 100 + width 20 (Linear) => 109");
+}
+
+/* LUT-Upload: Index laeuft weiter, 128er-Tabellen modulo 128, 256er
+   modulo 256 (Azahar PicaCore::ProcTex). */
+static void test_proctex_lut_upload(ArmCpu *c, unsigned char *mem)
+{
+    uint32_t buf[256];
+    uint32_t *q, size, o;
+    int i, ok;
+
+    /* Noise-Wertetabelle: 0xAF=127 + ein Wort => Index 0.
+       Farbtabelle: Start 255 + 4 Woerter => Index (255+4)&0xFF = 3. */
+    gpu_pica_reset();
+    q = (uint32_t *)(mem + LIST);
+    q = emit(q, 0xAF, (0u << 8) | 127u);
+    q = emit(q, 0xB0, 0x0FFFu);
+    buf[0] = 0x00FF0000u;               /* Index 255: blau */
+    buf[1] = 0xFF00FF00u;               /* Index 0: gruen */
+    buf[2] = 0xFF0000FFu;               /* Index 1: rot */
+    buf[3] = 0xFF000000u;               /* Index 2: schwarz */
+    q = t_emit_proctex_lut(q, 4u, 255u, buf, 4);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    check(gpu_pica_reg(0xAF) == 0x403u,
+          "Proctex-LUT: 0xAF-Index inkrementiert (255+4 => 3)");
+
+    /* 200 Woerter auf die 128er-Noise-Tabelle: Registerindex 200. */
+    gpu_pica_reset();
+    q = (uint32_t *)(mem + LIST);
+    q = emit(q, 0xAF, (0u << 8) | 0u);
+    for (i = 0; i < 200; i++) q = emit(q, 0xB0, (uint32_t)i);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    check(gpu_pica_reg(0xAF) == 200u,
+          "Proctex-LUT: 200 Woerter => Index 200 (8-Bit-Inkrement)");
+
+    /* Farbtabellen-Umschlag rendern: color_map 0 => lut_coord 0,
+       Farbindex 0 wurde bei Index 256 (nach 255 ab Start 255) geschrieben. */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_quad_vertices(c, VTX, 0.0f, 0.5f, 0.5f, 0.5f, 0.5f);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad(q, VTX, 8, 8);
+    q = emit(q, 0x80, 1u << 10);
+    q = emit(q, 0xA8, 9u);
+    q = emit(q, 0xAC, (1u << 11));             /* width 1 => Index = 0 */
+    q = emit(q, 0xAD, 0u);
+    memset(buf, 0, sizeof(buf));
+    q = t_emit_proctex_lut(q, 2u, 0u, buf, 128);   /* color_map alles 0 */
+    q = t_emit_proctex_lut(q, 4u, 0u, buf, 255);   /* Farbtabelle 0..254 = 0 */
+    buf[0] = 0xFF000000u;                          /* Index 255: schwarz */
+    buf[1] = 0xFF00FF00u;                          /* 256 -> 0: gruen */
+    q = t_emit_proctex_lut(q, 4u, 255u, buf, 2);
+    q = emit_tev0(q, 6u, 6u, 0u);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    ok = (mem[o + 3] == 0 && mem[o + 2] == 255 && mem[o + 1] == 0);
+    check(ok, "Proctex-Farbtabelle: Index 256 faellt auf 0 (gruen)");
+}
+
+/* texture3_coordinates (0x80 Bits 8..9) waehlt unter TEXCOORD0/1/2.
+   Eigenes Vertexprogramm: o1 -> TEXCOORD0 (12/13), o2 -> TEXCOORD1
+   (14/15). tc0=(0.5,0.5), tc1=(2.5,2.5); Clamp ToZero macht aus 2.5 die 0. */
+static void test_proctex_coordinates(ArmCpu *c, unsigned char *mem)
+{
+    int sel;
+    static const int expect[2] = {64, 0};
+    for (sel = 0; sel < 2; sel++) {
+        uint32_t words[4];
+        uint32_t *q, size, o;
+        int i;
+
+        gpu_pica_reset();
+        memset(mem + 0x40000u, 0, 0x100);
+        for (i = 0; i < 6; i++) {
+            static const float xy[6][2] = {{-1, -1}, {1, -1}, {1, 1},
+                                            {-1, -1}, {1, 1}, {-1, 1}};
+            float v[7];
+            v[0] = xy[i][0]; v[1] = xy[i][1]; v[2] = 0.0f;
+            v[3] = 0.5f; v[4] = 0.5f;              /* TEXCOORD0 */
+            v[5] = 2.5f; v[6] = 2.5f;              /* TEXCOORD1 */
+            memcpy(c->mem + ((VTX + (uint32_t)i * 28u) & 0x1FFFFFFFu), v, sizeof(v));
+        }
+        q = (uint32_t *)(mem + LIST);
+        q = emit(q, 0x200, VTX >> 3);
+        q = emit(q, 0x201, 0xB | (7u << 4) | (7u << 8));   /* f3, f2, f2 */
+        q = emit(q, 0x202, 2u << 28);
+        q = emit(q, 0x203, 0u);                 /* Loader 0: attr0/attr1 */
+        q = emit(q, 0x204, 0x10u);
+        q = emit(q, 0x205, (2u << 28) | (28u << 16));
+        q = emit(q, 0x206, 20u);                /* Loader 1: attr2 */
+        q = emit(q, 0x207, 0x2u);
+        q = emit(q, 0x208, (1u << 28) | (28u << 16));
+        q = emit(q, 0x4F, 3u);                  /* 3 Ausgaenge */
+        q = emit(q, 0x50, 0x03020100u);         /* o0 -> POSITION */
+        q = emit(q, 0x51, 0x1F1F0D0Cu);         /* o1 -> TEXCOORD0 */
+        q = emit(q, 0x52, 0x1F1F0F0Eu);         /* o2 -> TEXCOORD1 */
+        q = emit(q, 0x2BD, 7u);
+        q = emit(q, 0x2B9, 2u);
+        q = emit(q, 0x2BB, 0x210u);
+        words[0] = ins_common(0x13u, 0u, 0x00u, 0u, 0u, 0u);
+        words[1] = ins_common(0x13u, 0u, 0x01u, 0u, 1u, 0u);
+        words[2] = ins_common(0x13u, 0u, 0x02u, 0u, 2u, 0u);
+        words[3] = 0x22u << 26;
+        q = emit_program(q, words, 4);
+        q = emit_swizzle0(q, swz_xyzw());
+        q = emit_viewport(q, 8, 8);
+        q = emit(q, 0x228, 6u);
+        q = emit(q, 0x80, (1u << 10) | ((uint32_t)sel << 8));
+        q = emit(q, 0xA8, 8u);
+        q = emit(q, 0xAC, (128u << 11));
+        q = emit(q, 0xAD, 0u);
+        q = t_emit_proctex_ramps(q, 0);
+        q = emit_tev0(q, 6u, 6u, 0u);
+        q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+        q = emit(q, 0x22E, 0u);
+        size = (uint32_t)((unsigned char *)q - (mem + LIST));
+        gpu_run_pica_list(c, LIST, size);
+        o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+        {
+            char msg[96];
+            sprintf(msg, "Proctex texture3_coordinates=%d => Rot %d", sel, expect[sel]);
+            check(mem[o + 3] == (unsigned char)expect[sel], msg);
+        }
+    }
+}
+
 static void test_fb_formats(ArmCpu *c, unsigned char *mem)
 {
     static const struct {
@@ -3279,6 +3628,12 @@ int main(void) {
     test_texture_morton(&c, mem);
     test_texture_wrap(&c, mem);
     test_texture_filter(&c, mem);
+    test_proctex_combiner(&c, mem);
+    test_proctex_clamp_shift(&c, mem);
+    test_proctex_noise(&c, mem);
+    test_proctex_alpha_filter(&c, mem);
+    test_proctex_lut_upload(&c, mem);
+    test_proctex_coordinates(&c, mem);
     test_fb_formats(&c, mem);
     test_logic_ops(&c, mem);
     test_alpha_test(&c, mem);

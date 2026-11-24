@@ -13,14 +13,17 @@
  * Wrap/Border; keine Filterung wie Azahar, ETC1-Subtiles nach rohen
  * Kachelkoordinaten; nur Einheit 0 beachtet den Typ: Projection2D,
  * Cube/ShadowCube (Face-Adressen 0x86..0x8A), Shadow2D inkl. Bias,
- * TEXCOORD0_W 0x8B; TEXCOORD2 = 22/23), Fragment-Lighting 0x140..0x1D9
- * nach Azahar sw_lighting.cpp (Lichtquellen, Distanz-/Spot-Daempfung,
+ * TEXCOORD0_W 0x8B; TEXCOORD2 = 22/23), prozedurale Textur (Einheit 3,
+ * 0x0A8..0x0AD/0x0AF/0xB0..0xB7 nach Azahar sw_proctex.cpp: LUTs,
+ * Noise, Shift, Clamp, Combiner, separate Alpha, Filter), Fragment-Lighting
+ * 0x140..0x1D9 nach Azahar sw_lighting.cpp (Lichtquellen, Distanz-/Spot-Daempfung,
  * Fresnel, Bump-Mapping, Clamp, LUT-Upload 0x1C5/0x1C8..0x1CF) in die
  * TEV-Quellen Primary/SecondaryFragment, Output-Merger 0x100..0x107
  * (Blending, LogicOp, Alpha-Test) und Farb-/Tiefenziel 0x110..0x11E
  * (Kanalmasken, RGBA8/RGB8/RGB5A1/RGB565/RGBA4, Depth-Test/Write,
  * Stencil, D16/D24/D24S8) sowie Fog (0xE0/0xE1/0xE6/0xE8..0xEF, Azahar
- * sw_rasterizer.cpp WriteFog). Noch offen (ROADMAP M5): Mipmaps, Proctex.
+ * sw_rasterizer.cpp WriteFog). Noch offen (ROADMAP M5): Mipmaps (im
+ * Azahar-Software-Renderer ebenfalls nicht umgesetzt).
  */
 
 #include <stdint.h>
@@ -109,6 +112,7 @@ static uint32_t g_light_lut[LIGHT_LUT_COUNT][256];
 
 static void p_vs_reset(void);
 static void p_vs_reset_draw_state(void);
+static void p_proctex_reset(void);
 
 uint32_t gpu_pica_phys_to_guest(uint32_t paddr)
 {
@@ -146,6 +150,7 @@ void gpu_pica_reset(void)
     p_regs[0x020] = 0x12345678u;
     p_regs[0x030] = 0xFFFFFFF0u;
     p_regs[0x034] = 0x00000001u;
+    p_proctex_reset();
     p_vs_reset();
     p_vs_reset_draw_state();
 }
@@ -283,6 +288,277 @@ static float p_pica_small_float(uint32_t hex, int mbits, int ebits)
         memcpy(&f, &fp32, 4);
         return f;
     }
+}
+
+/* ================== Prozedurale Texturen (Proctex, Einheit 3) ==========
+ * Nachbildung von Azahar renderer_software/sw_proctex.cpp und der LUT-
+ * Verwaltung in pica_core.cpp (PicaCore::ProcTex). Register (TexturingRegs):
+ *   0x0A8 proctex           clamp u/v (je 3 Bit), color_combiner (4),
+ *                           alpha_combiner (4), separate_alpha (Bit14),
+ *                           noise_enable (Bit15), u_shift/v_shift (2+2),
+ *                           bias_low (Bits20..27, float16, ungenutzt)
+ *   0x0A9/0x0AA noise u/v   amplitude fix1.3.12 (Bits0..15, signed),
+ *                           phase float16 (Bits16..31)
+ *   0x0AB noise_frequency   u/v je float16
+ *   0x0AC proctex_lut       filter (Bits0..2), lod_min/max, width (Bits11..18)
+ *   0x0AD lut_offset        level0..3 (je 8 Bit; benutzt wird level0)
+ *   0x0AF lut_config        index (Bits0..7), ref_table (Bits8..11)
+ *   0x0B0..0x0B7 lut_data   jedes Wort landet bei index und inkrementiert
+ *                           index (Azahar PicaCore::ProcTex-LUT-Upload)
+ * Wertetabellen: 128 Eintraege, Bits0..11 value, Bits12..23 signed diff
+ *   (0.0.12). Farbtabellen: 256 Eintraege RGBA8; color_diff je Kanal ein
+ *   signed Byte, das als *2 gelesen wird (Farbdifferenz).
+ * Der Azahar-Software-Renderer wertet Mipmap-LOD nicht aus ("TODO(wwylele):
+ * implement mipmap" in sw_proctex.cpp); die Mipmap-Filter verhalten sich
+ * daher wie ihre Nicht-Mipmap-Gegenstuecke (Nearest/Linear).
+ */
+#define PROCTEX_VALUE_LUT_COUNT 128
+#define PROCTEX_COLOR_LUT_COUNT 256
+
+static uint32_t g_proctex_noise[PROCTEX_VALUE_LUT_COUNT];
+static uint32_t g_proctex_color_map[PROCTEX_VALUE_LUT_COUNT];
+static uint32_t g_proctex_alpha_map[PROCTEX_VALUE_LUT_COUNT];
+static uint32_t g_proctex_color[PROCTEX_COLOR_LUT_COUNT];
+static uint32_t g_proctex_color_diff[PROCTEX_COLOR_LUT_COUNT];
+
+static void p_proctex_reset(void)
+{
+    memset(g_proctex_noise, 0, sizeof(g_proctex_noise));
+    memset(g_proctex_color_map, 0, sizeof(g_proctex_color_map));
+    memset(g_proctex_alpha_map, 0, sizeof(g_proctex_alpha_map));
+    memset(g_proctex_color, 0, sizeof(g_proctex_color));
+    memset(g_proctex_color_diff, 0, sizeof(g_proctex_color_diff));
+}
+
+/* Azahar WriteInternalReg: der Tabellenindex steht in 0xAF, wird nach jedem
+ * Datenwort um eins erhoeht (BitField-Assign maskiert auf 8 Bit) und fuer
+ * die 128er-Tabellen modulo deren Groesse benutzt. Unbekannte Tabellen
+ * inkrementieren den Index ebenfalls. */
+static void p_proctex_lut_write(uint32_t value)
+{
+    uint32_t cfg = p_regs[0xAF];
+    uint32_t index = cfg & 0xFFu;
+    uint32_t table = (cfg >> 8) & 0xFu;
+
+    switch (table) {
+    case 0u: g_proctex_noise[index % PROCTEX_VALUE_LUT_COUNT] = value; break;
+    case 2u: g_proctex_color_map[index % PROCTEX_VALUE_LUT_COUNT] = value; break;
+    case 3u: g_proctex_alpha_map[index % PROCTEX_VALUE_LUT_COUNT] = value; break;
+    case 4u: g_proctex_color[index % PROCTEX_COLOR_LUT_COUNT] = value; break;
+    case 5u: g_proctex_color_diff[index % PROCTEX_COLOR_LUT_COUNT] = value; break;
+    default: break;
+    }
+    p_regs[0xAF] = (cfg & ~0xFFu) | ((index + 1u) & 0xFFu);
+}
+
+/* sw_proctex.cpp LookupLUT: coord=0 -> lut[0], coord=127/128 -> lut[127],
+ * coord=1 -> lut[127] + diff[127]; dazwischen value + frac*diff. */
+static float p_proctex_lut_lookup(const uint32_t *lut, float coord)
+{
+    int index_int;
+    int32_t diff;
+    float frac;
+
+    coord *= 128.0f;
+    index_int = (int)coord;
+    if (index_int > PROCTEX_VALUE_LUT_COUNT - 1) index_int = PROCTEX_VALUE_LUT_COUNT - 1;
+    if (index_int < 0) index_int = 0;
+    frac = coord - (float)index_int;
+    diff = (int32_t)((lut[index_int] >> 12) & 0xFFFu);
+    if (diff & 0x800) diff -= 0x1000;
+    return (float)(lut[index_int] & 0xFFFu) / 4095.0f +
+           frac * ((float)diff / 4095.0f);
+}
+
+/* sw_proctex.cpp NoiseRand1D/NoiseRand2D (gegen Hardware verifiziert). */
+static unsigned p_proctex_rand1d(unsigned v)
+{
+    static const unsigned table[16] = {0, 4, 10, 8, 4, 9, 7, 12, 5, 15, 13, 14, 11, 15, 2, 11};
+    return (((v % 9u) + 2u) * 3u & 0xFu) ^ table[(v / 9u) & 0xFu];
+}
+
+static float p_proctex_rand2d(unsigned x, unsigned y)
+{
+    static const unsigned table[16] = {10, 2, 15, 8, 0, 7, 4, 5, 5, 13, 2, 6, 13, 9, 3, 14};
+    unsigned u2 = p_proctex_rand1d(x);
+    unsigned v2 = p_proctex_rand1d(y);
+
+    v2 += ((u2 & 3u) == 1u) ? 4u : 0u;
+    v2 ^= (u2 & 1u) * 6u;
+    v2 += 10u + u2;
+    v2 &= 0xFu;
+    v2 ^= table[u2];
+    return -1.0f + (float)v2 * 2.0f / 15.0f;
+}
+
+/* sw_proctex.cpp NoiseCoef. */
+static float p_proctex_noise_coef(float u, float v)
+{
+    uint32_t nf = p_regs[0xAB];
+    uint32_t nu = p_regs[0xA9];
+    uint32_t nv = p_regs[0xAA];
+    float freq_u = p_pica_small_float(nf & 0xFFFFu, 10, 5);
+    float freq_v = p_pica_small_float((nf >> 16) & 0xFFFFu, 10, 5);
+    float phase_u = p_pica_small_float((nu >> 16) & 0xFFFFu, 10, 5);
+    float phase_v = p_pica_small_float((nv >> 16) & 0xFFFFu, 10, 5);
+    float x = 9.0f * freq_u * fabsf(u + phase_u);
+    float y = 9.0f * freq_v * fabsf(v + phase_v);
+    int x_int = (int)x;
+    int y_int = (int)y;
+    float x_frac = x - (float)x_int;
+    float y_frac = y - (float)y_int;
+    float g0 = p_proctex_rand2d((unsigned)x_int, (unsigned)y_int) * (x_frac + y_frac);
+    float g1 = p_proctex_rand2d((unsigned)x_int + 1u, (unsigned)y_int) *
+               (x_frac + y_frac - 1.0f);
+    float g2 = p_proctex_rand2d((unsigned)x_int, (unsigned)y_int + 1u) *
+               (x_frac + y_frac - 1.0f);
+    float g3 = p_proctex_rand2d((unsigned)x_int + 1u, (unsigned)y_int + 1u) *
+               (x_frac + y_frac - 2.0f);
+    float x_noise = p_proctex_lut_lookup(g_proctex_noise, x_frac);
+    float y_noise = p_proctex_lut_lookup(g_proctex_noise, y_frac);
+    /* Common::BilinearInterp: Lerp(Lerp(g0,g1,x), Lerp(g2,g3,x), y). */
+    float y0 = g0 * (1.0f - x_noise) + g1 * x_noise;
+    float y1 = g2 * (1.0f - x_noise) + g3 * x_noise;
+    return y0 * (1.0f - y_noise) + y1 * y_noise;
+}
+
+/* sw_proctex.cpp GetShiftOffset. */
+static float p_proctex_shift_offset(float v, uint32_t mode, uint32_t clamp_mode)
+{
+    float offset = (clamp_mode == 3u) ? 1.0f : 0.5f;   /* MirroredRepeat */
+
+    switch (mode) {
+    case 0u: return 0.0f;
+    case 1u: return offset * (float)(((int)v / 2) % 2);           /* Odd */
+    case 2u: return offset * (float)((((int)v + 1) / 2) % 2);     /* Even */
+    default: return 0.0f;
+    }
+}
+
+/* sw_proctex.cpp ClampCoord. */
+static float p_proctex_clamp(float coord, uint32_t mode)
+{
+    switch (mode) {
+    case 0u:                                   /* ToZero */
+        if (coord > 1.0f) coord = 0.0f;
+        return coord;
+    case 1u:                                   /* ToEdge */
+        return (coord < 1.0f) ? coord : 1.0f;
+    case 2u:                                   /* SymmetricalRepeat */
+        return coord - floorf(coord);
+    case 3u: {                                 /* MirroredRepeat */
+        int integer = (int)coord;
+        float frac = coord - (float)integer;
+        return (integer % 2) == 0 ? frac : (1.0f - frac);
+    }
+    case 4u:                                   /* Pulse */
+        return (coord <= 0.5f) ? 0.0f : 1.0f;
+    default:
+        return (coord < 1.0f) ? coord : 1.0f;
+    }
+}
+
+/* sw_proctex.cpp CombineAndMap. */
+static float p_proctex_combine(float u, float v, uint32_t combiner,
+                               const uint32_t *map_table)
+{
+    float f;
+
+    switch (combiner) {
+    case 0u: f = u; break;
+    case 1u: f = u * u; break;
+    case 2u: f = v; break;
+    case 3u: f = v * v; break;
+    case 4u: f = (u + v) * 0.5f; break;                    /* Add */
+    case 5u: f = (u * u + v * v) * 0.5f; break;            /* Add2 */
+    case 6u: {                                             /* SqrtAdd2 */
+        float s = sqrtf(u * u + v * v);
+        f = (s < 1.0f) ? s : 1.0f;
+        break;
+    }
+    case 7u: f = (u < v) ? u : v; break;                   /* Min */
+    case 8u: f = (u > v) ? u : v; break;                   /* Max */
+    case 9u: {                                             /* RMax */
+        float s = sqrtf(u * u + v * v);
+        float r = ((u + v) * 0.5f + s) * 0.5f;
+        f = (r < 1.0f) ? r : 1.0f;
+        break;
+    }
+    default: f = 0.0f; break;
+    }
+    return p_proctex_lut_lookup(map_table, f);
+}
+
+/* sw_proctex.cpp ProcTex: liefert die Farbe von Textureinheit 3. */
+static void p_sample_proctex(float u, float v, unsigned char out[4])
+{
+    uint32_t cfg = p_regs[0xA8];
+    uint32_t u_clamp = cfg & 7u;
+    uint32_t v_clamp = (cfg >> 3) & 7u;
+    uint32_t color_combiner = (cfg >> 6) & 0xFu;
+    uint32_t alpha_combiner = (cfg >> 10) & 0xFu;
+    uint32_t filter = p_regs[0xAC] & 7u;
+    uint32_t width = (p_regs[0xAC] >> 11) & 0xFFu;
+    uint32_t offset = p_regs[0xAD] & 0xFFu;
+    float u_shift, v_shift, lut_coord, index;
+    unsigned char color[4];
+    int i;
+
+    u = fabsf(u);
+    v = fabsf(v);
+
+    /* Shift-Offset vor der Rauschzugabe (Azahar). */
+    u_shift = p_proctex_shift_offset(v, (cfg >> 16) & 3u, u_clamp);
+    v_shift = p_proctex_shift_offset(u, (cfg >> 18) & 3u, v_clamp);
+
+    if (cfg & (1u << 15)) {                    /* noise_enable */
+        float noise = p_proctex_noise_coef(u, v);
+        int32_t amp_u = (int32_t)(p_regs[0xA9] & 0xFFFFu);
+        int32_t amp_v = (int32_t)(p_regs[0xAA] & 0xFFFFu);
+        if (amp_u & 0x8000) amp_u -= 0x10000;
+        if (amp_v & 0x8000) amp_v -= 0x10000;
+        u += noise * (float)amp_u / 4095.0f;
+        v += noise * (float)amp_v / 4095.0f;
+        u = fabsf(u);
+        v = fabsf(v);
+    }
+
+    u = p_proctex_clamp(u + u_shift, u_clamp);
+    v = p_proctex_clamp(v + v_shift, v_clamp);
+
+    lut_coord = p_proctex_combine(u, v, color_combiner, g_proctex_color_map);
+    index = (float)offset +
+            ((width > 0u) ? lut_coord * (float)(width - 1u) : 0.0f);
+
+    if (filter == 1u || filter == 3u || filter == 5u) {
+        int index_int = (int)index;
+        float frac = index - (float)index_int;
+        if (index_int < 0) index_int = 0;
+        if (index_int > PROCTEX_COLOR_LUT_COUNT - 1) index_int = PROCTEX_COLOR_LUT_COUNT - 1;
+        for (i = 0; i < 4; i++) {
+            int32_t diff = (int32_t)((g_proctex_color_diff[index_int] >> (i * 8)) & 0xFFu);
+            float val;
+            if (diff & 0x80) diff -= 0x100;
+            val = (float)((g_proctex_color[index_int] >> (i * 8)) & 0xFFu) +
+                  frac * (float)(diff * 2);
+            if (val < 0.0f) val = 0.0f;
+            if (val > 255.0f) val = 255.0f;
+            color[i] = (unsigned char)val;
+        }
+    } else {
+        int index_int = (int)roundf(index);
+        if (index_int < 0) index_int = 0;
+        if (index_int > PROCTEX_COLOR_LUT_COUNT - 1) index_int = PROCTEX_COLOR_LUT_COUNT - 1;
+        for (i = 0; i < 4; i++)
+            color[i] = (unsigned char)((g_proctex_color[index_int] >> (i * 8)) & 0xFFu);
+    }
+
+    if (cfg & (1u << 14)) {                    /* separate_alpha */
+        float alpha = p_proctex_combine(u, v, alpha_combiner, g_proctex_alpha_map);
+        color[3] = (unsigned char)(alpha * 255.0f);
+    }
+
+    for (i = 0; i < 4; i++) out[i] = color[i];
 }
 
 static float p_attr_comp(ArmCpu *c, uint32_t addr, int fmt)
@@ -2094,6 +2370,15 @@ static void p_process_tri(ArmCpu *c, const PicaVertex *v0, const PicaVertex *v1,
                     p_sample_tex(c, unit, tuv[ci][0], tuv[ci][1], tc0_w, texbuf);
                     for (i = 0; i < 4; i++) tex_col[unit].c[i] = texbuf[i];
                 }
+                /* Prozedurale Textur (Einheit 3, Azahar sw_rasterizer.cpp
+                   TextureColor): eigene Koordinatenwahl
+                   main_config.texture3_coordinates (Bits8..9). */
+                if (p_regs[0x80] & (1u << 10)) {
+                    uint32_t ci = (p_regs[0x80] >> 8) & 3u;
+                    if (ci > 2u) ci = 2u;   /* Azahar hat nur uv[0..2] */
+                    p_sample_proctex(tuv[ci][0], tuv[ci][1], texbuf);
+                    for (i = 0; i < 4; i++) tex_col[3].c[i] = texbuf[i];
+                }
 
                 /* Fragment-Lighting (Azahar sw_rasterizer.cpp): nur wenn
                    0x1C6 Bit0 (lighting.disable) = 0. */
@@ -3298,6 +3583,7 @@ static void p_write_reg(ArmCpu *c, uint32_t id, uint32_t value, uint32_t mask,
     p_vs_reg_write(c, id, value);
     if (id >= 0xE8u && id <= 0xEFu) p_fog_lut_write(value);
     if (id >= 0x1C8u && id <= 0x1CFu) p_light_lut_write(value);
+    if (id >= 0xB0u && id <= 0xB7u) p_proctex_lut_write(value);
 
     if (id == 0x010u) {             /* Finalize / irq_request */
         /* Azahar: every_byte_match(irq_request, irq_compare) -> P3D; bei
