@@ -258,6 +258,62 @@ Antwort.
 
 ## 6. Befunde (offene Ursachen, kein Workaround eingebaut)
 
+### Y2R-Videopfad fehlt: Movie-Player bleibt in Zustand 5 – offen 2026-11-24
+
+**Befund:** Die IPC-Folge des natuerlichen Boots stimmt mit
+`reports/azahar_trace.txt` bis einschliesslich `File::OpenLinkFile`
+(Referenz 2.469 s, Zeile 473) im Inhalt und in den Parametern ueberein;
+wegen der mehreren Gast-Threads ist nur die Multimenge der Kommandos
+vergleichbar, nicht die globale Zeilenreihenfolge. Ab dem
+naechsten Referenzereignis divergiert sie: die Referenz beginnt bei 2.628 s
+mit dem Y2R-Framepfad (je Frame `SetInputFormat`, `SetInputLineWidth`,
+`SetInputLines`, `SetSendingY/U/V`, `SetOutputFormat`, `SetRotation`,
+`SetBlockAlignment`, `SetTransferEndInterrupt`, `SetAlpha`,
+`SetStandardCoefficient`, `SetReceiving`, `StartConversion`, danach 4-5x
+`IsBusyConversion`; 520 Zyklen bis zum Trace-Ende 11 s). Der Port sendet
+davon **nichts**: nur `0x002B DriverInitialize`, `0x000D
+SetTransferEndInterrupt` und `0x000F GetTransferEndEvent` (`grep y2r:u
+out/logs/frontier.txt` = 3 Kommandos).
+
+**Belege (nur Diagnose, kein Gastzustand):**
+* `ARM_WATCH=0x00347C68` (StartConversion-Wrapper des Spiels) und
+  `ARM_WATCH=0x00218660`/`0x00171DAC` (Y2R-Treiber der Frame-Schleife):
+  0 Treffer im gesamten Lauf.
+* Beide Y2R-Framepfade werden nur aus dem Movie-Player-Objekt aufgerufen:
+  `fn_0031282C` verlangt Zustand 4 oder 8 (`fn_002779F8` liest Byte `+8`).
+  `ARM_MEMWATCH` auf dieses Byte zeigt 0 -> 0 -> 1 (Start,
+  `fn_00311CE0`) -> **5** (`fn_00311F58`, 0x31232C) und danach in 40 s
+  **keine** weitere Aenderung.
+* Zustand 5 wird von `fn_00218248` (Presenter) behandelt; der Presenter
+  verlaesst die Funktion aber sofort wieder, weil der Stream-Peek
+  (`fn_00218AE4` -> `0x003905E8`, Stream-ID `[obj+0x1e8]`) leer ist –
+  das erste dekodierte Videoframe steht nicht an.
+* Die Filmdatei selbst liegt korrekt vor: der Port liest
+  `m999.moflex` (RomFS-Datei, 0x912A4 Byte, Level-3-Datenoffset
+  0x26B10510) vollstaendig und alle Reads liefern die volle Laenge; die
+  BCSTM-Tonspur (`MOV_999.dspadpcm.bcstm`) wird ebenfalls gelesen.
+* `HLE_PERFMAP_FILE`: Thread 0 arbeitet durchgehend im Huffman-/Koeffizienten-
+  Decoder (`fn_0016E4A0+0x14`, 23,7 M Bloecke bei 300 Frames, 51,3 M bei
+  600 Frames), d. h. der Videodecoder laeuft – es fehlt die
+  Praesentations-/Y2R-Stufe.
+* Der Decoder-API-Aufruf `0x0033C864` -> `0x003909DC` wird **nie**
+  ausgefuehrt (ARM_WATCH: 0 Treffer in 8 s). Dagegen laeuft der Block
+  `0x001ED8FC` (in `fn_001ED4B8`, ruft `0x00390A20` =
+  Puffer-/Singleton-Freigabe der Decoder-Schicht) ca. 56x/s, also einmal
+  je Host-Frame. Die Praesentations-Queue (`[stream+0x34]` Ring,
+  Leseindex `+0x38`, Schreibindex `+0x3c`) bleibt leer.
+* Der Frame-Loop selbst (GSP `0x000C TriggerCmdReqQueue`, GX
+  `0x05 FlushCacheRegions` je Liste, `SetBufferSwap` per VBlank) und alle
+  Einmal-Ereignisse (`fs` OpenArchive/GetFormatInfo/OpenFile /head.lt6,
+  `boss` InitializeSession/GetOptoutFlag, `ptm` GetTotalStepCount,
+  `cfg` GetConfig-Blocks, `ndm` SuspendDaemons) stimmen; die Referenz
+  enthaelt nach 2.6 s ausschliesslich Y2R-Zeilen.
+
+**Naechster Schritt:** Im Demuxer ansetzen: pruefen, warum der erste
+Videopaket des `m999.moflex` nicht in den Praesentations-Stream
+(`[movie+0x1e8]`) gelangt, obwohl der Koeffizientendecoder laeuft. Kein
+Kernel-/IPC-Fehler belegt; ein Workaround wurde nicht eingebaut.
+
 ### Stall nach der zweiten PICA-Liste: Futex-Mutex bei `0x0040F120` – offen 2026-11-24
 
 **Befund:** Der natuerliche Boot bleibt nach der zweiten PICA-Liste
