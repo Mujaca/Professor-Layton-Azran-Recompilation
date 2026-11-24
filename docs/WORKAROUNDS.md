@@ -1183,3 +1183,22 @@ leer.
 Ressourcen-Set-Manager um `0x1FBxxx`/`0x23Dxxx` (vtable `0x3C6010`). Erst
 wenn ein *Schreibversuch* auf `0x408918`/`0x408920` existiert und
 fehlschlaegt, ist eine Runtime-Korrektur belegbar.
+### Erster selbst gerenderter Frame (M3/M4) – 2026-11-24
+
+Drei weitere Fehler verhinderten nach dem Film jedes Bild:
+1. **Recompiler, Thumb `add rD, pc`** (Register-Form): PC wurde wie bei
+   `adr` auf 4 Byte ausgerichtet; richtig ist Adresse + 4. Im `printf` des
+   Spiels (0x1000FA) zeigte die Formattabelle 2 Byte zu frueh, `%03d` wurde
+   mit Leerzeichen formatiert (Dateiname `15_   999.xs`), Szenen-/Layout-
+   Ressourcen wurden nicht gefunden, die Renderer-Registry blieb leer und
+   das Draw-Gate (0x27B34C) geschlossen. Gefunden per `tools/cosim` an
+   fn_00277B84 (Test `thumb_add_reg_pc_unausgerichtet`).
+2. **PICA Attribut-Loader/Indexpuffer**: Basis (0x200) wurde vor dem
+   Addieren des Loader- bzw. Index-Offsets in Gastadressen umgerechnet; die
+   Basis liegt im VRAM-Fenster, die Daten per Offset im FCRAM. Jetzt wird
+   die volle physische Adresse umgerechnet.
+3. **PICA Scissor**: 0x065 Modus, 0x066 Position, 0x067 Ausdehnung (Azahar
+   regs_internal.cpp); der Port las x1/y1 aus 0x065 -> 1x1-Rechteck.
+
+**Ergebnis:** M3 = ja (Draws), M4 = ja: `reports/port_intro_frame300.png`
+(Intro-Film, oberer Bildschirm), `reports/port_frame1800.png`.

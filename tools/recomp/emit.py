@@ -340,6 +340,11 @@ class Emitter:
         if n is None:
             raise Unsupported(t)
         if n == 15:
+            if self.thumb and getattr(self, "_thumb_pc_unaligned", False):
+                # Thumb-Datenverarbeitung mit PC als Registeroperand
+                # (`add r7, pc`, `mov r0, pc`): PC = Instruktion + 4, ohne
+                # Ausrichtung. Align(PC, 4) gilt nur fuer adr/Literal-Loads.
+                return "0x%08Xu" % u32(pc + 4)
             return "0x%08Xu" % u32(self.pc_value(pc))
         return "c->r[%d]" % n
 
@@ -376,6 +381,16 @@ class Emitter:
 
     # ---------- instruction classes ----------
     def dp(self, ins, in_it=False):
+        ops = isa.split_operands(ins.op_str)
+        # Register-Form (kein Immediate) -> PC unausgerichtet (siehe value()).
+        self._thumb_pc_unaligned = bool(self.thumb and ops
+                                        and not ops[-1].strip().startswith("#"))
+        try:
+            return self._dp(ins, in_it)
+        finally:
+            self._thumb_pc_unaligned = False
+
+    def _dp(self, ins, in_it=False):
         code, uses_rn, writes = DP_OPS[ins.id]
         ops = isa.split_operands(ins.op_str)
         pc = ins.address

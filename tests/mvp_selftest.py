@@ -257,6 +257,28 @@ CASES = [
         "expect": {"r0": 11},
     },
     {
+        # Thumb `add rD, pc` (Register-Form) liest PC = Adresse + 4 OHNE
+        # Ausrichtung (nur adr/Literal-Loads richten aus). Im printf des
+        # Spiels (0x1000FA) zeigte die Formattabelle sonst 2 Byte zu frueh,
+        # `%03d` wurde mit Leerzeichen statt Nullen formatiert und Dateinamen
+        # wie `15_   999.xs` entstanden.
+        "name": "thumb_add_reg_pc_unausgerichtet",
+        "asm": """
+            mov r0, #0
+            blx 0x100200
+            bx lr
+        """,
+        "thumb_raw": {
+            0x100200: """
+                nop
+                add r0, pc
+                bx lr
+            """,
+        },
+        "regs": {},
+        "expect": {"r0": 0x100206},
+    },
+    {
         "name": "push_pop_cond",
         "asm": """
             push {r4, lr}
