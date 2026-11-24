@@ -2319,6 +2319,9 @@ int main(void) {
     memset(&c, 0, sizeof(c));
     memset(mem, 0, sizeof(mem));
     arm_cpu_init(&c, mem, sizeof(mem));
+    /* Paralleles Rasterisieren: die Erwartungswerte sind die seriellen
+     * Azahar-Semantikwerte, der Test belegt damit Pixelgleichheit. */
+    gpu_pica_set_raster_threads(3);
 
     /* Textur: 2x2 RGB8, alle Texel rot. */
     for (i = 0; i < 4; i++) {

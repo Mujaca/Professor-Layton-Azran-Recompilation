@@ -124,6 +124,10 @@ static uint64_t host_us(void);
  * Zeit, in der der Gast-Lock zwischen zwei Gast-Abschnitten frei lag.
  * Reine Zaehler, kein Gastzustand. */
 static int g_ystat = 0;
+/* Diagnose (HLE_GTIME): Wandzeit der PICA-Kommandolisten-Ausfuehrung
+ * (Software-Rasterizer) gegen die Gesamtlaufzeit. Reine Zaehler. */
+static int g_gtime = 0;
+static unsigned long long g_gtime_us, g_gtime_lists;
 static unsigned long long g_yield_n, g_yield_us, g_pump_rel_n, g_pump_rel_us;
 static unsigned long long g_lock_idle_us;
 static volatile unsigned long long g_lock_free_us = 0;
@@ -355,6 +359,9 @@ static int g_log = 0;
 static uint64_t g_tick = 0x1000;
 static uint64_t g_boot_ns = 0;   /* Nullpunkt fuer svcGetSystemTick */
 static int g_tick_calls = 0;
+static int g_ticklog_n = 0;
+static int g_sleeplog_n = 0;
+static int g_waittmo_n = 0;
 static Handle g_handles[MAX_HANDLES];
 static int g_next_handle = 1;
 static uint32_t g_srv_handle = 0;
@@ -872,6 +879,14 @@ static int hs_wait(ArmCpu *c, Handle **objs, int cnt, int wait_all,
             kwait_unregister(wslot);
             *out_idx = -1;
             *result = RESULT_TIMEOUT;
+            if (getenv("HLE_WAITTMO_LOG") && g_waittmo_n < 200) {
+                g_waittmo_n++;
+                printf("[wtmo] t=%llu tid=%u blk=%08X lr=%08X ns=%llu elapsed_us=%llu\n",
+                       (unsigned long long)((host_ns() - g_boot_ns) / 1000000ull),
+                       tid, arm_last_block, c->r[14],
+                       (unsigned long long)timeout_ns_eff,
+                       (unsigned long long)((host_ns() - start) / 1000ull));
+            }
             return 0;
         }
         yielded = 1;
@@ -946,8 +961,9 @@ static void srv_command(Ipc *r, uint32_t *p) {
             put_result(r);
             break;
         }
-        case 2: { /* EnableNotification: Result, CopyHandle(Semaphore) */
-            uint32_t h = new_semaphore_handle("srv:notif", 0, 2);
+        case 2: { /* EnableNotification: Result, CopyHandle(Semaphore)
+                     Azahar sm/srv.cpp: MAX_PENDING_NOTIFICATIONS = 16. */
+            uint32_t h = new_semaphore_handle("srv:notif", 0, 16);
             if (g_log) printf("[srv] EnableNotification -> %u\n", h);
             ipc_begin(r, 2, 1, 2);
             put_result(r);
@@ -2435,12 +2451,15 @@ static void cfg_command(Ipc *r, uint32_t *p) {
             break;
         }
         case 0x0003: { /* GetTransferableId(salt): Result + u64 */
-            /* Azahar: MakeBuilder(3,0), Push(result, low, high). */
+            /* Azahar: MakeBuilder(3,0), Push(result, low, high).
+             * p[0] vor der Antwort puffern: ipc_put() schreibt in denselben
+             * Kommandopuffer, den p zeigt (Diagnose las sonst 0). */
+            uint32_t salt = (r->normal >= 1) ? p[0] : 0u;
             ipc_begin(r, 0x0003, 3, 0);
             put_result(r);
             ipc_put(r, 0x12345678u);    /* low  */
             ipc_put(r, 0x00000000u);    /* high */
-            if (g_log) printf("[cfg] GetTransferableId salt=0x%X -> ok\n", p[0]);
+            if (g_log) printf("[cfg] GetTransferableId salt=0x%X -> ok\n", salt);
             break;
         }
         case 0x0005: { /* GetSystemModel: Result + Model */
@@ -2734,6 +2753,8 @@ static void dsp_command(Ipc *r, uint32_t *p) {
         }
         case 0x0011: { /* LoadComponent: Result + bool + MappedBuffer-Echo */
             uint32_t dsc_flags = 0, dsc_addr = 0;
+            /* Parameter vor der Antwort puffern (ipc_put() ueberschreibt p). */
+            uint32_t size = (r->normal >= 1) ? p[0] : 0u;
             if (r->translate >= 2) {
                 dsc_flags = p[r->normal];
                 dsc_addr = p[r->normal + 1];
@@ -2743,7 +2764,7 @@ static void dsp_command(Ipc *r, uint32_t *p) {
             ipc_put(r, 1);          /* true = geladen */
             ipc_put(r, dsc_flags);
             ipc_put(r, dsc_addr);
-            if (g_log) printf("[dsp] LoadComponent size=0x%X -> ok\n", p[0]);
+            if (g_log) printf("[dsp] LoadComponent size=0x%X -> ok\n", size);
             break;
         }
         case 0x0012: { /* UnloadComponent: Result */
@@ -3312,7 +3333,12 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
                 if (addr != 0u && size != 0u &&
                     (uint64_t)gpu_pica_phys_to_guest(paddr) + size <= c->mem_size) {
                     unsigned long long d0 = gpu_pica_draw_count();
+                    uint64_t gt0 = g_gtime ? host_us() : 0;
                     int nops = gpu_run_pica_list(c, paddr, size);
+                    if (g_gtime) {
+                        g_gtime_us += host_us() - gt0;
+                        g_gtime_lists++;
+                    }
                     qops += nops;
                     /* Frontier-M3: Liste mit Draws ([gpu] list ... draws=N). */
                     printf("[gpu] list addr=%08X paddr=%08X size=%X ops=%d draws=%llu\n",
@@ -3717,6 +3743,12 @@ static void y2r_command(Ipc *r, uint32_t *p) {
             }
             {
                 int conv = y2r_perform_conversion(&mem, &g_y2r);
+                if (getenv("HLE_Y2R_LOG"))
+                    fprintf(stderr, "[y2rsc] t=%llu conv=%d fmt=%d/%d %ux%u\n",
+                            (unsigned long long)((host_ns() - g_boot_ns) / 1000000ull),
+                            conv, g_y2r.input_format, g_y2r.output_format,
+                            (unsigned)g_y2r.input_line_width,
+                            (unsigned)g_y2r.input_lines);
                 if (conv != 0) {
                     /* Azahar-ASSERT-Faelle; die Hardware meldet dort kein
                      * Completion-Interrupt. */
@@ -4163,6 +4195,13 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     snprintf(g_romfs, sizeof(g_romfs), "%s", romfs_dir ? romfs_dir : "out/romfs");
     g_log = getenv("HLE_LOG") != NULL;
     g_ystat = getenv("HLE_YSTAT") != NULL;
+    g_gtime = getenv("HLE_GTIME") != NULL;
+    {
+        /* Paralleles Rasterisieren grosser Dreiecke (Ergebnis pixelgleich).
+         * HLE_RASTER_THREADS=0 schaltet es fuer Messungen ab. */
+        const char *rt = getenv("HLE_RASTER_THREADS");
+        gpu_pica_set_raster_threads(rt ? atoi(rt) : 3);
+    }
     /* Diagnose-Laeufe werden per Timeout beendet; ungepufferte Ausgabe
        verhindert, dass die letzten Zeilen im stdio-Puffer verloren gehen. */
     if (getenv("HLE_ARB_LOG") || getenv("HLE_KLOG")) setvbuf(stdout, NULL, _IONBF, 0);
@@ -4232,6 +4271,18 @@ void hle_tick_stats(int *calls, unsigned long long *tick) {
 
 void hle_report(void) {
     printf("[hle] ipc=%d ticks=%llu tickcalls=%d\n", g_ipc_count, (unsigned long long)g_tick, g_tick_calls);
+    if (g_gtime) {
+        unsigned long long wall_ms = (host_us() - g_boot_ns / 1000ull) / 1000ull;
+        unsigned long long frag = 0, tex = 0, lit = 0, fb = 0;
+        unsigned long long pc = 0, sc = 0, pr = 0, sr = 0;
+        gpu_pica_work_stats(&frag, &tex, &lit, &fb);
+        gpu_pica_par_stats(&pc, &sc, &pr, &sr);
+        printf("[gtime] lists=%llu raster_ms=%llu wall_ms=%llu (%.1f%%) "
+               "frag=%llu tex=%llu lit=%llu fb=%llu par=%llu/%llu ser=%llu/%llu\n",
+               g_gtime_lists, g_gtime_us / 1000ull, wall_ms,
+               wall_ms ? 100.0 * (double)g_gtime_us / 1000.0 / (double)wall_ms : 0.0,
+               frag, tex, lit, fb, pc, pr, sc, sr);
+    }
     if (g_log) printf("[audio] frames=%llu\n", audio_dsp_frames());
     arm_perfmap_report();
     printf("[hle] letzte Ereignisse:\n");
@@ -4485,6 +4536,11 @@ static uint32_t hle_svc_dispatch(ArmCpu *c, uint32_t imm) {
                         WakeAfterDelay; ns <= 0 = sofort weiter, Yield) */
             int64_t ns = (int64_t)((uint64_t)c->r[0] | ((uint64_t)c->r[1] << 32));
             uint32_t sleep_ms;
+            if (getenv("HLE_SLEEP_LOG") && g_sleeplog_n < 200) {
+                g_sleeplog_n++;
+                printf("[sleep] tid=%u ns=%lld blk=%08X lr=%08X\n",
+                       cur_tid(c), (long long)ns, arm_last_block, c->r[14]);
+            }
             if (ns <= 0) {
                 sleep_ms = 0;
             } else {
@@ -4827,6 +4883,12 @@ static uint32_t hle_svc_dispatch(ArmCpu *c, uint32_t imm) {
                         Zeitbasis wie die hid-Zeitstempel. */
             g_tick = host_system_ticks();
             g_tick_calls++;
+            if (getenv("HLE_TICK_LOG") && g_ticklog_n < 200) {
+                g_ticklog_n++;
+                printf("[tick] tid=%u blk=%08X lr=%08X t=%llu\n",
+                       cur_tid(c), arm_last_block, c->r[14],
+                       (unsigned long long)g_tick);
+            }
             c->r[1] = (uint32_t)(g_tick >> 32);
             return (uint32_t)g_tick;
         }

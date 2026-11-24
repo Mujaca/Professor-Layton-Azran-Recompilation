@@ -258,6 +258,50 @@ Antwort.
 
 ## 6. Befunde (offene Ursachen, kein Workaround eingebaut)
 
+### Zeitbasis des Movie-Players: kein belegter Zeitfehler (Messung 2026-11-24)
+
+**Hypothese:** Der Film-Player rechnet Bildzeit/Lesevorlauf aus
+`svcGetSystemTick`/Timern/VBlank/Audio-Position; eine falsche Zeitbasis oder
+ein nicht fortschreitender DSP-Status steuert den Lesevorlauf falsch.
+
+**Belege (Diagnose, kein Gastzustand):**
+* Die Zeitbasis liegt tatsächlich auf dem Decoder-Pfad: `fn_001ED8FC`
+  (laeuft ~1x/Frame) ruft `fn_00288AAC`, das ueber `fn_002740A0` zweimal
+  `svc #0x28` liest und ein 64-Bit-Tickbudget gegen die globale Frame-Zeit
+  (`[ptr+0x178/0x17c]`) abrechnet (Frame-Limiter); anschliessend speichert
+  `fn_001ED8FC` die Tickdifferenz nach `[obj+0x78/0x80]` und ruft
+  `0x00390A20`. Die uebrigen 16 `svc #0x28`-Stellen liegen in
+  Bibliotheksfunktionen (0x125A80, 0x144504, 0x147FD0, 0x148D50, 0x275DF8,
+  0x27C7A0, 0x27CBDC, 0x27E3C8, 0x33FA08), keine im Player-Code 0x218xxx/
+  0x311xxx.
+* DSP: der Audio-Thread liefert exakt 204,4 Frames/s (160 Samples bei
+  32728 Hz; `[audio] f=N` mit Host-Zeit im 5,00-s-Raster), die Regionen-
+  handshake-Felder werden also im richtigen Takt geschrieben. Waehrend der
+  gesamten Laeufe ist **keine** DSP-Quelle aktiv (`enabled=0`, auch im
+  120-s-Lauf); der Film wurde auf diesem HEAD allerdings nicht erreicht
+  (siehe Reproduzierbarkeit), eine Tonspur lief daher nie.
+* Endliche Wartezeiten: `HLE_WAITTMO_LOG=1` meldet in 120 s Vollspeed
+  **keinen** abgelaufenen Wait (kein vorzeitiger Tick-Timeout).
+* Gast-/Host-Takt: 57-58 Gast-Frames/s gegen 60 Hz VBlank (Fenster-/VBlank-
+  Takt 268111856/4481136 = 59,83 Hz), d. h. die Zeitbasis laeuft nicht
+  auseinander; `svcGetSystemTick` (268,111856 MHz, QPC) ist monoton.
+* **Reproduzierbarkeit:** Auf HEAD 59dbf5b erreicht der natuerliche Boot in
+  60 s **und** 120 s Vollspeed (ohne `HLE_LOG`) **keine** Y2R-Konvertierung
+  (`HLE_Y2R_LOG=1`: 0 Zeilen, Block am Ende 0x0016E4A8), die in
+  bb5fe4c dokumentierten 41 `StartConversion` sind hier also nicht
+  reproduzierbar. Der Haenger ist der Koeffizienten-/Huffman-Loop
+  `fn_0016E4A0`, der aus einem Bitpuffer ohne Nutzdaten (Nullen) endlos
+  Symbole erzeugt; der Bit-Refill `0x16C568` (`ldrh [r1],#2`) hat keine
+  Laengenpruefung.
+
+**Ergebnis:** Die Zeitbasis selbst ist als Ursache **nicht belegt**
+(DSP-Takt und Tick-Rate stimmen, keine Timeouts, keine aktive Audioquelle).
+Offen bleibt die Datenzufuhr: der Decoder beginnt mit dem Huffman-Lauf,
+bevor der Producer-Thread (1-ms-Poll) die Bytes geliefert hat. Der
+Gast-Lock wird in `hle_pump()` nur alle 16384 Bloecke abgegeben, ein langer
+Decoder-Lauf verzoegert den Producer also stark; nach dem Stall laufen
+weitere Daten ein, der Loop prueft sie aber nie wieder.
+
 ### Bilddecoder hing in der Huffman-Schleife: Ruecksprung in die Funktionsmitte – behoben 2026-11-24
 
 **Befund:** Der natuerliche Boot blieb nach dem Dsp-Setup (~2,5 s Referenzzeit)
@@ -328,11 +372,13 @@ mit dem Y2R-Framepfad (je Frame `SetInputFormat`, `SetInputLineWidth`,
 `SetBlockAlignment`, `SetTransferEndInterrupt`, `SetAlpha`,
 `SetStandardCoefficient`, `SetReceiving`, `StartConversion`, danach 4-5x
 `IsBusyConversion`; 520 Zyklen bis zum Trace-Ende 11 s). Der Port sendet
-davon **nichts**: nur `0x002B DriverInitialize`, `0x000D
-SetTransferEndInterrupt` und `0x000F GetTransferEndEvent` (`grep y2r:u
-out/logs/frontier.txt` = 3 Kommandos).
+den vollstaendigen Satz inzwischen selbst: im 40-s-Lauf **41** Zyklen
+(`grep -c "cmd=0x0026" out/logs/frontier.txt` = 41, dazu je Zyklus
+`0x0001/0x0003/0x0005/0x0007/0x000D/0x0010/0x0011/0x0012/0x0018/0x001A/
+0x001C/0x0020/0x0022`). Die Differenz zu den 520 Referenzzyklen ist der
+getrennt dokumentierte 41-Frame-Stall des Decoders, kein IPC-Fehler.
 
-**Belege (nur Diagnose, kein Gastzustand):**
+**Belege (Stand vor dem Decoder-Fix, nur Diagnose, kein Gastzustand):**
 * `ARM_WATCH=0x00347C68` (StartConversion-Wrapper des Spiels) und
   `ARM_WATCH=0x00218660`/`0x00171DAC` (Y2R-Treiber der Frame-Schleife):
   0 Treffer im gesamten Lauf.
@@ -366,10 +412,12 @@ out/logs/frontier.txt` = 3 Kommandos).
   `cfg` GetConfig-Blocks, `ndm` SuspendDaemons) stimmen; die Referenz
   enthaelt nach 2.6 s ausschliesslich Y2R-Zeilen.
 
-**Naechster Schritt:** Im Demuxer ansetzen: pruefen, warum der erste
-Videopaket des `m999.moflex` nicht in den Praesentations-Stream
-(`[movie+0x1e8]`) gelangt, obwohl der Koeffizientendecoder laeuft. Kein
-Kernel-/IPC-Fehler belegt; ein Workaround wurde nicht eingebaut.
+**Naechster Schritt:** ~~Im Demuxer ansetzen: pruefen, warum das erste
+Videopaket des `m999.moflex` nicht in den Praesentations-Stream gelangt.~~
+**Erledigt:** Der Praesentationspfad laeuft (Decoder-Fix am Recompiler,
+`dynamic_pc`); offen sind nur noch der 41-Frame-Stall und die
+Y2R-Sendeparameter (naechster Abschnitt). Kein Kernel-/IPC-Fehler belegt;
+ein Workaround wurde nicht eingebaut.
 
 ### Stall nach der zweiten PICA-Liste: Futex-Mutex bei `0x0040F120` – offen 2026-11-24
 
@@ -403,8 +451,10 @@ Kernel noetig.
 
 **Nebenbefund:** Der Notification-Thread (tid 1) sendet `srv 0x000B
 ReceiveNotification`, das in der Referenz nicht vorkommt (Azahar: nullptr-
-Handler, liefert ebenfalls Erfolg). Zu pruefen ist `EnableNotification`
-(Port-Sema max. 2, Azahar `MAX_PENDING_NOTIFICATIONS = 16`).
+Handler, liefert ebenfalls Erfolg). `EnableNotification` legt das
+Sema inzwischen mit `MAX_PENDING_NOTIFICATIONS = 16` an (Azahar
+`sm/srv.cpp`; vorher 2). `srv 0x000B` kommt im aktuellen 40-s-Lauf nicht
+mehr vor.
 
 ### IPC-Folge bis OpenLinkFile – Dienst-Routing/Reply behoben 2026-11-24
 
@@ -1077,6 +1127,41 @@ mit 2548 vergleichen: ist sie groesser, ist der Commit zu kurz (Produzent);
 ist sie kleiner/gleich, ist der P-Frame-Parse falsch (Recompiler/Decoder-
 Zustand, dann Differenztest des Decoders). Kein Workaround eingebaut.
 
+
+### Y2R-Sendeparameter: `gap` ist `-unit` statt `512-unit` – offen 2026-11-24
+
+**Befund (IPC-Parameter, nicht Sequenz):** Die Dienstfolge ist weiterhin
+kanonisch gleich (`trace-diff`), und der Y2R-Framepfad ist vorhanden
+(41 vollstaendige Zyklen). Die erste inhaltliche Abweichung steckt in den
+Parametern von `SetSendingY/U/V`:
+
+| Kommando | Referenz `transfer_stride` | Port `[y2r] ... gap` |
+|---|---|---|
+| SetSendingY (0x0010) | 112 (0x70) | 65136 (0xFE70) |
+| SetSendingU/V (0x0011/0x0012) | 312 (0x138) | 65336 (0xFF38) |
+| SetReceiving (0x0018) | 2688 (0xA80) | 2688 (0xA80), stimmt |
+
+In der Referenz ist `unit + gap` immer 512 (400+112, 200+312). Der Port
+uebergibt `gap = -unit` (als int16: 0xFE70 = -400, 0xFF38 = -200), also
+`unit + gap = 0`.
+
+**Belege:**
+* `grep "\[y2r\] cmd 0x0010" out/logs/frontier.txt` →
+  `gap=65136`; `reports/azahar_trace.txt:477` → `transfer_stride=112`.
+* `ARM_WATCH=00218660` (Einstieg des Presenters): `r2=0x190` (400),
+  `r3=0xF0` (240), `lr=0x00312B90`. Der Stride-Parameter steht im Stack
+  und stammt aus `[r5+0xc]` (`vldr s1,[r5,#0xc]` →
+  `vstr s1,[sp,#0xc]` in `fn_0031282C`). Der Port liest dort 0; erwartet
+  ist 512.
+* Im Presenter `fn_00218660` entsteht `gap` als `sb - r5`
+  (`0x218754: sub r0, sb, r5`); das Register `sb` (r9) wird aus dem
+  Stackargument geladen (`ldr sb,[sp,#0x44]`). Mit `sb = 0` ergibt das
+  exakt `-unit`.
+
+**Einordnung:** Der Wert entsteht im Gast-/Presenter-Pfad
+(Videoframe-Metadaten), nicht in einem Kernel- oder Dienst-Handler. Kein
+Workaround eingebaut; die Korrektur gehoert in den Decoder-/Frame-Strang.
+Fuer M4 relevant, sobald das Video wieder vollstaendig dekodiert wird.
 ### Mobiclip-Decoder: Film haengt nach 41 Bildern – behoben 2026-11-24
 
 **Befund:** Der Film `m999.moflex` hat 520 Bilder (unabhaengiger Parser
@@ -1217,6 +1302,119 @@ suchen (wer ruft die vtable-Methode `0x380D1C`, den Destruktor) und die
 Bedingung, unter der der Intro-Scene-Task den Titel-Scene-Task startet.
 Kein Workaround eingebaut; `HLE_AUDIO_LOG` wurde nur um Quellen-/Puffer-
 Diagnosezeilen erweitert (reine Diagnose, kein Gastzustand).
+
+### Draw-Gate 0x27B34C: Spielzustand, kein Kernel-/Dienstfehler – ausgeschlossen 2026-11-24
+
+**Hypothese (Auftrag):** Der Renderer erreicht seine Draw-Aufrufe nicht, weil
+eine Bedingung aus Kernel/Diensten falsch ist.
+
+**Ergebnis: Hypothese widerlegt.** Kein Dienst- oder Kernelwert blockiert den
+Draw; die Draw-Anforderung wird vom Spiel selbst nie erzeugt. Belege:
+
+* **Sechs Aufrufer, keiner laeuft.** `HLE_PERFMAP_FILE` (1200 Frames, 20 s)
+  zaehlt fuer 0x27B34C **0** Bloecke. Auch die Einstiege der Wrapper
+  0x11AD4C/0x250FE8/0x256E40/0x27B6CC/0x2812EC sind 0; nur 0x11CAC4 laeuft
+  (2679x). `ARM_WATCH=0x11CAC4` zeigt `r2=0` in allen Treffern
+  (`lr=0x28C7B0`/`0x28CE74`); die beiden Aufrufer setzen `mov r2,#0`
+  (0x28C79C, 0x28CE60). Damit nimmt 0x11CAC4 immer den Zweig nach
+  0x11CD90 (Farb-/Alpha-Pfad) und ueberspringt den Draw-Aufruf bei 0x11CCDC.
+* **Gate der Draw-Funktion:** 0x27B34C kehrt bei 0x27B3A8 mit 0 zurueck,
+  wenn `[0x408808+0xb4c] == 0`. Perfmap: 0x27B844 wird 5496x gerufen und
+  verlaesst die Funktion immer ueber 0x27B990 (Rueckgabe `[obj+0xb4c]` = 0);
+  der Pfad ueber 0x27B958/0x27B964 (Rueckgabe 1) laeuft **nie**.
+* **Was 0xb4c ist:** 0x408808 ist das Grafikobjekt des Spiels (Vtable
+  0x3C5EC4, String „lxpCOpenGLES“ ab +0x20). +0xd6c zeigt auf einen der
+  beiden eingebetteten Render-Kontexte (+0x214/+0x458, doppelt gepuffert,
+  gesetzt in 0x1ED660). 0x13657C uebernimmt `[ctx+0x24]` (aktiver Layer)
+  nach `[renderer+0xb4c]`, aber nur wenn `[renderer+0x2b44] & 1` gesetzt ist.
+* **Der Layer ist immer leer:** `ARM_MEMWATCH=409354` (renderer+0xb4c):
+  3 Schreibzugriffe, alle 0 (Init/Memset). `ARM_MEMWATCH=408A40` und
+  `=408C84` (ctx0/ctx1+0x24): alle Schreibzugriffe 0, auch ueber 900 Frames
+  (15 s). Das Spiel aktiviert also nie einen Render-Layer; die Kontexte
+  werden von der Engine selbst (Aufrufe aus 0x26A87C/0x1ED6xx) zurueckgesetzt.
+* **Dienste sauber:** kein `err:f`, alle 10 Dienste 10/10; einzige
+  `UNIMPLEMENTIERT`-Zeilen sind `boss:U 0x000E` (GetTaskIdList) und
+  `0x0016` (ReceiveProperty), die Azahar fuer einen Titel ohne SpotPass-Task
+  ebenfalls ohne Nebenwirkung beantwortet. GSP nimmt alle Kommandos an.
+* **Kein Parser-Loch:** ein eigener Parser der Rohdumps aus
+  `HLE_PICA_DIAG=1` (`scratch/pica/list_*.bin`) findet in **keiner** Liste
+  0x22E/0x22F/0x23C/0x23D. Die 14 Listen je Frame sind reiner Zustand
+  (Rasterizer, Viewport, TEV, Attribute 0x201..0x203, Topologie 0x25E,
+  Shader 0x2C0/0x2CB) – die Draw-Anforderung fehlt im Gastcode, nicht im
+  PICA-Parser des Ports.
+* **Das Spiel laeuft weiter:** nach 520/520 Y2R-Frames liest es ~300 KiB
+  neue Assets direkt aus dem RomFS (Reads ab `0x1A705B10`, `0x1B3AEC`, …)
+  und liest `head.lt6` erneut; der Hauptthread zykelt danach normal durch
+  Mutex 0x40F120 (Schreibfolge 1/-1, keine Blockade). Ein haengender
+  Kernel-Wait ist damit ebenfalls ausgeschlossen.
+
+**Naechster Schritt:** Im Spiel-Renderer ansetzen: warum aktiviert die
+Szene keinen Layer (0x13657C verlangt `[renderer+0x2b44]&1` und einen
+gesetzten `[ctx+0x24]`)? Das ist Szenen-/Zustandslogik des Spiels
+(0x13657C, 0x26A84C, 0x1ED65C), keine HLE-Frage. Die Filmtextur selbst
+liegt korrekt in `0x15E3DE00` vor.
+
+### Renderer-Ressourcen-Registry 0x4088A8: Schreiber fehlt, Schluessel sind CRC32-Namen – Befund 2026-11-24
+
+**Aufbau (statisch + Laufzeitdump):** `0x4088A8` (= `0x408808+0xa0`,
+Grafikobjekt) ist eine Ressourcen-Gruppe mit vtable `0x3C6010`, konstruiert
+von `0x1FB3C4` ueber `0x238D1C`. Sie enthaelt zehn Paare aus Objekt-Pool und
+Zeiger-Tabelle; jeder Container ist `0xC` Byte (`[0]=Feld`, `[4]=Elementgroesse`,
+`[8]=Anzahl u16`, `[0xa]=Kapazitaet u16`). Die vom Frame-Treiber benutzte
+Tabelle liegt bei `+0x70` = `0x408918` (Elemente 4-Byte-Zeiger), Anzahl
+`0x408920`.
+
+**Schluessel:** `fn_0027BC50(reg, key)` binaersucht `[reg+0x70]`/`[reg+0x78]`
+mit Comparator `fn_00134900` (vergleicht `entry+0xc`); bei Misserfolg wird in
+`[reg+0x10]` (Parent) rekursiert. Der String-Weg ist `fn_002461D8(reg, name)`:
+`fn_00288500` ist CRC32 (zlib-Polynom, `~state`), danach dieselbe Suche.
+**Beleg:** `0x2D2F398D` = CRC32(`"#FIX_CLR"`). Weitere Namen im Image:
+`"#FIX_IMG"`, `"#FIX_FNT"`, `"#FIX_2D"`, `"#LT6_SES"`. Die Eintraege sind
+also benannte, eingebaute Renderer-Ressourcen (Fonts/Bilder/Passes), keine
+Szenen-Hashes.
+
+**Kein Schreiber im Boot:** `ARM_MEMWATCH=408920`/`=408918` (30 s und 90 s)
+zeigt ausschliesslich die BSS-Nullung (`pc=0x100030`) und die
+Konstruktor-Initialisierung (`fn_00288398`, `lr=0x238DB8`: Groesse 4, Anzahl
+0). Ein Dump `0x408800..0x408B00` am Laufende zeigt **alle** Container der
+Gruppe leer. Die 5 Aufrufer von `fn_0025618C` (Kommando-Verarbeiter
+`0x2B9368/0x2DA160/0x2DA380/0x2DAA68/0x2EF3DC`) geben `0x4088A8` nur als
+Argument an `fn_00249EB8` (Archiv-/Font-Load) bzw. `fn_00277B84` weiter.
+
+**Korrektur des frueheren Befunds:** `fn_0026F924` ist **kein**
+Resource-Lookup, sondern eine Archiv-Magic-Pruefung: es vergleicht `[obj]`
+mit `[0x3D9458]`=`"XPCK"` bzw. `[0x3D945C]`=`"XFSP"` (Laufzeitdump der
+Globals). Alle fuenf beobachteten `fn_00277B84`-Aufrufe kommen **ueber** die
+Magiepruefung und ueber `fn_0026F8BC`/`0x26B904` hinaus: der Ausgang
+`0x277DB0` (= Abbruch vor dem Oeffnen) hat in 15 s **0** Treffer, der
+Erfolgsblock `0x277C14` **5**. Die geoeffneten Archiveintraege haben die
+Groessen `0xA58` (das ist `seq/menu_logo.xq`), `0x4F8`, `0x8B0`, `0x139C`,
+`0x1A38`. Der fruehere Befund „bricht nach dem Ressourcen-Lookup ab“ ist
+damit widerlegt; der Pfad laeuft weiter und endet erst spaeter.
+`fn_00249EB8` (Font-Load) verlangt vor dem Laden, dass `"#FIX_FNT"` bereits
+in der Gruppe steht – die eingebauten Ressourcen muessen also vorher von
+einer anderen Stelle erzeugt werden.
+
+**RomFS-Lookup (Pruefung der entfernten Patches):** Der NotFound-Fall
+(`0x212E24`, `r0=0xC880446F`) ist der Verzeichnis-/Datei-Lookup des Namens
+`"stream"` (UTF-16, Laenge 12) in `lt6/snd/uk`. Der Pfad-Walker erkennt
+genau diesen Code (Modul 17, Desc 0x6F) bei `0x2055A0` als "weiter
+probieren"; anschliessend werden Dateien aus `.../stream/` gelesen
+(`MOV_999.dspadpcm.bcstm`). Der Fehlschlag ist normales Probing, kein
+Boot-Blocker; ein Wiederauftreten der Ursachen von `0x212F3C`/`0x399244` ist
+nicht belegt.
+
+**90-s-Lauf (Vollspeed):** 520/520 `StartConversion` (Film komplett),
+42.736 PICA-Listen, 7.226 `SetBufferSwap`, `seq/prog_common.xq` und
+`seq/menu_title.xq` werden aus `lt6_a.fa` gelesen (`0x48EE24` bzw.
+`0x473AE0`) – die Skriptebene laeuft, die Ressourcen-Gruppe bleibt trotzdem
+leer.
+
+**Naechster Schritt:** Die Erzeuger der eingebauten Ressourcen
+(`"#FIX_CLR"`, `"#FIX_IMG"`, `"#FIX_FNT"`, ...) suchen; Kandidat ist der
+Ressourcen-Set-Manager um `0x1FBxxx`/`0x23Dxxx` (vtable `0x3C6010`). Erst
+wenn ein *Schreibversuch* auf `0x408918`/`0x408920` existiert und
+fehlschlaegt, ist eine Runtime-Korrektur belegbar.
 ### Erster selbst gerenderter Frame (M3/M4) – 2026-11-24
 
 Drei weitere Fehler verhinderten nach dem Film jedes Bild:
@@ -1236,3 +1434,59 @@ Drei weitere Fehler verhinderten nach dem Film jedes Bild:
 
 **Ergebnis:** M3 = ja (Draws), M4 = ja: `reports/port_intro_frame300.png`
 (Intro-Film, oberer Bildschirm), `reports/port_frame1800.png`.
+
+### Hauptmenue: Ablauf sauber, Engpass ist der Software-Rasterizer – Messung 2026-11-24
+
+**Auftrag:** Den Spielablauf nach dem Intro-Film bis Titel/Hauptmenue verfolgen
+und die erste Ursache finden, die ihn blockiert oder verlangsamt.
+
+**Ablauf (belegt mit `HLE_LOG`, 4500 Host-Frames = 75 s):** Nach dem letzten
+Y2R-Frame (520/520, Ende von `m999.moflex`) folgen keine Fehler: `head.lt6`
+wird aus dem SaveData-Archiv gelesen, `res/lt6_gmp.xb`, `res/lt6_naz.xb`,
+`res/lt6_nkl.xb`, `res/qst/uk/word_param.xs` und `seq/menu_title.xq` werden
+geladen (jeder Read `done == len`, kein `[fs]`-Fehler, kein `err:f`). Der
+Titelbildschirm laeuft: ~10-14 PICA-Listen je Gast-Frame mit Draws,
+`SetBufferSwap` fuer beide Bildschirme, der Streaming-Leser holt die
+Titel-BGM in 16-KiB-Haeppchen, `boss:U` initialisiert (0x0001/0x000E/0x0016;
+die beiden `UNIMPLEMENTIERT`-Zeilen sind wie bei Azahar wirkungslos).
+APT/hid/ptm antworten wie in der Referenz; nach dem Film ruft der Gast diese
+Dienste gar nicht mehr (0 IPC-Zeilen in 4500 Frames), der Frame-Loop besteht
+nur aus `gsp::Gpu 0x000C/0x0008` und `dsp::DSP 0x0013`. Kein Dienst- oder
+Kernelwert blockiert, kein Gast-Thread haengt.
+
+**Eingabe:** Der Titel wartet auf eine Taste. `--press a@1800:120,start@2100:120`
+fuehrt in die naechste Szene/ins Menue: der obere Bildschirm zeigt danach die
+Szene mit Logo-Band, der untere ein Menue-Panel (Beleg:
+`scratch/m5/press3600.bmp`; Layout vergleichbar mit
+`reports/azahar_bottomscreen.png`). Ohne Eingabe bleibt das Bild dunkel – das
+ist der wartende Spielzustand, kein Fehler.
+
+**Gemessener Engpass (`HLE_GTIME`, 3600 Host-Frames = 60 s, ohne `HLE_LOG`):**
+* Wandzeit 60,19 s, davon **42,65 s (70,8 %) in `gpu_run_pica_list`**.
+* 351 M Fragmente, 335 M Textursamples, Fragment-Lighting aus, 351 M
+  Farbziel-Zugriffe -> **8,2 M Fragmente/s** (122 ns/Fragment).
+* Gast-Bildrate im Titel/Menue **7,0 fps** (35 Buffer-Swaps in 5 s), waehrend
+  der Host mit 59,8 fps laeuft. Der Gast-Lock liegt nur 0,8 % der Zeit frei
+  (`HLE_YSTAT`), die Zeit steckt also in der Rasterisierung, nicht in Warten
+  oder IPC.
+
+**Ursache der 122 ns/Fragment:** Pro Pixel laufen sechs TEV-Stufen
+(Azahar-Semantik), bis zu drei Textursamples, Tiefen-/Stencil-Test und
+Farbziel-Lesen/-Schreiben; jeder Zugriff dekodiert Register und 8x8-Morton neu.
+
+**Korrektur (kein Workaround):** `runtime/gpu` rasterisiert grosse Dreiecke
+zeilenweise parallel (`gpu_pica_set_raster_threads`; 3 Worker, ab 48
+Pixelzeilen). Innerhalb eines Dreiecks sind die Pixel disjunkt und der
+PICA-Zustand ist waehrend der Liste konstant, das Ergebnis bleibt pixelgleich
+(Beleg: `tests/pica_selftest.c` laeuft mit aktivem Pool und allen 116
+Erwartungswerten; der untere Bildschirm ist seriell/parallel byte-identisch).
+Messung: 351 M -> 533 M Fragmente in 60 s, 8,2 -> 14,4 M Fragmente/s,
+Titel/Menue 7,0 -> **10,6 fps** (+52 %). `HLE_RASTER_THREADS=0` schaltet den
+Pool fuer Messungen ab.
+
+**Offen:** Der Weg ins Hauptmenue ist nicht blockiert, nur langsam. Der
+Restfaktor ~5,6 bis 60 fps liegt in der seriellen Software-Pipeline (viele
+duenne Dreiecke: 62 % der Pixelzeilen liegen unter der Parallelschwelle).
+Echte Abhilfe ist M9 (Hardware-Rasterizer); Zwischenschritte waeren Early-Z
+(nach Azahar erst nach TEV), ein schnellerer TEV-Pfad und eine
+Draw-Parallelisierung ohne Ordnungswechsel.

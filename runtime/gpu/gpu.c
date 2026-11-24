@@ -30,6 +30,11 @@
 #include <math.h>
 #include <fenv.h>
 
+/* Host-Threads fuer das parallele Rasterisieren grosser Dreiecke. */
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+
 #include "arm_cpu.h"
 
 #define GPU_FB_DEFAULT 0x1F000000u  /* Port-Fenster liest hier */
@@ -42,9 +47,22 @@ static int g_fb_h = 240;
 /* Determinismus-Zaehler: abgeschlossene Listen/Submits und Draws. */
 static volatile unsigned long long g_pica_lists = 0;
 static volatile unsigned long long g_pica_draws = 0;
+/* Diagnose (HLE_GTIME): Arbeitsvolumen des Software-Rasterizers. Reine
+ * Zaehler, kein Gastzustand. */
+static volatile unsigned long long g_frag_n = 0;   /* schattierte Fragmente */
+static volatile unsigned long long g_tex_n = 0;    /* aktive Textursamples */
+static volatile unsigned long long g_lit_n = 0;    /* Fragment-Lighting */
+static volatile unsigned long long g_fb_n = 0;     /* Farbziel-Paare */
 
 unsigned long long gpu_pica_list_count(void) { return g_pica_lists; }
 unsigned long long gpu_pica_draw_count(void) { return g_pica_draws; }
+void gpu_pica_work_stats(unsigned long long *frag, unsigned long long *tex,
+                         unsigned long long *lit, unsigned long long *fb) {
+    if (frag) *frag = g_frag_n;
+    if (tex) *tex = g_tex_n;
+    if (lit) *lit = g_lit_n;
+    if (fb) *fb = g_fb_n;
+}
 
 void gpu_set_fb(uint32_t addr) { if (addr != 0) g_fb = addr; }
 uint32_t gpu_get_fb(void) { return g_fb; }
@@ -1952,6 +1970,275 @@ static int p_right_or_flat(int vx, int vy, int l1x, int l1y, int l2x, int l2y)
     return vx < l1x + (l2x - l1x) * (vy - l1y) / (l2y - l1y);
 }
 
+/* ---- Paralleles Rasterisieren grosser Dreiecke -------------------------
+ * Der Software-Rasterizer ist im natuerlichen Boot (Titelbildschirm) der
+ * Engpass: HLE_GTIME misst ~70 % der Wandzeit in den PICA-Listen. Die Pixel
+ * eines Dreiecks sind disjunkt (jeder Schreibzugriff geht ueber die
+ * Framebuffer-, Tiefen- und Stencil-Helfer auf genau die eigene
+ * Pixelkoordinate), und waehrend einer Kommandoliste sind p_regs, Texturen
+ * und LUTs konstant. Eine zeilenweise Aufteilung auf Host-Threads aendert das
+ * Ergebnis daher nicht; kleine Dreiecke bleiben seriell (Synchronaufwand).
+ * Der Pool wird nur vom Port aktiviert (gpu_pica_set_raster_threads aus
+ * hle_init); die PICA-Selbsttests laufen ebenfalls damit. */
+typedef struct {
+    ArmCpu *c;
+    const PicaVertex *v0, *v1, *v2;
+    int x[3], y[3];
+    int min_x, max_x;
+    int sc_mode, sx1, sy1, sx2, sy2;
+    int bias0, bias1, bias2;
+    float invw[3];
+} PicaRows;
+
+#define PICA_RASTER_MAX_WORKERS 4
+#define PICA_RASTER_MIN_ROWS 48      /* erst ab ~1/5 Bildhoehe parallel */
+
+typedef struct {
+    HANDLE thread;
+    HANDLE wake;
+    HANDLE done;
+    const PicaRows *job;
+    int py0, py1;
+} PicaRasterWorker;
+
+static PicaRasterWorker g_rw[PICA_RASTER_MAX_WORKERS];
+static int g_raster_threads = 0;
+static int g_rw_created = 0;
+/* Diagnose: wie viele Dreieckszeilen parallel bzw. seriell laufen. */
+static unsigned long long g_par_calls, g_ser_calls, g_par_rows, g_ser_rows;
+void gpu_pica_par_stats(unsigned long long *pc, unsigned long long *sc,
+                        unsigned long long *pr, unsigned long long *sr) {
+    if (pc) *pc = g_par_calls;
+    if (sc) *sc = g_ser_calls;
+    if (pr) *pr = g_par_rows;
+    if (sr) *sr = g_ser_rows;
+}
+
+static void p_shade_rows(const PicaRows *j, int py_begin, int py_end)
+{
+    const PicaVertex *v0 = j->v0, *v1 = j->v1, *v2 = j->v2;
+    ArmCpu *c = j->c;
+    int py, px;
+    /* Zaehler lokal fuehren: ein gemeinsames Inkrement je Fragment wuerde
+       die Cacheline zwischen den Worker-Threads hin- und herschieben. */
+    unsigned long long lfrag = 0, ltex = 0, llit = 0, lfb = 0;
+
+    for (py = py_begin; py < py_end; py += 16) {
+        for (px = j->min_x + 8; px < j->max_x; px += 16) {
+            int w0, w1, w2, wsum;
+            float bw0, bw1, bw2, iw, depth, tc0_w;
+            float prim[4], tuv[3][2], quat[4], view[3];
+            PicaColor primary, tex_col[4];
+            PicaColor pfc, sfc;
+            PicaColor tev_out;
+            unsigned char texbuf[4];
+            int i, unit;
+
+            if (j->sc_mode == 1) {      /* Exclude */
+                if (px >= j->sx1 && px < j->sx2 && py >= j->sy1 && py < j->sy2) continue;
+            }
+            /* Keine Schreibzugriffe ausserhalb des konfigurierten
+             * Farbziels (Azahar zeichnet nur in den Framebuffer). */
+            if (p_fb_configured()) {
+                uint32_t fw = p_regs[0x11E] & 0x7FFu;
+                uint32_t fh = ((p_regs[0x11E] >> 12) & 0x3FFu) + 1u;
+                if ((uint32_t)(px >> 4) >= fw || (uint32_t)(py >> 4) >= fh) continue;
+            }
+
+            w0 = j->bias0 + p_signed_area(j->x[1], j->y[1], j->x[2], j->y[2], px, py);
+            w1 = j->bias1 + p_signed_area(j->x[2], j->y[2], j->x[0], j->y[0], px, py);
+            w2 = j->bias2 + p_signed_area(j->x[0], j->y[0], j->x[1], j->y[1], px, py);
+            if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+            wsum = w0 + w1 + w2;
+            if (wsum == 0) continue;
+            lfrag++;
+            bw0 = (float)w0; bw1 = (float)w1; bw2 = (float)w2;
+            iw = 1.0f / (j->invw[0] * bw0 + j->invw[1] * bw1 + j->invw[2] * bw2);
+
+            for (i = 0; i < 4; i++)
+                prim[i] = (v0->color[i] * bw0 + v1->color[i] * bw1 + v2->color[i] * bw2) * iw;
+            for (i = 0; i < 3; i++) {
+                tuv[i][0] = (v0->uv[i][0] * bw0 + v1->uv[i][0] * bw1 +
+                             v2->uv[i][0] * bw2) * iw;
+                tuv[i][1] = (v0->uv[i][1] * bw0 + v1->uv[i][1] * bw1 +
+                             v2->uv[i][1] * bw2) * iw;
+            }
+            tc0_w = (v0->tc0_w * bw0 + v1->tc0_w * bw1 + v2->tc0_w * bw2) * iw;
+            for (i = 0; i < 4; i++)
+                quat[i] = (v0->quat[i] * bw0 + v1->quat[i] * bw1 +
+                           v2->quat[i] * bw2) * iw;
+            for (i = 0; i < 3; i++)
+                view[i] = (v0->view[i] * bw0 + v1->view[i] * bw1 +
+                           v2->view[i] * bw2) * iw;
+
+            for (i = 0; i < 4; i++) {
+                float f = prim[i];
+                if (f < 0.0f) f = 0.0f;
+                if (f > 1.0f) f = 1.0f;
+                primary.c[i] = (unsigned char)roundf(f * 255.0f);
+            }
+            for (i = 0; i < 4; i++)
+                tex_col[i].c[0] = tex_col[i].c[1] = tex_col[i].c[2] = tex_col[i].c[3] = 0;
+            for (unit = 0; unit < 3u; unit++) {
+                int ci = (unit == 2u && ((p_regs[0x80] >> 13) & 1u)) ? 1 : (int)unit;
+                if (p_regs[0x80] & (1u << unit)) ltex++;
+                p_sample_tex(c, unit, tuv[ci][0], tuv[ci][1], tc0_w, texbuf);
+                for (i = 0; i < 4; i++) tex_col[unit].c[i] = texbuf[i];
+            }
+
+            /* Fragment-Lighting (Azahar sw_rasterizer.cpp): nur wenn
+               0x1C6 Bit0 (lighting.disable) = 0. */
+            for (i = 0; i < 4; i++)
+                pfc.c[i] = sfc.c[i] = 0;
+            if (!(p_regs[0x1C6] & 1u)) {
+                llit++;
+                p_compute_fragments(tex_col, quat, view, &pfc, &sfc);
+            }
+
+            tev_out = p_tev(tex_col, &primary, &pfc, &sfc);
+
+            /* Alpha-Test (Azahar DoAlphaTest) */
+            if (p_regs[0x104] & 1u) {
+                uint32_t fn = (p_regs[0x104] >> 4) & 7u;
+                uint32_t ref = (p_regs[0x104] >> 8) & 0xFFu;
+                if (!p_compare(fn, tev_out.c[3], ref)) continue;
+            }
+
+            /* Tiefe: Azahar screenpos.z interpoliert, dann Range/Offset
+             * (0x4D/0x4E) und optional W-Buffer (0x6D). */
+            depth = (v0->pos[2] * bw0 + v1->pos[2] * bw1 + v2->pos[2] * bw2) /
+                    (float)wsum;
+            depth = depth * p_f24_to_float(p_regs[0x4D]) + p_f24_to_float(p_regs[0x4E]);
+            if ((p_regs[0x6D] & 1u) == 0u)      /* DepthBuffering::WBuffering */
+                depth *= iw * (float)wsum;
+            if (depth < 0.0f) depth = 0.0f;
+            if (depth > 1.0f) depth = 1.0f;
+            p_apply_fog(depth, &tev_out);
+            if (p_fb_configured() && !p_depth_stencil_test(c, (uint32_t)(px >> 4),
+                                                           (uint32_t)(py >> 4), depth))
+                continue;
+
+            if (p_fb_configured()) {
+                unsigned char dest[4];
+                unsigned char result[4];
+                unsigned char bl[4];
+                uint32_t om = p_regs[0x100];
+                uint32_t mask = p_regs[0x107];
+                int k;
+                p_fb_read(c, (uint32_t)(px >> 4), (uint32_t)(py >> 4), dest);
+                lfb++;
+                if (om & (1u << 8)) {           /* alphablend_enable */
+                    uint32_t p = p_regs[0x101];
+                    uint32_t cst = p_regs[0x103];
+                    for (k = 0; k < 4; k++) {
+                        int sfac = (int)((k == 3) ? ((p >> 24) & 0xFu) : ((p >> 16) & 0xFu));
+                        int dfac = (int)((k == 3) ? ((p >> 28) & 0xFu) : ((p >> 20) & 0xFu));
+                        int sv = tev_out.c[k] * (int)p_blend_factor((uint32_t)sfac, k,
+                                                                   tev_out.c, dest, cst);
+                        int dv = dest[k] * (int)p_blend_factor((uint32_t)dfac, k,
+                                                               tev_out.c, dest, cst);
+                        int r = p_blend_eq((k == 3) ? (p >> 8) : p, sv, dv);
+                        if (r < 0) r = 0;
+                        if (r > 255) r = 255;
+                        bl[k] = (unsigned char)r;
+                    }
+                } else {
+                    uint32_t lop = p_regs[0x102] & 0xFu;
+                    for (k = 0; k < 4; k++)
+                        bl[k] = (unsigned char)p_logic_op(lop, tev_out.c[k], dest[k]);
+                }
+                result[0] = (mask & (1u << 8)) ? bl[0] : dest[0];
+                result[1] = (mask & (1u << 9)) ? bl[1] : dest[1];
+                result[2] = (mask & (1u << 10)) ? bl[2] : dest[2];
+                result[3] = (mask & (1u << 11)) ? bl[3] : dest[3];
+                if ((p_regs[0x113] & 0xFu) != 0u)
+                    p_fb_write(c, (uint32_t)(px >> 4), (uint32_t)(py >> 4), result);
+            }
+        }
+    }
+    g_frag_n += lfrag;
+    g_tex_n += ltex;
+    g_lit_n += llit;
+    g_fb_n += lfb;
+}
+
+static DWORD WINAPI p_raster_worker_main(LPVOID arg)
+{
+    PicaRasterWorker *w = (PicaRasterWorker *)arg;
+    for (;;) {
+        WaitForSingleObject(w->wake, INFINITE);
+        p_shade_rows(w->job, w->py0, w->py1);
+        SetEvent(w->done);
+    }
+    return 0;
+}
+
+void gpu_pica_set_raster_threads(int n)
+{
+    int i;
+    if (n < 0) n = 0;
+    if (n > PICA_RASTER_MAX_WORKERS) n = PICA_RASTER_MAX_WORKERS;
+    g_raster_threads = 0;
+    if (n == 0) return;
+    if (!g_rw_created) {
+        for (i = 0; i < n; i++) {
+            PicaRasterWorker *w = &g_rw[i];
+            w->wake = CreateEventA(NULL, FALSE, FALSE, NULL);
+            w->done = CreateEventA(NULL, FALSE, FALSE, NULL);
+            w->thread = NULL;
+            if (w->wake != NULL && w->done != NULL)
+                w->thread = CreateThread(NULL, 0, p_raster_worker_main, w, 0, NULL);
+            if (w->wake == NULL || w->done == NULL || w->thread == NULL) break;
+        }
+        g_rw_created = 1;
+        n = i;
+    }
+    g_raster_threads = n;
+}
+
+/* Verteilt die Pixelzeilen eines Dreiecks auf den Pool (Rest seriell). */
+static void p_raster_rows(const PicaRows *j, int py_first, int py_last)
+{
+    int nw = g_raster_threads;
+    int total, seg, idx;
+
+    if (py_last <= py_first) return;
+    total = (py_last - py_first + 15) / 16;
+    if (nw <= 0 || total < PICA_RASTER_MIN_ROWS) {
+        g_ser_calls++;
+        g_ser_rows += (unsigned long long)total;
+        p_shade_rows(j, py_first, py_last);
+        return;
+    }
+    g_par_calls++;
+    g_par_rows += (unsigned long long)total;
+    seg = (total + nw) / (nw + 1);
+    if (seg < 1) seg = 1;
+    for (idx = 0; idx < nw; idx++) {
+        int a = idx * seg;
+        int b = a + seg;
+        PicaRasterWorker *w = &g_rw[idx];
+        if (a >= total) break;
+        if (b > total) b = total;
+        w->job = j;
+        w->py0 = py_first + a * 16;
+        w->py1 = py_first + b * 16;
+        if (w->py1 > py_last) w->py1 = py_last;
+        SetEvent(w->wake);
+    }
+    {
+        int a = nw * seg;
+        int b = a + seg;
+        if (a > total) a = total;
+        if (b > total) b = total;
+        p_shade_rows(j, py_first + a * 16, py_first + b * 16);
+    }
+    for (idx = 0; idx < nw; idx++) {
+        if (idx * seg >= total) break;
+        WaitForSingleObject(g_rw[idx].done, INFINITE);
+    }
+}
+
 static void p_process_tri(ArmCpu *c, const PicaVertex *v0, const PicaVertex *v1,
                           const PicaVertex *v2, int reversed)
 {
@@ -1990,9 +2277,7 @@ static void p_process_tri(ArmCpu *c, const PicaVertex *v0, const PicaVertex *v1,
         int sy1 = (int)((p_regs[0x66] >> 16) & 0x3FFu) << 4;
         int sx2 = (int)((p_regs[0x67] & 0x3FFu) + 1u) << 4;
         int sy2 = (int)(((p_regs[0x67] >> 16) & 0x3FFu) + 1u) << 4;
-        int bias0, bias1, bias2;
-        float invw[3];
-        int py, px;
+        PicaRows jr;
 
         if (sc_mode == 3) {              /* Include */
             if (min_x < sx1) min_x = sx1;
@@ -2004,142 +2289,21 @@ static void p_process_tri(ArmCpu *c, const PicaVertex *v0, const PicaVertex *v1,
         max_x = (max_x + 0xF) & ~0xF;
         max_y = (max_y + 0xF) & ~0xF;
 
-        bias0 = p_right_or_flat(x[0], y[0], x[1], y[1], x[2], y[2]) ? -1 : 0;
-        bias1 = p_right_or_flat(x[1], y[1], x[2], y[2], x[0], y[0]) ? -1 : 0;
-        bias2 = p_right_or_flat(x[2], y[2], x[0], y[0], x[1], y[1]) ? -1 : 0;
+        jr.c = c;
+        jr.v0 = v0; jr.v1 = v1; jr.v2 = v2;
+        for (int k = 0; k < 3; k++) { jr.x[k] = x[k]; jr.y[k] = y[k]; }
+        jr.min_x = min_x; jr.max_x = max_x;
+        jr.sc_mode = sc_mode;
+        jr.sx1 = sx1; jr.sy1 = sy1; jr.sx2 = sx2; jr.sy2 = sy2;
+        jr.bias0 = p_right_or_flat(x[0], y[0], x[1], y[1], x[2], y[2]) ? -1 : 0;
+        jr.bias1 = p_right_or_flat(x[1], y[1], x[2], y[2], x[0], y[0]) ? -1 : 0;
+        jr.bias2 = p_right_or_flat(x[2], y[2], x[0], y[0], x[1], y[1]) ? -1 : 0;
+        jr.invw[0] = v0->pos[3];
+        jr.invw[1] = v1->pos[3];
+        jr.invw[2] = v2->pos[3];
 
-        invw[0] = v0->pos[3];
-        invw[1] = v1->pos[3];
-        invw[2] = v2->pos[3];
+        p_raster_rows(&jr, min_y + 8, max_y);
 
-        for (py = min_y + 8; py < max_y; py += 16) {
-            for (px = min_x + 8; px < max_x; px += 16) {
-                int w0, w1, w2, wsum;
-                float bw0, bw1, bw2, iw, depth, tc0_w;
-                float prim[4], tuv[3][2], quat[4], view[3];
-                PicaColor primary, tex_col[4];
-                PicaColor pfc, sfc;
-                PicaColor tev_out;
-                unsigned char texbuf[4];
-                int i, unit;
-
-                if (sc_mode == 1) {      /* Exclude */
-                    if (px >= sx1 && px < sx2 && py >= sy1 && py < sy2) continue;
-                }
-                /* Keine Schreibzugriffe ausserhalb des konfigurierten
-                 * Farbziels (Azahar zeichnet nur in den Framebuffer). */
-                if (p_fb_configured()) {
-                    uint32_t fw = p_regs[0x11E] & 0x7FFu;
-                    uint32_t fh = ((p_regs[0x11E] >> 12) & 0x3FFu) + 1u;
-                    if ((uint32_t)(px >> 4) >= fw || (uint32_t)(py >> 4) >= fh) continue;
-                }
-
-                w0 = bias0 + p_signed_area(x[1], y[1], x[2], y[2], px, py);
-                w1 = bias1 + p_signed_area(x[2], y[2], x[0], y[0], px, py);
-                w2 = bias2 + p_signed_area(x[0], y[0], x[1], y[1], px, py);
-                if (w0 < 0 || w1 < 0 || w2 < 0) continue;
-                wsum = w0 + w1 + w2;
-                if (wsum == 0) continue;
-                bw0 = (float)w0; bw1 = (float)w1; bw2 = (float)w2;
-                iw = 1.0f / (invw[0] * bw0 + invw[1] * bw1 + invw[2] * bw2);
-
-                for (i = 0; i < 4; i++)
-                    prim[i] = (v0->color[i] * bw0 + v1->color[i] * bw1 + v2->color[i] * bw2) * iw;
-                for (i = 0; i < 3; i++) {
-                    tuv[i][0] = (v0->uv[i][0] * bw0 + v1->uv[i][0] * bw1 +
-                                 v2->uv[i][0] * bw2) * iw;
-                    tuv[i][1] = (v0->uv[i][1] * bw0 + v1->uv[i][1] * bw1 +
-                                 v2->uv[i][1] * bw2) * iw;
-                }
-                tc0_w = (v0->tc0_w * bw0 + v1->tc0_w * bw1 + v2->tc0_w * bw2) * iw;
-                for (i = 0; i < 4; i++)
-                    quat[i] = (v0->quat[i] * bw0 + v1->quat[i] * bw1 +
-                               v2->quat[i] * bw2) * iw;
-                for (i = 0; i < 3; i++)
-                    view[i] = (v0->view[i] * bw0 + v1->view[i] * bw1 +
-                               v2->view[i] * bw2) * iw;
-
-                for (i = 0; i < 4; i++) {
-                    float f = prim[i];
-                    if (f < 0.0f) f = 0.0f;
-                    if (f > 1.0f) f = 1.0f;
-                    primary.c[i] = (unsigned char)roundf(f * 255.0f);
-                }
-                for (i = 0; i < 4; i++)
-                    tex_col[i].c[0] = tex_col[i].c[1] = tex_col[i].c[2] = tex_col[i].c[3] = 0;
-                for (unit = 0; unit < 3u; unit++) {
-                    int ci = (unit == 2u && ((p_regs[0x80] >> 13) & 1u)) ? 1 : (int)unit;
-                    p_sample_tex(c, unit, tuv[ci][0], tuv[ci][1], tc0_w, texbuf);
-                    for (i = 0; i < 4; i++) tex_col[unit].c[i] = texbuf[i];
-                }
-
-                /* Fragment-Lighting (Azahar sw_rasterizer.cpp): nur wenn
-                   0x1C6 Bit0 (lighting.disable) = 0. */
-                for (i = 0; i < 4; i++)
-                    pfc.c[i] = sfc.c[i] = 0;
-                if (!(p_regs[0x1C6] & 1u))
-                    p_compute_fragments(tex_col, quat, view, &pfc, &sfc);
-
-                tev_out = p_tev(tex_col, &primary, &pfc, &sfc);
-
-                /* Alpha-Test (Azahar DoAlphaTest) */
-                if (p_regs[0x104] & 1u) {
-                    uint32_t fn = (p_regs[0x104] >> 4) & 7u;
-                    uint32_t ref = (p_regs[0x104] >> 8) & 0xFFu;
-                    if (!p_compare(fn, tev_out.c[3], ref)) continue;
-                }
-
-                /* Tiefe: Azahar screenpos.z interpoliert, dann Range/Offset
-                 * (0x4D/0x4E) und optional W-Buffer (0x6D). */
-                depth = (v0->pos[2] * bw0 + v1->pos[2] * bw1 + v2->pos[2] * bw2) /
-                        (float)wsum;
-                depth = depth * p_f24_to_float(p_regs[0x4D]) + p_f24_to_float(p_regs[0x4E]);
-                if ((p_regs[0x6D] & 1u) == 0u)      /* DepthBuffering::WBuffering */
-                    depth *= iw * (float)wsum;
-                if (depth < 0.0f) depth = 0.0f;
-                if (depth > 1.0f) depth = 1.0f;
-                p_apply_fog(depth, &tev_out);
-                if (p_fb_configured() && !p_depth_stencil_test(c, (uint32_t)(px >> 4),
-                                                               (uint32_t)(py >> 4), depth))
-                    continue;
-
-                if (p_fb_configured()) {
-                    unsigned char dest[4];
-                    unsigned char result[4];
-                    unsigned char bl[4];
-                    uint32_t om = p_regs[0x100];
-                    uint32_t mask = p_regs[0x107];
-                    int k;
-                    p_fb_read(c, (uint32_t)(px >> 4), (uint32_t)(py >> 4), dest);
-                    if (om & (1u << 8)) {           /* alphablend_enable */
-                        uint32_t p = p_regs[0x101];
-                        uint32_t cst = p_regs[0x103];
-                        for (k = 0; k < 4; k++) {
-                            int sfac = (int)((k == 3) ? ((p >> 24) & 0xFu) : ((p >> 16) & 0xFu));
-                            int dfac = (int)((k == 3) ? ((p >> 28) & 0xFu) : ((p >> 20) & 0xFu));
-                            int sv = tev_out.c[k] * (int)p_blend_factor((uint32_t)sfac, k,
-                                                                       tev_out.c, dest, cst);
-                            int dv = dest[k] * (int)p_blend_factor((uint32_t)dfac, k,
-                                                                   tev_out.c, dest, cst);
-                            int r = p_blend_eq((k == 3) ? (p >> 8) : p, sv, dv);
-                            if (r < 0) r = 0;
-                            if (r > 255) r = 255;
-                            bl[k] = (unsigned char)r;
-                        }
-                    } else {
-                        uint32_t lop = p_regs[0x102] & 0xFu;
-                        for (k = 0; k < 4; k++)
-                            bl[k] = (unsigned char)p_logic_op(lop, tev_out.c[k], dest[k]);
-                    }
-                    result[0] = (mask & (1u << 8)) ? bl[0] : dest[0];
-                    result[1] = (mask & (1u << 9)) ? bl[1] : dest[1];
-                    result[2] = (mask & (1u << 10)) ? bl[2] : dest[2];
-                    result[3] = (mask & (1u << 11)) ? bl[3] : dest[3];
-                    if ((p_regs[0x113] & 0xFu) != 0u)
-                        p_fb_write(c, (uint32_t)(px >> 4), (uint32_t)(py >> 4), result);
-                }
-            }
-        }
     }
 }
 

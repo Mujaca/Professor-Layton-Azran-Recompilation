@@ -49,9 +49,9 @@ ReadPipeIfPossible` (Request `normal=3, translate=0`).
   `GetServiceHandle` erhält den Namen als 8-Byte-Feld plus `name_len` =
   `strlen(name)` (nicht `strlen+1`); `name_len > 8` → `0xD9006405`
   (Azahar `sm/srv.cpp`, `kMaxPortSize = 8`).
-* **APT:U:** `1` GetLockHandle, `2` Initialize, `3` Enable, `0x0D`
-  ReceiveParameter, `0x0E` GlanceParameter, `0x43` InquireNotification,
-  `0x4B` AppletUtility, `0x4F` SetAppCpuTimeLimit.
+* **APT:U:** `1` GetLockHandle, `2` Initialize, `3` Enable, `0x0B`
+  InquireNotification, `0x0D` ReceiveParameter, `0x0E` GlanceParameter,
+  `0x43` NotifyToWait, `0x4B` AppletUtility, `0x4F` SetAppCpuTimeLimit.
 * **fs:USER:** `0x0801` Initialize, `0x0802` OpenFile, `0x0803`
   OpenFileDirectly, `0x080C` OpenArchive, `0x0861` InitializeWithSdkVersion,
   `0x0862` SetPriority.
@@ -571,9 +571,9 @@ ReadPipeIfPossible` (Request `normal=3, translate=0`).
   `GetServiceHandle` erhält den Namen als 8-Byte-Feld plus `name_len` =
   `strlen(name)` (nicht `strlen+1`); `name_len > 8` → `0xD9006405`
   (Azahar `sm/srv.cpp`, `kMaxPortSize = 8`).
-* **APT:U:** `1` GetLockHandle, `2` Initialize, `3` Enable, `0x0D`
-  ReceiveParameter, `0x0E` GlanceParameter, `0x43` InquireNotification,
-  `0x4B` AppletUtility, `0x4F` SetAppCpuTimeLimit.
+* **APT:U:** `1` GetLockHandle, `2` Initialize, `3` Enable, `0x0B`
+  InquireNotification, `0x0D` ReceiveParameter, `0x0E` GlanceParameter,
+  `0x43` NotifyToWait, `0x4B` AppletUtility, `0x4F` SetAppCpuTimeLimit.
 * **fs:USER:** `0x0801` Initialize, `0x0802` OpenFile, `0x0803`
   OpenFileDirectly, `0x080C` OpenArchive, `0x0861` InitializeWithSdkVersion,
   `0x0862` SetPriority.

@@ -919,9 +919,19 @@ static void generate_frame(DspState *d) {
             source_mix_into(s, intermediate[mix], mix);
     }
 
+    if (d->verbose && (d->frame_count % 256u) == 0u) {
+        int en = 0;
+        for (int i = 0; i < AUDIO_DSP_NUM_SOURCES; i++)
+            if (d->sources[i].enabled) en++;
+        printf("[audio] t=%llu f=%llu enabled=%d src0_id=%u src0_pos=%u src0_len=%u\n",
+               (unsigned long long)GetTickCount64(), d->frame_count, en,
+               (unsigned)d->sources[0].current_buffer_id,
+               (unsigned)d->sources[0].current_sample_number,
+               (unsigned)d->sources[0].cur_len);
+    }
+
     mixers_tick(d, read, write, intermediate);
     write_dsp_status(write);
-
     for (int i = 0; i < SPF; i++) {
         wr16(write + SM_FINAL_SAMPLES + (size_t)i * 4,
              (uint16_t)d->mixers.current_frame[i][0]);
