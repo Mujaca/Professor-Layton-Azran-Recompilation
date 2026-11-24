@@ -8,6 +8,7 @@
 #include "hle.h"
 #include "gpu.h"
 #include "gsp_fb.h"
+#include "dsp_hle.h"
 #include "hid_ring.h"
 #include "y2r.h"
 
@@ -2100,6 +2101,10 @@ static void dsp_signal_events(int type, int pipe) {
     }
 }
 
+static void dsp_interrupt_cb(int type, int pipe) {
+    dsp_signal_events(type, pipe);
+}
+
 static void dsp_pipe_append(int ch, const void *src, uint32_t n) {
     if (ch < 0 || ch >= DSP_NUM_PIPES) return;
     if (n > DSP_PIPE_CAP - g_dsp_pipe_len[ch]) n = DSP_PIPE_CAP - g_dsp_pipe_len[ch];
@@ -2131,6 +2136,7 @@ static void dsp_audio_struct_addresses(void) {
         buf[2 + i * 2] = (uint8_t)(addrs[i] & 0xFF);
         buf[2 + i * 2 + 1] = (uint8_t)(addrs[i] >> 8);
     }
+    g_dsp_pipe_len[2] = 0;
     dsp_pipe_append(2, buf, sizeof(buf));   /* DspPipe::Audio */
     dsp_signal_events(2, 2);                /* InterruptType::Pipe, Audio */
 }
@@ -2138,25 +2144,24 @@ static void dsp_audio_struct_addresses(void) {
 static void dsp_command(Ipc *r, uint32_t *p) {
     /* Antwortlayouts nach Azahar src/core/hle/service/dsp/dsp_dsp.cpp. */
     switch (r->cmd) {
-        case 0x0001: { /* RecvData: Result + Wert */
+        case 0x0001: { /* RecvData: Result + Wert (Azahar DspHle::RecvData) */
             ipc_begin(r, 0x0001, 2, 0);
             put_result(r);
-            ipc_put(r, 1);
+            ipc_put(r, audio_dsp_recv_data());
             break;
         }
         case 0x0002: { /* RecvDataIsReady: Result + bool */
             ipc_begin(r, 0x0002, 2, 0);
             put_result(r);
-            ipc_put(r, 1);
+            ipc_put(r, (uint32_t)audio_dsp_recv_data_ready());
             break;
         }
         case 0x0007: { /* SetSemaphore: Result
-                        Der DSP wertet das Semaphor aus und meldet danach den
-                        Pipe-Interrupt (Azahar SignalInterrupt). */
+                          Azahar DspHle::SetSemaphore ist ein No-op; die
+                          Pipe-Interrupts kommen je Audio-Frame aus
+                          runtime/audio/dsp_hle.c. */
             ipc_begin(r, r->cmd, 1, 0);
             put_result(r);
-            for (int pipe = 0; pipe < DSP_NUM_PIPES; pipe++)
-                dsp_signal_events(2, pipe);   /* InterruptType::Pipe */
             break;
         }
         case 0x0017: { /* SetSemaphoreMask: Result */
@@ -2183,11 +2188,11 @@ static void dsp_command(Ipc *r, uint32_t *p) {
             if (addr != 0 && size != 0 && g_cpu != NULL &&
                 (addr & 0x1FFFFFFFu) + size <= g_cpu->mem_size) {
                 const uint8_t *src = g_cur_mem + (addr & 0x1FFFFFFFu);
-                if (ch == 2 && size >= 1 && (src[0] == 0 || src[0] == 2)) {
-                    /* Audio-Pipe: Initialize/Wakeup -> Puffer leeren und die
-                       DSP-Struktur-Adressen liefern (Azahar PipeWrite). */
-                    g_dsp_pipe_len[2] = 0;
-                    dsp_audio_struct_addresses();
+                if (ch == 2) {
+                    /* Audio-Pipe: StateChange (Initialize/Shutdown/Wakeup/
+                       Sleep) an das DSP-HLE-Modul; die Struktur-Adressen
+                       schreibt der Callback (Azahar PipeWrite). */
+                    audio_dsp_pipe_write(src, size);
                 } else {
                     dsp_pipe_append((int)ch, src, size);
                     dsp_signal_events(2, (int)ch);
@@ -3659,6 +3664,14 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
        nimmt fuer jeden VBlank den Gast-Lock. */
     g_vblank_run = 1;
     CreateThread(NULL, 0, vblank_thread, NULL, 0, NULL);
+
+    /* DSP-HLE-Audio: Regionen 0x1FF50000/0x1FF70000 im Gast-Speicher,
+       Gast-Lock fuer den Audio-Thread, Pipe-2-Interrupts je Frame. */
+    audio_dsp_init(c->mem, c->mem_size);
+    audio_dsp_set_lock(guest_lock_enter, guest_lock_leave);
+    audio_dsp_set_interrupt(dsp_interrupt_cb);
+    audio_dsp_set_struct_addresses(dsp_audio_struct_addresses);
+    audio_dsp_start();
     printf("[hle] romfs=%s log=%d srv-handle=%u\n", g_romfs, g_log, g_srv_handle);
 }
 
@@ -3682,6 +3695,7 @@ void hle_tick_stats(int *calls, unsigned long long *tick) {
 
 void hle_report(void) {
     printf("[hle] ipc=%d ticks=%llu tickcalls=%d\n", g_ipc_count, (unsigned long long)g_tick, g_tick_calls);
+    if (g_log) printf("[audio] frames=%llu\n", audio_dsp_frames());
     arm_perfmap_report();
     printf("[hle] letzte Ereignisse:\n");
     for (int i = 0; i < HLE_EV_RING; i++) {

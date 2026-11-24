@@ -235,6 +235,45 @@ Quelle: Azahar `core/hle/service/cam/y2r_u.{h,cpp}`, `core/hw/y2r.cpp`.
   `runtime/kernel/hle.c`; Test `tests/y2r_test.py` mit synthetischen Bildern
   (alle Formate, Rotation, Morton, DMA-Lücken).
 
+## DSP (Audio-HLE)
+
+Quelle: Azahar `src/audio_core/hle/{hle,shared_memory,source,mixers,filter,
+effects}.cpp`, `src/audio_core/{codec,interpolate}.cpp`.
+
+* Der DSP-RAM liegt bei `0x1FF00000`; die Anwendung nutzt zwei Regionen zu je
+  `0x8000` Byte: `0x1FF50000` (Region 0) und `0x1FF70000` (Region 1). Der
+  Frame-Counter ist das letzte `u16` jeder Region (`+0x7FFE`) und wird von der
+  Anwendung erhoeht. Gelesen wird die Region mit dem hoeheren Counter
+  (Ausnahme Wraparound: `0xFFFF` gegen `0xFFFE`), geschrieben wird die andere.
+* `dsp::DSP ConvertProcessAddressFromDspDram(addr)` liefert
+  `(addr << 1) + 0x1FF00000 + 0x40000`; die 15 von `WriteProcessPipe(Audio,
+  Initialize)` gelieferten DSP-Adressen sind `0x8000 + Offset/2` der
+  `SharedMemory`-Struktur (Frame-Counter `0xBFFF`, Source-Config `0x9E92`,
+  Source-Status `0x8680`, ADPCM-Koeffizienten `0xA792`, DSP-Config `0x9430`,
+  DSP-Status `0x8400`, Final-Mix `0x8540`, Intermediate-Mix `0x9492`,
+  Compressor `0x8710`, Debug `0x8410`).
+* `SharedMemory`-Offsets: DSP-Status `0x800`, Debug `0x820`, Final-Mix
+  `0xA80` (160×2 s16 LE), Source-Status `0xD00` (24×12), Compressor `0xE20`,
+  DSP-Config `0x2860` (196 Byte), Intermediate-Mix `0x2924` (2×4×160 s32 LE),
+  Source-Config `0x3D24` (24×192), ADPCM-Koeffizienten `0x4F24` (24×16 s16).
+  `u32_dsp`-Felder (Pufferadresse, Laenge, Position …) sind mittelendian: die
+  beiden 16-Bit-Haelften sind gegenueber little-endian vertauscht.
+* Audio-Frame: 160 Samples bei 32728 Hz, Takt `160 * 4096 * 2 = 1310720`
+  ARM11-Zyklen (4,889 ms). Pro Frame verarbeitet der DSP alle 24 Quellen
+  (PCM8/PCM16/GC-ADPCM, mono/stereo, Puffer-Queue mit Prioritaet nach
+  `buffer_id`, Loop, Lineare/None-Interpolation mit 24 Nachkommabits,
+  Simple-/Biquad-Filter, 3 Gain-Saetze mit Ramp), mischt 3 Zwischenmixer und
+  schreibt Endmix + Status in die Schreibregion. Danach wird
+  `InterruptType::Pipe` fuer `DspPipe::Audio` signalisiert (Azahar
+  `AudioTickCallback`).
+* Status je Quelle (12 Byte): `is_enabled` (0), `current_buffer_id_dirty` (1),
+  `sync_count` (2), `buffer_position` (4, u32_dsp), `current_buffer_id` (8),
+  `last_buffer_id` (10). Die Dirty-Bits der gelesenen Konfiguration werden
+  vom DSP je Frame geloescht.
+* `SetSemaphore` ist im HLE ohne Wirkung; `RecvData(0)` liefert 0 bei
+  laufendem DSP, sonst 1, `RecvDataIsReady(0)` ist false solange ein Sleep
+  aussteht.
+
 ## HID (hid:USER / hid:SPVR)
 
 * Beide Dienste teilen **ein** Modul: ein Shared-Memory-Block (0x1000 Byte,

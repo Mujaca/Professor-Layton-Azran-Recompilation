@@ -30,10 +30,13 @@ SOURCES = [
     "kernel/hle.c",
     "gpu/gpu.c",
     "gpu/imgc.c",
+    "audio/audio_codec.c",
+    "audio/dsp_hle.c",
+    "audio/host_output.c",
     "platform/window.c",
     "workarounds.c",
 ]
-INCLUDES = ["", "cpu", "kernel", "gpu", "platform"]
+INCLUDES = ["", "cpu", "kernel", "gpu", "audio", "platform"]
 
 
 def zig():
@@ -127,7 +130,7 @@ def main():
 
     srcs = [os.path.join(RUNTIME, s) for s in SOURCES]
     run([zig(), "cc"] + cflags() + srcs + [gen_o, "-o", os.path.join(ROOT, "out", "port.exe"),
-                                           "-luser32", "-lgdi32"])
+                                           "-luser32", "-lgdi32", "-lwinmm"])
     print("gebaut: out/port.exe")
 
 

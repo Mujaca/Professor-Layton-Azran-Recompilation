@@ -328,11 +328,13 @@ einem Kernel-Wait stehen; `boss:U` ist weiter offen.
 
 
 `dsp cmd 0x0015 RegisterInterruptEvents` merkt sich das Ereignis je
-(InterruptType, Pipe); `cmd 0x0007 SetSemaphore` signalisiert danach die
-Pipe-Ereignisse (Azahar `DSP_DSP::SignalInterrupt`). Vorher blieb der
-Hauptthread direkt nach `SetSemaphore` auf seinem eigenen Event (Handle 35,
-`HLE_KLOG`) stehen; jetzt laufen `ReadPipeIfPossible`/`ConvertProcessAddress`
-weiter. **Pipe-Inhalt (2026-11-24):** `WriteProcessPipe(Audio, Init)` liefert
+(InterruptType, Pipe). `SetSemaphore` ist im HLE ein No-op wie in Azahar
+`DspHle::SetSemaphore`; seit `runtime/audio/dsp_hle.c` existiert, signalisiert
+der Audio-Thread `InterruptType::Pipe`/`DspPipe::Audio` nach jedem Audio-Frame
+(160 Samples, 4,889 ms) und verarbeitet die beiden DSP-Regionen. Vorher blieb
+der Hauptthread direkt nach `SetSemaphore` auf seinem eigenen Event (Handle
+35, `HLE_KLOG`) stehen; jetzt laufen `ReadPipeIfPossible`/
+`ConvertProcessAddress` weiter. **Pipe-Inhalt (2026-11-24):** `WriteProcessPipe(Audio, Init)` liefert
 jetzt die 15 DSP-Struktur-Adressen, die das Spiel zu 30
 `ConvertProcessAddress`-Aufrufen verarbeitet (wie `reports/azahar_trace.txt`);
 `ReadPipe`/`ReadPipeIfPossible` lesen echte Puffer. `boss:U` bleibt offen.
