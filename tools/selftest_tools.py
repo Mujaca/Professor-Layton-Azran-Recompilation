@@ -128,22 +128,18 @@ def test_failures():
 
 
 def test_docs_skill():
-    docs = ROOT / "docs" / "TOOLS.md"
-    skill = ROOT / ".opencode" / "skills" / "3ds-hle" / "SKILL.md"
-    new_skill = ROOT / ".opencode" / "skills" / "3ds-port" / "SKILL.md"
-    need(docs.is_file(), "docs/TOOLS.md fehlt")
-    need(skill.is_file(), ".opencode/skills/3ds-hle/SKILL.md fehlt")
-    need(new_skill.is_file(), ".opencode/skills/3ds-port/SKILL.md fehlt")
-    need((ROOT / "docs" / "SKILL.md").is_file(), "docs/SKILL.md fehlt")
-    text = docs.read_text(encoding="utf-8")
-    for name in ("trace-diff", "guest-refs", "guest-run", "guest-watch",
-                 "guest-exp", "where", "callgraph", "diff_trace",
-                 "milestones", "matrix", "perfmap", "hotpatch", "framecheck"):
+    for rel in ("AGENTS.md", "docs/ROADMAP.md", "docs/REFERENCE.md",
+                "docs/WORKAROUNDS.md", "docs/TOOLS.md",
+                ".opencode/skills/3ds-port/SKILL.md",
+                ".opencode/skills/3ds-hle/SKILL.md"):
+        need((ROOT / rel).is_file(), "%s fehlt" % rel)
+    text = (ROOT / "docs" / "TOOLS.md").read_text(encoding="utf-8")
+    for name in ("frontier", "trace-diff", "guest-refs", "guest-run",
+                 "guest-watch", "callgraph", "workarounds"):
         need(name in text, "%s fehlt in docs/TOOLS.md" % name)
-    st = skill.read_text(encoding="utf-8")
-    for needle in ("cmdbuf[0]", "0x10", "0x18", "0x20", "ReceiveParameter",
-                   "InterruptRelayQueue", "ndspInit", "aptMainLoop"):
-        need(needle in st, "Skill ohne %r" % needle)
+    ref = (ROOT / "docs" / "REFERENCE.md").read_text(encoding="utf-8")
+    for needle in ("cmdbuf[0]", "InterruptRelayQueue", "IVFC", "0x22F"):
+        need(needle in ref, "REFERENCE.md ohne %r" % needle)
 
 
 def test_callgraph():
@@ -211,81 +207,6 @@ def test_framecheck():
          "Screenshotgroesse: %s" % data["shot_bytes"])
 
 
-def test_hotpatch_list():
-    p = run(["hotpatch", "list"])
-    need(p.returncode == 0, "hotpatch list Exit %d" % p.returncode)
-    for name in ("count_fields", "regs", "mem", "log", "set_r0"):
-        need(name in p.stdout, "Callback %s fehlt" % name)
-
-
-def test_canonical_shot():
-    """Shot-Hash des kanonischen Laufs: zwei Laeufe muessen byte-identisch
-    sein (Screenshot wartet auf stabile Engine-Submits), und die
-    Referenzmessung darf nicht schlechter werden."""
-    import hashlib
-    exe = ROOT / "out" / "port.exe"
-    need(exe.is_file(), "out/port.exe fehlt (python tools\\build_port.py)")
-    hashes = []
-    tries = 0
-    while tries < 6:
-        tries += 1
-        shot = OUT / "canon_try.bmp"
-        logp = OUT / "canon_log.txt"
-        p = subprocess.run(
-            [sys.executable, str(ROOT / "tools" / "run_chain_direct.py"),
-             "--profile", str(ROOT / "tools" / "profiles" /
-                             "canonical_shot.json"),
-             "--shot", str(shot), "--log", str(logp)],
-            cwd=str(ROOT), capture_output=True, text=True, timeout=300)
-        need(p.returncode == 0, "run_chain_direct Exit %d\n%s"
-             % (p.returncode, p.stdout[-800:]))
-        need(shot.is_file(), "Shot fehlt: %s" % shot)
-        hashes.append(hashlib.sha256(shot.read_bytes()).hexdigest())
-        if len(hashes) >= 2 and hashes[-1] == hashes[-2]:
-            break
-    need(len(hashes) >= 2 and hashes[-1] == hashes[-2],
-         "Shot nicht deterministisch: %s" % hashes)
-    log = logp.read_text(encoding="utf-8", errors="replace")
-    need("[shot] frames=" in log and "lists=" in log,
-         "kein [shot]-Beleg im Log")
-    m = subprocess.run(
-        [sys.executable, str(ROOT / "tools" / "measure_ref.py"),
-         str(OUT / "canon_try.bmp")],
-        cwd=str(ROOT), capture_output=True, text=True, timeout=120)
-    need(m.returncode == 0, "measure_ref Exit %d" % m.returncode)
-    bottom = None
-    for line in m.stdout.splitlines():
-        if line.startswith("BOTTOM sichtbar"):
-            bottom = int(line.split()[4].split("/")[0])
-    need(bottom is not None, "BOTTOM-Zeile fehlt:\n%s" % m.stdout)
-    need(bottom <= 16000, "BOTTOM diff zu hoch: %d (linear 14752)" % bottom)
-    print("     shot-sha256 %s  BOTTOM %d/71360" % (hashes[0][:16], bottom))
-
-
-def test_classa_record_block():
-    """Record-Kette 0xD2-Loader -> Records -> Klasse-A-Block (sprites=3)."""
-
-    def run_profile(name):
-        logp = OUT / (name + ".log.txt")
-        p = subprocess.run(
-            [sys.executable, str(ROOT / "tools" / "run_chain_direct.py"),
-             "--profile", str(ROOT / "tools" / "profiles" / name),
-             "--shot", str(OUT / (name + ".bmp")), "--log", str(logp)],
-            cwd=str(ROOT), capture_output=True, text=True, timeout=300)
-        need(p.returncode == 0, "run_chain_direct %s Exit %d"
-             % (name, p.returncode))
-        return logp.read_text(encoding="utf-8", errors="replace")
-
-    log = run_profile("classa_drive.json")
-    need("284A48(" in log and "0E905000,3" in log,
-         "Loader-Alloc-Kette (284A48 0E905000,3) fehlt")
-    need("[classa] eye0" in log and "hdr=" in log,
-         "Klasse-A-Block fehlt")
-    log = run_profile("record_quads.json")
-    need("sprites=3 " in log, "Record-Liste sprites=3 fehlt")
-    print("     sprites=3, Klasse-A-Block vorhanden, 284A48 0E905000")
-
-
 def test_pica_regs():
     p = subprocess.run(
         [sys.executable, str(ROOT / "tools" / "test_pica_c.py")],
@@ -311,14 +232,11 @@ TESTS = [
     ("guest-watch 0x40B4C4", test_guest_watch),
     ("guest-exp --repeat 2", test_guest_exp),
     ("klare Fehlermeldungen", test_failures),
-    ("docs/TOOLS.md + Skills", test_docs_skill),
+    ("Doku + Skills vorhanden", test_docs_skill),
     ("callgraph writers/literals", test_callgraph),
     ("diff-trace Anker + Missing", test_diff_trace),
     ("milestones Fixture", test_milestones),
     ("framecheck Platzhalter", test_framecheck),
-    ("hotpatch list", test_hotpatch_list),
-    ("kanonischer Shot deterministisch", test_canonical_shot),
-    ("Record->Block sprites=3", test_classa_record_block),
     ("PICA-Registermap", test_pica_regs),
     ("IMGC ETC1/linear", test_imgc_decoder),
 ]

@@ -436,7 +436,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if argv:
         name = argv[0].replace("_", "-")
         if name in ("callgraph", "diff-trace", "milestones", "matrix",
-                    "where", "perfmap", "hotpatch", "framecheck"):
+                    "where", "perfmap", "framecheck"):
             from importlib import import_module
             mod = import_module("g3ds." + name.replace("-", "_"))
             return mod.main(argv[1:])

@@ -1,0 +1,162 @@
+{
+ "_comment": "Golden-Ausgaben von runtime/gpu/imgc.c. Am 2026-11-24 byte-exakt gegen die frueheren Python-Referenzdekoder verifiziert (Tag archive/pre-cleanup-2026-11-24).",
+ "cases": [
+  {
+   "name": "title_b_bg",
+   "fa": "lt6_b.fa",
+   "offset": "0x0CE43074",
+   "w": 320,
+   "h": 240,
+   "env": {},
+   "rgb_sha256": "11c7f51ffab15cca78e8f0bfa848d64d463fdc18e5aab4beeb8e3331f0c5cf36"
+  },
+  {
+   "name": "title_b_bg_z",
+   "fa": "lt6_b.fa",
+   "offset": "0x0CE43074",
+   "w": 320,
+   "h": 240,
+   "env": {
+    "HLE_IMGC_ZORDER": "1"
+   },
+   "rgb_sha256": "f933eec06dea8c24086ed1b011e242d0e7220285edb8d8e58763dcb27299f097"
+  },
+  {
+   "name": "etc1_000.xi",
+   "fa": "lt6_b.fa",
+   "offset": "0x0CD69FEC",
+   "w": 512,
+   "h": 512,
+   "env": {},
+   "rgb_sha256": "2d75e4e21e43bd8b67667d7245abb78a5b83b8d9f72133e0c36f3a3a85386189"
+  },
+  {
+   "name": "etc1_003.xi",
+   "fa": "lt6_b.fa",
+   "offset": "0x0CDAE6AC",
+   "w": 512,
+   "h": 256,
+   "env": {},
+   "rgb_sha256": "26578abab0c8109ff9e2dc3f365f8ada66a3d4ebafdfdc5aa6c44073498f7afa"
+  },
+  {
+   "name": "etc1_006.xi",
+   "fa": "lt6_b.fa",
+   "offset": "0x0CDE6980",
+   "w": 512,
+   "h": 256,
+   "env": {},
+   "rgb_sha256": "59e0cc453e33dc946d9f4f62980d670af3bea92cfa9c77161042e008ba3f1ae7"
+  },
+  {
+   "name": "etc1_013.xi",
+   "fa": "lt6_b.fa",
+   "offset": "0x0CE3D6E8",
+   "w": 256,
+   "h": 256,
+   "env": {},
+   "rgb_sha256": "979265d4c7bbd3189acb3f1a85ad7d7bf348ecdd822b232f110f3654798652d5"
+  },
+  {
+   "name": "etc1_005.xi",
+   "fa": "lt6_b.fa",
+   "offset": "0x0CDD8CE8",
+   "w": 512,
+   "h": 256,
+   "env": {},
+   "rgb_sha256": "8412bdd76258de52af2ca6f8f82c5cc9d09b6087b82314ba93b71d5fd473315c"
+  },
+  {
+   "name": "etc1_010.xi",
+   "fa": "lt6_b.fa",
+   "offset": "0x0CE1F0A8",
+   "w": 512,
+   "h": 256,
+   "env": {},
+   "rgb_sha256": "fedc32539e6ccf19129c32b8ad170e1fce7d3b15cdfc15257c5ea549e7e35a9d"
+  },
+  {
+   "name": "etc1_009.xi",
+   "fa": "lt6_b.fa",
+   "offset": "0x0CE11374",
+   "w": 512,
+   "h": 256,
+   "env": {},
+   "rgb_sha256": "0cd84d12defcfb794818d0eb9437871934c0de22de68231d9289c1fc03685194"
+  },
+  {
+   "name": "etc1_011.xi",
+   "fa": "lt6_b.fa",
+   "offset": "0x0CE2CEA8",
+   "w": 512,
+   "h": 256,
+   "env": {},
+   "rgb_sha256": "12d8bc7d8566a33238cc7b9d52df02f2c384521e776e64284977564cc483f3b4"
+  },
+  {
+   "name": "etc1_004.xi",
+   "fa": "lt6_b.fa",
+   "offset": "0x0CDBC05C",
+   "w": 512,
+   "h": 512,
+   "env": {},
+   "rgb_sha256": "b9373f2af1c241bc9f308672f2a54dda68d41639cd3d24e00a80424ef02f59fd"
+  },
+  {
+   "name": "etc1_012.xi",
+   "fa": "lt6_b.fa",
+   "offset": "0x0CE3AAE4",
+   "w": 512,
+   "h": 256,
+   "env": {},
+   "rgb_sha256": "3a48a5108a76ab9211619bbf6513551403c0f5c0c57ef8280dfde48381b56751"
+  },
+  {
+   "name": "etc1_007.xi",
+   "fa": "lt6_b.fa",
+   "offset": "0x0CDF4548",
+   "w": 512,
+   "h": 256,
+   "env": {},
+   "rgb_sha256": "011cdec696f2f3477b3f9806b2f9e793467e510acdbd5a52c75d0805fbb8ecae"
+  },
+  {
+   "name": "etc1_002.xi",
+   "fa": "lt6_b.fa",
+   "offset": "0x0CD92750",
+   "w": 512,
+   "h": 512,
+   "env": {},
+   "rgb_sha256": "aeb66afd64432a0a5459430e6920b35f29763a08abbb48ef66f6784b2f076c31"
+  },
+  {
+   "name": "etc1_001.xi",
+   "fa": "lt6_b.fa",
+   "offset": "0x0CD84E38",
+   "w": 512,
+   "h": 256,
+   "env": {},
+   "rgb_sha256": "939e607bfceb1a43fa5006a2b3dc9941a2c04938b64d8323a0f99447f2607f35"
+  },
+  {
+   "name": "etc1_008.xi",
+   "fa": "lt6_b.fa",
+   "offset": "0x0CE01F10",
+   "w": 512,
+   "h": 256,
+   "env": {},
+   "rgb_sha256": "a312a85c72e556fa7d45433d4eb9787cffa3f8939aa4039ed56cda415cff4ce9"
+  },
+  {
+   "name": "z_000",
+   "fa": "lt6_uk.fa",
+   "offset": "0x01428590",
+   "w": 512,
+   "h": 512,
+   "env": {
+    "HLE_IMGC_ZORDER": "1"
+   },
+   "rgb_sha256": "502ef86e03fb037eaf2820257180dfeea23ff4fb035eefe78141a92bf18453b6"
+  }
+ ]
+}

@@ -61,9 +61,9 @@ def main():
     zig = os.path.join(os.path.dirname(ziglang.__file__), "zig.exe")
     runtime = os.path.join(ROOT, "runtime")
     exe = os.path.join(OUT, "selftrace.exe")
-    cmd = [zig, "cc", "-std=c11", "-O1", "-I", runtime,
-           HOST, GEN, os.path.join(runtime, "arm_cpu.c"),
-           os.path.join(runtime, "arm_trace.c"), "-o", exe]
+    cmd = [zig, "cc", "-std=c11", "-O1", "-I", os.path.join(runtime, "cpu"),
+           HOST, GEN, os.path.join(runtime, "cpu", "arm_cpu.c"),
+           os.path.join(runtime, "cpu", "arm_trace.c"), os.path.join(runtime, "workarounds.c"), "-o", exe]
     p = subprocess.run(cmd, capture_output=True, text=True)
     if p.returncode != 0:
         print("COMPILE-FEHLER\n", p.stdout, p.stderr)

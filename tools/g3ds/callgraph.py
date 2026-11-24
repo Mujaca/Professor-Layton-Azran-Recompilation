@@ -165,7 +165,7 @@ def build(code_path: Optional[Path] = None, gen_path: Optional[Path] = None,
     code_path = Path(code_path) if code_path else common.CODE_BIN
     gen_path = Path(gen_path) if gen_path else common.GEN_BOOT
     common.check_file(code_path, "Code-Dump", "python tools/decomp.py")
-    common.check_file(gen_path, "Generierter Code", "python tools/build_port.py")
+    common.check_file(gen_path, "Generierter Code", "python tools/build.py")
     data = code_path.read_bytes()
     fmap = genmap.load_functions(gen_path, code_hi=common.ARM_BASE + len(data))
     calls: List[CallSite] = []

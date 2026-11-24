@@ -14,6 +14,21 @@ from . import isa, emit
 from . import scan as scanmod
 
 
+# Spielspezifische Block-Hooks (technische Schuld, siehe docs/WORKAROUNDS.md).
+# Der Recompiler selbst bleibt spielunabhaengig; Hooks kommen nur aus dieser Datei.
+def _load_block_hooks():
+    import json as _json, os as _os2
+    path = _os2.path.join(_os2.path.dirname(_os2.path.dirname(_os2.path.abspath(__file__))),
+                          "workarounds", "block_hooks.json")
+    if not _os2.path.exists(path):
+        return {}
+    data = _json.load(open(path, encoding="utf-8"))
+    return {int(h["addr"], 16): list(h["c"]) for h in data.get("hooks", [])}
+
+
+BLOCK_HOOKS = _load_block_hooks()
+
+
 def load(path):
     with open(path, "rb") as f:
         return f.read()
@@ -379,14 +394,8 @@ def generate(res, path, max_funcs=None, trace=False, data=None):
         out.append("  goto %s;" % em.label(_entry))
         for blk in fn.blocks:
             out.append("%s:" % em.label(blk.addr))
-            if u32(blk.addr) == 0x001079D0:
-                # SDK erwartet vom Kernel geschriebene Reply-Groesse 0x28
-                out.append("  c->r[0] = 0x28u;")
-            if u32(blk.addr) == 0x00107A30:
-                out.append("  c->r[6] = 0u;")
-            if u32(blk.addr) in (0x0012E1E4, 0x0012E1F0):
-                out.append("  arm_mutex_bootstrap(c, c->r[0]);")
-                out.append("  arm_mutex_bootstrap(c, c->r[4]);")
+            for ln in BLOCK_HOOKS.get(u32(blk.addr), ()):
+                out.append("  " + ln)
             if trace:
                 out.append("  arm_trace_block(c, 0x%08Xu, %du);" % (u32(blk.addr), 1 if fn.thumb else 0))
             for ins in blk.insns:

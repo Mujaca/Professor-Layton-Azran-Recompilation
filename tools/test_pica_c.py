@@ -18,10 +18,10 @@ def main():
     zig = os.path.join(os.path.dirname(ziglang.__file__), 'zig.exe')
     os.makedirs(os.path.dirname(EXE), exist_ok=True)
     cmd = [zig, 'cc', '-std=c11', '-O1',
-           '-I', os.path.join(ROOT, 'runtime'),
+           '-I', os.path.join(ROOT, 'runtime', 'cpu'), '-I', os.path.join(ROOT, 'runtime', 'gpu'),
            os.path.join(ROOT, 'tests', 'pica_selftest.c'),
-           os.path.join(ROOT, 'runtime', 'gpu.c'),
-           os.path.join(ROOT, 'runtime', 'arm_cpu.c'), '-o', EXE]
+           os.path.join(ROOT, 'runtime', 'gpu', 'gpu.c'),
+           os.path.join(ROOT, 'runtime', 'cpu', 'arm_cpu.c'), '-o', EXE]
     p = subprocess.run(cmd, capture_output=True, text=True)
     if p.returncode != 0:
         print('BUILD-FEHLER:\n' + p.stderr[-3000:])

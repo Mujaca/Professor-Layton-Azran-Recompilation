@@ -170,7 +170,7 @@ def make_run_dir(label: str) -> Path:
 
 def run_one(spec: RunSpec) -> RunResult:
     if not spec.exe.is_file():
-        common.fail("Binary fehlt: %s  (python tools\\build_port.py)" % spec.exe)
+        common.fail("Binary fehlt: %s  (python tools\\build.py)" % spec.exe)
     run_dir = spec.run_dir or make_run_dir(spec.label)
     run_dir.mkdir(parents=True, exist_ok=True)
     out_path = run_dir / (spec.label + ".out.log")

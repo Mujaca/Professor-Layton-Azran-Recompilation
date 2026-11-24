@@ -5,6 +5,20 @@ from . import isa
 from . import simd
 
 
+# Spielspezifische Nach-Aufruf-Hooks (technische Schuld, docs/WORKAROUNDS.md).
+def _load_call_hooks():
+    import json, os
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "workarounds", "block_hooks.json")
+    if not os.path.exists(path):
+        return {}
+    data = json.load(open(path, encoding="utf-8"))
+    return {int(h["addr"], 16): list(h["c"]) for h in data.get("after_call", [])}
+
+
+CALL_HOOKS = _load_call_hooks()
+
+
 class Unsupported(Exception):
     pass
 
@@ -323,9 +337,9 @@ class Emitter:
             lines = ["{ uint32_t sp0 = c->r[13];",
                      "  c->r[14] = 0x%08Xu;" % u32(nxt),
                      "  fn_%08X(c);" % u32(tgt)]
-            if u32(tgt) == 0x00287DD4:
-                lines.append("  if (c->r[0] == 0) c->r[0] = "
-                             "arm_pool_alloc(0x400);")
+            post = CALL_HOOKS.get(u32(tgt))
+            if post:
+                lines.extend("  " + ln for ln in post)
             lines.append("  arm_restore_sp(c, sp0); }")
             lines.append("if (c->aborted) return;")
             return lines

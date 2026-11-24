@@ -69,7 +69,7 @@ def _load_cached(gen_path: Path, code_hi: int) -> List[FuncInfo]:
     try:
         stat = gen_path.stat()
     except OSError:
-        common.fail("build/gen_boot.c fehlt: %s  (python tools/build_port.py)"
+        common.fail("build/gen_boot.c fehlt: %s  (python tools/build.py)"
                     % gen_path)
     cache_path = common.ensure_out() / "genmap.json"
     key = {"gen_size": stat.st_size, "gen_mtime": int(stat.st_mtime)}
