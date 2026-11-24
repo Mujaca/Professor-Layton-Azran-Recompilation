@@ -218,11 +218,34 @@ typedef struct {
 
 static FileSlot g_files[MAX_FILES];
 
+/* Kernel-Synchronisationsobjekte (3dbrew/Azahar kernel/{mutex,semaphore,
+ * event,timer,address_arbiter}.cpp). Der "signaled"-Zustand bleibt fuer
+ * einfache HLE-Event-Handles (GSP/HID/DSP/Y2R) erhalten; eigene Objekte
+ * tragen zusaetzlich die echte Semantik. */
+typedef enum {
+    HK_NONE = 0,     /* HLE-Event (Dienst-Handle), OneShot-artig */
+    HK_MUTEX,
+    HK_SEMAPHORE,
+    HK_EVENT,
+    HK_TIMER,
+    HK_THREAD,
+    HK_ARBITER
+} HandleKind;
+
 typedef struct {
     int used;
     int service;     /* ServiceId */
     int file;        /* Index in g_files oder -1 */
-    int signaled;    /* Event-Zustand */
+    volatile int signaled;   /* Event/Timer/Thread: Signalzustand */
+    int kind;                /* HandleKind */
+    uint32_t owner;          /* Mutex: Thread-Id des Besitzers */
+    int lock_count;          /* Mutex: rekursive Sperren */
+    int avail;               /* Semaphore: freie Plaetze */
+    int max_count;           /* Semaphore: Maximum */
+    int reset_type;          /* Event/Timer: 0 OneShot, 1 Sticky, 2 Pulse */
+    uint64_t timer_due;      /* Timer: faellig (Host-us) */
+    uint64_t timer_interval; /* Timer: Wiederholung (Host-us), 0 = einmalig */
+    int timer_active;        /* Timer: laeuft */
     char name[12];
 } Handle;
 
@@ -321,6 +344,7 @@ static int service_from_name(const char *name) {
 static int alloc_handle(int service, const char *name) {
     for (int i = 1; i < MAX_HANDLES; i++) {
         if (!g_handles[i].used) {
+            memset(&g_handles[i], 0, sizeof(g_handles[i]));
             g_handles[i].used = 1;
             g_handles[i].service = service;
             g_handles[i].file = -1;
@@ -335,6 +359,174 @@ static int alloc_handle(int service, const char *name) {
 static Handle *get_handle(uint32_t h) {
     if (h == 0 || h >= (uint32_t)MAX_HANDLES) return NULL;
     return g_handles[h].used ? &g_handles[h] : NULL;
+}
+
+/* Typisierte Kernel-Objekte fuer HLE-Dienste (Azahar legt sie ebenfalls als
+ * Mutex/Semaphore/Event an, z. B. APT_U:Lock, APT:Notification). */
+static uint32_t new_event_handle(const char *name, int reset_type) {
+    uint32_t h = (uint32_t)alloc_handle(SVC_OTHER, name);
+    Handle *hh = get_handle(h);
+    if (hh != NULL) { hh->kind = HK_EVENT; hh->reset_type = reset_type; }
+    return h;
+}
+
+static uint32_t new_mutex_handle(const char *name, int initial_locked) {
+    uint32_t h = (uint32_t)alloc_handle(SVC_OTHER, name);
+    Handle *hh = get_handle(h);
+    if (hh != NULL) {
+        hh->kind = HK_MUTEX;
+        if (initial_locked) { hh->owner = 0xFFFFFFFFu; hh->lock_count = 1; }
+    }
+    return h;
+}
+
+static uint32_t new_semaphore_handle(const char *name, int initial, int maxc) {
+    uint32_t h = (uint32_t)alloc_handle(SVC_OTHER, name);
+    Handle *hh = get_handle(h);
+    if (hh != NULL) { hh->kind = HK_SEMAPHORE; hh->avail = initial; hh->max_count = maxc; }
+    return h;
+}
+
+/* ---------- Kernel-Synchronisation ---------- */
+
+/* Result-Codes nach Azahar core/hle/result.h */
+#define RESULT_INVALID_HANDLE 0xD8E007F7u
+#define RESULT_TIMEOUT        0x09401BFEu
+#define RESULT_WRONG_THREAD   0xD8E0041Fu
+#define RESULT_OUT_OF_RANGE   0xD8E007FDu
+
+static uint64_t host_us(void) {
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER t;
+    if (freq.QuadPart == 0) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&t);
+    return (uint64_t)((t.QuadPart * 1000000ull) / (uint64_t)freq.QuadPart);
+}
+
+/* Thread-Id des aktuell laufenden Gast-Threads (0 = Hauptthread). */
+static uint32_t cur_tid(ArmCpu *c) {
+    if (c == g_main_cpu) return 0;
+    for (int i = 0; i < 32; i++) {
+        if (g_threads[i].used && g_threads[i].cpu == c) return (uint32_t)g_threads[i].id;
+    }
+    return 0;
+}
+
+static const char *handle_kind_name(const Handle *h) {
+    switch (h->kind) {
+    case HK_MUTEX: return "mutex";
+    case HK_SEMAPHORE: return "semaphore";
+    case HK_EVENT: return "event";
+    case HK_TIMER: return "timer";
+    case HK_THREAD: return "thread";
+    case HK_ARBITER: return "arbiter";
+    default: return "event(hle)";
+    }
+}
+
+/* ShouldWait/Acquire nach Azahar kernel/{mutex,semaphore,event,timer}.cpp */
+static int hs_should_wait(const Handle *h, uint32_t tid) {
+    switch (h->kind) {
+    case HK_MUTEX:
+        return h->lock_count > 0 && h->owner != tid;
+    case HK_SEMAPHORE:
+        return h->avail <= 0;
+    default:
+        return !h->signaled;
+    }
+}
+
+static void hs_acquire(Handle *h, uint32_t tid) {
+    switch (h->kind) {
+    case HK_MUTEX:
+        if (h->lock_count == 0) {
+            h->owner = tid;
+            h->lock_count = 1;
+        } else {
+            h->lock_count++;
+        }
+        break;
+    case HK_SEMAPHORE:
+        if (h->avail > 0) h->avail--;
+        break;
+    case HK_EVENT:
+    case HK_TIMER:
+        if (h->reset_type != 1) h->signaled = 0;   /* OneShot/Pulse */
+        break;
+    case HK_THREAD:
+        break;                                     /* bleibt signalisiert */
+    default:
+        h->signaled = 0;                           /* HLE-Event: OneShot */
+        break;
+    }
+}
+
+static void hs_signal(Handle *h) {
+    h->signaled = 1;
+}
+
+/* Abgelaufene Timer signalisieren (Azahar Timer::Signal). Wird aus den
+ * Warteschleifen und dem VBlank-Thread gepollt. */
+static void kernel_poll_timers(void) {
+    uint64_t now = host_us();
+    for (int i = 1; i < MAX_HANDLES; i++) {
+        Handle *h = &g_handles[i];
+        if (!h->used || h->kind != HK_TIMER || !h->timer_active) continue;
+        if (now < h->timer_due) continue;
+        h->signaled = 1;
+        if (h->timer_interval != 0) h->timer_due = now + h->timer_interval;
+        else h->timer_active = 0;
+    }
+}
+
+/* Wartet auf ein oder mehrere Objekte. Rueckgabe: 1 = erfolgreich,
+ * 0 = Timeout/Fehler (result gesetzt). Genau ein Gast-Thread laeuft; das
+ * Warten gibt den Gast-Lock ueber guest_yield() ab, damit Signalisierer
+ * laufen koennen (kooperatives Modell des Ports). */
+static int hs_wait(ArmCpu *c, Handle **objs, int cnt, int wait_all,
+                   uint64_t timeout_ns, int *out_idx, uint32_t *result) {
+    uint32_t tid = cur_tid(c);
+    int infinite = (timeout_ns == UINT64_MAX);
+    uint64_t timeout_us = infinite ? 0 : ((timeout_ns + 999ull) / 1000ull);
+    uint64_t start = host_us();
+
+    for (;;) {
+        int hit = -1;
+        kernel_poll_timers();
+        if (wait_all) {
+            int ok = 1;
+            for (int k = 0; k < cnt; k++) {
+                if (hs_should_wait(objs[k], tid)) { ok = 0; break; }
+            }
+            if (ok) {
+                for (int k = 0; k < cnt; k++) hs_acquire(objs[k], tid);
+                *out_idx = -1;
+                *result = 0;
+                return 1;
+            }
+        } else {
+            for (int k = 0; k < cnt; k++) {
+                if (!hs_should_wait(objs[k], tid)) { hit = k; break; }
+            }
+            if (hit >= 0) {
+                hs_acquire(objs[hit], tid);
+                *out_idx = hit;
+                *result = 0;
+                return 1;
+            }
+        }
+        if (!infinite && timeout_us == 0) {
+            *out_idx = -1;
+            *result = RESULT_TIMEOUT;
+            return 0;
+        }
+        if (!infinite && (host_us() - start) >= timeout_us) {
+            *out_idx = -1;
+            *result = RESULT_TIMEOUT;
+            return 0;
+        }
+        guest_yield();
+    }
 }
 
 /* ---------- IPC-Schreibzugriffe ---------- */
@@ -405,7 +597,7 @@ static void srv_command(Ipc *r, uint32_t *p) {
             break;
         }
         case 2: { /* EnableNotification: Result, CopyHandle(Semaphore) */
-            uint32_t h = (uint32_t)alloc_handle(SVC_OTHER, "srv:notif");
+            uint32_t h = new_semaphore_handle("srv:notif", 0, 2);
             if (g_log) printf("[srv] EnableNotification -> %u\n", h);
             ipc_begin(r, 2, 1, 2);
             put_result(r);
@@ -472,7 +664,7 @@ static void apt_command(Ipc *r, uint32_t *p) {
     switch (r->cmd) {
         case 1: { /* GetLockHandle: Result, AppletAttributes, State, CopyHandle(Lock) */
             uint32_t attrs = (r->normal >= 1) ? p[0] : 0u;
-            uint32_t lock = (uint32_t)alloc_handle(SVC_OTHER, "apt-lock");
+            uint32_t lock = new_mutex_handle("apt-lock", 0);
             /* Azahar (apt.cpp): MakeBuilder(3,2), Push(ResultSuccess,
                corrected_attributes, state), PushCopyObjects(lock). */
             ipc_begin(r, 1, 3, 2);
@@ -483,8 +675,8 @@ static void apt_command(Ipc *r, uint32_t *p) {
             break;
         }
         case 2: { /* Initialize: Result, CopyHandle(Notification), CopyHandle(Parameter) */
-            uint32_t ev1 = (uint32_t)alloc_handle(SVC_OTHER, "apt-notif");
-            uint32_t ev2 = (uint32_t)alloc_handle(SVC_OTHER, "apt-param");
+            uint32_t ev1 = new_event_handle("apt-notif", 0);
+            uint32_t ev2 = new_event_handle("apt-param", 0);
             g_apt_param_ev = ev2;
             /* Azahar: MakeBuilder(1,3), PushCopyObjects(notif, param). */
             ipc_begin(r, 2, 1, 3);
@@ -610,7 +802,7 @@ static void hid_command(Ipc *rp, uint32_t *p) {
                event_gyroscope, event_debug_pad). */
             uint32_t shmem = (uint32_t)alloc_handle(SVC_OTHER, "hid-shmem");
             uint32_t h[5];
-            for (int i = 0; i < 5; i++) h[i] = (uint32_t)alloc_handle(SVC_OTHER, "hid-ev");
+            for (int i = 0; i < 5; i++) h[i] = new_event_handle("hid-ev", 0);
             ipc_begin(rp, 0x000A, 1, 7);
             put_result(rp);
             ipc_put(rp, (5u << 26));       /* CopyHandle-Deskriptor, 6 Handles */
@@ -1432,7 +1624,7 @@ static void dsp_command(Ipc *r, uint32_t *p) {
             break;
         }
         case 0x0016: { /* GetSemaphoreEventHandle: Result + CopyHandle(Event) */
-            uint32_t ev = (uint32_t)alloc_handle(SVC_OTHER, "dsp-ev");
+            uint32_t ev = new_event_handle("dsp-ev", 0);
             Handle *hh = get_handle(ev);
             if (hh) hh->signaled = 1;
             ipc_begin(r, 0x0016, 1, 2);
@@ -2164,7 +2356,7 @@ static void gsp_command(Ipc *r, uint32_t *p) {
             uint32_t ev = (r->translate >= 2) ? p[r->normal + 1] : 0u;
             uint32_t relay_off;
             if (get_handle(ev) == NULL) {
-                ev = (uint32_t)alloc_handle(SVC_OTHER, "gsp-ev");
+                ev = new_event_handle("gsp-ev", 0);
             }
             g_gsp_irq_handle = ev;
             g_gsp_thread_id = 0;
@@ -2220,7 +2412,7 @@ static void y2r_command(Ipc *r, uint32_t *p) {
             break;
         }
         case 0x000F: { /* GetTransferEndEvent: Result + CopyHandle(Event) */
-            uint32_t ev = (uint32_t)alloc_handle(SVC_OTHER, "y2r-ev");
+            uint32_t ev = new_event_handle("y2r-ev", 0);
             Handle *hh = get_handle(ev);
             if (hh) hh->signaled = 1;
             ipc_begin(r, 0x000F, 1, 2);
@@ -2426,47 +2618,52 @@ static void setup_config_mem(ArmCpu *c) {
 }
 
 static volatile int g_vblank_run = 0;
-/* Warteschlange fuer svcArbitrateAddress (Adresse -> Anzahl Weckungen).
- * Die echte Semantik: type 0 = Signal weckt Waiter, ohne zu blockieren. */
-static uint32_t g_sig_addr[64];
-static int g_sig_cnt[64];
-static int g_sig_n = 0;
+/* Warteschlange fuer svcArbitrateAddress nach Azahar
+ * AddressArbiter::WaitThread/ResumeAllThreads/ResumeHighestPriorityThread.
+ * Signale sammeln sich NICHT an: geweckt wird nur, wer tatsaechlich wartet. */
+#define ARBQ_MAX 64
+typedef struct {
+    int used;
+    uint32_t addr;
+    uint32_t tid;
+    int woken;
+} ArbWaiter;
+static ArbWaiter g_arbq[ARBQ_MAX];
 
-static void arb_signal(uint32_t a, int32_t n) {
-    int i;
-    for (i = 0; i < g_sig_n; i++) if (g_sig_addr[i] == a) break;
-    if (i == g_sig_n) { if (g_sig_n >= 64) return; g_sig_addr[g_sig_n] = a; g_sig_cnt[g_sig_n] = 0; g_sig_n++; }
-    if (n < 0) g_sig_cnt[i] = 0x3FFFFFFF;
-    else g_sig_cnt[i] += n;
-}
-
-static int arb_take(uint32_t a) {
-    for (int i = 0; i < g_sig_n; i++) {
-        if (g_sig_addr[i] == a && g_sig_cnt[i] > 0) { g_sig_cnt[i]--; return 1; }
+/* Signal: value < 0 weckt alle, sonst die ersten value Waiter (FIFO statt
+ * Prioritaetswahl, da der Port keine echten Thread-Prioritaeten plant). */
+static int arb_resume(uint32_t addr, int32_t value) {
+    int woken = 0;
+    int32_t remaining = (value < 0) ? 0x7FFFFFFF : value;
+    for (int i = 0; i < ARBQ_MAX && remaining > 0; i++) {
+        if (!g_arbq[i].used || g_arbq[i].addr != addr || g_arbq[i].woken) continue;
+        g_arbq[i].woken = 1;
+        remaining--;
+        woken++;
     }
-    return 0;
+    return woken;
 }
 
-static void arb_unlock_short(void) {
-    if (g_guest_lock_init && !g_no_lock) {
-        if (t_lock_owned) {
-            guest_lock_leave();
-            Sleep(0);
-            guest_lock_reacquire();
-        } else {
-            Sleep(0);
+static int arb_register(uint32_t addr, uint32_t tid) {
+    for (int i = 0; i < ARBQ_MAX; i++) {
+        if (!g_arbq[i].used) {
+            g_arbq[i].used = 1;
+            g_arbq[i].addr = addr;
+            g_arbq[i].tid = tid;
+            g_arbq[i].woken = 0;
+            return i;
         }
-    } else {
-        Sleep(0);
+    }
+    return -1;
+}
+
+static void arb_unregister(int slot) {
+    if (slot >= 0 && slot < ARBQ_MAX) {
+        g_arbq[slot].used = 0;
+        g_arbq[slot].woken = 0;
     }
 }
 
-/* Handles, auf die tatsaechlich gewartet wird (fuer deterministisches
- * VBlank-Signalisieren statt "alle Handles fluten"). */
-static unsigned char g_wait_seen[MAX_HANDLES];
-static volatile uint32_t g_arb_seen[64];
-static volatile int g_arb_seen_n = 0;
-static unsigned g_vblank_frames = 0;
 
 /* Simulierter VBlank im Host-Takt (~60 Hz). Die fruehere pauschale
  * Event-Flut (wa-kernel-signal-all) ist durch echte GSP-Ereignisse ersetzt:
@@ -2482,7 +2679,7 @@ static DWORD WINAPI vblank_thread(LPVOID p) {
         gsp_vblank_fb_update(g_cpu, g_gsp_thread_id);
         gsp_signal_interrupt(GSP_IRQ_PDC0);
         gsp_signal_interrupt(GSP_IRQ_PDC1);
-        g_vblank_frames++;
+        kernel_poll_timers();
     }
     return 0;
 }
@@ -2558,21 +2755,31 @@ void hle_report(void) {
     }
 }
 
-/* Thread-Ende signalisieren: der zugehoerige Thread-Handle wird auf
- * "signaled" gesetzt, damit svcWaitSynchronization darauf zurueckkehrt. */
-/* WORKAROUND(wa-thread-exit-unsignaled): echter Kernel signalisiert den
- * Thread-Handle beim Ende. Bisher aus, weil es den Boot veraenderte. */
+/* Thread-Ende: Thread-Handle signalisieren (Azahar Thread::Stop setzt den
+ * Status Dead; ShouldWait ist dann dauerhaft falsch) und alle Mutexe
+ * freigeben, die der Thread haelt (ReleaseThreadMutexes). */
 static void thread_signal_exit(ArmCpu *c) {
-    static const int enabled = 0;
-    if (!enabled) return;
     for (int i = 0; i < g_thread_count; i++) {
-        if (g_threads[i].cpu == c) {
-            Handle *hh = get_handle(g_threads[i].handle);
-            if (hh != NULL) hh->signaled = 1;
-            if (getenv("HLE_THR_LOG"))
-                printf("[threxit] handle=%u\n", g_threads[i].handle);
-            return;
+        if (!g_threads[i].used || g_threads[i].cpu != c) continue;
+        uint32_t tid = (uint32_t)g_threads[i].id;
+        Handle *hh = get_handle(g_threads[i].handle);
+        if (hh != NULL) {
+            hh->kind = HK_THREAD;
+            hs_signal(hh);
         }
+        for (int k = 1; k < MAX_HANDLES; k++) {
+            Handle *m = &g_handles[k];
+            if (m->used && m->kind == HK_MUTEX && m->lock_count > 0 && m->owner == tid) {
+                m->lock_count = 0;
+                m->owner = 0;
+                if (getenv("HLE_THR_LOG"))
+                    printf("[threxit] mutex %d freigegeben (tid=%u)\n", k, tid);
+            }
+        }
+        if (getenv("HLE_THR_LOG"))
+            printf("[threxit] id=%u handle=%u\n", tid, g_threads[i].handle);
+        g_threads[i].used = 0;
+        return;
     }
 }
 
@@ -2665,6 +2872,10 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             uint32_t out = c->r[0], entry = c->r[1], arg = c->r[2];
             uint32_t stack = c->r[3];
             uint32_t h = (uint32_t)alloc_handle(SVC_OTHER, "thread");
+            {
+                Handle *th = get_handle(h);
+                if (th != NULL) th->kind = HK_THREAD;   /* ShouldWait: lebt noch */
+            }
             if (g_thread_count < 32) {
                 GuestThread *t = &g_threads[g_thread_count];
                 ArmCpu *tc = (ArmCpu *)calloc(1, sizeof(ArmCpu));
@@ -2720,27 +2931,118 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             }
             return 0;
         }
-        case 0x13: /* CreateMutex */
-        case 0x15: /* CreateSemaphore */
-        case 0x17: { /* CreateEvent */
+        case 0x13: { /* CreateMutex(out, initial_locked) */
             uint32_t out = c->r[0];
-            uint32_t h = (uint32_t)alloc_handle(SVC_OTHER, "sync");
+            uint32_t h = (uint32_t)alloc_handle(SVC_OTHER, "mutex");
+            Handle *hh = get_handle(h);
+            if (hh != NULL) {
+                hh->kind = HK_MUTEX;
+                if (c->r[1] != 0) {   /* initial gesperrt */
+                    hh->owner = cur_tid(c);
+                    hh->lock_count = 1;
+                }
+            }
             if (out) write_u32(c, out, h);
             c->r[1] = h;
             return 0;
         }
-        case 0x18: { /* SignalEvent */
+        case 0x14: { /* ReleaseMutex(handle) */
             Handle *hh = get_handle(c->r[0]);
-            if (hh != NULL) hh->signaled = 1;
+            if (hh == NULL || hh->kind != HK_MUTEX) return RESULT_INVALID_HANDLE;
+            uint32_t tid = cur_tid(c);
+            if (hh->lock_count <= 0 || hh->owner != tid) return RESULT_WRONG_THREAD;
+            hh->lock_count--;
+            if (hh->lock_count == 0) hh->owner = 0;
             return 0;
         }
-        case 0x19: { /* ClearEvent */
-            Handle *hh = get_handle(c->r[0]);
-            if (hh != NULL) hh->signaled = 0;
+        case 0x15: { /* CreateSemaphore(out, initial, max) */
+            uint32_t out = c->r[0];
+            int32_t initial = (int32_t)c->r[1], maxc = (int32_t)c->r[2];
+            if (initial > maxc) return RESULT_OUT_OF_RANGE;
+            uint32_t h = (uint32_t)alloc_handle(SVC_OTHER, "semaphore");
+            Handle *hh = get_handle(h);
+            if (hh != NULL) {
+                hh->kind = HK_SEMAPHORE;
+                hh->avail = initial;
+                hh->max_count = maxc;
+            }
+            if (out) write_u32(c, out, h);
+            c->r[1] = h;
             return 0;
         }
-        case 0x14: case 0x16: /* ReleaseMutex / ReleaseSemaphore */
+        case 0x16: { /* ReleaseSemaphore(out_count, handle, release_count) */
+            uint32_t out = c->r[0];
+            Handle *hh = get_handle(c->r[1]);
+            int32_t rel = (int32_t)c->r[2];
+            if (hh == NULL || hh->kind != HK_SEMAPHORE) return RESULT_INVALID_HANDLE;
+            if (rel < 0 || hh->avail + rel > hh->max_count) return RESULT_OUT_OF_RANGE;
+            if (out) write_u32(c, out, (uint32_t)hh->avail);
+            hh->avail += rel;
             return 0;
+        }
+        case 0x17: { /* CreateEvent(out, reset_type) */
+            uint32_t out = c->r[0];
+            uint32_t h = (uint32_t)alloc_handle(SVC_OTHER, "event");
+            Handle *hh = get_handle(h);
+            if (hh != NULL) {
+                hh->kind = HK_EVENT;
+                hh->reset_type = (int)c->r[1];
+                hh->signaled = 0;
+            }
+            if (out) write_u32(c, out, h);
+            c->r[1] = h;
+            return 0;
+        }
+        case 0x18: { /* SignalEvent(handle) */
+            Handle *hh = get_handle(c->r[0]);
+            if (hh == NULL || hh->kind != HK_EVENT) return RESULT_INVALID_HANDLE;
+            hs_signal(hh);
+            return 0;
+        }
+        case 0x19: { /* ClearEvent(handle) */
+            Handle *hh = get_handle(c->r[0]);
+            if (hh == NULL || hh->kind != HK_EVENT) return RESULT_INVALID_HANDLE;
+            hh->signaled = 0;
+            return 0;
+        }
+        case 0x1A: { /* CreateTimer(out, reset_type) */
+            uint32_t out = c->r[0];
+            uint32_t h = (uint32_t)alloc_handle(SVC_OTHER, "timer");
+            Handle *hh = get_handle(h);
+            if (hh != NULL) {
+                hh->kind = HK_TIMER;
+                hh->reset_type = (int)c->r[1];
+                hh->signaled = 0;
+                hh->timer_active = 0;
+            }
+            if (out) write_u32(c, out, h);
+            c->r[1] = h;
+            return 0;
+        }
+        case 0x1B: { /* SetTimer(handle, initial_ns, interval_ns) */
+            Handle *hh = get_handle(c->r[0]);
+            int64_t initial = (int64_t)((uint64_t)c->r[1] | ((uint64_t)c->r[2] << 32));
+            int64_t interval = (int64_t)((uint64_t)c->r[3] | ((uint64_t)c->r[4] << 32));
+            if (hh == NULL || hh->kind != HK_TIMER) return RESULT_INVALID_HANDLE;
+            if (initial < 0 || interval < 0) return RESULT_OUT_OF_RANGE;
+            hh->signaled = 0;
+            hh->timer_interval = (uint64_t)interval / 1000ull;
+            if (initial == 0) {
+                hh->timer_active = 0;
+                hh->signaled = 1;              /* sofort faellig */
+            } else {
+                hh->timer_due = host_us() + (uint64_t)initial / 1000ull;
+                hh->timer_active = 1;
+            }
+            return 0;
+        }
+        case 0x1C: { /* ClearTimer(handle) */
+            Handle *hh = get_handle(c->r[0]);
+            if (hh == NULL || hh->kind != HK_TIMER) return RESULT_INVALID_HANDLE;
+            hh->signaled = 0;
+            hh->timer_active = 0;
+            return 0;
+        }
         case 0x1E: case 0x1F: case 0x20: /* MemoryBlock */
             if (getenv("HLE_MAP_LOG"))
                 printf("[map] svc=%02X r0=%08X r1=%08X r2=%08X r3=%08X\n",
@@ -2748,6 +3050,8 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             return 0;
         case 0x21: { /* CreateAddressArbiter(out) */
             uint32_t h = (uint32_t)alloc_handle(SVC_OTHER, "arbiter");
+            Handle *hh = get_handle(h);
+            if (hh != NULL) hh->kind = HK_ARBITER;
             if (c->r[0]) write_u32(c, c->r[0], h);
             c->r[1] = h;
             return 0;
@@ -2757,142 +3061,144 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             uint32_t addr = c->r[1] & ~3u;
             uint32_t type = c->r[2];
             int32_t value = (int32_t)c->r[3];
+            uint64_t timeout_ns = (uint64_t)c->r[4] | ((uint64_t)c->r[5] << 32);
             uint32_t off = addr & 0x1FFFFFFFu;
+            Handle *hh = get_handle(c->r[0]);
+            if (hh == NULL || hh->kind != HK_ARBITER) return RESULT_INVALID_HANDLE;
 
             if (getenv("HLE_ARB_LOG") && arb_prints < 300) {
                 int32_t adbg = 0;
                 if (off + 4 <= c->mem_size) memcpy(&adbg, c->mem + off, 4);
-                printf("[arb] th=%u addr=%08X type=%u val=%d mem=%08X blk=%08X lr=%08X\n",
-                       (uint32_t)((c->tpidruro >> 12) & 0xFu),
-                       addr, type, value, (uint32_t)adbg, arm_last_block, c->r[14]);
+                printf("[arb] tid=%u addr=%08X type=%u val=%d mem=%08X blk=%08X lr=%08X\n",
+                       cur_tid(c), addr, type, value, (uint32_t)adbg,
+                       arm_last_block, c->r[14]);
                 arb_prints++;
             }
-
-            /* Objekt fuer das VBlank-Posting registrieren. */
-            {
-                int known = 0;
-                for (int k = 0; k < g_arb_seen_n; k++)
-                    if (g_arb_seen[k] == addr) { known = 1; break; }
-                if (!known && g_arb_seen_n < 64) {
-                    g_arb_seen[g_arb_seen_n++] = addr;
-                    if (getenv("HLE_ARB_LOG"))
-                        printf("[arbnew] addr=%08X type=%u val=%d th=%u\n",
-                               addr, type, value,
-                               (uint32_t)((c->tpidruro >> 12) & 0xFu));
-                }
-            }
-
             if (off + 4 > c->mem_size) return 0;
 
-            /* type 0 = SIGNAL: weckt Waiter, blockiert selbst nie. */
+            /* type 0 = Signal: weckt wartende Threads, blockiert nie. */
             if (type == 0) {
-                arb_signal(addr, value);
+                arb_resume(addr, value);
                 return 0;
             }
+            if (type < 1 || type > 4) return 0xD8E093EDu;
 
-            /* Warte-Typen 1..4: blockieren, solange Wert < value. */
+            /* Warte-Typen blockieren nur, wenn [addr] < value. type 3/4
+             * dekrementieren das Wort zuvor (Azahar
+             * DecrementAndWaitIfLessThan). */
             {
-                int decremented = 0;
-                for (int spin = 0; spin < 200; spin++) {
-                    int32_t cur = 0;
-                    memcpy(&cur, c->mem + off, 4);
-                    if (arb_take(addr)) break;          /* per Signal geweckt */
-                    if (cur >= value) break;            /* Bedingung erfuellt */
-                    /* Negativer Wert = Waiter eingetragen. Erst dem VBlank-
-                       Posting ~8 ms Zeit geben, dann zwangsweise signalisieren
-                       (sonst laeuft 0x288B90 endlos bzw. blockiert dauerhaft). */
-                    if (cur < 0 && spin >= 0) {
-                        int32_t nv = 1;
-                        memcpy(c->mem + off, &nv, 4);
-                        break;
-                    }
-
-
-                    if ((type == 2 || type == 4) && !decremented) {
-                        int32_t nv = cur - 1;
-                        memcpy(c->mem + off, &nv, 4);
-                        decremented = 1;
-                    }
-                    arb_unlock_short();
-                }
-                /* Notausgang: nach Timeout als signalisiert markieren. */
-                {
-                    int32_t cur = 0;
-                    memcpy(&cur, c->mem + off, 4);
-                    if (cur < value) {
-                        int32_t nv = 1;
-                        memcpy(c->mem + off, &nv, 4);
-                    }
+                int32_t cur = 0;
+                memcpy(&cur, c->mem + off, 4);
+                if (cur >= value) return 0;
+                if (type == 3 || type == 4) {
+                    int32_t nv = cur - 1;
+                    memcpy(c->mem + off, &nv, 4);
                 }
             }
+            {
+                uint32_t tid = cur_tid(c);
+                int slot = arb_register(addr, tid);
+                uint64_t start = host_us();
+                int infinite = (timeout_ns == UINT64_MAX);
+                uint64_t timeout_us = infinite ? 0 : ((timeout_ns + 999ull) / 1000ull);
+                if (getenv("HLE_KLOG"))
+                    printf("[karb] tid=%u addr=%08X type=%u val=%d slot=%d\n",
+                           tid, addr, type, value, slot);
+                for (;;) {
+                    if (slot < 0 || g_arbq[slot].woken) break;
+                    if (!infinite && (host_us() - start) >= timeout_us) break;
+                    guest_yield();
+                }
+                arb_unregister(slot);
+            }
+            /* Azahar: Timeout-Typen liefern immer ResultTimeout. */
+            if (type == 2 || type == 4) return RESULT_TIMEOUT;
             return 0;
         }
-        case 0x23: /* CloseHandle */
-            return 0;
-        case 0x24: { /* WaitSynchronization1(handle, timeout) */
+        case 0x23: { /* CloseHandle(handle) */
             uint32_t h = c->r[0];
             Handle *hh = get_handle(h);
-            for (int i = 0; i < 8; i++) {
-                if (hh != NULL && hh->signaled) break;
-                guest_yield();
+            if (hh == NULL) return RESULT_INVALID_HANDLE;
+            if (hh->file >= 0 && hh->file < MAX_FILES) {
+                if (g_files[hh->file].fp != NULL) fclose(g_files[hh->file].fp);
+                g_files[hh->file].used = 0;
+                g_files[hh->file].fp = NULL;
             }
-            if (hh != NULL) hh->signaled = 0;
+            memset(hh, 0, sizeof(*hh));
+            hh->file = -1;
+            return 0;
+        }
+        case 0x24: { /* WaitSynchronization1(handle, timeout) */
+            uint32_t h = c->r[0];
+            uint64_t timeout_ns = (uint64_t)c->r[1] | ((uint64_t)c->r[2] << 32);
+            Handle *hh = get_handle(h);
+            if (hh == NULL) {
+                if (getenv("HLE_KLOG")) printf("[kwait] WaitSync1 ungueltiges Handle %u\n", h);
+                return RESULT_INVALID_HANDLE;
+            }
+            {
+                Handle *objs[1];
+                int idx = 0;
+                uint32_t res = 0;
+                objs[0] = hh;
+                if (!hs_wait(c, objs, 1, 0, timeout_ns, &idx, &res)) return res;
+            }
             return 0;
         }
         case 0x25: { /* WaitSynchronizationN(out, handles, count, wait_all, timeout) */
             static int wl = 0;
+            uint32_t out = c->r[0], hlist = c->r[1], cnt = c->r[2];
+            int32_t wait_all = (int32_t)c->r[3];
+            uint64_t timeout_ns = (uint64_t)c->r[4] | ((uint64_t)c->r[5] << 32);
+            Handle *objs[32];
+            int idx = -1;
+            uint32_t res = 0;
+
             if (getenv("HLE_WAIT_LOG") && wl < 40) {
                 wl++;
-                printf("[wait25] th=%u r0=%08X r1=%08X r2=%08X r3=%08X r4=%08X blk=%08X lr=%08X\n",
-                       (uint32_t)((c->tpidruro >> 12) & 0xFu),
-                       c->r[0], c->r[1], c->r[2], c->r[3], c->r[4],
+                printf("[wait25] tid=%u r0=%08X r1=%08X r2=%08X r3=%08X r4=%08X r5=%08X blk=%08X lr=%08X\n",
+                       cur_tid(c), c->r[0], c->r[1], c->r[2], c->r[3], c->r[4], c->r[5],
                        arm_last_block, c->r[14]);
             }
-            uint32_t out = c->r[0], hlist = c->r[1], cnt = c->r[2];
-            if (getenv("HLE_WAIT_LOG") && cnt > 0 && cnt <= 8 && hlist != 0) {
-                printf("[wait25 handles] th=%u n=%u:",
-                       (uint32_t)((c->tpidruro >> 12) & 0xFu), cnt);
-                for (uint32_t k = 0; k < cnt; k++) {
-                    uint32_t hv = arm_mem_read(c, hlist + k * 4, 4);
-                    Handle *hh2 = get_handle(hv);
-                    printf(" %u(%s)", hv, hh2 ? hh2->name : "-");
+            if (cnt > 32u) return RESULT_OUT_OF_RANGE;
+            for (uint32_t k = 0; k < cnt; k++) {
+                uint32_t hv = (hlist != 0) ? arm_mem_read(c, hlist + k * 4, 4) : 0;
+                objs[k] = get_handle(hv);
+                if (objs[k] == NULL) {
+                    /* Echter Kernel: ResultInvalidHandle, kein Warten. */
+                    if (getenv("HLE_KLOG"))
+                        printf("[kwait] tid=%u WaitSyncN ungueltiges Handle %u (idx=%u/%u)\n",
+                               cur_tid(c), hv, k, cnt);
+                    return RESULT_INVALID_HANDLE;
                 }
-                printf("\n");
             }
-            int idx = 0;
-            for (int i = 0; i < 64; i++) {
-                int hit = -1;
-                for (uint32_t k = 0; k < cnt && k < 16; k++) {
-                    uint32_t hv = (hlist ? arm_mem_read(c, hlist + k * 4, 4) : 0);
-                    if (hv < MAX_HANDLES) g_wait_seen[hv] = 1;
-                    Handle *hh = get_handle(hv);
-                    /* Handle 0 = ungueltig: als "sofort erfuellt" behandeln,
-                       sonst blockiert der Waiter dauerhaft. */
-                    /* Handle 0 = ungueltig: standardmaessig als sofort
-                       erfuellt behandeln. Mit HLE_H0_WAIT dagegen als
-                       "nie signalisiert", damit der Dispatcher die echten
-                       Indizes (z. B. APT-Parameter = 2) sieht. */
-                    /* WORKAROUND(wa-wait-handle0): Handle 0 gilt als signalisiert. */
-                    int h0ok = (hv == 0);
-                    if (h0ok || (hh != NULL && hh->signaled)) { hit = (int)k; break; }
+            if (getenv("HLE_KLOG")) {
+                int blocks = 0;
+                for (uint32_t k = 0; k < cnt; k++)
+                    if (hs_should_wait(objs[k], cur_tid(c))) blocks = 1;
+                if (blocks && cnt <= 8) {
+                    printf("[kblock] tid=%u n=%u timeout=%llX blk=%08X lr=%08X:", cur_tid(c), cnt,
+                           (unsigned long long)timeout_ns, arm_last_block, c->r[14]);
+                    for (uint32_t k = 0; k < cnt; k++)
+                        printf(" %u(%s:%s)", (unsigned)(objs[k] - g_handles),
+                               objs[k]->name, handle_kind_name(objs[k]));
+                    printf("\n");
                 }
-                if (hit >= 0) { idx = hit; break; }
-                guest_yield();
             }
-            if (cnt > 0) {
-                for (uint32_t k = 0; k < cnt && k < 16; k++) {
-                    uint32_t hv = (hlist ? arm_mem_read(c, hlist + k * 4, 4) : 0);
-                    Handle *hh = get_handle(hv);
-                    if (hh != NULL && hh->signaled) { hh->signaled = 0; break; }
-                }
+            if (!hs_wait(c, objs, (int)cnt, wait_all != 0, timeout_ns, &idx, &res)) {
+                if (getenv("HLE_KLOG"))
+                    printf("[kwait] tid=%u Timeout cnt=%u all=%d res=%08X\n",
+                           cur_tid(c), cnt, wait_all, res);
+                if (getenv("HLE_WAIT_LOG"))
+                    printf("[wait25 idx] tid=%u cnt=%u -> timeout\n", cur_tid(c), cnt);
+                return res;
             }
             if (getenv("HLE_WAIT_LOG"))
-                printf("[wait25 idx] th=%u out=%08X cnt=%u -> idx=%d\n",
-                       (uint32_t)((c->tpidruro >> 12) & 0xFu), out, cnt, idx);
-            if (out != 0 && out != 0xFFFFFFFFu) write_u32(c, out, (uint32_t)idx);
-            /* Der SDK-Wrapper (0x287B90) erwartet den Index in r1 und
-               schreibt ihn selbst nach *out; ohne r1 nimmt der
-               Dispatcher den falschen Zweig. */
+                printf("[wait25 idx] tid=%u out=%08X cnt=%u -> idx=%d\n",
+                       cur_tid(c), out, cnt, idx);
+            if (!wait_all && out != 0 && out != 0xFFFFFFFFu)
+                write_u32(c, out, (uint32_t)idx);
+            /* SDK-Wrapper (0x287B90) liefert den Index zusaetzlich in r1. */
             c->r[1] = (uint32_t)idx;
             return 0;
         }

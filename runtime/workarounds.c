@@ -27,14 +27,3 @@ uint32_t arm_pool_alloc(unsigned size) {
     return addr;
 }
 
-/* Null-initialisierte Semaphore beim ersten Warten als frei behandeln. */
-void arm_mutex_bootstrap(ArmCpu *c, uint32_t addr) {
-    uint32_t a = addr & 0x1FFFFFFFu;
-    uint32_t v;
-    if (a + 4 > c->mem_size) return;
-    memcpy(&v, c->mem + a, 4);
-    if (v == 0) {
-        v = 1;
-        memcpy(c->mem + a, &v, 4);
-    }
-}

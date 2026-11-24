@@ -33,15 +33,20 @@ hin. Zusätzlich verändern `tools/fix_romfs_cycles.py` und
 `tools/rebuild_romfs_hash.py` das RomFS-Image, das der Port ausliefert. Auch
 das ist ein Workaround.
 
-## 2. Block-Hooks im Recompiler – `tools/workarounds/block_hooks.json` (7)
+## 2. Block-Hooks im Recompiler – `tools/workarounds/block_hooks.json` (4)
 
 | Adresse | Wirkung | Ursache (Verdacht) |
 |---|---|---|
 | 0x1079D0, 0x107A30 | IPC-Reply-Größe 0x28 / r6=0 | `svcSendSyncRequest`-Semantik |
-| 0x12E1E4, 0x12E1F0 | Semaphore 0 → 1 (`arm_mutex_bootstrap`) | Kernel-Sync-Objekte |
 | nach `bl 0x287DD4` | Allocator 0 → Host-Pool (`arm_pool_alloc`) | Heap-Init (ControlMemory/ExHeap) |
 | 0x11A818 | Busy-Wait-Delay sofort beenden | Zeitbasis/Scheduler |
 | 0x399244 | uninitialisierten Stack-Slot nullen | Recompiler/ABI |
+
+Die Hooks `0x12E1E4`/`0x12E1F0` (`arm_mutex_bootstrap`) sind entfernt:
+`ARM_WATCH=12E1E4` und `ARM_WATCH=12E1F0` zeigten im gesamten Boot
+**0 Treffer**, waehrend der benachbarte Block `0x12E1B4` ausgefuehrt wird.
+Die Hooks waren toter Code. Beleg: `check.py --full` gruen, Frontier 9/10
+mit denselben 23 Code-Patches.
 
 ## 3. Textersetzungen im generierten C – `tools/workarounds/gen_patches.py` (5)
 
@@ -58,8 +63,6 @@ das ist ein Workaround.
 
 | Kennung | Ort | Wirkung |
 |---|---|---|
-| – | `hle_svc` WaitSynchronization1/N | 1 kehrt nach 8 Yields zurück, N nach 64 Yields mit Index 0, wenn kein Handle signalisiert ist; Handle 0 gilt als signalisiert |
-| – | `hle_svc` ArbitrateAddress | Wartetyp setzt nach Spin das Wort zwangsweise auf 1 |
 | – | `dispatch_ipc` | leitet Kommandos nach Form statt nach Handle um (APT/cfg/fs) |
 | – | generierter Code | unbekannte Aufrufziele = No-op (geloggt in `out/missing_calls.txt`) |
 | – | `arm_mem_read/write` | Zugriffe außerhalb des Speichers liefern 0 statt Abbruch (`ARM_STRICT=1` bricht ab) |
@@ -71,6 +74,17 @@ VBlank (Host-Takt 16 ms) über die InterruptRelayQueue an das registrierte
 Event; P3D/PPF/PSC0/PSC1/DMA werden von den GX-Kommandos ausgelöst
 (`gsp_process_cmdqueue`). Beleg: Frontier 4 → 9 Dienste (Divergenz boss:U)
 mit identischen 23 Patches.
+
+Seit dem Kernel-Sync-Paket sind auch `wa-wait-handle0` und
+`wa-thread-exit-unsignaled` entfernt. `hle_svc` fuehrt Mutex, Semaphore,
+Event (OneShot/Sticky/Pulse), Timer und AddressArbiter mit echten
+ShouldWait/Acquire-Zustaenden; `WaitSynchronization1/N` warten kooperativ,
+unterstuetzen `wait_all`, Timeout und liefern den Index in `r1` (der
+SDK-Stub 0x287B90 speichert ihn nach `*out`). Ungueltige Handles liefern
+`ResultInvalidHandle` statt „signalisiert“. Thread-Ende signalisiert den
+Thread-Handle dauerhaft und gibt gehaltene Mutexe frei; `CloseHandle` gibt
+Handle und Dateislot frei.
+
 
 ## 5. Erledigt: IPC-Reply-Layouts
 
@@ -150,13 +164,18 @@ wenn rN zuletzt durch `pop`/`ldm sp!` aus dem Stack geladen wurde; emit.py
 erzeugt dafuer `return;` statt `arm_call_guest`. Falscher Seed `001016E0`
 entfernt. Test: `tests/mvp_selftest.py::bx_rN_rueckkehr_thumb`.
 
-**Offen:** Der Fehlerpfad `fn_001028A0 -> fn_0028E410 -> fn_00119D34`
-(`g_os+9 = 1`) wird weiterhin ausgeloest. Nach dem Fix laeuft er sauber
-ueber den echten Fehlerdienst: `ConnectToPort("err:f")`, dann
-`cmd 0x0001 normal=32` mit `p0=C1AC0000 p1=E0A046DB p2=0028EDE8
-p3=FFFF8001`; `HLE_ERRCTX` nennt `site=0028EDE8`. Der Hauptthread bleibt
-danach vor `ptm:u` stehen (Frontier 4/10). Ursache ist der zu frueh
-laufende Worker-Task (Task-Dispatcher `fn_00119D48` setzt ueber `0x27CB2C`
-einen Fehlerzustand, den `fn_0028E410` als fatal liest): vermutlich weckt
-der HLE-Kernel (`WaitSynchronization`/Arbiter, `wa-kernel-signal-all`) den
-Worker zu frueh. Das ist Kernel-Arbeitsvorrat.
+**Offen (Stand Kernel-Sync-Paket):** Der Fehlerpfad
+`fn_001028A0 -> fn_0028E410 -> fn_00119D34` (`g_os+9 = 1`) wird weiterhin
+ausgeloest; `err:f` meldet `E0A046DA/DB` (Modul FS, Summary InvalidState,
+Desc 0x2DA/0x2DB) mit `site=00212FD0`. Das ist der bekannte
+RomFS-/Pfadparser-Pfad (Code-Patches um 0x212F3C/0x399244), **nicht** mehr
+der Kernel: `services` ist inzwischen 9/10 (Divergenz `boss:U`).
+
+Der Hauptthread bleibt nach `dsp::DSP cmd 0x0007 (SetSemaphore)` stehen: er
+wartet auf ein eigenes Event (Handle 35, `svcCreateEvent` direkt nach
+`dsp cmd 0x0011 LoadComponent`), das er zuvor per `dsp cmd 0x0015
+RegisterInterruptEvents` an den DSP gebunden hat. Der Port hat keinen
+Audio-/DSP-Kern, der Pipe-Interrupts liefert; Azahar signalisiert diese im
+HLE-Audio (`DspHle`) beim Pipe-Processing. Naechster Arbeitsvorrat ist
+daher DSP-Interrupt-Zustellung, nicht Kernel-Synchronisation.
+

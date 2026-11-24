@@ -18,24 +18,6 @@
    "root_cause": "Wie 0x1079D0."
   },
   {
-   "addr": "0x0012E1E4",
-   "c": [
-    "arm_mutex_bootstrap(c, c->r[0]);",
-    "arm_mutex_bootstrap(c, c->r[4]);"
-   ],
-   "why": "Null-initialisierte Semaphore beim ersten Warten als frei behandeln.",
-   "root_cause": "Kernel-Sync-Objekte (svcCreateMutex/Semaphore/ArbitrateAddress) nicht korrekt."
-  },
-  {
-   "addr": "0x0012E1F0",
-   "c": [
-    "arm_mutex_bootstrap(c, c->r[0]);",
-    "arm_mutex_bootstrap(c, c->r[4]);"
-   ],
-   "why": "Wie 0x12E1E4.",
-   "root_cause": "Wie 0x12E1E4."
-  },
-  {
    "addr": "0x0011A818",
    "c": [
     "c->r[0] = 0u;"
