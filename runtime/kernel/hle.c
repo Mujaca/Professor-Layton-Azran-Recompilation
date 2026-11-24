@@ -4099,8 +4099,10 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
     ev(1, imm, c->r[0], c->r[1]);
     svc_trace(imm, c);
     if (imm == 0x3C) {
-        printf("[svc] Break bei Block 0x%08X: r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X\n",
-               arm_last_block, c->r[0], c->r[1], c->r[2], c->r[3], c->r[14]);
+        printf("[svc] Break bei Block 0x%08X: r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X th=%u\n",
+               arm_last_block, c->r[0], c->r[1], c->r[2], c->r[3], c->r[14],
+               (uint32_t)((c->tpidruro >> 12) & 0xFu));
+        arm_trace_thread_dump((int)((c->tpidruro >> 12) & 0xFu), 16);
         if (g_log) {
             uint32_t base = 0x003D8CC0u;
             printf("      globals @0x%08X:", base);

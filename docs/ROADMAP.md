@@ -98,3 +98,4 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | 2026-11-24 | exklusiv-monitor | 9/10 | boss:U | 0 |
 | 2026-11-24 | recomp-abdeckung | 10/10 | None | 0 |
 | 2026-11-24 | frame-pacing | 10/10 | None | 0 |
+| 2026-11-24 | m3-erster-draw | 10/10 | None | 0 |

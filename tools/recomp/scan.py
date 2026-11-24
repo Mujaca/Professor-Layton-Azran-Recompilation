@@ -68,6 +68,33 @@ def ldr_pc_table(data, ins, thumb):
     return (targets, end) if targets else ([], None)
 
 
+def offset_table_targets(data, base, thumb):
+    """Ziele einer Tabelle aus relativen Offsets: `ldr rX,[rB,rI,lsl #2]`
+    mit `rB = pc - imm` direkt danach `add pc, rX, rB`.
+
+    Solche Tabellen (z. B. Format-Handler eines Bilddecoders) stehen im
+    Image als 32-Bit-Offsets relativ zum Tabellenanfang; die Eintraege sind
+    oft Code-Fragmente VOR dem Funktionsanfang. Ohne eigenen Funktions-Seed
+    landet der dynamische Sprung im No-op bzw. in arm_call_guest ohne Ziel.
+    Gelesen wird bis zum ersten Eintrag, der auf keinen dekodierbaren Code
+    zeigt.
+    """
+    out = []
+    for i in range(128):
+        off = base + 4 * i
+        v = _rd32(data, off)
+        if v is None:
+            break
+        tgt = (base + v) & 0xFFFFFFFF
+        if tgt < isa.ARM_BASE or not _code_ok(data, tgt, thumb):
+            break
+        # Eintraege, die in die Tabelle selbst zeigen, sind Daten.
+        if base <= tgt < base + 4 * i + 4:
+            break
+        out.append((tgt & ~1, thumb))
+    return out
+
+
 def tbb_table(data, ins):
     """Ziele und Tabellenende fuer Thumb tbb/tbh [pc, rN]."""
     base = (ins.address + 4) & ~3
@@ -250,6 +277,8 @@ def decode_function(data, fn, visited):
         # PC-relative Konstanten im Block (Interworking-Veneer):
         #   add rN, pc, #imm  /  adr rN, #imm   ->  rN = Zieladresse
         pc_const = {}
+        # `ldr rX,[rB,rI,lsl #2]` mit pc-relativer Basis rB: Offset-Tabelle.
+        off_tbl = {}
         while True:
             ins = isa.decode(data, cur, thumb=fn.thumb)
             if ins is None:
@@ -280,6 +309,33 @@ def decode_function(data, fn, visited):
             value = pc_relative_const(ins, cur, fn.thumb)
             if value is not None:
                 pc_const[value[0]] = value[1]
+            if (ins.id == A.ARM_INS_LDR and len(ins.operands) >= 2
+                    and ins.operands[0].type == A.ARM_OP_REG
+                    and ins.operands[1].type == A.ARM_OP_MEM):
+                mem = ins.operands[1].mem
+                if (mem.base in pc_const and mem.index != 0):
+                    opn = ins.op_str.replace(" ", "")
+                    # Wortindex (lsl #2) oder bereits in Bytes gerechneter
+                    # Index (`ldr rX,[rB,rI]`); beides sind Offset-Tabellen.
+                    if "lsl#2" in opn or "lsl" not in opn:
+                        off_tbl[ins.operands[0].reg] = pc_const[mem.base]
+            if (ins.id == A.ARM_INS_ADD and op0_is_pc(ins)
+                    and len(ins.operands) >= 3
+                    and ins.operands[1].type == A.ARM_OP_REG
+                    and ins.operands[2].type == A.ARM_OP_REG):
+                # `add pc, rX, rB` mit Offset-Tabelle: Eintraege als
+                # Funktions-Seeds, damit der dynamische Sprung ein Ziel hat.
+                # Basis und Offset koennen in beliebiger Reihenfolge stehen.
+                a = ins.operands[1].reg
+                b = ins.operands[2].reg
+                base = pc_const.get(b)
+                if base is None or off_tbl.get(a) != base:
+                    base = pc_const.get(a)
+                    if base is None or off_tbl.get(b) != base:
+                        base = None
+                if base is not None:
+                    for tgt, tthumb in offset_table_targets(data, base, fn.thumb):
+                        fn.calls.add((tgt, tthumb))
             if ins.id in (A.ARM_INS_BL, A.ARM_INS_BLX):
                 tgt = direct_target(ins)
                 if tgt is not None:
