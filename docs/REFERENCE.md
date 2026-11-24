@@ -213,6 +213,32 @@ einen **Vertex-Shader-Interpreter/Übersetzer** und **TEV**.
 * **ADR in Thumb** ist PC-relativ mit `Align(PC, 4)` (PC = addr + 4); im
   Recompiler bereits so umgesetzt.
 
+* **16-Bit-Thumb im IT-Block**: Die "S"-Formen (ADD/SUB/AND/EOR/LSL/LSR/
+  ASR/ADC/SBC/ROR/RSB/ORR/MUL/MOV/MVN/BIC, T1) setzen innerhalb eines
+  IT-Blocks **keine** Flags (ARM ARM A7.7.3); TST/CMP/CMN dagegen immer.
+  Die Kodierung sagt das nicht, der Recompiler braucht den ITSTATE.
+  (Differenztest `--mode cf`, Fall `thumb_it_*`; `emit.IT_NO_FLAGS_16`.)
+* **QDADD/QDSUB**: verdoppelt wird der **zweite** Quelloperand
+  (`QDADD Rd,Rm,Rn`: `Rd = sat(Rm + sat(2*Rn))`, `QDSUB` analog `-`), und die
+  Verdopplung saturiert selbst (setzt Q). Belegt mit Unicorn und Azahar
+  `dyncom QDADD_INST`.
+* **SMLAxy** setzt bei Ueberlauf der Addition nur Q; das Ergebnis ist die
+  untere 32-Bit-Summe (kein Saettigen, Azahar `handle_Smlaxy`).
+* **CBZ/CBNZ**: Operand 0 ist das Register, Operand 1 das Ziel (Capstone wie
+  Assembler); der Sprung ist nur **vorwaerts** und in Halbwort-Schritten
+  kodiert (Rueckwaertsschleife braucht ein separates `b`).
+* **PC-Schreibweisen** im Recompiler: `bx lr`/`mov pc,lr`/`pop {..,pc}`/
+  `ldm sp!,{..,pc}` sind Rueckkehr (Rueckkehr zum C-Aufrufer); `pop`/`ldm`
+  mit PC setzen das Interworking-Bit. `bx rN`, `blx rN`, `ldr pc,[..]`,
+  `add pc,pc,rN,lsl #2` und Thumb `tbb/tbh` springen dynamisch: Ziele
+  innerhalb der Funktion per `switch`/`goto` (auch mitten in einem Block,
+  dafuer Labels an jeder Instruktion), sonst `arm_call_guest`.
+* **Sprungtabellen**: Bei `add pc,pc,rN,lsl #2` folgt ab `pc+8` eine Tabelle
+  aus 4-Byte-`b`-Instruktionen; bei `ldr pc,[pc,rN,lsl #2]` stehen dort
+  absolute Codezeiger (ARM `pc+8`, Thumb `Align(pc+4,4)`); `tbb/tbh` nutzen
+  Byte-/Halbwort-Offsets ab `Align(pc+4,4)`. Der Scanner legt diese Ziele als
+  Bloecke an (`scan.ldr_pc_table`/`tbb_table`).
+
 ## Quellen
 * https://www.3dbrew.org/wiki/IPC, /RomFS, /GSP_Shared_Memory, /GPU/Internal_Registers
 * libctru: `source/services/{apt,gsp,srv,fs}.c`, `source/ndsp/ndsp.c`

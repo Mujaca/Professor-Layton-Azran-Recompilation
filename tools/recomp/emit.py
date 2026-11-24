@@ -56,6 +56,8 @@ MEM_OPS = {
 
 LDM_IDS = (A.ARM_INS_LDM, A.ARM_INS_LDMDA, A.ARM_INS_LDMDB, A.ARM_INS_LDMIB)
 STM_IDS = (A.ARM_INS_STM, A.ARM_INS_STMDA, A.ARM_INS_STMDB, A.ARM_INS_STMIB)
+TBB_IDS = tuple(getattr(A, n) for n in ("ARM_INS_TBB", "ARM_INS_TBH")
+                if getattr(A, n, None) is not None)
 
 SHIFT = {"lsl": "SH_LSL", "lsr": "SH_LSR", "asr": "SH_ASR", "ror": "SH_ROR"}
 
@@ -103,17 +105,34 @@ def u32(v):
     return v & 0xFFFFFFFF
 
 
-def sets_flags(ins, thumb):
+# 16-Bit-Thumb-Formen, die ihre Flags nur ausserhalb eines IT-Blocks setzen
+# (die "S"-Form ist die Kodierung; im IT-Block ist es dieselbe Instruktion
+# ohne Flag-Wirkung, ARM ARM A7.7.3).
+IT_NO_FLAGS_16 = {"add", "sub", "and", "eor", "lsl", "lsr", "asr", "adc",
+                  "sbc", "ror", "rsb", "orr", "mul", "mov", "mvn", "bic"}
+
+
+def sets_flags(ins, thumb, in_it=False):
     """S-Bit aus der Kodierung lesen.
 
     capstone 5.0.7 setzt ``update_flags`` fuer ADC/SBC/RSC immer auf True
     (das C-Flag wird als impliziter Eingang gewertet). Das S-Bit steht bei ARM
     in Bit 20, bei 32-Bit-Thumb in Bit 4 des ersten Halfwords.
+
+    Zusaetzlich gilt fuer 16-Bit-Thumb: Innerhalb eines IT-Blocks setzen die
+    "S"-Formen (ADD/SUB/MOV/LSL/... T1) die Flags *nicht*; die Kodierung sagt
+    das nicht, sie haengt vom ITSTATE ab (ARM ARM A7.7.3). Ohne diese Regel
+    setzte der Recompiler Flags, die das Original unveraendert laesst.
     """
     try:
         b = ins.bytes
     except Exception:
-        return 1 if ins.update_flags else 0
+        b = b""
+    if thumb and in_it and len(b) == 2:
+        m = ins.mnemonic.lower().split(".")[0]
+        base = m[:-1] if m.endswith("s") else m
+        if base in IT_NO_FLAGS_16:
+            return 0
     if not thumb and len(b) >= 4:
         return (int.from_bytes(b[:4], "little") >> 20) & 1
     if thumb:
@@ -191,6 +210,7 @@ class Emitter:
         self.func = func_addr
         self.thumb = thumb
         self.block_labels = None   # set of local block addresses (for ldr pc)
+        self.pc_targets = None     # alle Instruktionsadressen (indirekte PC-Ziele)
         self.ret_bx = set()        # bx-Adressen mit Rueckkehrziel aus dem Stack
         self.it_cond = {}          # id(ins) -> Bedingung aus einem IT-Block
 
@@ -201,6 +221,35 @@ class Emitter:
 
     def label(self, addr):
         return "L_%08X_%08X" % (self.func, u32(addr))
+
+    def dynamic_pc(self, expr, interwork=True):
+        """Schreibt PC aus einem Ausdruck und springt dorthin.
+
+        Ziele innerhalb der Funktion werden per switch/goto angesprungen
+        (lokale Bloecke haben keinen Eintrag in g_entries), alles andere ueber
+        arm_call_guest. Der Aufruf kehrt nie zurueck: nach einem Sprung ist die
+        Funktion beendet (Ruecksprung erfolgt im Ziel ueber dessen LR).
+        """
+        lines = ["{", "  uint32_t t = (%s);" % expr,
+                 "  c->r[15] = t & ~1u;"]
+        if interwork:
+            lines.append("  c->t = t & 1u;")
+        labs = []
+        src = self.pc_targets if self.pc_targets else self.block_labels
+        if src:
+            labs = sorted(a for a in src
+                          if self.func <= a < self.func + 0x10000)
+        if labs:
+            lines.append("  switch (c->r[15]) {")
+            for a in labs:
+                lines.append("    case 0x%08Xu: goto %s;" % (u32(a), self.label(a)))
+            lines.append("    default: arm_call_guest(c, t); return;")
+            lines.append("  }")
+        else:
+            lines.append("  arm_call_guest(c, t); return;")
+        lines.append("}")
+        lines.append("return;")
+        return lines
 
     # ---------- operands ----------
     def value(self, tok, pc):
@@ -249,7 +298,7 @@ class Emitter:
         return "arm_shift_reg(%s, %s, %s, &sh)" % (kind, raddr, base), "sh"
 
     # ---------- instruction classes ----------
-    def dp(self, ins):
+    def dp(self, ins, in_it=False):
         code, uses_rn, writes = DP_OPS[ins.id]
         ops = isa.split_operands(ins.op_str)
         pc = ins.address
@@ -272,12 +321,26 @@ class Emitter:
             rn = self.value(ops[0], pc)
             rest = ops[1:]
         o2, sh = self.operand2(rest, pc)
-        sf = sets_flags(ins, self.thumb)
+        sf = sets_flags(ins, self.thumb, in_it)
         if sh:
-            return ["{", "  int sh = -1;",
-                    "  arm_dp(c, %s, %d, %s, %s, %d, sh);" % (code, rd, rn, o2, sf),
-                    "}"]
-        return ["arm_dp(c, %s, %d, %s, %s, %d, -1);" % (code, rd, rn, o2, sf)]
+            lines = ["{", "  int sh = -1;",
+                     "  arm_dp(c, %s, %d, %s, %s, %d, sh);" % (code, rd, rn, o2, sf),
+                     "}"]
+        else:
+            lines = ["arm_dp(c, %s, %d, %s, %s, %d, -1);" % (code, rd, rn, o2, sf)]
+        if writes and rd == 15:
+            src = isa.reg_num(ops[1]) if len(ops) > 1 else None
+            if code == "DP_MOV" and src == 14:
+                # `mov pc, lr` ist eine Rueckkehr in den C-Aufrufer; ein
+                # arm_call_guest am Rueckkehrziel wuerde eine Gastfunktion
+                # an einer Adresse mitten in der Aufruferfunktion starten.
+                lines.append("c->r[15] = c->r[14];")
+                lines.append("return;")
+            else:
+                # `mov pc, rN` / `add pc, ...` / Sprungtabellen: dynamisch
+                # weiterleiten (lokale Bloecke per switch/goto).
+                lines.extend(self.dynamic_pc("c->r[15]"))
+        return lines
 
     def mem(self, ins):
         size, signed, load = MEM_OPS[ins.id]
@@ -333,19 +396,23 @@ class Emitter:
             # bleibt unbalanciert). Nur echte Fremd-Eintraege via
             # arm_call_guest ausfuehren.
             lines.append("if (arm_ldrpc_log_on()) arm_ldrpc_log(c->r[15]);")
-            if self.block_labels:
-                labs = sorted(a for a in self.block_labels
+            lines.append("{ uint32_t t = c->r[15]; c->r[15] = t & ~1u;")
+            lines.append("  c->t = t & 1u;")
+            src = self.pc_targets if self.pc_targets else self.block_labels
+            labs = []
+            if src:
+                labs = sorted(a for a in src
                               if self.func <= a < self.func + 0x10000)
-                if labs:
-                    lines.append("{ uint32_t t = c->r[15]; switch (t) {")
-                    for a in labs:
-                        lines.append("  case 0x%08Xu: goto %s;"
-                                     % (u32(a), self.label(a)))
-                    lines.append("  default: arm_call_guest(c, t); return; } }")
-                else:
-                    lines.append("arm_call_guest(c, c->r[15]);")
+            if labs:
+                lines.append("  switch (c->r[15]) {")
+                for a in labs:
+                    lines.append("    case 0x%08Xu: goto %s;"
+                                 % (u32(a), self.label(a)))
+                lines.append("    default: arm_call_guest(c, t); return;")
+                lines.append("  }")
             else:
-                lines.append("arm_call_guest(c, c->r[15]);")
+                lines.append("  arm_call_guest(c, t); return;")
+            lines.append("}")
             lines.append("return;")
         return lines
 
@@ -385,6 +452,13 @@ class Emitter:
             if not ins.operands or ins.operands[0].type != A.ARM_OP_IMM:
                 raise Unsupported(ins.op_str)
             tgt = ins.operands[0].imm
+            if self.block_labels is not None and tgt not in self.block_labels:
+                # Ziel ausserhalb der Funktion (Tail-Call): als Gastaufruf
+                # ausfuehren; das Ziel kehrt ueber LR zum Aufrufer zurueck.
+                return ["{ uint32_t sp0 = c->r[13];",
+                        "  arm_call_guest(c, 0x%08Xu);" % u32(tgt),
+                        "  arm_restore_sp(c, sp0); }",
+                        "return;"]
             return ["goto %s;" % self.label(tgt)]
         if ins.id == A.ARM_INS_BL:
             if not ins.operands or ins.operands[0].type != A.ARM_OP_IMM:
@@ -908,8 +982,49 @@ class Emitter:
 
         raise Unsupported(ins.mnemonic)
 
+    def thumb_table_branch(self, ins):
+        """Thumb tbb/tbh [pc, rN]: Tabellensprung."""
+        ops = isa.split_operands(ins.op_str)
+        r = None
+        for tok in ops:
+            t = tok.strip()
+            if t.startswith("["):
+                inner = isa.split_operands(t.strip("[]"))
+                if len(inner) >= 2:
+                    r = isa.reg_num(inner[1])
+        if r is None:
+            raise Unsupported(ins.op_str)
+        base = (ins.address + 4) & ~3
+        half = ins.id == getattr(A, "ARM_INS_TBH", -1)
+        if half:
+            lines = ["{", "  uint32_t b = 0x%08Xu;" % u32(base),
+                     "  uint32_t o = arm_mem_read(c, b + c->r[%d] * 2u, 2);" % r,
+                     "  uint32_t t = b + 2u * o;"]
+        else:
+            lines = ["{", "  uint32_t b = 0x%08Xu;" % u32(base),
+                     "  uint32_t o = arm_mem_read(c, b + c->r[%d], 1);" % r,
+                     "  uint32_t t = b + 2u * o;"]
+        labs = []
+        src = self.pc_targets if self.pc_targets else self.block_labels
+        if src:
+            labs = sorted(a for a in src
+                          if self.func <= a < self.func + 0x10000)
+        lines.append("  c->r[15] = t & ~1u; c->t = 1u;")
+        if labs:
+            lines.append("  switch (c->r[15]) {")
+            for a in labs:
+                lines.append("    case 0x%08Xu: goto %s;" % (u32(a), self.label(a)))
+            lines.append("    default: arm_call_guest(c, t); return;")
+            lines.append("  }")
+        else:
+            lines.append("  arm_call_guest(c, t); return;")
+        lines.append("}")
+        lines.append("return;")
+        return lines
+
     # ---------- dispatch ----------
     def emit(self, ins):
+        in_it = id(ins) in self.it_cond
         cc0 = self.it_cond.get(id(ins), ins.cc)
         iid = ID_ALIASES.get(ins.id)
         if iid is not None:
@@ -917,7 +1032,7 @@ class Emitter:
         pc = ins.address
         cond = None if cc0 == A.ARM_CC_AL else cc0
         if ins.id in DP_OPS:
-            lines = self.dp(ins)
+            lines = self.dp(ins, in_it)
         elif ins.id in MEM_OPS:
             lines = self.mem(ins)
         elif ins.id in (A.ARM_INS_PUSH, A.ARM_INS_POP) or ins.id in LDM_IDS or ins.id in STM_IDS:
@@ -926,6 +1041,8 @@ class Emitter:
             lines = self.branch(ins)
         elif ins.id == A.ARM_INS_NOP:
             lines = []
+        elif ins.id in TBB_IDS:
+            lines = self.thumb_table_branch(ins)
         elif ins.id in (A.ARM_INS_CBZ, A.ARM_INS_CBNZ):
             ops = isa.split_operands(ins.op_str)
             r = isa.reg_num(ops[0]) if ops else None

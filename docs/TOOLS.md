@@ -35,7 +35,17 @@ NZCVQ/GE und ein Speicher-Digest.
 ```powershell
 python tools/recomp_difftest.py --seed 7 --count 200
 python tools/recomp_difftest.py --mode arm --quick --filter sbc
+python tools/recomp_difftest.py --mode cf          # Kontrollfluss-Suite
 ```
+
+Die Kontrollfluss-Suite (`--mode cf`) baut je Fall ein eigenes Programm aus
+mehreren Funktionen (ARM/Thumb gemischt) und vergleicht gegen Unicorn:
+bedingte Rueckkehr (`bxcc lr`, `popcc {pc}`, `ldrcc pc`, `movcc pc,lr`),
+`ldm sp!,{..,pc}` mit Interworking, `blx reg/imm` in beide Richtungen,
+Tail-Calls (`b`), Sprungtabellen (`add pc,pc,rN,lsl #2`,
+`ldrls pc,[pc,rN,lsl #2]`, Thumb `tbb`/`tbh`), alle IT-Masken,
+`cbz`/`cbnz`-Schleifen und Fallthrough zwischen Funktionseinstiegen.
+Verglichen werden r0-r14, NZCVQ/GE und der Daten-Digest.
 
 Neue Semantikfehler zuerst hier reproduzieren und dann als festen Fall in
 `tests/mvp_selftest.py` aufnehmen.

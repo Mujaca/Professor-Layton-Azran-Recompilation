@@ -313,6 +313,47 @@ CASES = [
         "regs": {"r1": 0x11223344, "r2": 0xAABBCCDD},
         "expect": {"r0": 0xAABB3344},
     },
+    {
+        # 16-Bit-Thumb im IT-Block setzt keine Flags (ARM ARM A7.7.3).
+        "name": "thumb_it_flags",
+        "thumb": True,
+        "asm": """
+            push {lr}
+            movs r0, #0
+            itt eq
+            moveq r1, #1
+            addeq r2, r3, #1
+            pop {pc}
+        """,
+        "regs": {"r3": 41},
+        "expect": {"r1": 1, "r2": 42, "z": 1},
+    },
+    {
+        # QDADD: Rd = sat(Rm + sat(2*Rn)); verdoppelt wird der zweite
+        # Quelloperand, die Verdopplung saturiert selbst (Q).
+        "name": "qdadd_saturation",
+        "asm": """
+            qdadd r0, r1, r2
+            bx lr
+        """,
+        "regs": {"r1": 3, "r2": 0x40000000},
+        "expect": {"r0": 0x7FFFFFFF, "q": 1},
+    },
+    {
+        # `mov<cond> pc, lr` ist eine bedingte Rueckkehr: bei falscher
+        # Bedingung muss der Folgeblock laufen.
+        "name": "movcond_pc_lr",
+        "asm": """
+            push {r4, lr}
+            mov r4, r0
+            cmp r1, #0
+            moveq pc, lr
+            add r0, r4, r1
+            pop {r4, pc}
+        """,
+        "regs": {"r0": 7, "r1": 5},
+        "expect": {"r0": 12},
+    },
 ]
 
 
@@ -336,9 +377,10 @@ def build_case(case, idx):
     mem = case.get("mem", [])
     checks = []
     for name, val in case["expect"].items():
-        if name in ("n", "z", "c", "v"):
+        if name in ("n", "z", "c", "v", "q"):
+            field = "qflag" if name == "q" else name
             checks.append('  if (c.%s != %du) { printf("FAIL %s: %%u\\n", c.%s); return 1; }'
-                          % (name, val, name, name))
+                          % (field, val, name, field))
         else:
             idx_r = int(name[1:])
             checks.append('  if (c.r[%d] != 0x%08Xu) { printf("FAIL %s: 0x%%08X (erwartet 0x%08X)\\n", c.r[%d]); return 1; }'

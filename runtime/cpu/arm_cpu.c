@@ -357,7 +357,13 @@ int arm_ldm_stm(ArmCpu *c, int base, int load, int writeback, int mode, uint32_t
         if (!(mask & (1u << i))) continue;
         if (load) {
             c->r[i] = arm_mem_read(c, addr, 4);
-            if (i == ARM_PC) pc_loaded = 1;
+            if (i == ARM_PC) {
+                /* Laden von PC ist ein Interworking-Sprung: Bit 0 waehlt den
+                 * Befehlssatz (ARM ARM A8.8.107). */
+                c->t = c->r[15] & 1u;
+                c->r[15] &= ~1u;
+                pc_loaded = 1;
+            }
         } else {
             arm_mem_write(c, addr, 4, c->r[i]);
         }
@@ -644,8 +650,22 @@ uint32_t arm_qadd32(ArmCpu *c, int op, uint32_t a, uint32_t b) {
     switch (op) {
         case QADD_ADD: r = x + y; break;
         case QADD_SUB: r = x - y; break;
-        case QADD_DADD: r = x + 2 * y; break;
-        default: r = x - 2 * y; break;
+        case QADD_DADD:
+            /* QDADD: Rd = sat(Rm + sat(2*Rn)) – verdoppelt wird der
+             * *zweite* Quelloperand (Azahar dyncom QDADD_INST,
+             * ARM ARM A8.8.129). Die Verdopplung saturiert selbst. */
+            r = 2 * y;
+            if (r > 2147483647LL) { r = 2147483647LL; c->qflag = 1; }
+            else if (r < -2147483648LL) { r = -2147483648LL; c->qflag = 1; }
+            r += x;
+            break;
+        default:
+            /* QDSUB: Rd = sat(Rm - sat(2*Rn)) */
+            r = 2 * y;
+            if (r > 2147483647LL) { r = 2147483647LL; c->qflag = 1; }
+            else if (r < -2147483648LL) { r = -2147483648LL; c->qflag = 1; }
+            r = x - r;
+            break;
     }
     if (r > 2147483647LL) { r = 2147483647LL; c->qflag = 1; }
     if (r < -2147483648LL) { r = -2147483648LL; c->qflag = 1; }
@@ -658,18 +678,16 @@ uint32_t arm_smla16(ArmCpu *c, uint32_t rn, uint32_t rm, uint32_t ra,
     int32_t y = (int16_t)(mtop ? (rm >> 16) : rm);
     int64_t prod = (int64_t)x * (int64_t)y;
     if (!accumulate) {
-        if (prod > 2147483647LL || prod < -2147483648LL) {
-            prod = (prod > 0) ? 2147483647LL : -2147483648LL;
-            c->qflag = 1;
-        }
+        /* SMULxy: 16x16 passt immer in 32 Bit, keine Saettigung. */
         return (uint32_t)(int32_t)prod;
     }
     int64_t sum = prod + (int64_t)(int32_t)ra;
+    /* SMLAxy setzt bei Ueberlauf nur Q; das Ergebnis ist die untere
+     * 32-Bit-Summe (Azahar handle_Smlaxy, ARM ARM A8.8.135). */
     if (sum > 2147483647LL || sum < -2147483648LL) {
-        sum = (sum > 0) ? 2147483647LL : -2147483648LL;
         c->qflag = 1;
     }
-    return (uint32_t)(int32_t)sum;
+    return (uint32_t)sum;
 }
 
 
