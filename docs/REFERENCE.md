@@ -220,6 +220,50 @@ MMU/Seitentabelle hat.
 Das Titelbild ist ein 3D-Render (`title.xc`): korrekte Darstellung braucht
 zusätzlich **TEV** und die Rasterizer-Zustände (Viewport/Clip/Depth).
 
+### Rasterizer, Clipping, TEV und Farbziel
+
+Quelle: Azahar `renderer_software/sw_rasterizer.cpp`, `sw_clipper.cpp`,
+`sw_framebuffer.cpp`, `sw_texturing.cpp`, `pica/regs_*.h`.
+
+* **Clip-Raum:** Position ist `(x,y,z,w)`; sichtbar ist `-w <= x,y <= w`,
+  `0 <= z <= w`, `w > 0`. Zusätzlich optional eine eigene Ebene
+  (`clip_enable` 0x47, Koeffizienten `clip_coef[4]` 0x48..0x4B). Clipping ist
+  Sutherland-Hodgman gegen diese 7(+1) Ebenen; ein Dreieck wird zu einem
+  Polygon mit bis zu 3+7 Ecken und danach als Fan trianguliert.
+* **Viewport:** `0x41`/`0x43` sind halbe Breite/Höhe als float24, `0x68`
+  Bits 0..9 = X- und Bits 16..25 = Y-Ecke (signed). Bildschirmkoordinate
+  `x = (x/w + 1) * half_w + corner_x`. `0x4D`/`0x4E` sind
+  `viewport_depth_range`/`viewport_depth_near_plane` (float24).
+* **Perspektivkorrektur:** Attribute werden vor der Division mit `1/w`
+  multipliziert. Im Bildschirmraum werden `attr/w` und `1/w` linear
+  (baryzentrisch) interpoliert und danach durcheinander geteilt, also
+  `attr = sum(attr_i/w_i * A_i) / sum(1/w_i * A_i)`.
+* **Coverage:** Rasterizer-Koordinaten sind 12.4-Fixed-Point (Pixel*16).
+  Baryzentrische Gewichte sind ganzzahlige signed areas; die Kante
+  „rechts oder flach unten“ bekommt Bias -1 (Top-Left-Regel). Scissor
+  0x65 (Modus Bits0..1, x1/y1) / 0x66 (x2/y2) schneidet das Bounding-Box.
+  Cull-Modus 0x40 Bits 0..1: 0/3 = alle (Dreieck wird auf CCW gedreht),
+  1 = nur im Uhrzeigersinn, 2 = nur gegen den Uhrzeigersinn.
+* **TEV (6 Stufen):** Basis 0xC0, 0xC8, 0xD0, 0xD8, 0xF0, 0xF8; je Stufe
+  `+0` Quellen, `+1` Modifier, `+2` Operationen, `+3` `const_color`,
+  `+4` Skalierung. Quellen: 0 PrimaryColor (interpolierte Vertexfarbe),
+  1/2 Primary/Secondary-Fragmentfarbe (Lighting), 3..6 Texture0..3,
+  0xD PreviousBuffer, 0xE Constant, 0xF Previous. In Stufe 0 wird
+  `Previous` durch Quelle 3 ersetzt. Kombinierer: Replace/Modulate/Add/
+  AddSigned/Lerp/Subtract/Dot3/MultiplyThenAdd/AddThenMultiply; Skalierung
+  = `1 << scale` (Wert 3 = 1). Combiner-Buffer: 0xE0 Bits 8..11 (RGB) /
+  12..15 (Alpha) markieren Stufen 0..3, die den Puffer aktualisieren;
+  0xFD ist die Puffer-Farbe.
+* **Farbziel:** Output-Merger 0x100..0x108 (Alpha-Blend / LogicOp,
+  Kanal-Masken Bits 8..11, Depth-Test Bit 0). Framebuffer 0x110..0x11E:
+  `color_buffer_address` 0x11C (physisch = Wert*8), Breite 0x11D Bits 0..10,
+  Höhe als Feld Bits 12..21 (= tatsächliche Höhe - 1, Zugriff `+1`),
+  Flip Bit 24, `color_format` 0x116 Bits 16..18 (RGBA8/RGB8/RGB5A1/
+  RGB565/RGBA4). Pixel liegen 8x8-Morton-gekachelt und von unten nach oben
+  (`y' = height_raw - y`, Offset = `morton(x,y') + (y' & ~7) * width * bpp`).
+* **Texturkoordinaten:** `t` wird vor dem Sample invertiert
+  (`t = height-1 - wrapped(t)`), da Texturen von unten nach oben liegen.
+
 ## Quellen
 
 * https://www.3dbrew.org/wiki/IPC, /RomFS, /GSP_Shared_Memory, /GPU/Internal_Registers

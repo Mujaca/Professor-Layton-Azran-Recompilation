@@ -15,6 +15,11 @@ float24-Uniform-Upload 0x2C0/0x2C1, Programm 0x2CB/0x2CC, Swizzle
 Ausgangs-Mapping 0x04F/0x050, output_mask 0x2BD, Arithmetik/Swizzle,
 LOOP+aL, IFU, Default-Attribute 0x232, attribut_mask, Index-Puffer 0x227
 (0x22F/u16) und Immediate-Mode 0x232=0xF.
+
+Rasterizer/Fragment (Azahar renderer_software): Clipping, Viewport 0x41/0x43/
+0x68, perspektivkorrekte Interpolation, 12.4-Coverage, TEV 0x0C0..0x0FD
+(Konstantfarbe + interpolierte Vertexfarbe) und Farbziel 0x11C..0x11E
+(RGBA8 + 8x8-Morton).
 """
 import os
 import subprocess

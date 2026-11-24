@@ -131,6 +131,38 @@ static uint32_t *emit_swizzle0(uint32_t *p, uint32_t w)
     return emit(p, 0x2D6, w);
 }
 
+/* Viewport 0x41/0x43 (halbe Groesse, float24) + Ecke 0x68. */
+static uint32_t *emit_viewport(uint32_t *p, int w, int h)
+{
+    p = emit(p, 0x41, f24raw((float)w * 0.5f));
+    p = emit(p, 0x43, f24raw((float)h * 0.5f));
+    return emit(p, 0x68, 0u);
+}
+
+/* TEV-Stufe 0: Farbe = Quelle `src`, Alpha = Quelle `asrc`, Op Replace.
+   sources: 0 PrimaryColor, 3 Texture0, 0xe Constant, 0xf Previous. */
+static uint32_t *emit_tev0(uint32_t *p, uint32_t src, uint32_t asrc,
+                           uint32_t const_rgba)
+{
+    int s;
+    p = emit(p, 0xC0, (src & 0xFu) | ((asrc & 0xFu) << 16));
+    p = emit(p, 0xC1, 0u);          /* keine Modifier */
+    p = emit(p, 0xC2, 0u);          /* Replace, Alpha Replace */
+    p = emit(p, 0xC3, const_rgba);  /* const_color */
+    p = emit(p, 0xC4, 0u);          /* Skalierung 1x */
+    /* Ungenutzte Stufen 1..5 als Durchreichen (Quelle Previous, Replace).
+       Die Hardware/Azahar fuehrt immer alle 6 TEV-Stufen aus. */
+    for (s = 1; s < 6; s++) {
+        uint32_t base = (s < 4) ? (0xC0u + (uint32_t)s * 8u) : (0xF0u + (uint32_t)(s - 4) * 8u);
+        p = emit(p, base + 0u, 0x000F000Fu);  /* color/alpha source1 = Previous */
+        p = emit(p, base + 1u, 0u);
+        p = emit(p, base + 2u, 0u);
+        p = emit(p, base + 3u, 0u);
+        p = emit(p, base + 4u, 0u);
+    }
+    return p;
+}
+
 /* Standard-Attributsetup: 1 Attribut (float3) aus VTX, Stride 16. */
 static uint32_t *emit_attr0(uint32_t *p, uint32_t base)
 {
@@ -181,6 +213,8 @@ int main(void) {
     p = emit(p, 0x82, (2u << 16) | 2u);    /* 2x2 */
     p = emit(p, 0x85, TEX >> 3);
     p = emit(p, 0x8E, 1);                  /* RGB8 */
+    p = emit_viewport(p, 400, 240);        /* 0x41/0x43/0x68 */
+    p = emit_tev0(p, 3, 0, 0);             /* TEV: Farbe Texture0, Alpha Vertex */
     p = emit(p, 0x22E, 0);                 /* Draw-Trigger (arrays) */
     size = (uint32_t)((unsigned char *)p - (mem + LIST));
 
@@ -197,19 +231,20 @@ int main(void) {
     cx = (FB + (120u * 400u + 200u) * 3u) & 0x1FFFFFFFu;
     check(mem[cx + 0] == 255 && mem[cx + 1] == 0 && mem[cx + 2] == 0,
           "Mitte rot (Textur ueber 0x200-Loader/Stride 16 gesampelt)");
-    px = (FB + (0u * 400u + 0u) * 3u) & 0x1FFFFFFFu;
+    px = (FB + (239u * 400u + 399u) * 3u) & 0x1FFFFFFFu;
     check(mem[px + 0] == 0 && mem[px + 1] == 0 && mem[px + 2] == 0,
-          "Ecke (0,0) ausserhalb des Dreiecks bleibt schwarz");
+          "Ecke (399,239) ausserhalb des Dreiecks bleibt schwarz");
 
-    /* Textur aus: p_texel faellt auf Weiss zurueck (Enable-Feld). */
+    /* Textur aus: Azahar liefert fuer eine deaktivierte Textureinheit
+       0,0,0,0 (kein Weiss-Fallback); TEV-Quelle Texture0 wird schwarz. */
     p = (uint32_t *)(mem + LIST);
     p = emit(p, 0x80, 0);
     p = emit(p, 0x22E, 0);
     size = (uint32_t)((unsigned char *)p - (mem + LIST));
     gpu_run_pica_list(&c, LIST, size);
     check(gpu_pica_texture_bound() == 0, "0x80=0 schaltet Textur 0 aus");
-    check(mem[cx + 0] == 255 && mem[cx + 1] == 255 && mem[cx + 2] == 255,
-          "Mitte weiss ohne Textur (Fallback-Pfad)");
+    check(mem[cx + 0] == 0 && mem[cx + 1] == 0 && mem[cx + 2] == 0,
+          "Mitte schwarz ohne Textur (TEV-Quelle Texture0 = 0)");
 
     /* ---- Adressumrechnung physisch -> Gast-Linearspeicher ----
      * Azahar memory.h: VRAM_PADDR 0x18000000 / VRAM_VADDR 0x1F000000,
@@ -568,6 +603,131 @@ int main(void) {
         gpu_pica_last_vertex(pos, NULL, NULL);
         check(pos[0] == 0.0f && pos[1] == 1.0f,
               "Immediate-Mode 0x232=0xF verarbeitet Vertex (0,1)");
+    }
+
+    /* ---- TEV-Konstantfarbe (Quelle Constant + Replace) ----
+     * Azahar sw_rasterizer.cpp get_source(Source::Constant) liest
+     * const_color des Stages; Replace gibt Quelle 1 unveraendert aus. */
+    {
+        uint32_t *q, size2;
+        gpu_pica_reset();
+        memset(mem + FB, 0, 400u * 240u * 3u);
+        set_vertex(&c, 0, -1.0f, -1.0f, 0.0f, 0.0f, 0.0f);
+        set_vertex(&c, 20, 1.0f, -1.0f, 0.0f, 1.0f, 0.0f);
+        set_vertex(&c, 40, 0.0f, 1.0f, 0.0f, 0.5f, 1.0f);
+        q = (uint32_t *)(mem + LIST);
+        q = emit(q, 0x200, VTX >> 3);
+        q = emit(q, 0x201, 0xBu);              /* attr0 float3 */
+        q = emit(q, 0x202, 0u);
+        q = emit(q, 0x203, 0u);
+        q = emit(q, 0x204, 0u);
+        q = emit(q, 0x205, (1u << 28) | (20u << 16));
+        q = emit_viewport(q, 400, 240);
+        q = emit_tev0(q, 0xEu, 0xEu, 0xFF304050u);  /* Constant, (r,g,b,a)=50,40,30,255 */
+        q = emit(q, 0x228, 3u);
+        q = emit(q, 0x22E, 0u);
+        size2 = (uint32_t)((unsigned char *)q - (mem + LIST));
+        gpu_run_pica_list(&c, LIST, size2);
+        cx = (FB + (120u * 400u + 200u) * 3u) & 0x1FFFFFFFu;
+        check(mem[cx + 0] == 0x50 && mem[cx + 1] == 0x40 && mem[cx + 2] == 0x30,
+              "TEV Constant/Replace schreibt (0x50,0x40,0x30)");
+    }
+
+    /* ---- Interpolierte Vertexfarbe (VS o1 -> COLOR_RGBA senses) ----
+     * Azahar: primary_color = perspektivisch interpolierte Vertexfarbe
+     * (GetInterpolatedAttribute), danach u8 = round(f*255). */
+    {
+        uint32_t words[3], *q, size2;
+        float v[6][4];
+        int vi;
+        gpu_pica_reset();
+        memset(mem + FB, 0, 400u * 240u * 3u);
+        set_vertex(&c, 0, -1.0f, -1.0f, 0.0f, 0.0f, 0.0f);
+        set_vertex(&c, 20, 1.0f, -1.0f, 0.0f, 1.0f, 0.0f);
+        set_vertex(&c, 40, 0.0f, 1.0f, 0.0f, 0.5f, 1.0f);
+        /* 3 Vertices, Stride 32: Position float4 + Farbe float4. */
+        v[0][0] = -1.0f; v[0][1] = -1.0f; v[0][2] = 0.0f; v[0][3] = 1.0f;
+        v[1][0] =  1.0f; v[1][1] = -1.0f; v[1][2] =      0.0f; v[1][3] = 1.0f;
+        v[2][0] =  0.0f; v[2][1] =  1.0f; v[2][2] = 0.0f; v[2][3] = 1.0f;
+        v[3][0] =  1.0f; v[3][1] =  0.0f; v[3][2] = 0.0f; v[3][3] = 1.0f;
+        v[4][0] =  0.0f; v[4][1] =  1.0f; v[4][2] = 0.0f; v[4][3] = 1.0f;
+        v[5][0] =  0.0f; v[5][1] =  0.0f; v[5][2] = 1.0f; v[5][3] = 1.0f;
+        for (vi = 0; vi < 3; vi++)
+            memcpy(mem + VTX3 + vi * 32, v[vi], 16),
+            memcpy(mem + VTX3 + vi * 32 + 16, v[vi + 3], 16);
+        q = (uint32_t *)(mem + LIST);
+        q = emit(q, 0x200, VTX3 >> 3);
+        q = emit(q, 0x201, 0xFFu);             /* attr0+attr1 float4 */
+        q = emit(q, 0x202, 1u << 28);          /* max_attribute_index = 1 */
+        q = emit(q, 0x203, 0u);                /* Loader: attr0 bei +0 */
+        q = emit(q, 0x204, 0x0010u);           /* comp0=attr0, comp1=attr1 */
+        q = emit(q, 0x205, (2u << 28) | (32u << 16));
+        q = emit(q, 0x2B9, 1u);                /* max_input_attr_index */
+        q = emit(q, 0x2BB, 0x10u);             /* attr0->v0, attr1->v1 */
+        q = emit(q, 0x4F, 2u);                 /* 2 Ausgaenge */
+        q = emit(q, 0x50, 0x03020100u);        /* o0 -> POSITION xyzw */
+        q = emit(q, 0x51, 0x0B0A0908u);        /* o1 -> COLOR_RGBA */
+        q = emit(q, 0x2BD, 3u);                /* o0 + o1 */
+        words[0] = ins_common(0x13u, 0u, 0x00u, 0u, 0u, 0u);  /* mov o0,v0 */
+        words[1] = ins_common(0x13u, 0u, 0x01u, 0u, 1u, 0u);  /* mov o1,v1 */
+        words[2] = 0x22u << 26;
+        q = emit_program(q, words, 3);
+        q = emit_swizzle0(q, swz_xyzw());
+        q = emit(q, 0x228, 3u);
+        q = emit_viewport(q, 400, 240);
+        q = emit_tev0(q, 0u, 0u, 0u);          /* PrimaryColor, Replace */
+        q = emit(q, 0x22E, 0u);
+        size2 = (uint32_t)((unsigned char *)q - (mem + LIST));
+        printf("DBG interp start\n"); fflush(stdout);
+        gpu_run_pica_list(&c, LIST, size2);
+        printf("DBG interp done\n"); fflush(stdout);
+        cx = (FB + (120u * 400u + 200u) * 3u) & 0x1FFFFFFFu;
+        check(abs((int)mem[cx + 0] - 63) <= 2 &&
+              abs((int)mem[cx + 1] - 64) <= 2 &&
+              abs((int)mem[cx + 2] - 128) <= 2,
+              "interpolierte Vertexfarbe in der Dreiecksmitte ~(63,64,128)");
+        px = (FB + (239u * 400u + 399u) * 3u) & 0x1FFFFFFFu;
+        check(mem[px + 0] == 0 && mem[px + 1] == 0 && mem[px + 2] == 0,
+              "Ecke (399,239) bleibt ausserhalb (kein Vollflaeche-Fuellen)");
+    }
+
+    /* ---- Konfiguriertes Farbziel 0x11C..0x11E (RGBA8, Morton, unten->oben) ----
+     * Azahar sw_framebuffer.cpp DrawPixel: y = height_raw - y, 8x8-Morton,
+     * Offset = morton(x,y,bpp) + (y & ~7) * width * bpp. */
+    {
+        uint32_t *q, size2;
+        uint32_t off2;
+        gpu_pica_reset();
+        memset(mem + 0x40000u, 0, 0x40000u);
+        set_vertex(&c, 0, -1.0f, -1.0f, 0.0f, 0.0f, 0.0f);
+        set_vertex(&c, 20, 1.0f, -1.0f, 0.0f, 1.0f, 0.0f);
+        set_vertex(&c, 40, 0.0f, 1.0f, 0.0f, 0.5f, 1.0f);
+        q = (uint32_t *)(mem + LIST);
+        q = emit(q, 0x200, VTX >> 3);
+        q = emit(q, 0x201, 0xBu);
+        q = emit(q, 0x202, 0u);
+        q = emit(q, 0x203, 0u);
+        q = emit(q, 0x204, 0u);
+        q = emit(q, 0x205, (1u << 28) | (20u << 16));
+        q = emit_viewport(q, 400, 240);
+        q = emit_tev0(q, 0xEu, 0xEu, 0x10203040u);
+        q = emit(q, 0x228, 3u);
+        /* Farbziel: RGBA8, Adresse 0x40000, 400x240, Schreibmaske RGBA. */
+        q = emit(q, 0x116, 0u);                /* color_format RGBA8 */
+        q = emit(q, 0x11C, 0x40000u >> 3);
+        q = emit(q, 0x11D, 400u | ((240u - 1u) << 12));
+        q = emit(q, 0x108, 0x00000F00u);       /* red..alpha enable */
+        q = emit(q, 0x102, 3u);                /* LogicOp Copy */
+        q = emit(q, 0x113, 1u);                /* allow_color_write */
+        q = emit(q, 0x22E, 0u);
+        size2 = (uint32_t)((unsigned char *)q - (mem + LIST));
+        gpu_run_pica_list(&c, LIST, size2);
+        /* Pixel (200,120) -> y'=119; Morton: y%8=7 -> 0x2A, x%8=0,
+           coarse_x=200 -> +1600; *4 Byte; plus (119&~7)*400*4. */
+        off2 = 0x40000u + (42u + 1600u) * 4u + 112u * 400u * 4u;
+        check(mem[off2 + 0] == 0x40 && mem[off2 + 1] == 0x30 &&
+              mem[off2 + 2] == 0x20 && mem[off2 + 3] == 0x10,
+              "Farbziel 0x11C/0x11D: RGBA8 + Morton-Pixel korrekt");
     }
 
     printf("ERGEBNIS: %s\n", fails == 0 ? "OK" : "FEHLER");
