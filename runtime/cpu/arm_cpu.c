@@ -136,7 +136,7 @@ uint32_t arm_shift_imm(int type, uint32_t amount, uint32_t value, int *carry) {
              if (carry) *carry = (int)((value >> (32 - amount)) & 1);
             return value << amount;
         case SH_LSR:
-            if (amount == 0) {                      /* LSR #32 */
+            if (amount == 0 || amount >= 32) {      /* LSR #32 */
                 if (carry) *carry = (int)(value >> 31);
                 return 0;
             }
@@ -144,7 +144,7 @@ uint32_t arm_shift_imm(int type, uint32_t amount, uint32_t value, int *carry) {
             return value >> amount;
         case SH_ASR: {
             int32_t sv = (int32_t)value;
-            if (amount == 0) {                      /* ASR #32 */
+            if (amount == 0 || amount >= 32) {      /* ASR #32 */
                 if (carry) *carry = (int)((sv >> 31) & 1);
                 return (uint32_t)(sv >> 31);
             }
@@ -165,6 +165,14 @@ uint32_t arm_shift_imm(int type, uint32_t amount, uint32_t value, int *carry) {
         default:
             return value;
     }
+}
+
+/* RRX braucht das eingehende C-Flag; der Shifter-Carry ist ein
+ * Ausgabeparameter, daher eigener Helfer (nicht arm_shift_imm mit *carry=-1). */
+uint32_t arm_rrx(ArmCpu *c, uint32_t value, int *carry) {
+    uint32_t res = (value >> 1) | (c->c ? 0x80000000u : 0u);
+    if (carry) *carry = (int)(value & 1u);
+    return res;
 }
 
 uint32_t arm_shift_reg(int type, uint32_t amount, uint32_t value, int *carry) {
@@ -234,7 +242,11 @@ void arm_dp(ArmCpu *c, int op, int rd, uint32_t rn, uint32_t op2,
         case DP_ADD: case DP_ADC: case DP_CMN:
         case DP_SUB: case DP_SBC: case DP_CMP:
         case DP_RSB: case DP_RSC: {
-            uint32_t cin = (op == DP_ADC || op == DP_SBC || op == DP_RSC) ? c->c : 0u;
+            /* ARM: ADC rechnet +C, SBC/RSC dagegen -NOT(C) (Borrow = !C).
+             * Das C-Flag ist danach "kein Borrow" (a >= b + cin). */
+            uint32_t cin = 0u;
+            if (op == DP_ADC) cin = c->c;
+            else if (op == DP_SBC || op == DP_RSC) cin = c->c ? 0u : 1u;
             int subtract = (op == DP_SUB || op == DP_SBC || op == DP_CMP ||
                             op == DP_RSB || op == DP_RSC);
             uint32_t a, b;
@@ -480,6 +492,17 @@ static int32_t sat_range(int32_t v, int32_t lo, int32_t hi) {
     return v;
 }
 
+/* SSAT/USAT: 32-Bit-Wert auf bits Stellen saettigen und CPSR.Q setzen. */
+uint32_t arm_sat32(ArmCpu *c, int is_signed, uint32_t value, int bits) {
+    int64_t v = (int64_t)(int32_t)value;
+    int64_t lo = is_signed ? -(1LL << (bits - 1)) : 0;
+    int64_t hi = is_signed ? ((1LL << (bits - 1)) - 1)
+                           : ((1LL << bits) - 1);
+    if (v < lo) { v = lo; c->qflag = 1; }
+    if (v > hi) { v = hi; c->qflag = 1; }
+    return (uint32_t)v;
+}
+
 uint32_t arm_par8(ArmCpu *c, int op, uint32_t a, uint32_t b) {
     uint32_t res = 0, ge = 0;
     for (int i = 0; i < 4; i++) {
@@ -490,16 +513,18 @@ uint32_t arm_par8(ArmCpu *c, int op, uint32_t a, uint32_t b) {
             case PAR_UADD: { int t = ab + bb; ge |= (uint32_t)(t > 0xFF) << i; r = t; break; }
             case PAR_USUB: { ge |= (uint32_t)(ab >= bb) << i; r = ab - bb; break; }
             case PAR_SADD: { int t = (int8_t)ab + (int8_t)bb;
-                             ge |= (uint32_t)(t >= -128 && t <= 127) << i; r = t; break; }
+                             ge |= (uint32_t)(t >= 0) << i; r = t; break; }
             case PAR_SSUB: { int t = (int8_t)ab - (int8_t)bb;
-                             ge |= (uint32_t)(t >= -128 && t <= 127) << i; r = t; break; }
+                             ge |= (uint32_t)(t >= 0) << i; r = t; break; }
             case PAR_UQADD: r = sat_range(ab + bb, 0, 255); break;
             case PAR_SQADD: r = sat_range((int8_t)ab + (int8_t)bb, -128, 127); break;
             case PAR_UQSUB: r = sat_range(ab - bb, 0, 255); break;
             case PAR_SQSUB: r = sat_range((int8_t)ab - (int8_t)bb, -128, 127); break;
             case PAR_UHADD: r = (ab + bb) >> 1; break;
             case PAR_SHADD: r = ((int8_t)ab + (int8_t)bb) >> 1; break;
-            case PAR_UHSUB: r = (ab - bb) > 0 ? ((ab - bb) >> 1) : 0; break;
+            /* UHSUB8: arithmetische Halbierung der Differenz, negative
+             * Differenz wird nicht geklemmt (Ergebnis 0xFF bei 1-2). */
+            case PAR_UHSUB: r = (int32_t)(ab - bb) >> 1; break;
             case PAR_SHSUB: r = ((int8_t)ab - (int8_t)bb) >> 1; break;
             default: r = 0; break;
         }
@@ -516,24 +541,26 @@ uint32_t arm_par16(ArmCpu *c, int op, uint32_t a, uint32_t b) {
         int bb = (int)((b >> (16 * i)) & 0xFFFFu);
         int r = 0;
         switch (op) {
-            case PAR_UADD: { int t = ab + bb; ge |= (uint32_t)(t > 0xFFFF) << i; r = t; break; }
-            case PAR_USUB: { ge |= (uint32_t)(ab >= bb) << i; r = ab - bb; break; }
+            case PAR_UADD: { int t = ab + bb; ge |= (uint32_t)(t > 0xFFFF) << (2 * i); r = t; break; }
+            case PAR_USUB: { ge |= (uint32_t)(ab >= bb) << (2 * i); r = ab - bb; break; }
             case PAR_SADD: { int t = (int16_t)ab + (int16_t)bb;
-                             ge |= (uint32_t)(t >= -32768 && t <= 32767) << i; r = t; break; }
+                             ge |= (uint32_t)(t >= 0) << (2 * i); r = t; break; }
             case PAR_SSUB: { int t = (int16_t)ab - (int16_t)bb;
-                             ge |= (uint32_t)(t >= -32768 && t <= 32767) << i; r = t; break; }
+                             ge |= (uint32_t)(t >= 0) << (2 * i); r = t; break; }
             case PAR_UQADD: r = sat_range(ab + bb, 0, 0xFFFF); break;
             case PAR_SQADD: r = sat_range((int16_t)ab + (int16_t)bb, -32768, 32767); break;
             case PAR_UQSUB: r = sat_range(ab - bb, 0, 0xFFFF); break;
             case PAR_SQSUB: r = sat_range((int16_t)ab - (int16_t)bb, -32768, 32767); break;
             case PAR_UHADD: r = (ab + bb) >> 1; break;
             case PAR_SHADD: r = ((int16_t)ab + (int16_t)bb) >> 1; break;
-            case PAR_UHSUB: r = (ab - bb) > 0 ? ((ab - bb) >> 1) : 0; break;
+            case PAR_UHSUB: r = (int32_t)(ab - bb) >> 1; break;
             case PAR_SHSUB: r = ((int16_t)ab - (int16_t)bb) >> 1; break;
             default: r = 0; break;
         }
         res |= (uint32_t)(r & 0xFFFF) << (16 * i);
     }
+    /* 16-Bit-Lanes belegen GE-Paare: GE[2i] und GE[2i+1] sind gleich. */
+    ge = (ge | (ge << 1)) & 0xFu;
     if (op <= PAR_SSUB) c->ge = ge;
     return res;
 }
@@ -567,16 +594,20 @@ uint32_t arm_ext16(int is_signed, uint32_t v, int rot8) {
 
 uint32_t arm_pack16(int keep_low, uint32_t a, uint32_t b, int shift, int asr) {
     (void)asr;
-    if (shift == 0) {
-        shift = 32;
-    }
     if (keep_low) {
-        /* PKHBT: rd = rn[15:0] | (rm << shift)[31:16] */
-        uint32_t hi = (shift >= 32) ? 0u : (b << shift);
+        /* PKHBT: rd = rn[15:0] | (rm << shift)[31:16]; shift 0 = LSL #0. */
+        uint32_t hi = (shift ? (b << shift) : b);
         return (a & 0xFFFFu) | (hi & 0xFFFF0000u);
     }
-    /* PKHTB: rd = rn[31:16] | (rm ASR shift)[15:0] */
-    uint32_t lo = (shift >= 32) ? 0u : (uint32_t)((int32_t)b >> shift);
+    /* PKHTB: rd = rn[31:16] | (rm ASR shift)[15:0]; Encoding 0 = ASR #32. */
+    uint32_t lo;
+    if (shift == 0) {
+        lo = (uint32_t)((int32_t)b >> 31);
+    } else if (shift >= 32) {
+        lo = (uint32_t)((int32_t)b >> 31);
+    } else {
+        lo = (uint32_t)((int32_t)b >> shift);
+    }
     return (a & 0xFFFF0000u) | (lo & 0xFFFFu);
 }
 

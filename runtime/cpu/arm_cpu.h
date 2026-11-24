@@ -44,6 +44,7 @@ int arm_cond(const ArmCpu *c, int cc);
 
 uint32_t arm_shift_imm(int type, uint32_t amount, uint32_t value, int *carry);
 uint32_t arm_shift_reg(int type, uint32_t amount, uint32_t value, int *carry);
+uint32_t arm_rrx(ArmCpu *c, uint32_t value, int *carry);
 
 void arm_dp(ArmCpu *c, int op, int rd, uint32_t rn, uint32_t op2,
             int set_flags, int shifter_carry);
@@ -93,6 +94,7 @@ uint32_t arm_sel(ArmCpu *c, uint32_t a, uint32_t b);
 uint32_t arm_ext16(int is_signed, uint32_t v, int rot8);
 uint32_t arm_pack16(int keep_low, uint32_t a, uint32_t b, int shift, int asr);
 uint32_t arm_sat16(ArmCpu *c, int is_signed, uint32_t v, int bits);
+uint32_t arm_sat32(ArmCpu *c, int is_signed, uint32_t v, int bits);
 uint32_t arm_usad(ArmCpu *c, uint32_t a, uint32_t b, int accumulate, uint32_t acc);
 uint32_t arm_qadd32(ArmCpu *c, int op, uint32_t a, uint32_t b);
 uint32_t arm_smla16(ArmCpu *c, uint32_t rn, uint32_t rm, uint32_t ra,

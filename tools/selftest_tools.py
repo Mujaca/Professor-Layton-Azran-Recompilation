@@ -225,6 +225,25 @@ def test_imgc_decoder():
     need("ERGEBNIS: OK" in p.stdout, "IMGC-Checks fehlgeschlagen")
 
 
+def test_call_mode():
+    """BLX wechselt den Instruktionssatz, BL behaelt ihn (Scan-Seeds)."""
+    import capstone.arm as A
+    from recomp import isa, scan
+    cases = [
+        ("000000eb", False, A.ARM_INS_BL, False),   # ARM  BL  -> ARM
+        ("000000fa", False, A.ARM_INS_BLX, True),   # ARM  BLX -> Thumb
+        ("00f000f8", True, A.ARM_INS_BL, True),     # Thumb BL -> Thumb
+        ("00f040e8", True, A.ARM_INS_BLX, False),   # Thumb BLX -> ARM
+    ]
+    for raw, caller_thumb, ins_id, want_thumb in cases:
+        ins = isa.decode(bytes.fromhex(raw), isa.ARM_BASE, thumb=caller_thumb)
+        need(ins is not None and ins.id == ins_id,
+             "%s nicht als erwartete Instruktion dekodiert" % raw)
+        got = scan.call_target_thumb(ins, caller_thumb)
+        need(got is want_thumb,
+             "%s: Zielmodus %s statt %s" % (raw, got, want_thumb))
+
+
 TESTS = [
     ("guest-refs 0x40B4C4", test_guest_refs),
     ("trace-diff boss:U", test_trace_diff),
@@ -239,6 +258,7 @@ TESTS = [
     ("framecheck Platzhalter", test_framecheck),
     ("PICA-Registermap", test_pica_regs),
     ("IMGC ETC1/linear", test_imgc_decoder),
+    ("BLX-Zielmodus im Scan", test_call_mode),
 ]
 
 

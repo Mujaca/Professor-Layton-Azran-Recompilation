@@ -239,6 +239,120 @@ CASES = [
         "regs": {},
         "expect": {"r0": 42},
     },
+    {
+        # strlen (fn_0028F5E8) als nachgeschriebene Originalsequenz: wortweise
+        # Schleife ueber uqsub8 (0x01010101 - Wort) und lsls-Kaskade, die den
+        # Nullbyte-Index bestimmt. Muss fuer einen 8-Zeichen-Namen 8 liefern.
+        # Der Literal-Pool liegt wie im Original 0x40 Byte hinter dem
+        # `ldreq r2,[pc,#0x38]` (hier 0x10005C) und wird im Gastpuffer abgelegt.
+        "name": "strlen_wortschleife",
+        "asm": """
+            add r3, r0, #1
+            b check
+        byte_loop:
+            ldrb r1, [r0], #1
+            cmp r1, #0
+            subeq r0, r0, r3
+            bxeq lr
+        check:
+            tst r0, #3
+            ldreq r2, [pc, #0x38]
+            bne byte_loop
+        word_loop:
+            ldr r1, [r0], #4
+            uqsub8 r1, r2, r1
+            cmp r1, #0
+            beq word_loop
+            lsls r2, r1, #24
+            sub r0, r0, r3
+            subne r0, r0, #3
+            bxne lr
+            lsls r2, r1, #16
+            subne r0, r0, #2
+            bxne lr
+            lsls r1, r1, #8
+            subne r0, r0, #1
+            bx lr
+            .word 0x01010101
+        """,
+        "regs": {"r0": 0x200},
+        "mem_bytes": [(0x200, b"gsp::Gpu\x00"), (0x10005C, b"\x01\x01\x01\x01")],
+        "expect": {"r0": 8},
+    },
+    {
+        # SBC rechnet -NOT(C): nach cmp geht das C-Flag als "kein Borrow"
+        # ein. Vorher wurde cin = C verwendet (Ergebnis um 1 zu klein).
+        "name": "sbc_borrow",
+        "asm": """
+            cmp r2, #0
+            sbc r0, r1, r4
+            bx lr
+        """,
+        "regs": {"r1": 100, "r4": 1, "r2": 0},
+        "expect": {"r0": 99, "c": 1},
+    },
+    {
+        # LSR/ASR #32: die Kodierung meint den Sonderfall (amount 0).
+        "name": "shift_32",
+        "asm": """
+            mov r0, #-1
+            mov r1, r0, lsr #32
+            mov r2, #0x80000000
+            mov r3, r2, asr #32
+            bx lr
+        """,
+        "regs": {},
+        "expect": {"r1": 0, "r3": 0xFFFFFFFF},
+    },
+    {
+        # RRX braucht das eingehende C-Flag (Shifter-Carry ist nur Ausgabe).
+        "name": "rrx_carry_in",
+        "asm": """
+            cmp r2, #0
+            mov r3, #2
+            mov r0, r3, rrx
+            bx lr
+        """,
+        "regs": {"r2": 0},
+        "expect": {"r0": 0x80000001},
+    },
+    {
+        # UXTAH extendiert 16 Bit, UXTAB dagegen 8 Bit (und optional ROR).
+        "name": "uxtab_uxtah",
+        "asm": """
+            uxtab r0, r1, r2
+            uxtah r3, r1, r2
+            uxtab r4, r5, r2, ror #16
+            bx lr
+        """,
+        "regs": {"r1": 0x100, "r2": 0x01FF01FF, "r5": 0},
+        "expect": {"r0": 0x1FF, "r3": 0x2FF, "r4": 0xFF},
+    },
+    {
+        # UBFX/SBFX/BFI/BFC (Bitfeld) waren nicht implementiert.
+        "name": "bitfield",
+        "asm": """
+            ubfx r0, r1, #4, #8
+            sbfx r2, r1, #4, #8
+            mvn r3, #0
+            bfi r3, r1, #4, #8
+            mvn r4, #0
+            bfc r4, #4, #8
+            bx lr
+        """,
+        "regs": {"r1": 0x12345678},
+        "expect": {"r0": 0x67, "r2": 0x67, "r3": 0xFFFFF78F, "r4": 0xFFFFF00F},
+    },
+    {
+        # PKHBT ohne Shift: rn[15:0] | rm[31:16].
+        "name": "pkhbt_shift0",
+        "asm": """
+            pkhbt r0, r1, r2
+            bx lr
+        """,
+        "regs": {"r1": 0x11223344, "r2": 0xAABBCCDD},
+        "expect": {"r0": 0xAABB3344},
+    },
 ]
 
 
@@ -272,13 +386,16 @@ def build_case(case, idx):
 
     main = ['#include "arm_cpu.h"', '#include <stdio.h>', '#include <string.h>',
             'void fn_00100000(ArmCpu *c);', 'int main(void) {',
-            '  static uint8_t mem[0x10000];', '  ArmCpu c;',
+            '  static uint8_t mem[0x140000];  /* muss den Textbereich ab 0x100000 fassen */', '  ArmCpu c;',
             '  arm_cpu_init(&c, mem, sizeof(mem));',
             '  c.r[13] = 0x8000;  /* Stack */']
     for k, v in regs.items():
         main.append('  c.r[%d] = 0x%08Xu;' % (int(k[1:]), v))
     for addr, val in mem:
         main.append('  mem[0x%X] = 0x%02Xu;' % (addr, val))
+    for addr, blob in (case.get("mem_bytes") or []):
+        for i, b in enumerate(blob):
+            main.append('  mem[0x%X] = 0x%02Xu;' % (addr + i, b))
     main.append('  fn_00100000(&c);')
     main.append('  if (c.aborted) { printf("FAIL aborted\\n"); return 1; }')
     main += checks
