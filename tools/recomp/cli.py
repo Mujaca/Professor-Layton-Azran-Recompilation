@@ -154,6 +154,50 @@ def return_bx_in_block(blk):
     return out
 
 
+def lr_copy_returns(fn):
+    """`mov pc, rN` / `bx rN`, deren rN eine unveraenderte Kopie von lr ist.
+
+    Handgeschriebener Code sichert das Rueckkehrziel oft in einem Register
+    (`mov r6, lr; bl helfer; ...; mov pc, r6`). Das ist eine Rueckkehr in den
+    Aufrufer. Als dynamischer Sprung uebersetzt, startete arm_call_guest am
+    Rueckkehrziel (mitten im Aufrufer) eine nicht vorhandene Funktion ->
+    No-op (Mobiclip-Decoder 0x16C1DC: `mov r6, lr` ... `mov pc, r6`).
+    Gesucht wird linear rueckwaerts in Adressreihenfolge innerhalb der
+    Funktion bis zum letzten Schreiber von rN.
+    """
+    import capstone.arm as A
+    insns = sorted({i.address: i for b in fn.blocks for i in b.insns}.values(),
+                   key=lambda i: i.address)
+    out = set()
+
+    def writes(ins):
+        try:
+            return {isa.reg_num(ins.reg_name(r)) for r in ins.regs_access()[1]}
+        except Exception:
+            return set()
+
+    for k, ins in enumerate(insns):
+        ops = isa.split_operands(ins.op_str) if ins.op_str else []
+        src = None
+        if ins.id == A.ARM_INS_MOV and len(ops) == 2 and isa.is_pc(ops[0]):
+            src = isa.reg_num(ops[1])
+        elif ins.id == A.ARM_INS_BX and ops:
+            src = isa.reg_num(ops[0])
+        if src is None or src in (13, 14, 15):
+            continue
+        for j in range(k - 1, -1, -1):
+            prev = insns[j]
+            if src not in writes(prev):
+                continue
+            pops = isa.split_operands(prev.op_str) if prev.op_str else []
+            if (prev.id == A.ARM_INS_MOV and len(pops) == 2
+                    and isa.reg_num(pops[0]) == src and isa.reg_num(pops[1]) == 14
+                    and prev.cc in (A.ARM_CC_AL, A.ARM_CC_INVALID)):
+                out.add(ins.address)
+            break
+    return out
+
+
 def needs_fallthrough(ins):
     """True, wenn nach dieser Instruktion der naechste Block folgt."""
     import capstone
@@ -479,12 +523,14 @@ def generate(res, path, max_funcs=None, trace=False, data=None):
         _entry = fn.addr if any(b.addr == fn.addr for b in fn.blocks) else fn.blocks[0].addr
         out.append("  goto %s;" % em.label(_entry))
         labeled = set()
+        lr_ret = lr_copy_returns(fn)
         for blk in fn.blocks:
             if blk.addr in labeled:
                 continue
             out.append("%s:" % em.label(blk.addr))
             labeled.add(blk.addr)
-            em.ret_bx = return_bx_in_block(blk)
+            em.ret_bx = return_bx_in_block(blk) | lr_ret
+            em.ret_mov = lr_ret
             em.it_cond = emit.it_conditions(blk.insns) if fn.thumb else {}
             for ln in BLOCK_HOOKS.get(u32(blk.addr), ()):
                 out.append("  " + ln)
