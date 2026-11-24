@@ -1070,3 +1070,54 @@ den Originalbytes ab dem Port-Speicherabbild las genau 1.108 Byte;
 in der Azahar-Referenz (Gap 112/312). Der Y2R-Ausgabepuffer enthaelt die
 echten Filmbilder (8x8-Kacheln, RGB24, 512x240). Offen: das Spiel zeichnet
 die Textur noch nicht (keine PICA-Draws), der Bildschirm bleibt einfarbig.
+
+### Draw-Gate 0x27B34C: Spielzustand, kein Kernel-/Dienstfehler – ausgeschlossen 2026-11-24
+
+**Hypothese (Auftrag):** Der Renderer erreicht seine Draw-Aufrufe nicht, weil
+eine Bedingung aus Kernel/Diensten falsch ist.
+
+**Ergebnis: Hypothese widerlegt.** Kein Dienst- oder Kernelwert blockiert den
+Draw; die Draw-Anforderung wird vom Spiel selbst nie erzeugt. Belege:
+
+* **Sechs Aufrufer, keiner laeuft.** `HLE_PERFMAP_FILE` (1200 Frames, 20 s)
+  zaehlt fuer 0x27B34C **0** Bloecke. Auch die Einstiege der Wrapper
+  0x11AD4C/0x250FE8/0x256E40/0x27B6CC/0x2812EC sind 0; nur 0x11CAC4 laeuft
+  (2679x). `ARM_WATCH=0x11CAC4` zeigt `r2=0` in allen Treffern
+  (`lr=0x28C7B0`/`0x28CE74`); die beiden Aufrufer setzen `mov r2,#0`
+  (0x28C79C, 0x28CE60). Damit nimmt 0x11CAC4 immer den Zweig nach
+  0x11CD90 (Farb-/Alpha-Pfad) und ueberspringt den Draw-Aufruf bei 0x11CCDC.
+* **Gate der Draw-Funktion:** 0x27B34C kehrt bei 0x27B3A8 mit 0 zurueck,
+  wenn `[0x408808+0xb4c] == 0`. Perfmap: 0x27B844 wird 5496x gerufen und
+  verlaesst die Funktion immer ueber 0x27B990 (Rueckgabe `[obj+0xb4c]` = 0);
+  der Pfad ueber 0x27B958/0x27B964 (Rueckgabe 1) laeuft **nie**.
+* **Was 0xb4c ist:** 0x408808 ist das Grafikobjekt des Spiels (Vtable
+  0x3C5EC4, String „lxpCOpenGLES“ ab +0x20). +0xd6c zeigt auf einen der
+  beiden eingebetteten Render-Kontexte (+0x214/+0x458, doppelt gepuffert,
+  gesetzt in 0x1ED660). 0x13657C uebernimmt `[ctx+0x24]` (aktiver Layer)
+  nach `[renderer+0xb4c]`, aber nur wenn `[renderer+0x2b44] & 1` gesetzt ist.
+* **Der Layer ist immer leer:** `ARM_MEMWATCH=409354` (renderer+0xb4c):
+  3 Schreibzugriffe, alle 0 (Init/Memset). `ARM_MEMWATCH=408A40` und
+  `=408C84` (ctx0/ctx1+0x24): alle Schreibzugriffe 0, auch ueber 900 Frames
+  (15 s). Das Spiel aktiviert also nie einen Render-Layer; die Kontexte
+  werden von der Engine selbst (Aufrufe aus 0x26A87C/0x1ED6xx) zurueckgesetzt.
+* **Dienste sauber:** kein `err:f`, alle 10 Dienste 10/10; einzige
+  `UNIMPLEMENTIERT`-Zeilen sind `boss:U 0x000E` (GetTaskIdList) und
+  `0x0016` (ReceiveProperty), die Azahar fuer einen Titel ohne SpotPass-Task
+  ebenfalls ohne Nebenwirkung beantwortet. GSP nimmt alle Kommandos an.
+* **Kein Parser-Loch:** ein eigener Parser der Rohdumps aus
+  `HLE_PICA_DIAG=1` (`scratch/pica/list_*.bin`) findet in **keiner** Liste
+  0x22E/0x22F/0x23C/0x23D. Die 14 Listen je Frame sind reiner Zustand
+  (Rasterizer, Viewport, TEV, Attribute 0x201..0x203, Topologie 0x25E,
+  Shader 0x2C0/0x2CB) – die Draw-Anforderung fehlt im Gastcode, nicht im
+  PICA-Parser des Ports.
+* **Das Spiel laeuft weiter:** nach 520/520 Y2R-Frames liest es ~300 KiB
+  neue Assets direkt aus dem RomFS (Reads ab `0x1A705B10`, `0x1B3AEC`, …)
+  und liest `head.lt6` erneut; der Hauptthread zykelt danach normal durch
+  Mutex 0x40F120 (Schreibfolge 1/-1, keine Blockade). Ein haengender
+  Kernel-Wait ist damit ebenfalls ausgeschlossen.
+
+**Naechster Schritt:** Im Spiel-Renderer ansetzen: warum aktiviert die
+Szene keinen Layer (0x13657C verlangt `[renderer+0x2b44]&1` und einen
+gesetzten `[ctx+0x24]`)? Das ist Szenen-/Zustandslogik des Spiels
+(0x13657C, 0x26A84C, 0x1ED65C), keine HLE-Frage. Die Filmtextur selbst
+liegt korrekt in `0x15E3DE00` vor.
