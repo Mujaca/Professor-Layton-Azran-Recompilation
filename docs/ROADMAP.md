@@ -72,3 +72,4 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | 2026-11-24 | fs-session-init | 9/10 | boss:U | 0 |
 | 2026-11-24 | review-faelschungen | 9/10 | boss:U | 0 |
 | 2026-11-24 | srv-namenslaenge | 9/10 | boss:U | 0 |
+| 2026-11-24 | naechste-divergenz-1 | 9/10 | boss:U | 0 |

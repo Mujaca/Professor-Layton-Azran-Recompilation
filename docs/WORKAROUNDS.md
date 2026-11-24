@@ -258,7 +258,29 @@ legt den Folgeblock an. Test: `tests/mvp_selftest.py::bx_cond_fallthrough`.
 Folge: `srvname "fs:USER" -> 13`, RomFS-Mount ohne `err:f`,
 Frontier 3/10 -> 9/10 (Divergenz `boss:U`).
 
+### BLX-Zielmodus im Recompiler – behoben 2026-11-24
+
+**Befund:** Der Scan seedete jedes `blx`-Ziel als Thumb
+(`tgt_thumb = ins.id == BLX or fn.thumb`). Thumb-BLX springt aber nach ARM.
+Damit wurden echte ARM-Funktionen im Bereich 0x2926xx/0x2927xx als Thumb
+dekodiert: `0x2927B8` (Linker-Veneer, `ldr r0,[pc]; bx lr`, liefert `__errno`)
+lief als Thumb-Müll und riss die C++-Personality-Routine in den
+Terminate-Pfad (`0x1009E4 -> 0x10026C -> 0x10056D`).
+
+**Belege:** Ringpuffer (Thread 2) endete mit `0x2926DC -> blx 0x2927B8` und
+danach `0x2922FC/0x292370` (Terminate); das Image zeigt 0x292678 =
+`70 40 2d e9` = ARM `push {r4,r5,r6,lr}`, der generierte Code hatte dort aber
+`arm_trace_block(..., 1u)` (Thumb). Alle Aufrufer setzten `c->t = 0u` (ARM).
+
+**Korrektur:** `call_target_thumb()` in `tools/recomp/scan.py` (BL behält den
+Modus, BLX wechselt) + Test `tools/selftest_tools.py::call_mode`.
+Folge: kein Abbruch mehr nach dem ersten GSP-Commandlist-Flush; das Spiel
+setzt erstmals selbst `SetBufferSwap` (M2 belegt). Der Boot bleibt danach in
+einem Kernel-Wait stehen; `boss:U` ist weiter offen.
+
 ### DSP: RegisterInterruptEvents und Semaphore (2026-11-24)
+
+
 
 `dsp cmd 0x0015 RegisterInterruptEvents` merkt sich das Ereignis je
 (InterruptType, Pipe); `cmd 0x0007 SetSemaphore` signalisiert danach die
