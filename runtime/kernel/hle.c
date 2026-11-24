@@ -152,9 +152,12 @@ static DWORD WINAPI guest_thread_main(LPVOID p) {
     t_tid = (int)t->id;
     g_thread_alive[t_tid] = 1;
     g_thread_started[t_tid] = 1;
+    if (getenv("HLE_THR_LOG"))
+        printf("[thrstart] id=%d entry=%08X\n", t_tid, t->entry);
     if (!g_no_lock) {
         sched_wait_turn();
         guest_lock_enter();
+        if (getenv("HLE_THR_LOG")) printf("[thrlock] id=%d\n", t_tid);
     }
     arm_call_guest_pub(t->cpu, t->entry);
     thread_signal_exit(t->cpu);
@@ -2052,6 +2055,15 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     printf("[hle] romfs=%s log=%d srv-handle=%u\n", g_romfs, g_log, g_srv_handle);
 }
 
+/* Befund 2026-11-24: hle_init nimmt den Gast-Lock auf dem Host-Hauptthread,
+ * waehrend der Gastcode im game_thread laeuft. Dadurch blockieren alle per
+ * svcCreateThread gestarteten Gast-Threads dauerhaft in guest_lock_enter()
+ * (per HLE_PERFMAP: Threads 3..6 = 0 Bloecke, ARM_WATCH auf 0x123168 nie
+ * getroffen). Korrekte Variante waere, den Lock im game_thread zu nehmen
+ * (hle_guest_enter) und in hle_init nicht; das legt aber derzeit einen
+ * frueheren Gast-Exit offen (OS-Init-Flag -> fn_00100CE0-Finalize ->
+ * fn_001016B8 liefert 0 -> ExitProcess). Siehe scratch/night/last_summary.md. */
+
 void hle_tick_stats(int *calls, unsigned long long *tick) {
     if (calls) *calls = g_tick_calls;
     if (tick) *tick = g_tick;
@@ -2278,9 +2290,9 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             if (getenv("HLE_ARB_LOG") && arb_prints < 300) {
                 int32_t adbg = 0;
                 if (off + 4 <= c->mem_size) memcpy(&adbg, c->mem + off, 4);
-                printf("[arb] th=%u addr=%08X type=%u val=%d mem=%08X\n",
+                printf("[arb] th=%u addr=%08X type=%u val=%d mem=%08X blk=%08X lr=%08X\n",
                        (uint32_t)((c->tpidruro >> 12) & 0xFu),
-                       addr, type, value, (uint32_t)adbg);
+                       addr, type, value, (uint32_t)adbg, arm_last_block, c->r[14]);
                 arb_prints++;
             }
 
