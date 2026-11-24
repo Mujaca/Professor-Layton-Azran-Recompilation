@@ -1,47 +1,5 @@
 {
  "_comment": "Spielspezifische C-Zeilen, die der Recompiler einfuegt. Technische Schuld (docs/WORKAROUNDS.md); Ziel: leere Listen. 'hooks' = am Anfang des Blocks, 'after_call' = direkt nach 'bl <addr>'.",
- "hooks": [
-  {
-   "addr": "0x001079D0",
-   "c": [
-    "c->r[0] = 0x28u;"
-   ],
-   "why": "SDK erwartet vom Kernel geschriebene IPC-Reply-Groesse 0x28.",
-   "root_cause": "svcSendSyncRequest/Reply-Semantik im Kernel unvollstaendig."
-  },
-  {
-   "addr": "0x00107A30",
-   "c": [
-    "c->r[6] = 0u;"
-   ],
-   "why": "Fehlerpfad nach IPC-Reply entschaerft.",
-   "root_cause": "Wie 0x1079D0."
-  },
-  {
-   "addr": "0x0011A818",
-   "c": [
-    "c->r[0] = 0u;"
-   ],
-   "why": "Kalibrierte SDK-Busy-Wait-Verzoegerung sofort beenden (blockierte den kooperativen Scheduler).",
-   "root_cause": "Tick-Zaehler/Scheduler: svcGetSystemTick und Thread-Wechsel ohne echte Zeitbasis."
-  },
-  {
-   "addr": "0x00399244",
-   "c": [
-    "{ uint32_t flen = arm_ld(c, c->r[13] + 0x0Cu, 4, 0); if (flen == 0u) arm_st(c, c->r[13] + 0x1Cu, 4, 0u); }"
-   ],
-   "why": "RomFS-Pfadparser liest uninitialisierten Stack-Slot [sp+0x1C] bei leerer erster Komponente.",
-   "root_cause": "Verdacht Recompiler/ABI (Stack-Inhalt weicht von echter Hardware ab) oder Folge des Code-Caves an 0x399244."
-  }
- ],
- "after_call": [
-  {
-   "addr": "0x00287DD4",
-   "c": [
-    "if (c->r[0] == 0) c->r[0] = arm_pool_alloc(0x400);"
-   ],
-   "why": "Allocator liefert 0; Ersatz aus Host-Pool.",
-   "root_cause": "Heap-/Allocator-Initialisierung des SDK (ControlMemory/ExHeap) unvollstaendig."
-  }
- ]
+ "hooks": [],
+ "after_call": []
 }

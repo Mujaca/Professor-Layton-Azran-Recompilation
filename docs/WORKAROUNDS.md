@@ -12,21 +12,26 @@ python tools/workarounds/apply.py --skip 0x0010F8C4    # einzelnen Patch auslass
 rg "WORKAROUND\(" runtime                              # Runtime-Workarounds
 ```
 
-## 1. Patches am Spielcode – `tools/workarounds/code_patches.json` (22)
+## 1. Patches am Spielcode – `tools/workarounds/code_patches.json` (0)
 
-Werden vor dem Recompilieren auf `code.bin` angewendet. Gruppiert nach
-vermuteter Ursache:
+**Leer.** Alle 22 Einträge sind entfernt (2026-11-24). Beleg je Gruppe:
 
-| Ursache (Verdacht) | Adressen | Quelle |
+| Gruppe | Entfernt (Adressen) | Frontier danach |
 |---|---|---|
-| **Locale/`mblen` liefert -1** (ctype-/TLS-Init oder Recompiler) | 0x13023C, 0x130270, 0x13028C, 0x130308, 0x13A0D4–0x13A170, Caves 0x399F00/0x399FA0 | widecopy, narrowcopy, conv_success, mblen |
-| **RomFS-Lookup** findet Dateien nicht (Recompiler-Semantik? Hash `ror`/`udiv`) | 0x212F3C, 0x399244, Caves 0x399F40/0x399FE8 | namelen_exact, chain_end, empty_component |
-| **Archiv-Loader / Datei-Größe** | 0x1300C8, 0x1301C0, 0x13C46C, 0x13C4EC, 0x28F33C | bufreturn, real_loader, size_stub (feste BCSAR-Größe!) |
-| **Thumb-Interworking** | 0x2927B8 | interwork_2927b8 |
-| Frame-Callback-Registrierung | 0x11BA98 | frame_callback |
-| Menü-Abkürzung (vermutlich überflüssig) | 0x10F8C4 | build_port |
+| Locale/`mblen` (widecopy, narrowcopy, conv_success, mblen) | 0x13023C, 0x130270, 0x13028C, 0x130308, 0x13A0D4, 0x13A0DC, 0x13A168, 0x13A170, Caves 0x399F00/0x399FA0 | 9/10 (boss:U) |
+| Archiv-Loader / Größen-Stub | 0x1300C8, 0x1301C0, 0x13C46C, 0x13C4EC, 0x28F33C, Cave 0x399F40 | 9/10 (boss:U) |
+| Menü-Gate, Frame-Callback, Thumb-Interworking | 0x10F8C4, 0x11BA98, 0x2927B8 | 9/10 (boss:U) |
+| RomFS-Lookup (namelen/chain/empty component) | 0x212F3C, 0x399244, Cave 0x399FE8 | **9/10 (boss:U)** |
 
-**Entfernt:** `0x3CBEFC` (`jp`→`uk`, `lang_uk`). Der Patch war
+Belege: `HLE_PERFMAP_FILE`-Lauf zeigte für 0x1302xx/0x13A0xx keinen
+ausgeführten Block; die Locale-Konvertierung `fn_00130220 -> 0x13A080`
+wird im natürlichen Boot nicht betreten. Die übrigen Gruppen wurden
+einzeln gebaut und mit `tools/frontier.py` gemessen: der Lookup läuft
+mit den unveränderten Originalbytes (also ohne Namenslängen-/Kettenende-
+Hack und ohne Größen-Stub) bis zu demselben Punkt. Das Spiel braucht die
+Patches offenbar nur für spätere Assets, nicht für den Boot bis `dsp::DSP`.
+
+**Früher entfernt:** `0x3CBEFC` (`jp`→`uk`, `lang_uk`). Der Patch war
 überflüssig: Das Spiel setzt beim Boot Region 2 (EUR) und Sprache 2 in
 `0x3D8E68/0x3D8E69`; seine interne Sprachcodetabelle ab `0x3D8EEC` liefert
 für Index 2 bereits `uk`. Beleg: `guest-watch --write 0x003D8E68`, Frontier
@@ -36,37 +41,40 @@ EUR-Werte (Sprache EN, Land GB, Modell Old3DS plausibel: der Zeiger auf
 (`0x12B60C` wählt `table[sprache]`); der Patch änderte also ausschließlich
 den JP-Eintrag, nie den von EUR verwendeten Index 2.
 
-Wichtig: Das Spiel läuft auf echter Hardware mit denselben RomFS-Daten. Dass
-der Lookup scheitert, deutet stark auf einen **Semantikfehler im Recompiler**
-hin. Zusätzlich verändern `tools/fix_romfs_cycles.py` und
-`tools/rebuild_romfs_hash.py` das RomFS-Image, das der Port ausliefert. Auch
-das ist ein Workaround.
+Offen: `tools/fix_romfs_cycles.py` und `tools/rebuild_romfs_hash.py`
+verändern weiterhin das RomFS-Image, das der Port ausliefert. Auch das ist
+ein Workaround und sollte als nächstes durch korrekte IVFC-/Hash-Semantik
+oder ein unverändertes Image ersetzt werden.
 
-## 2. Block-Hooks im Recompiler – `tools/workarounds/block_hooks.json` (4)
+## 2. Block-Hooks im Recompiler – `tools/workarounds/block_hooks.json` (0)
 
-| Adresse | Wirkung | Ursache (Verdacht) |
-|---|---|---|
-| 0x1079D0, 0x107A30 | IPC-Reply-Größe 0x28 / r6=0 | `svcSendSyncRequest`-Semantik |
-| nach `bl 0x287DD4` | Allocator 0 → Host-Pool (`arm_pool_alloc`) | Heap-Init (ControlMemory/ExHeap) |
-| 0x11A818 | Busy-Wait-Delay sofort beenden | Zeitbasis/Scheduler |
-| 0x399244 | uninitialisierten Stack-Slot nullen | Recompiler/ABI |
+**Leer.** Entfernt wurden `0x1079D0`/`0x107A30` (IPC-Reply-Größe),
+`0x11A818` (Busy-Wait), `0x399244` (Stack-Slot) und der Hook nach
+`bl 0x287DD4` (Allocator-Ersatz). Beleg: Build ohne alle Hooks, Frontier
+bleibt 9/10 (boss:U). Die Kernel-Synchronisation (`runtime/kernel/hle.c`)
+und die GSP-Interrupts liefern inzwischen die echten Werte/Zustände, die
+die Hooks vorher ersetzt haben.
 
-Die Hooks `0x12E1E4`/`0x12E1F0` (`arm_mutex_bootstrap`) sind entfernt:
-`ARM_WATCH=12E1E4` und `ARM_WATCH=12E1F0` zeigten im gesamten Boot
-**0 Treffer**, waehrend der benachbarte Block `0x12E1B4` ausgefuehrt wird.
-Die Hooks waren toter Code. Beleg: `check.py --full` gruen, Frontier 9/10
-mit denselben 23 Code-Patches.
+Früher entfernt: `0x12E1E4`/`0x12E1F0` (`arm_mutex_bootstrap`) – `ARM_WATCH`
+zeigte im gesamten Boot 0 Treffer (toter Code).
 
-## 3. Textersetzungen im generierten C – `tools/workarounds/gen_patches.py` (5)
+## 3. Textersetzungen im generierten C – `tools/workarounds/gen_patches.py` (1)
 
 | Funktion | Wirkung | Ursache (Verdacht) |
 |---|---|---|
 | fn_0028EE00 | srv-Namenslänge 8 → 9 akzeptieren | Spiel schickt `strlen+1`: Recompiler (strlen) oder srv-Layout |
-| fn_001187F8 | Fehlerabzweig entfernt + Rückgabe 0 erzwungen | Datei-Open (`rom:`) |
-| fn_00100F98 | Asset-Registrierung erzwingen | Save-Flag `[sb+0x567]` |
-| fn_001ED64C | fehlende Funktion als Wrapper | Recompiler-Funktionserkennung (Seed fehlt) |
-| fn_001B9938 | GPU-Busy-Wait überspringen | GSP-Interrupt P3D fehlt |
-| (entfernt) | `.fa`-Read-Hook `hle_fa_read` – war im alten Build nie aktiv | – |
+
+Beleg: Mit leerem `gen_patches` fällt Frontier auf **6/10**, erste
+Divergenz `gsp::Gpu`; der Check `cmp r2,#8` in `fn_0028EE00` (0x28EE14)
+weist die Namenslänge 9 ab. `gsp::Gpu`/`dsp::DSP`/`hid:USER` sind genau
+8 Zeichen. Die Aufrufer berechnen `r2` über `fn_0028F5E8` (strlen,
+0x12F79C und 0x28E9D8); die Wortschleife nutzt `uqsub8` und ist in der
+Runtime korrekt implementiert – als nächstes muss isoliert geprüft werden,
+warum dort 9 statt 8 ankommt (Kandidat: `ldr`-/`str`-Semantik oder
+Literal-Pool in `fn_0028F5E8`).
+
+Die übrigen vier Ersetzungen (fn_001187F8, fn_00100F98, fn_001ED64C,
+fn_001B9938) sind entfernt: Build ohne sie bleibt Frontier 9/10 (boss:U).
 
 ## 4. Runtime – `rg "WORKAROUND(" runtime`
 
