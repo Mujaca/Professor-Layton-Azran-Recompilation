@@ -1644,6 +1644,22 @@ static void ptm_command(Ipc *r, uint32_t *p) {
     }
 }
 
+/* DSP-Interrupt-Ereignisse: RegisterInterruptEvents (cmd 0x0015) bindet pro
+ * (InterruptType, Pipe) ein Gast-Ereignis (Azahar dsp_dsp.cpp GetInterruptEvent). */
+#define DSP_INT_TYPES 3
+#define DSP_NUM_PIPES 8
+static uint32_t g_dsp_events[DSP_INT_TYPES][DSP_NUM_PIPES];
+
+static void dsp_signal_events(int type, int pipe) {
+    if (type < 0 || type >= DSP_INT_TYPES || pipe < 0 || pipe >= DSP_NUM_PIPES)
+        return;
+    {
+        uint32_t ev = g_dsp_events[type][pipe];
+        Handle *hh = get_handle(ev);
+        if (hh != NULL) hh->signaled = 1;
+    }
+}
+
 static void dsp_command(Ipc *r, uint32_t *p) {
     /* Antwortlayouts nach Azahar src/core/hle/service/dsp/dsp_dsp.cpp. */
     switch (r->cmd) {
@@ -1659,7 +1675,15 @@ static void dsp_command(Ipc *r, uint32_t *p) {
             ipc_put(r, 1);
             break;
         }
-        case 0x0007:   /* SetSemaphore: Result */
+        case 0x0007: { /* SetSemaphore: Result
+                        Der DSP wertet das Semaphor aus und meldet danach den
+                        Pipe-Interrupt (Azahar SignalInterrupt). */
+            ipc_begin(r, r->cmd, 1, 0);
+            put_result(r);
+            for (int pipe = 0; pipe < DSP_NUM_PIPES; pipe++)
+                dsp_signal_events(2, pipe);   /* InterruptType::Pipe */
+            break;
+        }
         case 0x0017: { /* SetSemaphoreMask: Result */
             ipc_begin(r, r->cmd, 1, 0);
             put_result(r);
@@ -1749,7 +1773,20 @@ static void dsp_command(Ipc *r, uint32_t *p) {
         }
         case 0x0013:   /* FlushDataCache */
         case 0x0014:   /* InvalidateDataCache */
-        case 0x0015: { /* RegisterInterruptEvents: Result (kein Handle) */
+            ipc_begin(r, r->cmd, 1, 0);
+            put_result(r);
+            break;
+        case 0x0015: { /* RegisterInterruptEvents: Result
+                          Params (Azahar): interrupt(type), channel(pipe),
+                          CopyHandle(event). */
+            uint32_t type = p[0];
+            uint32_t chan = p[1];
+            uint32_t ev = (r->translate >= 2) ? p[r->normal + 1] : 0u;
+            if (type < DSP_INT_TYPES && chan < DSP_NUM_PIPES) {
+                g_dsp_events[type][chan] = ev;
+                if (g_log) printf("[dsp] RegisterInterruptEvents type=%u pipe=%u ev=%u\n",
+                                  type, chan, ev);
+            }
             ipc_begin(r, r->cmd, 1, 0);
             put_result(r);
             break;

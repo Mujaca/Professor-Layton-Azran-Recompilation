@@ -197,13 +197,47 @@ wird weiterhin ausgeloest; `err:f` meldet `E0A046DA/DB`. Der letzte Abschnitt
 zeigt: nicht der RomFS-/Hash-Parser, sondern die nie initialisierte
 FS-Session loest den Abbruch aus.
 
-Der Hauptthread bleibt nach `dsp::DSP cmd 0x0007 (SetSemaphore)` stehen: er
-wartet auf ein eigenes Event (Handle 35, `svcCreateEvent` direkt nach
+Der Hauptthread blieb nach `dsp::DSP cmd 0x0007 (SetSemaphore)` stehen: er
+wartete auf ein eigenes Event (Handle 35, `svcCreateEvent` direkt nach
 `dsp cmd 0x0011 LoadComponent`), das er zuvor per `dsp cmd 0x0015
 RegisterInterruptEvents` an den DSP gebunden hat. Der Port hat keinen
 Audio-/DSP-Kern, der Pipe-Interrupts liefert; Azahar signalisiert diese im
-HLE-Audio (`DspHle`) beim Pipe-Processing. Naechster Arbeitsvorrat ist
-daher DSP-Interrupt-Zustellung, nicht Kernel-Synchronisation.
+HLE-Audio (`DspHle`) beim Pipe-Processing. **Inzwischen behoben** durch die
+Interrupt-Registrierung in `runtime/kernel/hle.c` (siehe unten); offen ist
+der Inhalt der DSP-Pipes.
+
+### FS-Session fehlte wegen bedingtem `bx` ohne Fallthrough – behoben 2026-11-24
+
+**Befund:** Der RomFS-Mount scheiterte an der nie initialisierten FS-Session
+(`fn_0028EDCC` liest `[0x3D8D8C] == 0`, `err:f E0A046DB`). Die Ursache war
+**nicht** ein fehlender Aufruf von `fsInit`, sondern ein Recompiler-Fehler:
+
+* `fsInit` beginnt bei `0x291C64` (Guard `[0x3D8D8C] != 0 -> bxne lr`, danach
+  `srvGetServiceHandle("fs:USER")`). `ARM_WATCH=291C64` zeigte: der Block
+  wurde betreten (lr=`0x100DE8`), aber `0x28F730`/`0x28EE00` liefen nie.
+* Im generierten C bestand `fn_00291C64` nur aus dem Guard und endete mit
+  `return;`. `bxne lr` (0x291C70) ist aber **bedingt**: bei Z=0 muss die
+  Ausfuehrung bei `0x291C74` weiterlaufen.
+* `tools/recomp/scan.py::decode_function` legte den Fallthrough-Block nur
+  fuer `b<cond>`/`CBZ`/`CBNZ` an. `bx<cond>`, `pop<cond> {pc}` usw. beendeten
+  die Funktion; `0x291C74` existierte nur als falscher Prolog-Seed.
+
+**Korrektur:** Jeder bedingt ausgefuehrte Terminator (`ins.cc != ARM_CC_AL`)
+legt den Folgeblock an. Test: `tests/mvp_selftest.py::bx_cond_fallthrough`.
+Folge: `srvname "fs:USER" -> 13`, RomFS-Mount ohne `err:f`,
+Frontier 3/10 -> 9/10 (Divergenz `boss:U`).
+
+### DSP: RegisterInterruptEvents und Semaphore (2026-11-24)
+
+`dsp cmd 0x0015 RegisterInterruptEvents` merkt sich das Ereignis je
+(InterruptType, Pipe); `cmd 0x0007 SetSemaphore` signalisiert danach die
+Pipe-Ereignisse (Azahar `DSP_DSP::SignalInterrupt`). Vorher blieb der
+Hauptthread direkt nach `SetSemaphore` auf seinem eigenen Event (Handle 35,
+`HLE_KLOG`) stehen; jetzt laufen `ReadPipeIfPossible`/`ConvertProcessAddress`
+weiter. Naechster echter Blocker ist der **Inhalt** der DSP-Pipes:
+`ReadPipe`/`ReadPipeIfPossible` liefern weiterhin Attrappen (§4); das Spiel
+laeuft danach in einen Fehlerpfad, `boss:U` wird noch nicht geoeffnet.
+
 
 ### Arbiter korrekt, Boot stoppt am Gast-RomFS-Lookup (2026-11-24)
 
@@ -243,10 +277,10 @@ deshalb beantwortet, weil `dispatch_ipc` nach Kommandoform routet
 (Workaround §4). Auf echter Hardware muss die FS-Session vor dem Mount
 existieren.
 
-**Naechster Arbeitsvorrat:** Herausfinden, warum der Boot die FS-Session-
-Initialisierung (`fn_00291C74` bzw. deren Aufrufer) ueberspringt –
-Kandidat ist die in §6 beschriebene OS-Init-/`g_os+9`-Reihenfolge, die
-schon einmal einen Init-Zweig vorzeitig beendet hat. Erst danach ist der
-Hash-Lookup ueberhaupt erreichbar; `tools/fix_romfs_cycles.py` und
+**Naechster Arbeitsvorrat:** ~~Herausfinden, warum der Boot die FS-Session-
+Initialisierung (`fn_00291C74` bzw. deren Aufrufer) ueberspringt~~ –
+**erledigt**: nicht der Aufrufer fehlte, sondern der Fallthrough nach dem
+bedingten `bxne lr` in `fn_00291C64` (siehe oben, „FS-Session fehlte wegen
+bedingtem `bx`“). `tools/fix_romfs_cycles.py` und
 `tools/rebuild_romfs_hash.py` waren dafuer nachweislich nicht noetig und
 sind entfernt.
