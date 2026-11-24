@@ -1301,6 +1301,34 @@ static void fs_command(Ipc *r, uint32_t *p) {
             ipc_put_handle(r, h);   /* MoveHandle(file) */
             break;
         }
+        case 0x0845: { /* GetFormatInfo: Result + total_size, dirs, files, duplicate */
+            /* Azahar fs_user.cpp: MakeBuilder(5,0). Die Werte beschreiben
+               das tatsaechlich vom Port bereitgestellte Save-Archiv
+               (out/savedata); duplicate_data ist 0. */
+            uint32_t total = 0, dirs = 0, files = 0;
+            WIN32_FIND_DATAA fd;
+            HANDLE fh = FindFirstFileA("out\\savedata\\*", &fd);
+            if (fh != INVALID_HANDLE_VALUE) {
+                do {
+                    if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0)
+                        continue;
+                    if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                        dirs++;
+                    } else {
+                        files++;
+                        total += fd.nFileSizeLow;
+                    }
+                } while (FindNextFileA(fh, &fd));
+                FindClose(fh);
+            }
+            ipc_begin(r, 0x0845, 5, 0);
+            put_result(r);
+            ipc_put(r, total);
+            ipc_put(r, dirs);
+            ipc_put(r, files);
+            ipc_put(r, 0);
+            break;
+        }
         case 0x0861: case 0x0862: { /* InitializeWithSdkVersion / SetPriority: Result */
             ipc_begin(r, r->cmd, 1, 0);
             put_result(r);
@@ -1492,6 +1520,33 @@ static void file_command(Ipc *r, uint32_t *p) {
             (void)hi;
             ipc_begin(r, 0x0805, 1, 0);
             ipc_put(r, 0);
+            break;
+        }
+        case 0x080C: { /* OpenLinkFile: neue Dateisitzung auf denselben Backend */
+            /* Azahar file.cpp: MakeBuilder(1,2), Push(Result), PushMoveObjects.
+               Die neue Sitzung hat eigene Position/Groesse, teilt aber die
+               Datei (hier: eigener Host-Handle auf denselben Pfad). */
+            FileSlot *ns = NULL;
+            for (int i = 0; i < MAX_FILES; i++) {
+                if (!g_files[i].used) { ns = &g_files[i]; break; }
+            }
+            uint32_t nh = 0;
+            if (ns != NULL) {
+                memset(ns, 0, sizeof(*ns));
+                ns->used = 1;
+                ns->size = f->size;
+                snprintf(ns->path, sizeof(ns->path), "%s", f->path);
+                if (f->fp != NULL && f->path[0] != 0) {
+                    ns->fp = fopen(f->path, "r+b");
+                    if (ns->fp == NULL) ns->fp = fopen(f->path, "rb");
+                }
+                nh = (uint32_t)alloc_handle(SVC_FILE, "file-link");
+                if (nh != 0 && nh < MAX_HANDLES) g_handles[nh].file = (int)(ns - g_files);
+            }
+            if (g_log) printf("[file] OpenLinkFile %s -> handle %u\n", f->path, nh);
+            ipc_begin(r, 0x080C, 1, 2);
+            put_result(r);
+            ipc_put_handle(r, nh);
             break;
         }
         case 0x0808: { /* Close */
@@ -2924,9 +2979,14 @@ static void dispatch_ipc(uint32_t handle) {
     /* Fallback: Datei-/FS-Kommandos auch dann richtig routen, wenn das
        Handle im HLE einer anderen Kategorie zugeordnet ist (im Trace
        sendet das Spiel 0x0802/0x0803/0x0808 auf Handle 4 = "sync"). */
-    /* 0x08xx IMMER nach Kommandoform routen: das Spiel schickt Datei-
-       Kommandos auch auf Handles, die wir anders vergeben haben. */
-    if ((cmd & 0xFF00u) == 0x0800u) {
+    /* 0x08xx: bei bekanntem Datei-/FS-Handle entscheidet das Handle
+       (Azahar: der Dienst hinter der Session waehlt den Handler). 0x080C
+       ist auf einer Datei OpenLinkFile, auf fs:USER OpenArchive; 0x0845
+       (GetFormatInfo) gehoert immer zu fs:USER. Nur wenn das Handle
+       unbekannt oder einer anderen Kategorie zugeordnet ist, nach
+       Kommandoform routen. */
+    if ((cmd & 0xFF00u) == 0x0800u
+            && !(h != NULL && (service == SVC_FILE || service == SVC_FS_USER))) {
         if (cmd == 0x080Cu || cmd == 0x080Du || cmd == 0x080Eu || cmd == 0x0812u)
             service = SVC_FS_USER;
         /* 0x0803 ist mehrdeutig: als fs:USER-Kommando ist es
