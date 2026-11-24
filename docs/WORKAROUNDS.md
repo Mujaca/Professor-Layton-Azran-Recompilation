@@ -120,7 +120,9 @@ gebaut und mit `tools/frontier.py` gemessen; der Stand blieb **9/10
 
 **Host-Eingabe (kein Workaround):** `runtime/platform/window.c` bildet Tastatur
 (A/B/X/Y, L/R, Start/Select, Steuerkreuz, Circle-Pad) und die Maus ueber dem
-unteren Screen auf `HleHidInput` ab (`runtime/platform/hid_ring.h`); das
+unteren Screen auf `HleHidInput` ab (`runtime/platform/hid_ring.h`); die
+Tastenbelegung steht in `port.ini` neben `port.exe` (Standard und Format:
+`docs/FRONTEND.md`), ein XInput-Pad wird optional zusaetzlich gelesen. Das
 Circle-Pad der Tastatur wird wie Azahar `analog_from_button`/`hid.cpp` auf den
 Einheitskreis normiert und mit `0x9A` skaliert (Diagonale also 109, nicht
 154/154). `hle_hid_set_input` schreibt nur in den Host-Puffer; die HID-Ringe
@@ -135,7 +137,11 @@ Zeitstempeln, Touch ohne Druck `x=y=0`, Accelerometer-Ruhelage `(0,-512,0)`
 die vom Spiel gemeldeten Puffer spaltenweise (`address + x*stride +
 (239-y)*bpp`) und decodiert die fuenf GSP-Pixelformate; Fenster und
 `--shot datei.bmp` zeigen beide Screens untereinander (oben 400x240, unten
-320x240). `runtime/platform/gsp_fb.h` bildet `GPU::SetBufferSwap` nach
+320x240). Das Fenster skaliert ganzzahlig und seitenverhaeltnistreu
+(Letterbox), F11 schaltet Vollbild, die Titelzeile zeigt Host-fps und
+Gast-Frames (`docs/FRONTEND.md`); Anzeige und GSP-VBlank laufen im exakten
+3DS-Takt 268111856/4481136 Hz (`runtime/platform/frame_clock.h`).
+`runtime/platform/gsp_fb.h` bildet `GPU::SetBufferSwap` nach
 (address_left1/2 nach `active_fb`, Register-`active_fb` aus `shown_fb`), und
 `runtime/kernel/hle.c` uebernimmt den sichtbaren Puffer erst beim VBlank. Der
 VBlank-Thread liest die FrameBufferInfo und loescht ihr dirty-Flag atomar

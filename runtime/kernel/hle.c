@@ -9,6 +9,7 @@
 #include "fs_archive.h"
 #include "gpu.h"
 #include "gsp_fb.h"
+#include "frame_clock.h"
 #include "dsp_hle.h"
 #include "hid_ring.h"
 #include "y2r.h"
@@ -54,6 +55,7 @@ static ArmCpu *g_main_cpu = NULL;
  * Screen 0 = oben (400x240), Screen 1 = unten (320x240). */
 static GspFbRegs g_gsp_fb_regs[2];
 static HleGspFrame g_gsp_display[2];
+static volatile unsigned g_gsp_guest_frames = 0;
 static SRWLOCK g_gsp_fb_srw = SRWLOCK_INIT;
 static int g_gsp_fb_init_done = 0;
 
@@ -74,6 +76,10 @@ int hle_gsp_frame(int screen, HleGspFrame *out) {
     ok = out->valid;
     ReleaseSRWLockShared(&g_gsp_fb_srw);
     return ok;
+}
+
+unsigned hle_gsp_guest_frames(void) {
+    return g_gsp_guest_frames;
 }
 
 /* Uebernimmt den sichtbaren Registerstand in die Anzeige (VBlank-Latch). */
@@ -2674,6 +2680,7 @@ static void gsp_signal_interrupt(int id) {
  * dirty-Flag im Update-Header: Bit0; Info-Eintrag = index & 1. */
 static void gsp_vblank_fb_update(ArmCpu *c, int tid) {
     int screen;
+    int guest_updated = 0;
     if (c == NULL) return;
     gsp_fb_init();
     for (screen = 0; screen < 2; screen++) {
@@ -2684,6 +2691,7 @@ static void gsp_vblank_fb_update(ArmCpu *c, int tid) {
         if (base + 0x40u > c->mem_size) continue;
         fbu = c->mem + base;
         if ((fbu[1] & 1u) == 0u) continue;   /* nicht aktualisiert */
+        guest_updated = 1;
         idx = fbu[0] & 1u;
         info = base + 8u + idx * 0x20u;
         memcpy(&active, c->mem + info + 0u, 4);
@@ -2710,6 +2718,7 @@ static void gsp_vblank_fb_update(ArmCpu *c, int tid) {
     gsp_fb_latch_locked(0);
     gsp_fb_latch_locked(1);
     ReleaseSRWLockExclusive(&g_gsp_fb_srw);
+    if (guest_updated) g_gsp_guest_frames++;
 }
 
 
@@ -3873,9 +3882,11 @@ static void arb_unregister(int slot) {
  * PDC0/PDC1 gehen ueber die InterruptRelayQueue an das bei
  * RegisterInterruptRelayQueue registrierte Spiel-Event. */
 static DWORD WINAPI vblank_thread(LPVOID p) {
+    FrameClock clock;
     (void)p;
+    frame_clock_start(&clock);
     while (g_vblank_run) {
-        Sleep(16);
+        frame_clock_wait(&clock);
         /* Echte VBlank-Quelle: GSP uebernimmt die FrameBufferInfo aus dem
          * Shared-Memory und meldet PDC0 (oben) / PDC1 (unten) per RelayQueue
          * und Event (Azahar GPU::VBlankCallback / GSP_GPU::SignalInterrupt).
@@ -3890,6 +3901,7 @@ static DWORD WINAPI vblank_thread(LPVOID p) {
         hid_poll();
         guest_lock_leave();
     }
+    frame_clock_stop(&clock);
     return 0;
 }
 
