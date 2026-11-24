@@ -258,6 +258,51 @@ Antwort.
 
 ## 6. Befunde (offene Ursachen, kein Workaround eingebaut)
 
+### Zeitbasis des Movie-Players: kein belegter Zeitfehler (Messung 2026-11-24)
+
+**Hypothese:** Der Film-Player rechnet Bildzeit/Lesevorlauf aus
+`svcGetSystemTick`/Timern/VBlank/Audio-Position; eine falsche Zeitbasis oder
+ein nicht fortschreitender DSP-Status steuert den Lesevorlauf falsch.
+
+**Belege (Diagnose, kein Gastzustand):**
+* Die Zeitbasis liegt tatsächlich auf dem Decoder-Pfad: `fn_001ED8FC`
+  (laeuft ~1x/Frame) ruft `fn_00288AAC`, das ueber `fn_002740A0` zweimal
+  `svc #0x28` liest und ein 64-Bit-Tickbudget gegen die globale Frame-Zeit
+  (`[ptr+0x178/0x17c]`) abrechnet (Frame-Limiter); anschliessend speichert
+  `fn_001ED8FC` die Tickdifferenz nach `[obj+0x78/0x80]` und ruft
+  `0x00390A20`. Die uebrigen 16 `svc #0x28`-Stellen liegen in
+  Bibliotheksfunktionen (0x125A80, 0x144504, 0x147FD0, 0x148D50, 0x275DF8,
+  0x27C7A0, 0x27CBDC, 0x27E3C8, 0x33FA08), keine im Player-Code 0x218xxx/
+  0x311xxx.
+* DSP: der Audio-Thread liefert exakt 204,4 Frames/s (160 Samples bei
+  32728 Hz; `[audio] f=N` mit Host-Zeit im 5,00-s-Raster), die Regionen-
+  handshake-Felder werden also im richtigen Takt geschrieben. Waehrend der
+  gesamten Laeufe ist **keine** DSP-Quelle aktiv (`enabled=0`, auch im
+  120-s-Lauf); der Film wurde auf diesem HEAD allerdings nicht erreicht
+  (siehe Reproduzierbarkeit), eine Tonspur lief daher nie.
+* Endliche Wartezeiten: `HLE_WAITTMO_LOG=1` meldet in 120 s Vollspeed
+  **keinen** abgelaufenen Wait (kein vorzeitiger Tick-Timeout).
+* Gast-/Host-Takt: 57-58 Gast-Frames/s gegen 60 Hz VBlank (Fenster-/VBlank-
+  Takt 268111856/4481136 = 59,83 Hz), d. h. die Zeitbasis laeuft nicht
+  auseinander; `svcGetSystemTick` (268,111856 MHz, QPC) ist monoton.
+* **Reproduzierbarkeit:** Auf HEAD 59dbf5b erreicht der natuerliche Boot in
+  60 s **und** 120 s Vollspeed (ohne `HLE_LOG`) **keine** Y2R-Konvertierung
+  (`HLE_Y2R_LOG=1`: 0 Zeilen, Block am Ende 0x0016E4A8), die in
+  bb5fe4c dokumentierten 41 `StartConversion` sind hier also nicht
+  reproduzierbar. Der Haenger ist der Koeffizienten-/Huffman-Loop
+  `fn_0016E4A0`, der aus einem Bitpuffer ohne Nutzdaten (Nullen) endlos
+  Symbole erzeugt; der Bit-Refill `0x16C568` (`ldrh [r1],#2`) hat keine
+  Laengenpruefung.
+
+**Ergebnis:** Die Zeitbasis selbst ist als Ursache **nicht belegt**
+(DSP-Takt und Tick-Rate stimmen, keine Timeouts, keine aktive Audioquelle).
+Offen bleibt die Datenzufuhr: der Decoder beginnt mit dem Huffman-Lauf,
+bevor der Producer-Thread (1-ms-Poll) die Bytes geliefert hat. Der
+Gast-Lock wird in `hle_pump()` nur alle 16384 Bloecke abgegeben, ein langer
+Decoder-Lauf verzoegert den Producer also stark; nach dem Stall laufen
+weitere Daten ein, der Loop prueft sie aber nie wieder.
+
+
 ### Y2R-Videopfad fehlt: Movie-Player bleibt in Zustand 5 – offen 2026-11-24
 
 **Befund:** Die IPC-Folge des natuerlichen Boots stimmt mit

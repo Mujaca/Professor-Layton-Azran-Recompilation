@@ -123,7 +123,12 @@ Rohdump nach `scratch/pica/list_<addr>_<size>.bin`),
 Wandzeit in Lock-Abgaben, Zeit mit freiem Gast-Lock; je ~1 s eine Zeile
 `[ystat]`),
 `HLE_STALLDUMP=1` (bei jedem 300. Host-Frame die letzten 12 Bloecke je
-Gast-Thread auf stderr, um Haenger ohne IPC zu lokalisieren).
+Gast-Thread auf stderr, um Haenger ohne IPC zu lokalisieren),
+`HLE_Y2R_LOG=1` (jede `StartConversion` mit Zeitstempel/Format auf stderr;
+zaehlt den Video-Framepfad ohne das langsame `HLE_LOG`),
+`HLE_TICK_LOG=1` (die ersten 200 `svcGetSystemTick`-Aufrufe mit Thread,
+Block und LR), `HLE_SLEEP_LOG=1` (die ersten 200 `svcSleepThread`-Aufrufe),
+`HLE_WAITTMO_LOG=1` (erschöpfte endliche Wartezeiten mit Thread/Block/LR).
 
 ## Assets
 

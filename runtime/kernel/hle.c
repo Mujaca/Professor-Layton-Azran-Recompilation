@@ -355,6 +355,9 @@ static int g_log = 0;
 static uint64_t g_tick = 0x1000;
 static uint64_t g_boot_ns = 0;   /* Nullpunkt fuer svcGetSystemTick */
 static int g_tick_calls = 0;
+static int g_ticklog_n = 0;
+static int g_sleeplog_n = 0;
+static int g_waittmo_n = 0;
 static Handle g_handles[MAX_HANDLES];
 static int g_next_handle = 1;
 static uint32_t g_srv_handle = 0;
@@ -872,6 +875,14 @@ static int hs_wait(ArmCpu *c, Handle **objs, int cnt, int wait_all,
             kwait_unregister(wslot);
             *out_idx = -1;
             *result = RESULT_TIMEOUT;
+            if (getenv("HLE_WAITTMO_LOG") && g_waittmo_n < 200) {
+                g_waittmo_n++;
+                printf("[wtmo] t=%llu tid=%u blk=%08X lr=%08X ns=%llu elapsed_us=%llu\n",
+                       (unsigned long long)((host_ns() - g_boot_ns) / 1000000ull),
+                       tid, arm_last_block, c->r[14],
+                       (unsigned long long)timeout_ns_eff,
+                       (unsigned long long)((host_ns() - start) / 1000ull));
+            }
             return 0;
         }
         yielded = 1;
@@ -3717,6 +3728,12 @@ static void y2r_command(Ipc *r, uint32_t *p) {
             }
             {
                 int conv = y2r_perform_conversion(&mem, &g_y2r);
+                if (getenv("HLE_Y2R_LOG"))
+                    fprintf(stderr, "[y2rsc] t=%llu conv=%d fmt=%d/%d %ux%u\n",
+                            (unsigned long long)((host_ns() - g_boot_ns) / 1000000ull),
+                            conv, g_y2r.input_format, g_y2r.output_format,
+                            (unsigned)g_y2r.input_line_width,
+                            (unsigned)g_y2r.input_lines);
                 if (conv != 0) {
                     /* Azahar-ASSERT-Faelle; die Hardware meldet dort kein
                      * Completion-Interrupt. */
@@ -4485,6 +4502,11 @@ static uint32_t hle_svc_dispatch(ArmCpu *c, uint32_t imm) {
                         WakeAfterDelay; ns <= 0 = sofort weiter, Yield) */
             int64_t ns = (int64_t)((uint64_t)c->r[0] | ((uint64_t)c->r[1] << 32));
             uint32_t sleep_ms;
+            if (getenv("HLE_SLEEP_LOG") && g_sleeplog_n < 200) {
+                g_sleeplog_n++;
+                printf("[sleep] tid=%u ns=%lld blk=%08X lr=%08X\n",
+                       cur_tid(c), (long long)ns, arm_last_block, c->r[14]);
+            }
             if (ns <= 0) {
                 sleep_ms = 0;
             } else {
@@ -4827,6 +4849,12 @@ static uint32_t hle_svc_dispatch(ArmCpu *c, uint32_t imm) {
                         Zeitbasis wie die hid-Zeitstempel. */
             g_tick = host_system_ticks();
             g_tick_calls++;
+            if (getenv("HLE_TICK_LOG") && g_ticklog_n < 200) {
+                g_ticklog_n++;
+                printf("[tick] tid=%u blk=%08X lr=%08X t=%llu\n",
+                       cur_tid(c), arm_last_block, c->r[14],
+                       (unsigned long long)g_tick);
+            }
             c->r[1] = (uint32_t)(g_tick >> 32);
             return (uint32_t)g_tick;
         }
