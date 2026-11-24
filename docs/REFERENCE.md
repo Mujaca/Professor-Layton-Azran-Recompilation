@@ -238,6 +238,14 @@ einen **Vertex-Shader-Interpreter/Übersetzer** und **TEV**.
   absolute Codezeiger (ARM `pc+8`, Thumb `Align(pc+4,4)`); `tbb/tbh` nutzen
   Byte-/Halbwort-Offsets ab `Align(pc+4,4)`. Der Scanner legt diese Ziele als
   Bloecke an (`scan.ldr_pc_table`/`tbb_table`).
+* **LDREX/STREX/CLREX**: Die Reservierung gilt pro (Adresse, Groesse). Sie
+  wird von jedem Store auf den ueberwachten Bereich, von `CLREX`, von einem
+  Exception-Eintritt (SVC) und von einem Threadwechsel entwertet (ARMv6K;
+  Azahar `ThreadManager::SwitchContext` ruft `cpu->ClearExclusiveState()`).
+  `STREX` schreibt nur bei gueltiger Reservierung und liefert sonst 1;
+  Rueckgabe 0 bedeutet Erfolg. `LDREXD/STREXD` ueberwachen 8 Byte.
+  (Port: `arm_excl_*` in `runtime/cpu/arm_cpu.c`; Unicorn-Faelle in
+  `tools/recomp_difftest.py`, Invalidierungstest in `tests/mvp_selftest.py`.)
 
 ### VFP / Float (verifiziert mit Unicorn, 2026-11-24)
 

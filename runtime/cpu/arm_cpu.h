@@ -25,6 +25,13 @@ typedef struct ArmCpu {
     uint32_t qflag;         /* CPSR.Q (Saturation) */
     int aborted;
     uint64_t insn_count;
+    /* Lokaler Exklusiv-Monitor (LDREX/STREX, ARMv6K). Der Monitor gilt pro
+     * Gast-Thread; die globalen Slots in arm_cpu.c tragen die Generation. */
+    int excl_valid;
+    int excl_slot;
+    uint32_t excl_addr;
+    uint32_t excl_size;
+    uint32_t excl_gen;
 } ArmCpu;
 
 /* Datenverarbeitungs-Operationen (muessen zu tools/recomp/emit.py passen) */
@@ -64,6 +71,19 @@ void arm_svc(ArmCpu *c, uint32_t imm);
 uint32_t arm_pool_alloc(unsigned size);
 void arm_sp_check(ArmCpu *c, uint32_t sp0, uint32_t tgt);
 void arm_restore_sp(ArmCpu *c, uint32_t sp0);
+
+/* ---- Exklusiv-Monitor (LDREX/STREX/CLREX) ----
+ * arm_excl_load() liest size Bytes und setzt die Reservierung.
+ * arm_excl_store() schreibt nur, wenn die Reservierung noch gilt, und liefert
+ * 0 (Erfolg) bzw. 1 (Fehlschlag, kein Speicherschreiben). Jede Schreiboperation
+ * auf den ueberwachten Bereich sowie jeder Threadwechsel (arm_excl_clear_all)
+ * macht die Reservierung ungueltig. */
+uint32_t arm_excl_load(ArmCpu *c, uint32_t addr, int size);
+uint32_t arm_excl_store(ArmCpu *c, uint32_t addr, int size, uint32_t value);
+uint64_t arm_excl_load64(ArmCpu *c, uint32_t addr);
+uint32_t arm_excl_store64(ArmCpu *c, uint32_t addr, uint32_t lo, uint32_t hi);
+void arm_excl_clear(ArmCpu *c);
+void arm_excl_clear_all(void);
 
 /* Host-Handler fuer SVCs (Rueckgabewert landet in r0). */
 typedef uint32_t (*ArmSvcHandler)(ArmCpu *c, uint32_t imm);

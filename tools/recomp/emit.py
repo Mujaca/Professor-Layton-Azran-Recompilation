@@ -699,7 +699,10 @@ class Emitter:
             return ["vfp_muladd(c, %d, %d, %d, %d, %d);"
                     % (dbl, regs[0][1], regs[1][1], regs[2][1], mode)]
 
-        if base in ("nop", "hint", "pld", "pldw", "clrex", "dbg", "sev", "wfe", "wfi",
+        if base == "clrex":
+            return ["arm_excl_clear(c);"]
+
+        if base in ("nop", "hint", "pld", "pldw", "dbg", "sev", "wfe", "wfi",
                     "it", "cdp", "cdp2", "ldc", "stc", "mcrr", "mrrc") or base.startswith(("ldc", "stc")):
             return []
 
@@ -894,7 +897,7 @@ class Emitter:
             if rd is None or rn is None:
                 raise Unsupported(ins.op_str)
             size = 1 if base.endswith("b") else (2 if base.endswith("h") else 4)
-            return ["c->r[%d] = arm_mem_read(c, c->r[%d], %d);" % (rd, rn, size)]
+            return ["c->r[%d] = arm_excl_load(c, c->r[%d], %d);" % (rd, rn, size)]
 
         if base in ("strex", "strexb", "strexh"):
             rd = isa.reg_num(ops[0])
@@ -905,8 +908,8 @@ class Emitter:
             if None in (rd, rm, rn):
                 raise Unsupported(ins.op_str)
             size = 1 if base.endswith("b") else (2 if base.endswith("h") else 4)
-            return ["arm_mem_write(c, c->r[%d], %d, c->r[%d]);" % (rn, size, rm),
-                    "c->r[%d] = 0;" % rd]
+            return ["c->r[%d] = arm_excl_store(c, c->r[%d], %d, c->r[%d]);"
+                    % (rd, rn, size, rm)]
 
         if base in ("mrc", "mcr", "mrc2", "mcr2"):
             rd = isa.reg_num(ops[2]) if len(ops) > 2 else None

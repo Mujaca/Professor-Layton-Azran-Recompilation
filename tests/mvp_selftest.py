@@ -550,6 +550,49 @@ CASES = [
         "expect": {"r2": 0x00000000, "r3": 0x40320000,
                    "r0": 0x00000000, "r1": 0x40080000, "r4": 18},
     },
+    {
+        # LDREX/STREX ohne Threadwechsel: Reservierung gilt, STREX schreibt.
+        "name": "ldrex_strex_erfolg",
+        "asm": """
+            ldrex r0, [r1]
+            strex r2, r3, [r1]
+            ldr r4, [r1]
+            bx lr
+        """,
+        "regs": {"r1": 0x1000, "r3": 0x55667788},
+        "mem": [(0x1000, 0x44), (0x1001, 0x33), (0x1002, 0x22), (0x1003, 0x11)],
+        "expect": {"r0": 0x11223344, "r2": 0, "r4": 0x55667788},
+    },
+    {
+        # CLREX loescht den lokalen Monitor; STREX muss scheitern und darf
+        # den Speicher nicht schreiben.
+        "name": "ldrex_clrex_strex_fehler",
+        "asm": """
+            ldrex r0, [r1]
+            clrex
+            strex r2, r3, [r1]
+            ldr r4, [r1]
+            bx lr
+        """,
+        "regs": {"r1": 0x1000, "r3": 0x55667788},
+        "mem": [(0x1000, 0x44), (0x1001, 0x33), (0x1002, 0x22), (0x1003, 0x11)],
+        "expect": {"r0": 0x11223344, "r2": 1, "r4": 0x11223344},
+    },
+    {
+        # Ein normaler Store auf die ueberwachte Adresse entwertet die
+        # Reservierung (ARMv6K); STREX scheitert.
+        "name": "ldrex_store_strex_fehler",
+        "asm": """
+            ldrex r0, [r1]
+            str r5, [r1]
+            strex r2, r3, [r1]
+            ldr r4, [r1]
+            bx lr
+        """,
+        "regs": {"r1": 0x1000, "r3": 0x55667788, "r5": 0x0A0B0C0D},
+        "mem": [(0x1000, 0x44), (0x1001, 0x33), (0x1002, 0x22), (0x1003, 0x11)],
+        "expect": {"r0": 0x11223344, "r2": 1, "r4": 0x0A0B0C0D},
+    },
 ]
 
 
@@ -603,6 +646,100 @@ def build_case(case, idx):
     return c_path, main_path
 
 
+def exclusive_monitor_test():
+    """Prueft den Exklusiv-Monitor direkt: Threadwechsel/Store/clrex
+    invalidieren die Reservierung, passende LDREX/STREX-Folgen gelingen."""
+    src = r'''
+#include "arm_cpu.h"
+#include <stdio.h>
+#include <string.h>
+
+static int fails;
+#define CHECK(cond, msg) do { if (!(cond)) { \
+    printf("FAIL %s\n", msg); fails++; } } while (0)
+
+int main(void) {
+    static uint8_t mem[0x4000];
+    ArmCpu a, b;
+    uint64_t d;
+    memset(mem, 0, sizeof mem);
+    mem[0x40] = 0x44; mem[0x41] = 0x33; mem[0x42] = 0x22; mem[0x43] = 0x11;
+    mem[0x48] = 0x08; mem[0x49] = 0x07; mem[0x4A] = 0x06; mem[0x4B] = 0x05;
+    mem[0x4C] = 0x04; mem[0x4D] = 0x03; mem[0x4E] = 0x02; mem[0x4F] = 0x01;
+    arm_cpu_init(&a, mem, sizeof mem);
+    arm_cpu_init(&b, mem, sizeof mem);
+
+    /* 1. LDREX/STREX ohne Wechsel gelingt. */
+    CHECK(arm_excl_load(&a, 0x40, 4) == 0x11223344u, "ldrex liest Wort");
+    CHECK(arm_excl_store(&a, 0x40, 4, 0xAABBCCDDu) == 0, "strex gelingt");
+    CHECK(arm_mem_read(&a, 0x40, 4) == 0xAABBCCDDu, "strex schreibt");
+
+    /* 2. Store eines anderen Threads entwertet die Reservierung. */
+    arm_excl_load(&a, 0x40, 4);
+    arm_mem_write(&b, 0x40, 4, 0x01020304u);
+    CHECK(arm_excl_store(&a, 0x40, 4, 0xDEADBEEFu) == 1, "strex nach Fremd-Store scheitert");
+    CHECK(arm_mem_read(&a, 0x40, 4) == 0x01020304u, "strex schreibt nach Fehler nicht");
+
+    /* 3. Threadwechsel (arm_excl_clear_all) entwertet alle Monitore. */
+    arm_excl_load(&a, 0x40, 4);
+    arm_excl_clear_all();
+    CHECK(arm_excl_store(&a, 0x40, 4, 0xDEADBEEFu) == 1, "strex nach Threadwechsel scheitert");
+
+    /* 4. CLREX entwertet den lokalen Monitor. */
+    arm_excl_load(&a, 0x40, 4);
+    arm_excl_clear(&a);
+    CHECK(arm_excl_store(&a, 0x40, 4, 0xDEADBEEFu) == 1, "strex nach clrex scheitert");
+
+    /* 5. Fremde LDREX auf derselben Adresse entwertet die erste Reservierung. */
+    arm_excl_load(&a, 0x40, 4);
+    arm_excl_load(&b, 0x40, 4);
+    CHECK(arm_excl_store(&a, 0x40, 4, 0xDEADBEEFu) == 1, "alte Reservierung entwertet");
+
+    /* 6. Groesse muss passen (STREXB nach LDREX-Wort scheitert). */
+    arm_excl_load(&a, 0x40, 4);
+    CHECK(arm_excl_store(&a, 0x40, 1, 0x5Au) == 1, "falsche Groesse scheitert");
+
+    /* 7. LDREXB/STREXB. */
+    arm_excl_load(&a, 0x40, 1);
+    CHECK(arm_excl_store(&a, 0x40, 1, 0x5Au) == 0, "strexb gelingt");
+    CHECK(arm_mem_read(&a, 0x40, 1) == 0x5Au, "strexb schreibt Byte");
+
+    /* 8. LDREXD/STREXD (Adresse muss 8 Byte ausgerichtet sein). */
+    d = arm_excl_load64(&a, 0x48);
+    CHECK(d == 0x0102030405060708ull, "ldrexd liest Doppelwort");
+    CHECK(arm_excl_store64(&a, 0x48, 0x11223344u, 0x55667788u) == 0, "strexd gelingt");
+    CHECK(arm_mem_read(&a, 0x48, 4) == 0x11223344u, "strexd schreibt lo");
+    CHECK(arm_mem_read(&a, 0x4C, 4) == 0x55667788u, "strexd schreibt hi");
+
+    if (fails) { printf("%d Fehler\n", fails); return 1; }
+    printf("OK\n");
+    return 0;
+}
+'''
+    os.makedirs(OUT, exist_ok=True)
+    src_path = os.path.join(OUT, "exclusive_monitor.c")
+    with open(src_path, "w", encoding="utf-8") as f:
+        f.write(src)
+    exe = os.path.join(OUT, "exclusive_monitor.exe")
+    import ziglang
+    zig = os.path.join(os.path.dirname(ziglang.__file__), "zig.exe")
+    runtime = os.path.join(ROOT, "runtime")
+    cmd = [zig, "cc", "-std=c11", "-O1", "-I", os.path.join(runtime, "cpu"),
+           src_path, os.path.join(runtime, "cpu", "arm_cpu.c"),
+           os.path.join(runtime, "cpu", "arm_trace.c"),
+           os.path.join(runtime, "workarounds.c"), "-o", exe]
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    if p.returncode != 0:
+        print("[exklusiv-monitor] COMPILE-FEHLER\n%s\n%s" % (p.stdout, p.stderr))
+        return False
+    r = subprocess.run([exe], capture_output=True, text=True)
+    if r.returncode == 0:
+        print("[exklusiv-monitor] OK")
+        return True
+    print("[exklusiv-monitor] FEHLER: %s" % (r.stdout.strip() or r.stderr.strip()))
+    return False
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     import ziglang
@@ -630,6 +767,10 @@ def main():
             failed += 1
 
     print("\n%d/%d Tests bestanden" % (len(CASES) - failed, len(CASES)))
+    if not exclusive_monitor_test():
+        failed += 1
+    total = len(CASES) + 1
+    print("%d/%d Tests inkl. Exklusiv-Monitor bestanden" % (total - failed, total))
     return 1 if failed else 0
 
 

@@ -90,8 +90,32 @@ uint32_t arm_mem_read(ArmCpu *c, uint32_t addr, int size) {
     return v;
 }
 
+/* ---------------- exclusive monitor ---------------- */
+
+/* Globaler Monitor: pro (Adresse, Groesse) ein Slot mit Generationszaehler.
+ * Ein LDREX merkt sich (Slot, Generation) im ArmCpu; jeder Store auf den
+ * ueberwachten Bereich, ein CLREX oder ein Threadwechsel erhoeht die
+ * Generation bzw. entwertet den Slot. STREX gelingt nur, wenn die gemerkte
+ * Generation noch aktuell ist. Damit kann ein STREX nach einem Threadwechsel
+ * nicht mehr den Wert eines anderen Threads ueberschreiben. */
+#define ARM_EXCL_SLOTS 8
+typedef struct {
+    int used;
+    uint32_t addr;
+    uint32_t size;
+    uint32_t gen;
+} ArmExclSlot;
+static ArmExclSlot g_excl[ARM_EXCL_SLOTS];
+static unsigned g_excl_rr = 0;
+static volatile int g_excl_active = 0;
+static void arm_excl_invalidate(uint32_t addr, uint32_t size);
+
 void arm_mem_write(ArmCpu *c, uint32_t addr, int size, uint32_t val) {
     if (addr >= 0x20000000u) addr &= 0x1FFFFFFFu;
+    /* Jede Schreiboperation auf einen ueberwachten Bereich macht die
+     * Reservierung ungueltig (ARMv6K: lokaler Monitor wird von einem
+     * Store auf die ueberwachte Adresse geloescht). */
+    if (g_excl_active) arm_excl_invalidate(addr, (uint32_t)size);
     if (g_memwatch != 0 &&
         ((g_memwatch_end != 0) ? (addr >= g_memwatch && addr < g_memwatch_end)
                                : ((addr & ~3u) == g_memwatch)) &&
@@ -108,6 +132,131 @@ void arm_mem_write(ArmCpu *c, uint32_t addr, int size, uint32_t val) {
     for (int i = 0; i < size; i++) {
         c->mem[addr + i] = (uint8_t)(val >> (8 * i));
     }
+}
+
+/* ---- Exklusiv-Monitor: siehe Kommentar oben ---- */
+
+static uint32_t excl_norm(uint32_t addr) {
+    return (addr >= 0x20000000u) ? (addr & 0x1FFFFFFFu) : addr;
+}
+
+static void arm_excl_invalidate(uint32_t addr, uint32_t size) {
+    uint32_t end;
+    if (size == 0) return;
+    end = addr + size;
+    for (int i = 0; i < ARM_EXCL_SLOTS; i++) {
+        if (!g_excl[i].used) continue;
+        /* Byte-Bereiche ueberlappen sich? */
+        if (addr < g_excl[i].addr + g_excl[i].size && g_excl[i].addr < end) {
+            g_excl[i].used = 0;
+            if (g_excl_active > 0) g_excl_active--;
+        }
+    }
+}
+
+static void excl_reserve(ArmCpu *c, uint32_t addr, uint32_t size) {
+    int slot = -1;
+    c->excl_valid = 0;
+    for (int i = 0; i < ARM_EXCL_SLOTS; i++) {
+        if (g_excl[i].used && g_excl[i].addr == addr &&
+            g_excl[i].size == size) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        int free_slot = -1;
+        for (int i = 0; i < ARM_EXCL_SLOTS; i++) {
+            if (!g_excl[i].used) { free_slot = i; break; }
+        }
+        slot = (free_slot >= 0) ? free_slot
+                                : (int)(g_excl_rr++ % ARM_EXCL_SLOTS);
+        if (!g_excl[slot].used) g_excl_active++;
+        g_excl[slot].used = 1;
+        g_excl[slot].addr = addr;
+        g_excl[slot].size = size;
+    }
+    /* Jede neue Reservierung entwertet eine evtl. vorhandene alte auf
+     * derselben Adresse (globaler Monitor, nur ein Exklusivzugriff). */
+    g_excl[slot].gen++;
+    c->excl_valid = 1;
+    c->excl_slot = slot;
+    c->excl_addr = addr;
+    c->excl_size = size;
+    c->excl_gen = g_excl[slot].gen;
+}
+
+uint32_t arm_excl_load(ArmCpu *c, uint32_t addr, int size) {
+    uint32_t value;
+    addr = excl_norm(addr);
+    value = arm_mem_read(c, addr, size);
+    excl_reserve(c, addr, (uint32_t)size);
+    return value;
+}
+
+uint64_t arm_excl_load64(ArmCpu *c, uint32_t addr) {
+    /* LDREXD: zwei Worte; die Reservierung gilt fuer den 8-Byte-Bereich. */
+    uint64_t lo, hi;
+    addr = excl_norm(addr);
+    lo = arm_mem_read(c, addr, 4);
+    hi = arm_mem_read(c, addr + 4u, 4);
+    excl_reserve(c, addr, 8u);
+    return lo | (hi << 32);
+}
+
+uint32_t arm_excl_store(ArmCpu *c, uint32_t addr, int size, uint32_t value) {
+    int ok = 0;
+    addr = excl_norm(addr);
+    if (c->excl_valid && c->excl_addr == addr &&
+        c->excl_size == (uint32_t)size &&
+        c->excl_slot >= 0 && c->excl_slot < ARM_EXCL_SLOTS) {
+        ArmExclSlot *s = &g_excl[c->excl_slot];
+        if (s->used && s->gen == c->excl_gen && s->addr == addr &&
+            s->size == (uint32_t)size) {
+            s->used = 0;
+            if (g_excl_active > 0) g_excl_active--;
+            arm_mem_write(c, addr, size, value);
+            ok = 1;
+        }
+    }
+    /* STREX loescht den lokalen Monitor immer (ARM ARM, STREX). */
+    c->excl_valid = 0;
+    return ok ? 0u : 1u;
+}
+
+uint32_t arm_excl_store64(ArmCpu *c, uint32_t addr, uint32_t lo, uint32_t hi) {
+    int ok = 0;
+    addr = excl_norm(addr);
+    if (c->excl_valid && c->excl_addr == addr && c->excl_size == 8u &&
+        c->excl_slot >= 0 && c->excl_slot < ARM_EXCL_SLOTS) {
+        ArmExclSlot *s = &g_excl[c->excl_slot];
+        if (s->used && s->gen == c->excl_gen && s->addr == addr &&
+            s->size == 8u) {
+            s->used = 0;
+            if (g_excl_active > 0) g_excl_active--;
+            arm_mem_write(c, addr, 4, lo);
+            arm_mem_write(c, addr + 4u, 4, hi);
+            ok = 1;
+        }
+    }
+    c->excl_valid = 0;
+    return ok ? 0u : 1u;
+}
+
+void arm_excl_clear(ArmCpu *c) {
+    if (c->excl_valid && c->excl_slot >= 0 && c->excl_slot < ARM_EXCL_SLOTS) {
+        ArmExclSlot *s = &g_excl[c->excl_slot];
+        if (s->used && s->addr == c->excl_addr && s->size == c->excl_size) {
+            s->used = 0;
+            if (g_excl_active > 0) g_excl_active--;
+        }
+    }
+    c->excl_valid = 0;
+}
+
+void arm_excl_clear_all(void) {
+    for (int i = 0; i < ARM_EXCL_SLOTS; i++) g_excl[i].used = 0;
+    g_excl_active = 0;
 }
 
 /* ---------------- conditions ---------------- */
@@ -398,6 +547,8 @@ void arm_set_svc_handler(ArmSvcHandler handler) {
 }
 
 void arm_svc(ArmCpu *c, uint32_t imm) {
+    /* Exception-Eintritt loescht den lokalen Exklusiv-Monitor (ARMv6K). */
+    arm_excl_clear(c);
     arm_trace_svc(imm);
     if (g_svc_handler != NULL) {
         c->r[0] = g_svc_handler(c, imm);
