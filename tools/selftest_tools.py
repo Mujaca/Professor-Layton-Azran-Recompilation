@@ -331,6 +331,30 @@ def test_offset_table_seed():
          % sorted("%08X" % a for a in res.functions))
 
 
+def test_dynamic_pc_resume():
+    """Ruecksprung eines Tabellenziels mitten in die aufrufende Funktion.
+
+    Die IDCT-Helfer des Bilddecoders werden per `add lr, pc, #4; add pc, rN, rM`
+    angesprungen und kehren mit `mov pc, lr` in den naechsten Block der
+    *aufrufenden* Funktion zurueck (belegt: LR 0x0016A600 aus 0x0016EF38).
+    Der Emitter muss diesen Gast-PC wieder in einen lokalen Block aufloesen,
+    statt die Funktion zu verlassen (sonst bleiben r0-r6 und der Epilog auf der
+    Strecke).
+    """
+    from recomp import emit
+
+    em = emit.Emitter(0x0016A590, thumb=False)
+    em.block_labels = {0x0016A590, 0x0016A600, 0x0016A680}
+    em.pc_targets = set(em.block_labels)
+    code = "\n".join(em.dynamic_pc("0x0016EF3Cu"))
+    need("arm_call_guest(c, t); break;" in code,
+         "Fremdziel wird nicht per arm_call_guest aufgeloest:\n%s" % code)
+    tail = code.split("break;", 1)[1]
+    need("case 0x0016A600u: goto L_0016A590_0016A600;" in tail,
+         "Ruecksprung in die Funktionsmitte fehlt:\n%s" % code)
+    need("default: return;" in tail, "kein Rueckfall aus dem Resume-Switch:\n%s" % code)
+
+
 TESTS = [
     ("guest-refs 0x40B4C4", test_guest_refs),
     ("trace-diff boss:U", test_trace_diff),
@@ -349,6 +373,7 @@ TESTS = [
     ("ldr-pc-Veneer-Ziel im Scan", test_ldrpc_veneer),
     ("Veneer-Seed Thumb", test_veneer_thumb_seed),
     ("Offset-Tabelle Seed", test_offset_table_seed),
+    ("Ruecksprung in Funktionsmitte", test_dynamic_pc_resume),
 ]
 
 

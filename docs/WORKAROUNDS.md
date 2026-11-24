@@ -258,6 +258,64 @@ Antwort.
 
 ## 6. Befunde (offene Ursachen, kein Workaround eingebaut)
 
+### Bilddecoder hing in der Huffman-Schleife: Ruecksprung in die Funktionsmitte – behoben 2026-11-24
+
+**Befund:** Der natuerliche Boot blieb nach dem Dsp-Setup (~2,5 s Referenzzeit)
+in `fn_0016E4A0` stehen. `HLE_PERFMAP` zeigte fuer Gast-Thread 0 nur noch die
+beiden PCs `0x0016E4A8`/`0x0016E4B4` (19 M Bloecke in 10 s, 182 M in 60 s,
+sonst nichts). Das ist die Huffman-/Codebook-Schleife des Bilddecoders
+(`ldrh [tab+idx]; tst #1; beq`), die bei einer Tabelle aus Nullen nie endet.
+
+**Ursache (Recompiler, nicht Spiel):** Die IDCT-Helfer werden per
+`add lr, pc, #4; add pc, rN, rM` angesprungen (Tabelle `0x16A510` →
+`0x16EF20`… `0x16FB04`) und kehren mit `mov pc, lr` **mitten in die aufrufende
+Funktion** `fn_0016A590` zurueck (LR `0x0016A600`). `Emitter.dynamic_pc` hat
+ein Fremdziel als `arm_call_guest(c, t); return;` behandelt: der
+C-Aufruf kehrte zum Direktaufrufer zurueck, der Epilog `0x16A680`
+(`pop {r0-r6, fp, ip, pc}`) lief nie. Damit blieben r0/r1 als fortgeschriebener
+Koeffizientenzeiger stehen (0x1010/0x1012, danach 0x2010/0x2014), und der
+naechste Decoder-Schritt las seine Huffman-Tabelle aus `[0x2010+0x3B8] = 0`
+→ Endlosschleife.
+
+**Belege:**
+
+* `ARM_WATCH=16A798`: r0 = 0x0CA92AE8 (gueltiges Decoder-Objekt), r3 = 0.
+* `ARM_WATCH=16AFB4`: 2. Aufruf (lr 0x16A7A8) hat r0 = 0x00001010.
+* `ARM_WATCH=16E4A0`: r0 = 0x00002010, lr = 0x0016C520, r2 = 0xFFFFFF9E.
+* `ARM_WATCH=16A680`: **0 Treffer** – der Epilog lief nie.
+* `ARM_MEMWATCH=1667FC44`: `push {r0-r3}` schreibt zuerst 0x0CA92AE8, spaeter
+  0x00001010 (2. Aufruf) – der Wert wird also gar nicht zurueckgeladen.
+* `[sp]`-Korrekturen bei `blk=0x0016EF38 lr=0x0016A600` zeigten den
+  Tail-Ruecksprung zusaetzlich.
+
+**Korrektur (`tools/recomp/emit.py`, `dynamic_pc`):** Nach
+`arm_call_guest(c, t)` fuer ein Fremdziel wird `c->r[15]` gegen die
+Blockanfaenge der *aktuellen* Funktion geprueft und per `goto` fortgesetzt
+(sonst `return`). Das ist echte ARM-Semantik: `mov pc, lr` springt an die
+Adresse im LR, auch wenn sie in der Funktionsmitte liegt. Nur Blockanfaenge
+sind anspringbar; jede `bl`-Rueckkehradresse ist ein Block. Test:
+`tools/selftest_tools.py::test_dynamic_pc_resume`.
+
+**Folge:** Der Decoder laeuft durch, der Boot erreicht den Y2R-Introvideo-Zyklus
+wie die Referenz (im 40-s-Frontier-Lauf 41x `StartConversion` samt
+`SetInputFormat`/`SetSending*`/`SetReceiving`, dazu 0x4000-Byte-Videohaeds und
+DSP-Pipe-Writes). Frontier bleibt 10/10 (M1/M2 ja); M3 haengt jetzt nur
+noch an der Spieldauer (Titelbildschirm nach dem Film), nicht mehr an einem
+Haenger. Der aeltere Abschnitt „Stall nach der zweiten PICA-Liste“ ist damit
+ueberholt.
+
+**Offen (nächster Blocker, belegt 2026-11-24):** Ab dem 42. Videoframe fallen
+Tabellenziele im Decoder an, die als Block in einer bereits dekodierten Funktion
+liegen, aber kein Funktionsanfang sind: `0x16E70C` (72x), `0x16AF84` (42x),
+`0x16E8BC` (33x), `0x16E9E0` (27x), `0x16AA20` (27x), `0x16AF9C` (24x),
+`0x16EB68` (15x), `0x16AA08` (15x), `0x16C254` (6x), `0x16C27C` (3x)
+(`out/missing_calls.txt`, 150-s-Lauf). `dynamic_pc` deckt nur Bloecke der
+*aktuellen* Funktion ab, `arm_call_guest` nur Funktionsanfaenge. Entweder
+diese Ziele im Scanner als Funktionsanfang behalten (Funktion splitten) oder im
+Emitter ein globales Block-Dispatch (Blockadresse → Label) einfuehren. Danach
+den 150-s-Lauf wiederholen (aktuell bleibt der Film nach 41 Y2R-Frames stehen).
+
+
 ### Stall nach der zweiten PICA-Liste: Futex-Mutex bei `0x0040F120` – offen 2026-11-24
 
 **Befund:** Der natuerliche Boot bleibt nach der zweiten PICA-Liste
