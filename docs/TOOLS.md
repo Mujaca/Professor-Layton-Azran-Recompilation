@@ -45,7 +45,19 @@ Zusaetzlich gezielt abgedeckt (2026-11-24):
   `smlad(x)`/`smlsd(x)` inkl. Q-Flag bei Ueberlauf, `smlald(x)`/`smlsld(x)`,
   `umaal`, `sxtab16`/`uxtab16` (16-Bit-Halbwort-Addition, ROR),
 * Thumb-2-Breitformen mit Shift-Operanden (`add.w ..., ror #n`,
-  `mov.w/mvn.w/cmp.w/tst.w ... ror #n`).
+  `mov.w/mvn.w/cmp.w/tst.w ... ror #n`),
+* gezielte 32-Bit-Thumb-2-Generatoren (`thumb_t32_cases`): alle 12-Bit-
+  modifizierten Immediates inkl. der Muster, die C unberuehrt lassen; Shifts
+  (Immediate/Register, 16- und 32-Bit, `rrx`/`rrxs`); `addw`/`subw` und
+  SP-Arithmetik; `ldr/str/ldrb/...` mit allen Offsetformen (imm12, imm8
+  pre/post, Register mit `lsl #0..3`, negativer Registeroffset). 16-Bit-
+  Offsetformen, `[sp]`/`[pc]`, `ldrd`/`strd` (Basis nicht in {Rd,Rd+1}),
+  `ldm`/`stm` in allen Modi, `mul.w`/`mla`/`mls`/`umull`/`smull`-Familie,
+  Bitfeld-Grenzfaelle (`ubfx/sbfx/bfi/bfc` bei lsb/width 0/31/32, `usat`/
+  `ssat`), sowie IT-Bloecke mit allen Befehlsklassen (16-/32-Bit-DP mit und
+  ohne S, Shifts, MUL, CMP, Lade/Speichern mit Writeback, LDRD, LDM,
+  PUSH/POP, MOVW, SMLABB), alle 15 IT-Masken und bedingte Spruenge im
+  IT-Block.
 
 Nicht Teil des Tests: `rbit` (ARM11 ist ARMv6K; RBIT wurde erst mit ARMv6T2/
 ARMv7 eingefuehrt) und `setend` (in ARMv6 vorhanden, kommt im Spiel-Image
@@ -60,8 +72,10 @@ python tools/recomp_difftest.py --mode cf          # Kontrollfluss-Suite
 ```
 
 `--fast` ist der feste Regressionlauf (Seed 1, systematische Faelle beider
-Modi ohne Zusatz-Zufallsfolgen plus vier Kontrollfluss-Faelle); er braucht auf
-einem Entwicklungsrechner ~35-40 s. `--seeds N` wiederholt denselben Lauf mit
+Modi ohne Zusatz-Zufallsfolgen plus vier Kontrollfluss-Faelle); er umfasst
+durch den breiten Thumb-2-Generator inzwischen ~1.900 Faelle und braucht auf
+einem Entwicklungsrechner einige Minuten (die Zig-Kompilierung des erzeugten
+C-Codes dominiert). `--seeds N` wiederholt denselben Lauf mit
 N aufeinanderfolgenden Seeds (breiter Lauf, z. B. `--seeds 20 --count 2000`
 je Modus; Laufzeit beachten).
 

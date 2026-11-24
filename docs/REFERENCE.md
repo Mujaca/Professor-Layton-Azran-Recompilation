@@ -484,6 +484,20 @@ Quelle: Azahar `renderer_software/sw_rasterizer.cpp`, `sw_clipper.cpp`,
   absolute Codezeiger (ARM `pc+8`, Thumb `Align(pc+4,4)`); `tbb/tbh` nutzen
   Byte-/Halbwort-Offsets ab `Align(pc+4,4)`. Der Scanner legt diese Ziele als
   Bloecke an (`scan.ldr_pc_table`/`tbb_table`).
+* **Terminatoren in IT-Bloecken**: `b`, `bx`, `pop {..,pc}`, `ldm ..,{..,pc}`
+  innerhalb eines IT-Blocks tragen in ihrer Kodierung kein Bedingungsfeld;
+  die Bedingung kommt aus dem ITSTATE. Sie sind also bedingt ausgefuehrt und
+  haben einen Fallthrough. Scanner (`scan.decode_function`) und Emitter
+  (`cli.needs_fallthrough`) muessen den ITSTATE dafuer mitfuehren.
+* **MLS** (nur Thumb-2): `Rd = Ra - Rn*Rm`, kein S-Bit. Belegt mit Unicorn
+  (`tools/recomp_difftest.py`).
+* **RRX/RRXS** ist auch in Thumb eine 32-Bit-Kodierung (`0xEA4F`/`0xEA5F`),
+  nicht die 16-Bit-Datenverarbeitung; `rrxs` setzt N/Z, C = Rm[0].
+* **LDR mit Writeback und Rt == Rn** ist nach ARM ARM UNPREDICTABLE. Azahar
+  (`LDR_INST`: `get_addr` schreibt zurueck, danach liest der Load) und Unicorn
+  lassen den geladenen Wert gewinnen; der Recompiler unterdrueckt dafuer den
+  Writeback. Bei `LDRD`/`STRD` mit Basis == Rd/Rd+1 weichen Unicorn und
+  Azahar dagegen ab (UNPREDICTABLE, kein Testfall).
 
 ## Kernel: Threads, Prioritaeten, SVC-ABI
 
@@ -950,6 +964,20 @@ einen **Vertex-Shader-Interpreter/Übersetzer** und **TEV**.
   absolute Codezeiger (ARM `pc+8`, Thumb `Align(pc+4,4)`); `tbb/tbh` nutzen
   Byte-/Halbwort-Offsets ab `Align(pc+4,4)`. Der Scanner legt diese Ziele als
   Bloecke an (`scan.ldr_pc_table`/`tbb_table`).
+* **Terminatoren in IT-Bloecken**: `b`, `bx`, `pop {..,pc}`, `ldm ..,{..,pc}`
+  innerhalb eines IT-Blocks tragen in ihrer Kodierung kein Bedingungsfeld;
+  die Bedingung kommt aus dem ITSTATE. Sie sind also bedingt ausgefuehrt und
+  haben einen Fallthrough. Scanner (`scan.decode_function`) und Emitter
+  (`cli.needs_fallthrough`) muessen den ITSTATE dafuer mitfuehren.
+* **MLS** (nur Thumb-2): `Rd = Ra - Rn*Rm`, kein S-Bit. Belegt mit Unicorn
+  (`tools/recomp_difftest.py`).
+* **RRX/RRXS** ist auch in Thumb eine 32-Bit-Kodierung (`0xEA4F`/`0xEA5F`),
+  nicht die 16-Bit-Datenverarbeitung; `rrxs` setzt N/Z, C = Rm[0].
+* **LDR mit Writeback und Rt == Rn** ist nach ARM ARM UNPREDICTABLE. Azahar
+  (`LDR_INST`: `get_addr` schreibt zurueck, danach liest der Load) und Unicorn
+  lassen den geladenen Wert gewinnen; der Recompiler unterdrueckt dafuer den
+  Writeback. Bei `LDRD`/`STRD` mit Basis == Rd/Rd+1 weichen Unicorn und
+  Azahar dagegen ab (UNPREDICTABLE, kein Testfall).
 * **Funktionserkennung / Seeds** (verifiziert 2026-11-24):
   - Direkte Calls: `bl` bleibt im Modus des Aufrufers, `blx #imm` wechselt ihn
     (Thumb -> ARM, ARM -> Thumb; das Thumb-Bit des Ziels ist dort implizit).

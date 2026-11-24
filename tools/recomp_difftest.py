@@ -577,6 +577,259 @@ def thumb_media_cases(rng):
     return cases
 
 
+def _t32_expand_imm(imm12):
+    """ThumbExpandImm eines 12-Bit-Feldes i:imm3:imm8 (ARM ARM A5.2.5)."""
+    imm12 &= 0xFFF
+    if imm12 < 0x400:
+        sel = (imm12 >> 8) & 3
+        b = imm12 & 0xFF
+        if sel == 0:
+            v = (b << 16) | b                    # 0x00XY00XY
+        elif sel == 1:
+            v = (b << 24) | (b << 8)             # 0xXY00XY00
+        elif sel == 2:
+            v = b * 0x01010101                   # 0xXYXYXYXY
+        else:
+            v = (b << 8) | b                     # 0x0000XYXY
+        return v & 0xFFFFFFFF
+    unrot = 0x80 | (imm12 & 0x7F)
+    rot = (imm12 >> 7) & 0x1F
+    return ((unrot >> rot) | (unrot << (32 - rot))) & 0xFFFFFFFF
+
+
+def _t32_imm_values(rng):
+    """Werte im 12-Bit-Raum, inkl. der drei Muster, die C unberuehrt lassen."""
+    vals = []
+    for imm12 in (0x05A, 0x1A5, 0x2AA, 0x3F3, 0x400, 0x481, 0x5FF, 0x6A5,
+                  0x7F0, 0x9AB, 0xB55, 0xD00, 0xF7F, 0xFFF):
+        vals.append(_t32_expand_imm(imm12))
+    for _ in range(6):
+        vals.append(_t32_expand_imm(rng.randrange(0x1000)))
+    return sorted(set(vals))
+
+
+def _thumb_mem_forms(cases, rng):
+    """Lade-/Speicherbefehle mit allen Thumb-2-Offsetformen."""
+    base = 1
+    offs = (0, 4, 8, 0x7F, 0xFF, 0x3FF, 0x7FF, -4, -8, -255, -0x400)
+    for op in ("ldr", "str", "ldrb", "strb", "ldrh", "strh", "ldrsb", "ldrsh"):
+        for off in offs:
+            b = _mem_base(rng)
+            rd = rng.choice([r for r in range(13) if r != base])
+            _add(cases, "%s.w r%d, [r%d, #%d]" % (op, rd, base, off),
+                 regs={base: b}, small=True, note=op + ".w imm")
+            _add(cases, "%s.w r%d, [r%d, #%d]!" % (op, rd, base, off),
+                 regs={base: b}, small=True, note=op + ".w pre")
+            _add(cases, "%s.w r%d, [r%d], #%d" % (op, rd, base, off),
+                 regs={base: b}, small=True, note=op + ".w post")
+            ro = rng.choice([r for r in range(13) if r not in (base, rd)])
+            _add(cases, "%s.w r%d, [r%d, r%d]" % (op, rd, base, ro),
+                 regs={base: b, ro: 8}, small=True, note=op + ".w reg")
+            if op in ("ldr", "str"):
+                for sh in (0, 1, 2, 3):
+                    _add(cases, "%s.w r%d, [r%d, r%d, lsl #%d]"
+                         % (op, rd, base, ro, sh),
+                         regs={base: b, ro: 8}, small=True,
+                         note=op + ".w reg lsl")
+                _add(cases, "%s.w r%d, [r%d, -r%d]" % (op, rd, base, ro),
+                     regs={base: b, ro: 8}, small=True, note=op + ".w reg neg")
+    # 16-Bit-Formen (imm5-Skalierung je Groesse).
+    widths = {"ldr": (4, 0x7C), "str": (4, 0x7C), "ldrb": (1, 0x1F),
+              "strb": (1, 0x1F), "ldrh": (2, 0x3E), "strh": (2, 0x3E)}
+    for op, (_scale, maxoff) in widths.items():
+        for off in (0, 4, 8, maxoff):
+            b = _mem_base(rng)
+            rd = rng.randrange(8)
+            _add(cases, "%s r%d, [r%d, #%d]" % (op, rd, base, off),
+                 regs={base: b}, small=True, note=op + "16")
+            ro = rng.choice([r for r in range(8) if r not in (base, rd)])
+            _add(cases, "%s r%d, [r%d, r%d]" % (op, rd, base, ro),
+                 regs={base: b, ro: 8}, small=True, note=op + "16 reg")
+    # SP-/PC-relative Formen und ADR (Align(pc+4, 4)).
+    _add(cases, "ldr r0, [sp, #0x20]", note="ldr sp16")
+    _add(cases, "str r0, [sp, #0x20]", note="str sp16")
+    _add(cases, "add r0, sp, #0x20", note="add sp16")
+    _add(cases, "ldr r0, [pc, #0]", note="ldr pc16")
+    _add(cases, "add r0, sp, #0x7C", note="add sp16 max")
+    _add(cases, "sub sp, #0x7C", note="sub sp16 max")
+    # LDRD/STRD: Basis nicht in {Rd, Rd+1} (sonst UNPREDICTABLE).
+    for op in ("ldrd", "strd"):
+        for off in (0, 4, 8, -4, 0x3FC, -0x3FC):
+            b = _mem_base(rng)
+            rd = rng.choice([0, 4, 6, 8, 10])
+            base2 = 2
+            _add(cases, "%s r%d, r%d, [r%d, #%d]" % (op, rd, rd + 1, base2, off),
+                 regs={base2: b}, small=True, note=op)
+            _add(cases, "%s r%d, r%d, [r%d, #%d]!" % (op, rd, rd + 1, base2, off),
+                 regs={base2: b}, small=True, note=op + " pre")
+            _add(cases, "%s r%d, r%d, [r%d], #%d" % (op, rd, rd + 1, base2, off),
+                 regs={base2: b}, small=True, note=op + " post")
+
+
+def thumb_t32_cases(rng):
+    """Gezielte 32-Bit-Thumb-2-Kodierungen (breiter Differenztest)."""
+    cases = []
+    R = lambda: rng.randrange(13)
+    # --- Datenverarbeitung mit modifizierten Immediates -------------------
+    for v in _t32_imm_values(rng):
+        if v == 0:
+            continue
+        rd = R()
+        for op in ("and", "eor", "orr", "bic", "add", "sub", "rsb"):
+            rn = R()
+            _add(cases, "%s.w r%d, r%d, #0x%08X" % (op, rd, rn, v),
+                 note=op + ".w imm12")
+            _add(cases, "%ss.w r%d, r%d, #0x%08X" % (op, rd, rn, v),
+                 note=op + "s.w imm12")
+        for op in ("adc", "sbc"):
+            rn = R()
+            _add(cases, "%s r%d, r%d, #0x%08X" % (op, rd, rn, v),
+                 note=op + " imm12")
+            _add(cases, "%ss r%d, r%d, #0x%08X" % (op, rd, rn, v),
+                 note=op + "s imm12")
+        _add(cases, "mov.w r%d, #0x%08X" % (rd, v), note="mov.w imm12")
+        _add(cases, "mvns.w r%d, #0x%08X" % (rd, v), note="mvns.w imm12")
+        rn = R()
+        for op in ("tst", "teq", "cmp", "cmn"):
+            _add(cases, "%s.w r%d, #0x%08X" % (op, rn, v),
+                 note=op + ".w imm12")
+    # --- Shifts (Immediate/Register, 16- und 32-Bit) ----------------------
+    for sh in ("lsl", "lsr", "asr", "ror"):
+        for amt in (1, 2, 7, 8, 15, 16, 23, 24, 30, 31):
+            d, n, m = R(), R(), R()
+            _add(cases, "%s.w r%d, r%d, #%d" % (sh, d, n, amt), note=sh + ".w")
+            _add(cases, "%ss.w r%d, r%d, #%d" % (sh, d, n, amt), note=sh + "s.w")
+            op = rng.choice(["add", "sub", "and", "orr", "eor", "bic"])
+            _add(cases, "%s.w r%d, r%d, r%d, %s #%d" % (op, d, n, m, sh, amt),
+                 note="dp " + sh + " imm")
+            _add(cases, "cmp.w r%d, r%d, %s #%d" % (d, n, sh, amt),
+                 note="cmp.w " + sh)
+        d, n, m = R(), R(), R()
+        _add(cases, "%s.w r%d, r%d, r%d" % (sh, d, n, m), note=sh + ".w reg")
+        _add(cases, "%ss.w r%d, r%d, r%d" % (sh, d, n, m), note=sh + "s.w reg")
+        op = rng.choice(["add", "sub", "and", "orr", "eor"])
+        _add(cases, "%s.w r%d, r%d, r%d, %s r%d" % (op, d, n, m, sh, R()),
+             note="dp " + sh + " reg")
+    d, n = R(), R()
+    _add(cases, "rrx r%d, r%d" % (d, n), note="rrx")
+    _add(cases, "rrxs r%d, r%d" % (d, n), note="rrxs")
+    for sh in ("lsl", "lsr", "asr"):
+        for amt in (1, 5, 31):
+            _add(cases, "%ss r%d, r%d, #%d" % (sh, R(), R(), amt), note=sh + "s16")
+    # --- ADR / PC-relativ ------------------------------------------------
+    _add(cases, "adr r0, hier\nbx lr\nhier:\nbx lr", note="adr16")
+    # --- SP-Arithmetik und ADDW/SUBW --------------------------------------
+    _add(cases, "add sp, sp, #0x50", note="add sp imm7")
+    _add(cases, "sub sp, #0x50", note="sub sp imm7")
+    _add(cases, "add.w r0, sp, #0x123", note="addw sp")
+    _add(cases, "sub.w r0, sp, #0x123", note="subw sp")
+    _add(cases, "add.w sp, sp, #0x123", note="addw sp sp")
+    _add(cases, "sub.w sp, sp, #0x123", note="subw sp sp")
+    for v in (0, 1, 0xFF, 0x100, 0x7FF, 0xFFF):
+        d, n = R(), R()
+        _add(cases, "addw r%d, r%d, #%d" % (d, n, v), note="addw")
+        _add(cases, "subw r%d, r%d, #%d" % (d, n, v), note="subw")
+    # --- Laden/Speichern/LDRD/STRD ----------------------------------------
+    _thumb_mem_forms(cases, rng)
+    # --- LDM/STM alle Adressierungsarten (Basis nicht in der Liste) --------
+    for mode in ("ia", "ib", "da", "db"):
+        for wb in (False, True):
+            bb = _mem_base(rng)
+            pool = [r for r in range(13) if r != 1]
+            lst = sorted(rng.sample(pool, 3))
+            regs = "{%s}" % ", ".join("r%d" % r for r in lst)
+            _add(cases, "ldm%s.w r1%s, %s" % (mode, "!" if wb else "", regs),
+                 regs={1: bb}, small=True, note="ldm" + mode)
+            _add(cases, "stm%s.w r1%s, %s" % (mode, "!" if wb else "", regs),
+                 regs={1: bb}, small=True, note="stm" + mode)
+    # --- Multiplikationen -------------------------------------------------
+    for _ in range(4):
+        d, n, m = R(), R(), R()
+        if len({d, n, m}) < 3:
+            continue
+        _add(cases, "mul.w r%d, r%d, r%d" % (d, n, m), note="mul.w")
+        a = R()
+        if a in (d, n, m):
+            continue
+        _add(cases, "mla r%d, r%d, r%d, r%d" % (d, n, m, a), note="mla")
+        _add(cases, "mls r%d, r%d, r%d, r%d" % (d, n, m, a), note="mls")
+    for _ in range(3):
+        lo = rng.randrange(0, 12, 2)
+        hi = lo + 1
+        n, m = R(), R()
+        if n in (lo, hi) or m in (lo, hi):
+            continue
+        for op in ("umull", "umlal", "smull", "smlal"):
+            _add(cases, "%s r%d, r%d, r%d, %d" % (op, lo, hi, n, m), note=op)
+    # --- Bitfeld-Befehle und Saettigung, Grenzfaelle ----------------------
+    combos = [(0, 1), (0, 8), (0, 16), (0, 31), (1, 31), (16, 16), (31, 1),
+              (8, 24), (24, 8), (0, 32), (1, 16), (15, 17)]
+    for lsb, width in combos:
+        rn = R()
+        _add(cases, "ubfx r%d, r%d, #%d, #%d" % (R(), rn, lsb, width),
+             note="ubfx %d/%d" % (lsb, width))
+        _add(cases, "sbfx r%d, r%d, #%d, #%d" % (R(), rn, lsb, width),
+             note="sbfx %d/%d" % (lsb, width))
+        _add(cases, "bfi r%d, r%d, #%d, #%d" % (R(), rn, lsb, width),
+             note="bfi %d/%d" % (lsb, width))
+        _add(cases, "bfc r%d, #%d, #%d" % (R(), lsb, width),
+             note="bfc %d/%d" % (lsb, width))
+    for bits in (1, 8, 16, 31, 32):
+        _add(cases, "ssat r%d, #%d, r%d" % (R(), bits, R()), note="ssat")
+    for bits in (0, 1, 8, 16, 31):
+        _add(cases, "usat r%d, #%d, r%d" % (R(), bits, R()), note="usat")
+    # --- IT-Bloecke mit allen Befehlsklassen ------------------------------
+    for cc in CC[1:]:
+        d, n, m = R(), R(), R()
+        _add(cases, "it %s\nadd%s r%d, r%d, r%d" % (cc, cc, d, n, m),
+             note="it dp16 " + cc)
+        op = rng.choice(["add", "sub", "and", "orr", "eor"])
+        _add(cases, "it %s\n%s%s.w r%d, r%d, r%d" % (cc, op, cc, d, n, m),
+             note="it dp32 " + cc)
+        _add(cases, "it %s\n%sseq.w r%d, r%d, #%d"
+             % (cc, rng.choice(["add", "sub", "and", "orr"]), d, n,
+                rng.randrange(1, 0x80)), note="it dp32 s " + cc)
+        _add(cases, "it %s\nlsleq r%d, r%d, #1" % (cc, d, n),
+             regs={n: 0x80000001}, note="it lsls " + cc)
+        _add(cases, "it %s\nmul%s r%d, r%d, r%d" % (cc, cc, d, n, d),
+             note="it muls16 " + cc)
+        _add(cases, "it %s\ncmp%s r%d, r%d" % (cc, cc, d, n), note="it cmp " + cc)
+        _add(cases, "it %s\nldr%s r%d, [r%d]" % (cc, cc, d, 1),
+             regs={1: _mem_base(rng)}, small=True, note="it ldr " + cc)
+        _add(cases, "it %s\nstr%s r%d, [r%d, #4]" % (cc, cc, d, 1),
+             regs={1: _mem_base(rng)}, small=True, note="it str " + cc)
+        _add(cases, "it %s\nldr%s r%d, [r%d, #4]!" % (cc, cc, d, 1),
+             regs={1: _mem_base(rng)}, small=True, note="it ldr pre " + cc)
+        _add(cases, "it %s\nubfx%s r%d, r%d, #4, #8" % (cc, cc, d, n),
+             note="it ubfx " + cc)
+        _add(cases, "it %s\nmla%s r%d, r%d, r%d, r%d" % (cc, cc, d, n, m, d),
+             note="it mla " + cc)
+        _add(cases, "it %s\nsmlabb%s r%d, r%d, r%d, r%d"
+             % (cc, cc, d, n, m, d), note="it smlabb " + cc)
+        _add(cases, "it %s\nmovw%s r%d, #0x1234" % (cc, cc, d),
+             note="it movw " + cc)
+        _add(cases, "it %s\nldrd%s r%d, r%d, [r%d]" % (cc, cc, 0, 1, 2),
+             regs={2: _mem_base(rng)}, small=True, note="it ldrd " + cc)
+        _add(cases, "it %s\nldm%s r%d, {r%d, r%d}" % (cc, cc, 2, 0, 1),
+             regs={2: _mem_base(rng)}, small=True, note="it ldm " + cc)
+        _add(cases, "it %s\npush%s {r%d, lr}" % (cc, cc, d),
+             note="it push " + cc)
+        _add(cases, "it %s\npop%s {r%d}" % (cc, cc, d), note="it pop " + cc)
+    for pat in ("it", "itt", "ite", "ittt", "itte", "itet", "itee",
+                "itttt", "ittte", "ittet", "ittee", "itett", "itete",
+                "iteet", "iteee"):
+        lines = [pat + " eq"]
+        for i, p in enumerate(pat[2:]):
+            cc = "eq" if p == "t" else "ne"
+            lines.append("add%s.w r%d, r%d, #%d" % (cc, 3 + i, 3 + i, i + 1))
+        _add(cases, "\n".join(lines), regs={3: 1, 4: 2, 5: 4, 6: 8},
+             note="itpat " + pat)
+    for cc in ("eq", "ne", "hi", "ls", "gt"):
+        _add(cases, "it %s\nb%s skip\nadd r0, r0, #5\nskip:\nbx lr" % (cc, cc),
+             note="it branch " + cc)
+    return cases
+
+
 def _extra_random(cases, rng, count, thumb):
     pool = [c for c in cases if "\n" not in c["asm"]]
     pool = [c for c in pool if not c["regs"] and not c["small"]]
@@ -593,8 +846,8 @@ def build_cases(rng, count, mode):
         cases = (arm_dp_cases(rng) + arm_mul_cases(rng) + arm_misc_cases(rng)
                  + arm_media_cases(rng) + arm_mem_cases(rng))
     else:
-        cases = (thumb_dp_cases(rng) + thumb_mem_cases(rng)
-                 + thumb_media_cases(rng))
+        cases = (thumb_dp_cases(rng) + thumb_t32_cases(rng)
+                 + thumb_mem_cases(rng) + thumb_media_cases(rng))
     _extra_random(cases, rng, count, mode == "thumb")
     return cases
 

@@ -167,10 +167,14 @@ def return_bx_in_block(blk):
     return out
 
 
-def needs_fallthrough(ins):
+def needs_fallthrough(ins, in_it=False):
     """True, wenn nach dieser Instruktion der naechste Block folgt."""
     import capstone
     import capstone.arm as A
+    # Ein Terminator in einem Thumb-2-IT-Block ist bedingt ausgefuehrt, auch
+    # wenn seine Kodierung kein Bedingungsfeld traegt.
+    if in_it:
+        return True
     # Bedingt ausgefuehrte Terminatoren haben immer einen Fallthrough
     if ins.cc != A.ARM_CC_AL:
         return True
@@ -536,7 +540,8 @@ def generate(res, path, max_funcs=None, trace=False, data=None):
                 lines, _ = instruction_lines(em, ins)
                 for ln in lines:
                     out.append("  " + ln)
-            if blk.insns and needs_fallthrough(blk.insns[-1]):
+            if blk.insns and needs_fallthrough(
+                    blk.insns[-1], fn.thumb and id(blk.insns[-1]) in em.it_cond):
                 nxt = blk.insns[-1].address + blk.insns[-1].size
                 known = set(b.addr for b in fn.blocks)
                 if nxt in known:

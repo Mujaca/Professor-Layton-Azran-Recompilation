@@ -274,6 +274,10 @@ def decode_function(data, fn, visited):
         fn.blocks.append(blk)
         cur = baddr
         const_reg = {}
+        # IT-Zustand (Thumb-2) wie in emit.it_conditions mitfuehren: ein
+        # Terminator in einem IT-Block ist bedingt ausgefuehrt, auch wenn
+        # seine Kodierung selbst kein Bedingungsfeld hat.
+        itstate = 0
         # PC-relative Konstanten im Block (Interworking-Veneer):
         #   add rN, pc, #imm  /  adr rN, #imm   ->  rN = Zieladresse
         pc_const = {}
@@ -285,6 +289,24 @@ def decode_function(data, fn, visited):
                 break
             blk.insns.append(ins)
             visited[cur] = ins.size
+            in_it = False
+            if itstate:
+                in_it = True
+                if (itstate & 7) == 0:
+                    itstate = 0
+                else:
+                    itstate = (itstate & 0xE0) | ((itstate << 1) & 0x1F)
+            elif fn.thumb:
+                m = ins.mnemonic.lower().split(".")[0]
+                if (m.startswith("it") and len(m) <= 5
+                        and set(m[1:]) <= set("te")):
+                    b = ins.bytes
+                    if len(b) >= 2:
+                        hw = int.from_bytes(b[:2], "little")
+                        firstcond = (hw >> 4) & 0xF
+                        mask = hw & 0xF
+                        if mask:
+                            itstate = (firstcond << 4) | mask
             ldrpc = ldrpc_literal_target(ins, fn.thumb, data)
             if ldrpc is not None:
                 fn.calls.add(ldrpc)
@@ -365,7 +387,7 @@ def decode_function(data, fn, visited):
                 # ldrne pc, bne, cbz ...) haben immer einen Fallthrough; sonst
                 # fehlt der Folgeblock und die Funktion endet vorzeitig.
                 cond = (ins.id in (A.ARM_INS_CBZ, A.ARM_INS_CBNZ)
-                        or ins.cc != A.ARM_CC_AL)
+                        or ins.cc != A.ARM_CC_AL or in_it)
                 fall = nxt
                 extra = []
                 if ins.id == A.ARM_INS_LDR and op0_is_pc(ins):

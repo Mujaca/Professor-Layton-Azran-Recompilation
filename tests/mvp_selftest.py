@@ -794,6 +794,91 @@ CASES = [
         "regs": {"r3": 0xA8000000, "r4": 0x000A0000},
         "expect": {"r0": 0xA8000010, "r1": 0xA80A0010},
     },
+    {
+        # 16-Bit-Shift im IT-Block: ausgefuehrt, aber ohne Flag-Wirkung
+        # (ARM ARM A7.7.3). Der fruehere Code nutzte capstone update_flags
+        # und setzte Z/C.
+        "name": "thumb_it_lsls_no_flags",
+        "thumb": True,
+        "asm": """
+            movs r0, #0
+            it eq
+            lsreq r1, r2, #1
+            bx lr
+        """,
+        "regs": {"r2": 0x80000001},
+        "expect": {"r0": 0, "r1": 0x40000000, "z": 1, "c": 0, "n": 0},
+    },
+    {
+        # 16-Bit-MUL im IT-Block setzt ebenfalls keine Flags.
+        "name": "thumb_it_muls_no_flags",
+        "thumb": True,
+        "asm": """
+            movs r0, #0
+            it eq
+            muleq r1, r2, r1
+            bx lr
+        """,
+        "regs": {"r1": 5, "r2": 3},
+        "expect": {"r0": 0, "r1": 15, "z": 1},
+    },
+    {
+        # Bedingter Sprung in einem IT-Block: Ziel genommen -> kein Add.
+        "name": "thumb_it_branch_taken",
+        "thumb": True,
+        "asm": """
+            movs r0, #0
+            cmp r1, #0
+            it eq
+            beq skip
+            adds r0, #5
+        skip:
+            bx lr
+        """,
+        "regs": {"r1": 0},
+        "expect": {"r0": 0},
+    },
+    {
+        # Derselbe Block ohne genommene Bedingung: der Folgeblock muss
+        # existieren (der Scanner legte ihn fuer IT-Terminatoren nicht an).
+        "name": "thumb_it_branch_fallthrough",
+        "thumb": True,
+        "asm": """
+            movs r0, #0
+            cmp r1, #0
+            it eq
+            beq skip
+            adds r0, #5
+        skip:
+            bx lr
+        """,
+        "regs": {"r1": 1},
+        "expect": {"r0": 5},
+    },
+    {
+        # MLS (Thumb-2): Rd = Ra - Rn*Rm.
+        "name": "thumb_mls",
+        "thumb": True,
+        "asm": """
+            mls r0, r1, r2, r3
+            bx lr
+        """,
+        "regs": {"r1": 7, "r2": 9, "r3": 100},
+        "expect": {"r0": 37},
+    },
+    {
+        # RRXS (32-Bit-Thumb): Rotate Right with Extend; der fruehere Code
+        # verwechselte die Form mit einem reinen Register-Move.
+        "name": "thumb_rrxs",
+        "thumb": True,
+        "asm": """
+            movs r0, #0
+            rrxs r1, r2
+            bx lr
+        """,
+        "regs": {"r2": 0x80000001},
+        "expect": {"r1": 0x40000000, "z": 0, "n": 0, "c": 1},
+    },
 ]
 
 

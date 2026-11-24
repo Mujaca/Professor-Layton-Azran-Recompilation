@@ -435,6 +435,11 @@ void arm_mla(ArmCpu *c, int rd, uint32_t rn, uint32_t rm, uint32_t ra, int set_f
     c->r[rd] = res;
 }
 
+/* MLS (Thumb-2): Rd = Ra - Rn*Rm, kein S-Bit. */
+void arm_mls(ArmCpu *c, int rd, uint32_t rn, uint32_t rm, uint32_t ra) {
+    c->r[rd] = ra - rn * rm;
+}
+
 void arm_mull(ArmCpu *c, int rdlo, int rdhi, uint32_t rn, uint32_t rm,
               int is_signed, int accumulate, int set_flags) {
     uint64_t res;

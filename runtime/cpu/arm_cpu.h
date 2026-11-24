@@ -217,6 +217,7 @@ static inline uint32_t arm_mul(ArmCpu *c, uint32_t a, uint32_t b, int set_flags)
 }
 
 void arm_mla(ArmCpu *c, int rd, uint32_t rn, uint32_t rm, uint32_t ra, int set_flags);
+void arm_mls(ArmCpu *c, int rd, uint32_t rn, uint32_t rm, uint32_t ra);
 void arm_mull(ArmCpu *c, int rdlo, int rdhi, uint32_t rn, uint32_t rm,
               int is_signed, int accumulate, int set_flags);
 

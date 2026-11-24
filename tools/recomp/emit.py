@@ -501,7 +501,9 @@ class Emitter:
             lines.append("  c->r[%d] = arm_ld(c, a, %d, %d);" % (rd, size, signed))
         else:
             lines.append("  arm_st(c, a, %d, c->r[%d]);" % (size, rd))
-        if wb:
+        # Azahar/Unicorn: Writeback wird vor dem Laden ausgefuehrt; ist das
+        # Basisregister auch Ziel (UNPREDICTABLE), gewinnt der geladene Wert.
+        if wb and not (load and base_reg == rd):
             if post:
                 lines.append("  c->r[%d] = a + o;" % base_reg)
             else:
@@ -793,7 +795,7 @@ class Emitter:
         raise Unsupported(ins.op_str)
 
     # ---------- dispatch per mnemonic (Fallback fuer nicht-per-id erkannte Formen) ----------
-    def by_mnemonic(self, ins):
+    def by_mnemonic(self, ins, in_it=False):
         m = ins.mnemonic.lower()
         base = strip_cc(m)
         ops = isa.split_operands(ins.op_str)
@@ -850,7 +852,7 @@ class Emitter:
             if rd is None:
                 raise Unsupported(ins.op_str)
 
-            if base == "rrx":
+            if base.startswith("rrx"):
                 expr = "arm_rrx(c, %s, &sh)" % self.value(ops[1], pc)
                 plain = "arm_rrx(c, %s, 0)" % self.value(ops[1], pc)
             elif len(ops) >= 3:
@@ -868,7 +870,7 @@ class Emitter:
                 expr = src
                 plain = src
 
-            if not ins.update_flags:
+            if not sets_flags(ins, self.thumb, in_it):
                 return ["c->r[%d] = %s;" % (rd, plain)]
 
             return ["{", "  int sh = -1;",
@@ -1277,12 +1279,12 @@ class Emitter:
                 lines = ["c->r[%d] = %s & 0xFFFFu;" % (rd, val)]
             else:
                 lines = ["c->r[%d] = (c->r[%d] & 0xFFFFu) | ((%s & 0xFFFFu) << 16);" % (rd, rd, val)]
-        elif ins.id in (A.ARM_INS_MUL, A.ARM_INS_MLA):
+        elif ins.id in (A.ARM_INS_MUL, A.ARM_INS_MLA, A.ARM_INS_MLS):
             ops = isa.split_operands(ins.op_str)
             rd = isa.reg_num(ops[0])
             if rd is None or len(ops) < 2:
                 raise Unsupported(ins.op_str)
-            sf = 1 if ins.update_flags else 0
+            sf = sets_flags(ins, self.thumb, in_it)
             if ins.id == A.ARM_INS_MUL:
                 rn = isa.reg_num(ops[1])
                 rm = isa.reg_num(ops[2]) if len(ops) > 2 else rn
@@ -1295,7 +1297,12 @@ class Emitter:
                 ra = isa.reg_num(ops[3])
                 if None in (rn, rm, ra):
                     raise Unsupported(ins.op_str)
-                lines = ["arm_mla(c, %d, c->r[%d], c->r[%d], c->r[%d], %d);" % (rd, rn, rm, ra, sf)]
+                if ins.id == A.ARM_INS_MLS:
+                    # MLS: Rd = Ra - Rn*Rm (Thumb-2, kein S-Bit).
+                    lines = ["arm_mls(c, %d, c->r[%d], c->r[%d], c->r[%d]);"
+                             % (rd, rn, rm, ra)]
+                else:
+                    lines = ["arm_mla(c, %d, c->r[%d], c->r[%d], c->r[%d], %d);" % (rd, rn, rm, ra, sf)]
         elif ins.id in (A.ARM_INS_UMULL, A.ARM_INS_UMLAL, A.ARM_INS_SMULL, A.ARM_INS_SMLAL):
             ops = isa.split_operands(ins.op_str)
             if len(ops) < 4:
@@ -1308,7 +1315,7 @@ class Emitter:
                 raise Unsupported(ins.op_str)
             signed = 1 if ins.id in (A.ARM_INS_SMULL, A.ARM_INS_SMLAL) else 0
             acc = 1 if ins.id in (A.ARM_INS_UMLAL, A.ARM_INS_SMLAL) else 0
-            sf = 1 if ins.update_flags else 0
+            sf = sets_flags(ins, self.thumb, in_it)
             lines = ["arm_mull(c, %d, %d, c->r[%d], c->r[%d], %d, %d, %d);" % (
                 rdlo, rdhi, rn, rm, signed, acc, sf)]
         elif ins.id in (A.ARM_INS_VLDR, A.ARM_INS_VSTR, A.ARM_INS_VMOV, A.ARM_INS_VADD,
@@ -1317,7 +1324,7 @@ class Emitter:
                         A.ARM_INS_VMRS, A.ARM_INS_VMSR, A.ARM_INS_VPUSH, A.ARM_INS_VPOP):
             lines = self.vfp(ins)
         else:
-            lines = self.by_mnemonic(ins)
+            lines = self.by_mnemonic(ins, in_it)
 
         if cond is not None:
             wrapped = ["if (arm_cond(c, %d)) {" % (cond - 1)]
