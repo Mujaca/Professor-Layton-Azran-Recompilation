@@ -62,16 +62,8 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 |---|---|---|---|---|
 | 2026-11-24 | cleanup | 7/10 | y2r:u fehlt | 23 |
 | 2026-11-24 | ipc-layouts | 7/10 | y2r:u fehlt | 23 |
-| 2026-11-24 | night | 7/10 | y2r:u | 23 |
-| 2026-11-24 | night | 7/10 | y2r:u | 23 |
-| 2026-11-24 | night | 4/10 | ptm:u | 23 |
 | 2026-11-24 | recomp-bxret | 4/10 | ptm:u | 23 |
-| 2026-11-24 | night | 4/10 | ptm:u | 23 |
 | 2026-11-24 | gsp: InterruptRelayQueue + GX 0x00-0x05 | 9/10 | boss:U | 23 |
-| 2026-11-24 | night | 9/10 | boss:U | 23 |
 | 2026-11-24 | kernel-sync | 9/10 | boss:U | 23 |
-| 2026-11-24 | night | 9/10 | boss:U | 23 |
 | 2026-11-24 | cfg-eur | 9/10 | boss:U | 22 |
-| 2026-11-24 | night | 9/10 | boss:U | 22 |
 | 2026-11-24 | workarounds | 9/10 | boss:U | 0 |
-| 2026-11-24 | night | 9/10 | boss:U | 0 |

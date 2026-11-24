@@ -1627,7 +1627,8 @@ static void dsp_command(Ipc *r, uint32_t *p) {
         }
         case 0x000C: { /* ConvertProcessAddressFromDspDram: Result + ARM-Adresse */
             uint32_t dsp_addr = p[0];
-            uint32_t arm = 0x00408800u + (dsp_addr & 0xFFu) * 0x10u;
+            /* Azahar dsp_dsp.cpp: (addr << 1) + DSP_RAM_VADDR (0x1FF00000) + 0x40000 */
+            uint32_t arm = (dsp_addr << 1) + 0x1FF00000u + 0x40000u;
             ipc_begin(r, 0x000C, 2, 0);
             put_result(r);
             ipc_put(r, arm);
