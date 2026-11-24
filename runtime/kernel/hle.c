@@ -2392,12 +2392,9 @@ static void gsp_command(Ipc *r, uint32_t *p) {
                Header {index:8, number_commands:8, status:8, should_stop:8},
                Command[15] ab +0x20 (je 0x20 B). id 0x01 = SubmitCmdList
                (Adresse +0x04, Laenge +0x08). */
-            int qops = gsp_process_cmdqueue(g_cpu);
-            if (qops == 0 && g_cmdlist_addr != 0 && g_cmdlist_size != 0 && g_cpu != NULL) {
-                int nops = gpu_run_pica_list(g_cpu, g_cmdlist_addr, g_cmdlist_size);
-                if (g_log) printf("[gsp] TriggerCmdReqQueue list=%08X size=%X -> %d Ops\n",
-                                  g_cmdlist_addr, g_cmdlist_size, nops);
-            }
+            /* SetCommandList ist in Azahar ein Stub; die zuletzt gesetzte
+               Liste wird hier nicht erneut abgespielt. */
+            (void)gsp_process_cmdqueue(g_cpu);
             ipc_begin(r, 0x000C, 1, 0);
             put_result(r);
             break;
@@ -2854,10 +2851,10 @@ static void thread_signal_exit(ArmCpu *c) {
         if (!g_threads[i].used || g_threads[i].cpu != c) continue;
         uint32_t tid = (uint32_t)g_threads[i].id;
         Handle *hh = get_handle(g_threads[i].handle);
-        if (hh != NULL) {
-            hh->kind = HK_THREAD;
+        /* Nur signalisieren, wenn der Slot noch dieser Thread ist: nach
+           CloseHandle kann er fuer ein anderes Objekt wiederverwendet sein. */
+        if (hh != NULL && hh->used && hh->kind == HK_THREAD)
             hs_signal(hh);
-        }
         for (int k = 1; k < MAX_HANDLES; k++) {
             Handle *m = &g_handles[k];
             if (m->used && m->kind == HK_MUTEX && m->lock_count > 0 && m->owner == tid) {
@@ -3116,7 +3113,7 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             int64_t interval = (int64_t)((uint64_t)c->r[3] | ((uint64_t)c->r[4] << 32));
             if (hh == NULL || hh->kind != HK_TIMER) return RESULT_INVALID_HANDLE;
             if (initial < 0 || interval < 0) return RESULT_OUT_OF_RANGE;
-            hh->signaled = 0;
+            /* Azahar Timer::Set laesst den Signalzustand unveraendert. */
             hh->timer_interval = (uint64_t)interval / 1000ull;
             if (initial == 0) {
                 hh->timer_active = 0;
@@ -3127,11 +3124,16 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             }
             return 0;
         }
-        case 0x1C: { /* ClearTimer(handle) */
+        case 0x1C: { /* CancelTimer(handle): nur austragen (Azahar Timer::Cancel) */
+            Handle *hh = get_handle(c->r[0]);
+            if (hh == NULL || hh->kind != HK_TIMER) return RESULT_INVALID_HANDLE;
+            hh->timer_active = 0;
+            return 0;
+        }
+        case 0x1D: { /* ClearTimer(handle): Signal loeschen (Azahar Timer::Clear) */
             Handle *hh = get_handle(c->r[0]);
             if (hh == NULL || hh->kind != HK_TIMER) return RESULT_INVALID_HANDLE;
             hh->signaled = 0;
-            hh->timer_active = 0;
             return 0;
         }
         case 0x1E: case 0x1F: case 0x20: /* MemoryBlock */
@@ -3174,9 +3176,11 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             }
             if (type < 1 || type > 4) return 0xD8E093EDu;
 
-            /* Warte-Typen blockieren nur, wenn [addr] < value. type 3/4
-             * dekrementieren das Wort zuvor (Azahar
-             * DecrementAndWaitIfLessThan). */
+            /* Azahar ArbitrationType: 1 WaitIfLessThan, 2 DecrementAndWait-
+             * IfLessThan, 3 WaitIfLessThanWithTimeout, 4 DecrementAndWait-
+             * IfLessThanWithTimeout. BEKANNTER FEHLER (docs/WORKAROUNDS.md):
+             * unten sind 2 und 3 vertauscht; die korrekte Zuordnung laesst
+             * den Boot haengen, weil ein Signal fehlt. */
             {
                 int32_t cur = 0;
                 memcpy(&cur, c->mem + off, 4);
@@ -3190,6 +3194,7 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                 uint32_t tid = cur_tid(c);
                 int slot = arb_register(addr, tid);
                 uint64_t start = host_us();
+                /* Nur die WithTimeout-Typen (3/4) werten den Timeout aus. */
                 int infinite = (timeout_ns == UINT64_MAX);
                 uint64_t timeout_us = infinite ? 0 : ((timeout_ns + 999ull) / 1000ull);
                 if (getenv("HLE_KLOG"))
@@ -3202,7 +3207,7 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                 }
                 arb_unregister(slot);
             }
-            /* Azahar: Timeout-Typen liefern immer ResultTimeout. */
+            /* Azahar: die WithTimeout-Typen liefern immer ResultTimeout. */
             if (type == 2 || type == 4) return RESULT_TIMEOUT;
             return 0;
         }

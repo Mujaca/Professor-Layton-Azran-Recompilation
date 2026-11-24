@@ -83,6 +83,15 @@ fn_001B9938) sind entfernt: Build ohne sie bleibt Frontier 9/10 (boss:U).
 | – | `dispatch_ipc` | leitet Kommandos nach Form statt nach Handle um (APT/cfg/fs) |
 | – | generierter Code | unbekannte Aufrufziele = No-op (geloggt in `out/missing_calls.txt`) |
 | – | `arm_mem_read/write` | Zugriffe außerhalb des Speichers liefern 0 statt Abbruch (`ARM_STRICT=1` bricht ab) |
+| – | `hle_svc` 0x22 ArbitrateAddress | Typen falsch zugeordnet: 2 dekrementiert nicht und wartet mit Timeout aus r4/r5, 3 dekrementiert (Azahar: 1 WaitIfLessThan, 2 DecrementAndWait, 3/4 WithTimeout). Korrekte Zuordnung getestet: Frontier 9 → 2 (fs:USER), d. h. ein fehlendes Signal wird bisher durch Timeout-Polling verdeckt |
+| – | Y2R `GetTransferEndEvent`, DSP `GetSemaphoreEventHandle` | Events vorab signalisiert; Y2R `IsFinished*` immer wahr (Azahar: unsignalisiert, Signal bei echter Fertigmeldung) |
+| – | DSP `ReadPipeIfPossible` | schreibt abwechselnd 1/0 in den Gastpuffer statt echter Pipe-Daten |
+| – | srv `GetServiceHandle`, `generic_command` | unbekannte Dienste/Kommandos liefern Erfolg |
+| – | fs `OpenFile`, `file_command` | Sentinel-Dateislot und Erfolg auch bei fehlgeschlagenem Open; `romfs_image.bin` mit Offset +0x1000 |
+| – | `SleepThread` | Schlafzeit auf 50 ms gedeckelt |
+| – | cfg `GetConfig` | unbekannte Blöcke liefern Erfolg mit Nullen (Azahar: Fehler) |
+
+Diese Liste stammt aus dem Review der Nachtarbeit (2026-11-24) gegen Azahar.
 
 `wa-kernel-signal-all` ist **entfernt**: `vblank_thread` flutet keine Handles
 mehr und postet keine Arbiter-Wörter; auch `WaitSynchronizationN` signalisiert
