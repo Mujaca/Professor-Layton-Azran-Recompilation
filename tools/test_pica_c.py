@@ -35,6 +35,18 @@ Fog (Azahar sw_rasterizer.cpp WriteFog): LUT-Upload 0xE6/0xE8..0xEF
 0xE1, Index/Fraktion und Mischung vor dem Depth-Test. Texturzustand:
 TEXCOORD2 ist Semantic 22/23 (nicht 16/17), und nur Einheit 0 beachtet
 den Texturtyp (Bits28..30, 3dbrew/Azahar sw_rasterizer.cpp TextureColor).
+
+Texturtypen (Azahar sw_rasterizer.cpp TextureColor, sw_clipper.cpp
+ConvertCubeCoord, output_vertex.cpp): Projection2D teilt u/v durch
+TEXCOORD0_W (Semantik 16), Cube/ShadowCube waehlen Face + Koordinaten
+ueber die dominante Achse (u'=x/z*0.5+0.5), Shadow2D teilt perspektivisch
+und vergleicht z_ref = (a<<16)|(b<<8)|g gegen z_int inkl. Bias 0x8B.
+
+Fragment-Lighting (Azahar sw_lighting.cpp/regs_lighting.h) 0x140..0x1D9:
+Lichtquellen (f16-Position, f20-Distanzdaempfung, fix1.1.11-Spot,
+10-Bit-Farben), LUT-Upload 0x1C5/0x1C8..0x1CF (Typ/Index + Inkrement),
+Distanz-LUT, Fresnel-Alpha, two_sided_diffuse, Clamp und Bump-Mapping
+(NormalMap mit/ohne Renorm) sowie Einspeisung als TEV-Quelle 1/2.
 """
 import os
 import subprocess

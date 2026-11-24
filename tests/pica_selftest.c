@@ -1341,7 +1341,507 @@ static void test_fb_clamp(ArmCpu *c, unsigned char *mem)
           "Framebuffer-Clamp: kein Schreiben ausserhalb des Farbziels");
 }
 
+/* ================= Fragment-Lighting + Texturtypen (Azahar) =================
+ * Erwartungswerte direkt aus tools/azahar:
+ *   sw_lighting.cpp ComputeFragmentsColors, regs_lighting.h (0x140..0x1D9)
+ *   pica_core.cpp HandleSpecialReg (LUT 0x1C5/0x1C8..0x1CF)
+ *   sw_rasterizer.cpp TextureColor + sw_clipper.cpp ConvertCubeCoord
+ *   output_vertex.cpp (Semantics 4..7 QUAT, 16 TEXCOORD0_W, 18..20 VIEW)
+ */
+
+/* Halb-Float (f16) und f20 (Float<12,7>) fuer Testvektoren. */
+static uint32_t f16raw(float v)
+{
+    int e;
+    float m;
+    uint32_t sign = 0;
+    if (v == 0.0f) return 0;
+    if (v < 0.0f) { sign = 0x8000u; v = -v; }
+    m = frexpf(v, &e);
+    return sign | ((uint32_t)(e - 1 + 15) << 10) |
+           ((uint32_t)((m * 2.0f - 1.0f) * 1024.0f + 0.5f) & 0x3FFu);
+}
+
+static uint32_t f20raw(float v)
+{
+    int e;
+    float m;
+    uint32_t sign = 0;
+    if (v == 0.0f) return 0;
+    if (v < 0.0f) { sign = 0x80000u; v = -v; }
+    m = frexpf(v, &e);
+    return sign | ((uint32_t)(e - 1 + 63) << 12) |
+           ((uint32_t)((m * 2.0f - 1.0f) * 4096.0f + 0.5f) & 0xFFFu);
+}
+
+/* Vertexprogramm: attr0 -> POSITION, attr1 -> TEXCOORD0, attr2.x ->
+   TEXCOORD0_W, attr2.yzw -> VIEW (18..20), attr3 -> QUATERNION (4..7). */
+static uint32_t *t_emit_vs_light(uint32_t *q)
+{
+    uint32_t w[5];
+    q = emit(q, 0x2B9, 3u);                /* max input attribute */
+    q = emit(q, 0x2BB, 0x3210u);           /* attr0..3 -> v0..v3 */
+    q = emit(q, 0x4F, 4u);                 /* 4 Ausgangsattribute */
+    q = emit(q, 0x50, 0x03020100u);        /* o0 -> POSITION */
+    q = emit(q, 0x51, 0x1F1F0D0Cu);        /* o1 -> TEXCOORD0 */
+    q = emit(q, 0x52, 0x14131210u);        /* o2 -> tc0_w + VIEW */
+    q = emit(q, 0x53, 0x07060504u);        /* o3 -> QUATERNION */
+    q = emit(q, 0x2BD, 0xFu);
+    w[0] = ins_common(0x13u, 0u, 0x00u, 0u, 0u, 0u);
+    w[1] = ins_common(0x13u, 0u, 0x01u, 0u, 1u, 0u);
+    w[2] = ins_common(0x13u, 0u, 0x02u, 0u, 2u, 0u);
+    w[3] = ins_common(0x13u, 0u, 0x03u, 0u, 3u, 0u);
+    w[4] = 0x22u << 26;
+    q = emit_program(q, w, 5);
+    return emit_swizzle0(q, swz_xyzw());
+}
+
+/* Sechs Quad-Vertices: pos float3, uv float2, [w,viewx,viewy,viewz] float4,
+   quat float4; Stride 52. */
+static void t_light_vertices(ArmCpu *c, uint32_t vtx, float z,
+                             float u0, float v0, float u1, float v1,
+                             float tc0_w, const float view[3], const float quat[4])
+{
+    static const float xy[6][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, -1}, {1, 1}, {-1, 1}};
+    int i;
+    for (i = 0; i < 6; i++) {
+        float f[13];
+        f[0] = xy[i][0];
+        f[1] = xy[i][1];
+        f[2] = z;
+        f[3] = u0 + (xy[i][0] + 1.0f) * 0.5f * (u1 - u0);
+        f[4] = v0 + (xy[i][1] + 1.0f) * 0.5f * (v1 - v0);
+        f[5] = tc0_w;
+        f[6] = view[0]; f[7] = view[1]; f[8] = view[2];
+        f[9] = quat[0]; f[10] = quat[1]; f[11] = quat[2]; f[12] = quat[3];
+        memcpy(c->mem + ((vtx + (uint32_t)i * 52u) & 0x1FFFFFFFu), f, sizeof(f));
+    }
+}
+
+static uint32_t *t_emit_quad_light(uint32_t *q, uint32_t vtx, int vw, int vh)
+{
+    q = emit(q, 0x200, vtx >> 3);
+    q = emit(q, 0x201, 0xFF7Bu);           /* 0:float3, 1:float2, 2:float4, 3:float4 */
+    q = emit(q, 0x202, 3u << 28);          /* max_attribute_index = 3 */
+    q = emit(q, 0x203, 0u);
+    q = emit(q, 0x204, 0x3210u);           /* comps: attr0..3 */
+    q = emit(q, 0x205, (4u << 28) | (52u << 16));
+    q = emit(q, 0x228, 6u);
+    q = t_emit_vs_light(q);
+    return emit_viewport(q, vw, vh);
+}
+
+static void test_lighting(ArmCpu *c, unsigned char *mem)
+{
+    static const float view[3] = {0.0f, 0.0f, 1.0f};
+    static const float quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};   /* Identitaet */
+    uint32_t *q, size, o;
+    uint32_t base;
+
+    /* --- A) Direktionales Licht +z, Diffus rot => Primary-Fragment rot.
+       Config0 (0x1C3 Bits4..7 = 0): Distribution0 unterstuetzt, Fresnel nicht.
+       config1 0x1C4: Spot (Bit8) und Distanz (Bit24) fuer Licht 0 aus,
+       D0-LUT (Bit16) aus. --- */
+    base = 0x01010100u;
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_light_vertices(c, VTX, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, view, quat);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x1C2, 0u);                     /* max_light_index 0 */
+    q = emit(q, 0x1C3, 0u);                     /* Config0, kein Shadow/Bump */
+    q = emit(q, 0x1C4, base);                   /* Spot/Dist/D0 aus */
+    q = emit(q, 0x1D9, 0u);                     /* Slot 0 -> Licht 0 */
+    q = emit(q, 0x140, 0u);                     /* specular_0 */
+    q = emit(q, 0x141, 0u);                     /* specular_1 */
+    q = emit(q, 0x142, 255u << 20);             /* diffuse rot (10 Bit/255) */
+    q = emit(q, 0x143, 0u);                     /* ambient */
+    q = emit(q, 0x144, f16raw(0.0f) | (f16raw(0.0f) << 16));  /* Position x/y */
+    q = emit(q, 0x145, f16raw(1.0f));           /* Position z = +1 (Richtung) */
+    q = emit(q, 0x149, 1u);                     /* config: directional */
+    q = emit_tev0(q, 1u, 1u, 0u);               /* Quelle PrimaryFragment */
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    check(mem[o + 3] == 0xFF && mem[o + 2] == 0x00 && mem[o + 1] == 0x00 &&
+          mem[o + 0] == 0xFF,
+          "Lighting: direktionales Licht +z, Diffus rot => Primary-Fragment rot");
+
+    /* --- B) Secondary-Fragment bleibt 0 (kein Specular). --- */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_light_vertices(c, VTX, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, view, quat);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x1C2, 0u);
+    q = emit(q, 0x1C3, 0u);
+    q = emit(q, 0x1C4, base);
+    q = emit(q, 0x1D9, 0u);
+    q = emit(q, 0x142, 255u << 20);
+    q = emit(q, 0x145, f16raw(1.0f));
+    q = emit(q, 0x149, 1u);
+    q = emit_tev0(q, 2u, 2u, 0u);               /* Quelle SecondaryFragment */
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    check(mem[o + 0] == 0xFF && mem[o + 1] == 0 && mem[o + 2] == 0 && mem[o + 3] == 0,
+          "Lighting: Secondary-Fragment ohne Specular => (0,0,0,255)");
+
+    /* --- C) two_sided_diffuse (Bit1) mit Licht -z: abs(dot)=1.
+       Ohne Bit1 clampt dot auf 0 => nur Ambient (0) => schwarz. --- */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_light_vertices(c, VTX, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, view, quat);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x1C2, 0u);
+    q = emit(q, 0x1C3, 0u);
+    q = emit(q, 0x1C4, base);
+    q = emit(q, 0x1D9, 0u);
+    q = emit(q, 0x142, 255u << 20);
+    q = emit(q, 0x145, f16raw(-1.0f));          /* nach -z */
+    q = emit(q, 0x149, 3u);                     /* directional + two_sided */
+    q = emit_tev0(q, 1u, 1u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    check(mem[o + 3] == 0xFF && mem[o + 2] == 0 && mem[o + 1] == 0 && mem[o + 0] == 0xFF,
+          "Lighting: two_sided_diffuse nimmt abs(dot) => rot");
+    {
+        /* gleiche Liste ohne two_sided: dot=-1 -> 0 */
+        gpu_pica_reset();
+        memset(mem + 0x40000u, 0, 0x100);
+        q = (uint32_t *)(mem + LIST);
+        q = t_emit_quad_light(q, VTX, 8, 8);
+        q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+        q = emit(q, 0x1C2, 0u);
+        q = emit(q, 0x1C3, 0u);
+        q = emit(q, 0x1C4, base);
+        q = emit(q, 0x1D9, 0u);
+        q = emit(q, 0x142, 255u << 20);
+        q = emit(q, 0x145, f16raw(-1.0f));
+        q = emit(q, 0x149, 1u);                 /* directional, kein two_sided */
+        q = emit_tev0(q, 1u, 1u, 0u);
+        q = emit(q, 0x22E, 0u);
+        size = (uint32_t)((unsigned char *)q - (mem + LIST));
+        gpu_run_pica_list(c, LIST, size);
+        o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+        check(mem[o + 3] == 0x00 && mem[o + 2] == 0x00 && mem[o + 1] == 0x00 && mem[o + 0] == 0xFF,
+              "Lighting: ohne two_sided wird dot<0 auf 0 geclampt => schwarz");
+    }
+
+    /* --- D) Distanzdaempfung: Punktlicht im Ursprung, View +z => length 1.
+       scale 0.5 + bias 0 => sample_loc 0.5 => LUT-Typ 16 Index 128.
+       LUT 4095 (=1.0) => Distanzfaktor 1 (rot), LUT 0 => Faktor 0 (schwarz).
+       Damit ist LUT-Upload 0x1C5/0x1C8 und die Index-Inkrementierung belegt. --- */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_light_vertices(c, VTX, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, view, quat);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x1C2, 0u);
+    q = emit(q, 0x1C3, 0u);
+    q = emit(q, 0x1C4, 0x00010100u);            /* Spot + D0 aus, Distanz AN */
+    q = emit(q, 0x1D9, 0u);
+    q = emit(q, 0x142, 255u << 20);
+    q = emit(q, 0x144, 0u);                     /* Position (0,0,0) */
+    q = emit(q, 0x145, 0u);
+    q = emit(q, 0x149, 0u);                     /* Punktlicht */
+    q = emit(q, 0x14A, 0u);                     /* dist_atten_bias = 0 */
+    q = emit(q, 0x14B, f20raw(0.5f));           /* dist_atten_scale = 0.5 */
+    q = emit(q, 0x1C5, (16u << 8) | 128u);      /* Typ DistanceAttenuation, Idx 128 */
+    q = emit(q, 0x1C8, 4095u);                  /* Wert 1.0 */
+    q = emit_tev0(q, 1u, 1u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    check(mem[o + 3] == 0xFF && mem[o + 2] == 0x00 && mem[o + 1] == 0x00 && mem[o + 0] == 0xFF,
+          "Lighting: Distanz-LUT 0x1C5/0x1C8 Typ 16 Idx 128 = 1.0 => Licht traegt");
+
+    /* gleiche Konfiguration mit LUT-Wert 0 => Abstand daempft vollstaendig */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x1C2, 0u);
+    q = emit(q, 0x1C3, 0u);
+    q = emit(q, 0x1C4, 0x00010100u);
+    q = emit(q, 0x1D9, 0u);
+    q = emit(q, 0x142, 255u << 20);
+    q = emit(q, 0x144, 0u);
+    q = emit(q, 0x145, 0u);
+    q = emit(q, 0x149, 0u);
+    q = emit(q, 0x14A, 0u);
+    q = emit(q, 0x14B, f20raw(0.5f));
+    q = emit(q, 0x1C5, (16u << 8) | 128u);
+    q = emit(q, 0x1C8, 0u);                     /* Wert 0.0 */
+    q = emit_tev0(q, 1u, 1u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    check(mem[o + 3] == 0x00 && mem[o + 2] == 0x00 && mem[o + 1] == 0x00 && mem[o + 0] == 0xFF,
+          "Lighting: Distanz-LUT 0 => Diffus faellt auf 0 (nur Alpha bleibt)");
+
+    /* --- E) Fresnel (Config1) setzt Diffus-Alpha (Bits2/3 in 0x1C3).
+       LUT-Typ 3 (Fresnel) Index 255 = 2048/4095 = 0.5001 => Alpha 127.
+       NH=1 (Normale +z, Licht +z, View +z) => Index 255, Fraktion 1. --- */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_light_vertices(c, VTX, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, view, quat);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x1C2, 0u);
+    q = emit(q, 0x1C3, (1u << 4) | (1u << 2) | (1u << 3));  /* Config1 + Alpha */
+    q = emit(q, 0x1C4, 0x01010100u);            /* Spot/Dist/D0 aus */
+    q = emit(q, 0x1D9, 0u);
+    q = emit(q, 0x142, 255u << 20);             /* Diffus rot */
+    q = emit(q, 0x145, f16raw(1.0f));
+    q = emit(q, 0x149, 1u);
+    q = emit(q, 0x1C5, (3u << 8) | 255u);       /* Typ Fresnel, Index 255 */
+    q = emit(q, 0x1C8, 2048u);
+    q = emit_tev0(q, 1u, 1u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    check(mem[o + 3] == 0xFF && mem[o + 2] == 0x00 && mem[o + 1] == 0x00 && mem[o + 0] == 127,
+          "Lighting: Fresnel-LUT Typ 3 setzt Diffus-Alpha 127");
+
+    /* --- F) Bump-Mapping (NormalMap): Stuetztextur (128,128,128) =>
+       Perturbation (0.00392,0.00392,0.00392). Mit Renorm ist
+       z = sqrt(1 - 2*0.00392^2) = 0.999985 => dot(Licht +z, Normale) 0.999985
+       => Diffusion 254. Ohne Renorm (Bit30) bleibt z = 0.00392 => 0. --- */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    memset(mem + TEX, 0, 0x100);
+    {
+        unsigned char bump[4] = {128, 128, 128, 0};
+        t_tex_encode(mem + TEX, 0, (unsigned)t_morton(4, 3), bump);
+    }
+    t_light_vertices(c, VTX, 0.0f, 0.5f, 0.5f, 0.5f, 0.5f, 1.0f, view, quat);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x80, 1u);                      /* Textur 0 an (Bump-Quelle) */
+    q = emit(q, 0x82, (8u << 16) | 8u);
+    q = emit(q, 0x84, 0u);
+    q = emit(q, 0x85, TEX >> 3);
+    q = emit(q, 0x8E, 0u);
+    q = emit(q, 0x1C2, 0u);
+    q = emit(q, 0x1C3, (1u << 28));             /* bump_mode = NormalMap */
+    q = emit(q, 0x1C4, base);
+    q = emit(q, 0x1D9, 0u);
+    q = emit(q, 0x142, 255u << 20);
+    q = emit(q, 0x145, f16raw(1.0f));
+    q = emit(q, 0x149, 1u);
+    q = emit_tev0(q, 1u, 1u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    check(mem[o + 3] == 254 && mem[o + 2] == 0x00 && mem[o + 1] == 0x00 && mem[o + 0] == 0xFF,
+          "Lighting: Bump-Map-NormalMap renormiert z => Diffus 254");
+
+    /* gleiche Lage ohne Renorm (Bit30): z bleibt 0.00392 => 0 */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x80, 1u);
+    q = emit(q, 0x82, (8u << 16) | 8u);
+    q = emit(q, 0x84, 0u);
+    q = emit(q, 0x85, TEX >> 3);
+    q = emit(q, 0x8E, 0u);
+    q = emit(q, 0x1C2, 0u);
+    q = emit(q, 0x1C3, (1u << 30) | (1u << 28));/* NormalMap ohne Renorm */
+    q = emit(q, 0x1C4, base);
+    q = emit(q, 0x1D9, 0u);
+    q = emit(q, 0x142, 255u << 20);
+    q = emit(q, 0x145, f16raw(1.0f));
+    q = emit(q, 0x149, 1u);
+    q = emit_tev0(q, 1u, 1u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    check(mem[o + 3] <= 1 && mem[o + 2] == 0 && mem[o + 1] == 0 && mem[o + 0] == 0xFF,
+          "Lighting: Bump-Map ohne Renorm => Diffus ~0");
+}
+
+static void test_texture_projection_cube(ArmCpu *c, unsigned char *mem)
+{
+    static const float view[3] = {0.0f, 0.0f, 1.0f};
+    static const float quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    const unsigned char black[4] = {0, 0, 0, 0xFF};
+    const unsigned char green[4] = {0, 0xFF, 0, 0xFF};
+    unsigned char *tile = mem + TEX;
+    uint32_t *q, size, o;
+    int i;
+
+    /* 1) Projection2D (Typ 3) + TEXCOORD0_W (Semantik 16): u/v /= tc0_w.
+       Textur 4x4 RGBA8, Texel (1,2) gruen (Sampler invertiert t), Rest
+       schwarz. Quad u/v konstant 0.140625, tc0_w 0.5 -> u'=0.28125,
+       s=t=int(1.125)=1. */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x200);
+    memset(tile, 0, 0x200);
+    for (i = 0; i < 16; i++)
+        t_tex_encode(tile, 0, (unsigned)t_morton(i % 4, i / 4), black);
+    t_tex_encode(tile, 0, (unsigned)t_morton(1, 2), green);
+    t_light_vertices(c, VTX, 0.0f, 0.140625f, 0.140625f, 0.140625f, 0.140625f,
+                     0.5f, view, quat);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_tex(q, TEX, 4, 4, 0, 3u << 28);  /* Typ Projection2D */
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit_tev0(q, 3u, 3u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    check(mem[o + 0] == 0xFF && mem[o + 1] == 0x00 && mem[o + 2] == 0xFF && mem[o + 3] == 0x00,
+          "Projection2D: u/v /= tc0_w (0.5) => Texel (1,2) gruen");
+
+    /* Gegenprobe: Typ Texture2D mit demselben tc0_w ignoriert die Division:
+       u=0.140625*4=0.5625 -> s=0, t=0 -> Zeile 3 (schwarz). */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x200);
+    t_light_vertices(c, VTX, 0.0f, 0.140625f, 0.140625f, 0.140625f, 0.140625f,
+                     0.5f, view, quat);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_tex(q, TEX, 4, 4, 0, 0u);        /* Typ Texture2D */
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit_tev0(q, 3u, 3u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    check(mem[o + 0] == 0xFF && mem[o + 1] == 0x00 && mem[o + 2] == 0x00 && mem[o + 3] == 0x00,
+          "Texture2D ignoriert tc0_w => Texel (0,3) schwarz");
+
+    /* 2) Cube (Typ 1): (u,v,w)=(0.6,0.2,0.3) -> +X-Face, y=-v, z=u,
+       u'=(-0.3/0.6)*0.5+0.5=0.25, v'=(-0.2/0.6)*0.5+0.5=0.3333
+       => s=2, t=int(2.666)=2 -> Zeile 5. */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x200);
+    memset(tile, 0, 0x200);
+    for (i = 0; i < 64; i++)
+        t_tex_encode(tile, 0, (unsigned)i, black);
+    t_tex_encode(tile, 0, (unsigned)t_morton(2, 5), green);
+    t_light_vertices(c, VTX, 0.0f, 0.6f, 0.2f, 0.6f, 0.2f, 0.3f, view, quat);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_tex(q, TEX, 8, 8, 0, 1u << 28);  /* Typ TextureCube */
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit_tev0(q, 3u, 3u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    check(mem[o + 2] == 0xFF && mem[o + 1] == 0x00 && mem[o + 3] == 0x00 && mem[o + 0] == 0xFF,
+          "TextureCube: +X-Face, y=-v, z=u => Texel (2,5) gruen");
+
+    /* Gegenprobe: Texture2D mit (0.6,0.2) => s=4, t=1 -> Zeile 6 (schwarz). */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x200);
+    t_light_vertices(c, VTX, 0.0f, 0.6f, 0.2f, 0.6f, 0.2f, 0.3f, view, quat);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_tex(q, TEX, 8, 8, 0, 0u);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit_tev0(q, 3u, 3u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    check(mem[o + 0] == 0xFF && mem[o + 1] == 0x00 && mem[o + 2] == 0x00 && mem[o + 3] == 0x00,
+          "Texture2D mit denselben Koordinaten => Zeile 6 schwarz");
+
+    /* 3) Shadow2D (Typ 2): u/v /= tc0_w (nicht orthographisch),
+       shadow_z = |tc0_w|. Texel (4,3) mit Rot 0x5A und z_ref 0.
+       tc0_w=0.5 -> z_int=0x7FFFFF > 0 => Density 0. */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x200);
+    memset(tile, 0, 0x200);
+    for (i = 0; i < 64; i++)
+        t_tex_encode(tile, 0, (unsigned)i, black);
+    {
+        unsigned char ref[4] = {0x5A, 0, 0, 0};
+        t_tex_encode(tile, 0, (unsigned)t_morton(4, 3), ref);
+    }
+    t_light_vertices(c, VTX, 0.0f, 0.25f, 0.25f, 0.25f, 0.25f, 0.5f, view, quat);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_tex(q, TEX, 8, 8, 0, 2u << 28);  /* Typ Shadow2D */
+    q = emit(q, 0x8B, 0u);                      /* orthographic=0, bias=0 */
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit_tev0(q, 3u, 3u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    check(mem[o + 0] == 0 && mem[o + 3] == 0,
+          "Shadow2D: z_ref 0 < z_int 0x7FFFFF => Density 0");
+
+    /* Bias 0x400001 (Bits1..23) hebt z_int auf -1: z_ref 0 >= -1 => rot. */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x200);
+    t_light_vertices(c, VTX, 0.0f, 0.25f, 0.25f, 0.25f, 0.25f, 0.5f, view, quat);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_tex(q, TEX, 8, 8, 0, 2u << 28);
+    q = emit(q, 0x8B, 0x400001u << 1);          /* bias 0x400001 */
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit_tev0(q, 3u, 3u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    check(mem[o + 0] == 0x5A && mem[o + 1] == 0x5A && mem[o + 3] == 0x5A,
+          "Shadow2D: bias verschiebt z_int unter z_ref => Density 0x5A");
+
+    /* 4) ShadowCube (Typ 4): +X-Face wie oben, shadow_z=|z|=0.6,
+       Texel (2,5) mit Rot 0x44 und z_ref 0xFFFFFF => Density 0x44. */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x200);
+    memset(tile, 0, 0x200);
+    for (i = 0; i < 64; i++)
+        t_tex_encode(tile, 0, (unsigned)i, black);
+    {
+        unsigned char ref[4] = {0x44, 0xFF, 0xFF, 0xFF};
+        t_tex_encode(tile, 0, (unsigned)t_morton(2, 5), ref);
+    }
+    t_light_vertices(c, VTX, 0.0f, 0.6f, 0.2f, 0.6f, 0.2f, 0.3f, view, quat);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_tex(q, TEX, 8, 8, 0, 4u << 28);  /* Typ ShadowCube */
+    q = emit(q, 0x8B, 0u);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit_tev0(q, 3u, 3u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    check(mem[o + 0] == 0x44 && mem[o + 1] == 0x44 && mem[o + 2] == 0x44 &&
+          mem[o + 3] == 0x44,
+          "ShadowCube: Face +X, shadow_z 0.6, z_ref 0xFFFFFF => Density 0x44");
+}
+
 int main(void) {
+
     static unsigned char mem[0x100000];
     ArmCpu c;
     uint32_t *p;
@@ -1923,6 +2423,8 @@ int main(void) {
     test_uniform_masks(&c, mem);
     test_no_program(&c, mem);
     test_fb_clamp(&c, mem);
+    test_lighting(&c, mem);
+    test_texture_projection_cube(&c, mem);
 
     printf("ERGEBNIS: %s\n", fails == 0 ? "OK" : "FEHLER");
     return fails == 0 ? 0 : 1;

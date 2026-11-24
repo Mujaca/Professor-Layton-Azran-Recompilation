@@ -77,3 +77,4 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | 2026-11-24 | pica-texturen-blend | 3/10 | hid:USER | 0 |
 | 2026-11-24 | pica-luecken | 3/10 | hid:USER | 0 |
 | 2026-11-24 | pica-review-fixes | 9/10 | boss:U | 0 |
+| 2026-11-24 | pica-lighting | 9/10 | boss:U | 0 |

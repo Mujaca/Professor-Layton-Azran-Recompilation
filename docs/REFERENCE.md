@@ -290,6 +290,40 @@ Quelle: Azahar `renderer_software/sw_rasterizer.cpp`, `sw_clipper.cpp`,
   `t = height - 1 - t`. Der Azahar-Software-Renderer wertet Min-/Mag-Filter
   nicht aus (`TODO: Apply the min and mag filters`), sondern liest immer den
   nächsten Texel.
+* **Texturtypen (nur Einheit 0, 3dbrew/Azahar `TextureColor`):** Typ in
+  0x83 Bits28..30: 0 Texture2D, 1 TextureCube, 2 Shadow2D, 3 Projection2D,
+  4 ShadowCube, 5 Disabled (liefert 0,0,0,0). Einheiten 1/2 ignorieren den
+  Typ. `Projection2D` teilt u/v durch `tc0_w` (Semantik 16, TEXCOORD0_W).
+  `Cube`/`ShadowCube` wählen die dominante Achse von (u,v,tc0_w), Face-Adresse
+  `address*8` mit Bits0..21 aus `0x86..0x8A` (übrige Bits von 0x85),
+  `u'=x/z*0.5+0.5`, `v'=y/z*0.5+0.5`. `Shadow2D` teilt bei
+  `0x8B` Bit0 = 0 (perspektivisch) u/v durch tc0_w; Shadow-Tiefe ist
+  `|tc0_w|` (Cube: `|z|`). Danach je Texel
+  `z_int = min(shadow_z,1)*0xFFFFFF - (bias<<1)` (bias = 0x8B Bits1..23) und
+  `z_ref = (a<<16)|(b<<8)|g`; Density = r wenn `z_ref >= z_int`, sonst 0
+  (alle vier Kanäle).
+* **Fragment-Lighting (`0x140..0x1D9`, Azahar `sw_lighting.cpp`,
+  `regs_lighting.h`):** 8 Lichtquellen à 0x10 Wörter ab 0x140 (specular_0,
+  specular_1, diffuse, ambient als 10-Bit-Kanäle/255; Position x/y/z als f16;
+  Spot-Richtung x/y/z als fix1.1.11/2047; config Bits0..3 directional/
+  two_sided/geometric0/1; dist_atten_bias/scale als f20 = Float<12,7>).
+  `0x1C0` global_ambient, `0x1C2` max_light_index, `0x1C3` config0
+  (Bit0 Shadow, Bits2/3 Primary/Secondary-Alpha, Bits4..7 Config 0..8,
+  Bits16/17 Shadow primary/secondary, Bit18 invert, Bit19 Shadow-Alpha,
+  Bits22..23 Bump-Selector, Bits24..25 Shadow-Selector, Bit27 Clamp,
+  Bits28..29 Bump-Modus, Bit30 Renorm aus), `0x1C4` config1
+  (Bits0..7 Shadow aus, 8..15 Spot aus, 16/17 D0/D1-LUT aus, 19 Fresnel,
+  20..22 Reflect R/G/B, 24..31 Distanz aus), `0x1C5` LUT-Typ (Bits8..12)
+  und -Index (Bits0..7), `0x1C6` Bit0 Lighting aus, `0x1C8..0x1CF` LUT-Daten
+  (jedes Wort landet bei Typ/Index, danach Index+1 mod 256),
+  `0x1D0` Abs-Modus je Eingang, `0x1D1` LUT-Eingang je Kanal
+  (0 NH, 1 VH, 2 NV, 3 LN, 4 SP, 5 CP), `0x1D2` Skalierung
+  (0 1x, 1 2x, 2 4x, 3 8x, 6 0.25x, 7 0.5x), `0x1D9` Light-Enable
+  (3 Bit je Slot). 24 LUTs à 256 Einträge: Bits0..11 `value`/4095,
+  Bits12..22 `difference`/2047, Bit23 negatives Vorzeichen. Ohne Abs-Modus
+  ist der Index signed (result*128), sonst unsigned (result*256).
+  Ergebnis (Diffus+Global-Ambient, Specular) wird 0..1 geklemmt und als
+  Primary/Secondary-Fragment den TEV-Quellen 1/2 zugeführt.
 * **Farbziel:** Output-Merger 0x100..0x107: 0x100 Bit0..1
   `fragment_operation_mode`, Bit8 `alphablend_enable`; 0x101 Gleichungen
   (RGB Bits 0..2, Alpha 8..10) und Faktoren (Src RGB 16..19, Dst RGB 20..23,

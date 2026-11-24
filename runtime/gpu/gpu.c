@@ -11,12 +11,16 @@
  * Fragment-Pipeline: Sutherland-Hodgman-Clipping, 12.4-Coverage, TEV
  * 0x0C0..0x0FD, Texturen 0x080..0x09F (alle 14 Formate, 8x8-Morton,
  * Wrap/Border; keine Filterung wie Azahar, ETC1-Subtiles nach rohen
- * Kachelkoordinaten; nur Einheit 0 beachtet den Typ, TEXCOORD2 = 22/23),
- * Output-Merger 0x100..0x107 (Blending, LogicOp, Alpha-Test) und
- * Farb-/Tiefenziel 0x110..0x11E (Kanalmasken, RGBA8/RGB8/
- * RGB5A1/RGB565/RGBA4, Depth-Test/Write, Stencil, D16/D24/D24S8) sowie
- * Fog (0xE0/0xE1/0xE6/0xE8..0xEF, Azahar sw_rasterizer.cpp WriteFog).
- * Noch offen (ROADMAP M5): Lighting, Mipmaps, Proctex.
+ * Kachelkoordinaten; nur Einheit 0 beachtet den Typ: Projection2D,
+ * Cube/ShadowCube (Face-Adressen 0x86..0x8A), Shadow2D inkl. Bias,
+ * TEXCOORD0_W 0x8B; TEXCOORD2 = 22/23), Fragment-Lighting 0x140..0x1D9
+ * nach Azahar sw_lighting.cpp (Lichtquellen, Distanz-/Spot-Daempfung,
+ * Fresnel, Bump-Mapping, Clamp, LUT-Upload 0x1C5/0x1C8..0x1CF) in die
+ * TEV-Quellen Primary/SecondaryFragment, Output-Merger 0x100..0x107
+ * (Blending, LogicOp, Alpha-Test) und Farb-/Tiefenziel 0x110..0x11E
+ * (Kanalmasken, RGBA8/RGB8/RGB5A1/RGB565/RGBA4, Depth-Test/Write,
+ * Stencil, D16/D24/D24S8) sowie Fog (0xE0/0xE1/0xE6/0xE8..0xEF, Azahar
+ * sw_rasterizer.cpp WriteFog). Noch offen (ROADMAP M5): Mipmaps, Proctex.
  */
 
 #include <stdint.h>
@@ -97,6 +101,11 @@ static uint32_t p_regs[PICA_NREGS] = {
 /* Fog-LUT (0xE8..0xEF schreiben bei 0xE6 % 128, danach Offset++). */
 static uint32_t g_fog_lut[128];
 
+/* Lighting-LUT (Azahar PicaCore::Lighting.luts): 24 Typen a 256 Eintraege,
+   gefuellt ueber 0x1C8..0x1CF mit Typ/Index aus 0x1C5. */
+#define LIGHT_LUT_COUNT 24
+static uint32_t g_light_lut[LIGHT_LUT_COUNT][256];
+
 static void p_vs_reset(void);
 static void p_vs_reset_draw_state(void);
 
@@ -132,6 +141,7 @@ void gpu_pica_reset(void)
 {
     memset(p_regs, 0, sizeof(p_regs));
     memset(g_fog_lut, 0, sizeof(g_fog_lut));
+    memset(g_light_lut, 0, sizeof(g_light_lut));
     p_regs[0x020] = 0x12345678u;
     p_regs[0x030] = 0xFFFFFFF0u;
     p_regs[0x034] = 0x00000001u;
@@ -209,6 +219,41 @@ static float p_f24_to_float(uint32_t hex)
         fp32 = sign | (0xFFu << 23) | (mantissa << 7);
     } else {
         fp32 = sign | ((uint32_t)(64 + exponent) << 23) | (mantissa << 7);
+    }
+    {
+        float f;
+        memcpy(&f, &fp32, 4);
+        return f;
+    }
+}
+
+/* Generisches Pica::Float<M,E>::FromRaw (Azahar pica_types.h) fuer f16
+   (10/5, Lichtposition) und f20 (12/7, Distanzdaempfung). */
+static float p_pica_small_float(uint32_t hex, int mbits, int ebits)
+{
+    int bias = 127 - ((1 << (ebits - 1)) - 1);
+    uint32_t exp_mask = (1u << ebits) - 1u;
+    uint32_t mant_mask = (1u << mbits) - 1u;
+    uint32_t exponent = (hex >> mbits) & exp_mask;
+    uint32_t mantissa = hex & mant_mask;
+    uint32_t sign = (hex >> (ebits + mbits)) << 31;
+    uint32_t fp32;
+
+    if (exponent == 0u && mantissa == 0u) {
+        fp32 = sign;
+    } else if (exponent == 0u) {
+        int e = bias + 1;
+        while ((mantissa & (1u << mbits)) == 0u) {
+            e--;
+            mantissa <<= 1;
+        }
+        mantissa &= mant_mask;
+        fp32 = sign | ((uint32_t)e << 23) | (mantissa << (23 - mbits));
+    } else if (exponent == exp_mask) {
+        fp32 = sign | (0xFFu << 23) | (mantissa << (23 - mbits));
+    } else {
+        fp32 = sign | ((uint32_t)(bias + (int)exponent) << 23) |
+               (mantissa << (23 - mbits));
     }
     {
         float f;
@@ -555,8 +600,10 @@ static int p_wrap_coord(uint32_t mode, int val, int size)
     }
 }
 
-/* Texel einer Einheit an (x,y) ohne Wrap (Koordinaten bereits im Bild). */
-static int p_lookup_texel(ArmCpu *c, uint32_t unit, int x, int y,
+/* Texel einer Einheit an (x,y) ohne Wrap (Koordinaten bereits im Bild).
+   texaddr ist die physische Basisadresse des Texturbildes (Azahar
+   FullTextureConfig/memory.GetPhysicalPointer). */
+static int p_lookup_texel(ArmCpu *c, uint32_t unit, uint32_t texaddr, int x, int y,
                           unsigned char out[4])
 {
     uint32_t size = p_regs[p_tex_base(unit) + 1u];
@@ -568,7 +615,7 @@ static int p_lookup_texel(ArmCpu *c, uint32_t unit, int x, int y,
 
     if (w <= 0 || h <= 0 || ts == 0u) return 0;
     if (x < 0 || y < 0 || x >= w || y >= h) return 0;
-    off = gpu_pica_phys_to_guest((p_regs[p_tex_base(unit) + 4u] & 0x0FFFFFFFu) * 8u)
+    off = gpu_pica_phys_to_guest(texaddr)
         + (uint32_t)(y / 8) * ts * (uint32_t)(w / 8)
         + (uint32_t)(x / 8) * ts;
     if (off + ts > c->mem_size) return 0;
@@ -578,7 +625,7 @@ static int p_lookup_texel(ArmCpu *c, uint32_t unit, int x, int y,
 }
 
 /* Eine Adresse inkl. Wrap/Border/Farbtiefe (t invertiert) sampeln. */
-static int p_texel_wrapped(ArmCpu *c, uint32_t unit, int s, int t,
+static int p_texel_wrapped(ArmCpu *c, uint32_t unit, uint32_t texaddr, int s, int t,
                            unsigned char out[4])
 {
     uint32_t base = p_tex_base(unit);
@@ -609,29 +656,116 @@ static int p_texel_wrapped(ArmCpu *c, uint32_t unit, int s, int t,
         out[3] = 0;
         return 0;
     }
-    return p_lookup_texel(c, unit, s, h - 1 - t, out);
+    return p_lookup_texel(c, unit, texaddr, s, h - 1 - t, out);
+}
+
+/* Physische Basisadresse der Einheit (Azahar GetPhysicalAddress = address*8). */
+static uint32_t p_tex_phys_addr(uint32_t unit)
+{
+    return (p_regs[p_tex_base(unit) + 4u] & 0x0FFFFFFFu) * 8u;
+}
+
+/* Cube-Face-Adresse (Azahar TexturingRegs::GetCubePhysicalAddress): Bits
+   22..27 der Hauptadresse sind mit allen Zusatzadressen geteilt. */
+static uint32_t p_cube_phys_addr(uint32_t face)
+{
+    uint32_t addr = p_regs[0x85] & 0x0FFFFFFFu;
+    if (face != 0u) {
+        uint32_t fa = p_regs[0x86u + face - 1u] & 0x3FFFFFu;
+        addr = (addr & ~0x3FFFFFu) | fa;
+    }
+    return addr * 8u;
+}
+
+/* Azahar sw_clipper.cpp ConvertCubeCoord: waehlt die dominante Achse, die
+   Face-Adresse und liefert u/v im Face-Raum sowie |z| als Shadow-Tiefe. */
+static void p_cube_coord(float u, float v, float w, float *ou, float *ov,
+                         float *shadow_z, uint32_t *face)
+{
+    float au = fabsf(u), av = fabsf(v), aw = fabsf(w);
+    float x, y, z;
+
+    if (au > av && au > aw) {
+        if (u > 0.0f) { *face = 0u; y = -v; } else { *face = 1u; y = v; }
+        x = -w; z = u;
+    } else if (av > aw) {
+        if (v > 0.0f) { *face = 2u; x = u; } else { *face = 3u; x = -u; }
+        y = w; z = v;
+    } else {
+        if (w > 0.0f) { *face = 4u; y = -v; } else { *face = 5u; y = v; }
+        x = u; z = w;
+    }
+    *shadow_z = fabsf(z);
+    if (z != 0.0f) { x /= z; y /= z; } else { x = 0.0f; y = 0.0f; }
+    *ou = x * 0.5f + 0.5f;
+    *ov = y * 0.5f + 0.5f;
 }
 
 /* Sample einer Textureinheit 0..2 (Azahar sw_rasterizer.cpp TextureColor).
  * Der Azahar-Software-Renderer wertet die Min-/Mag-Filter nicht aus
  * ("TODO: Apply the min and mag filters"); es wird immer der naechste
- * Texel gelesen. */
-static void p_sample_tex(ArmCpu *c, uint32_t unit, float u, float v,
+ * Texel gelesen. Nur Einheit 0 beachtet den Texturtyp (3dbrew):
+ *   1 Cube/4 ShadowCube -> Face-Adresse + Face-Koordinaten (tc0_w als w)
+ *   2 Shadow2D          -> optional Perspektivdivision, Shadow-Vergleich
+ *   3 Projection2D      -> u/v /= tc0_w
+ *   5 Disabled          -> Textur liefert (0,0,0,0)
+ */
+static void p_sample_tex(ArmCpu *c, uint32_t unit, float u, float v, float tc0_w,
                          unsigned char out[4])
 {
     uint32_t base = p_tex_base(unit);
     uint32_t cfg = p_regs[base + 2u];
     uint32_t size = p_regs[base + 1u];
+    uint32_t texaddr = p_tex_phys_addr(unit);
     int w = (int)((size >> 16) & 0x7FFu);
     int h = (int)(size & 0x7FFu);
+    uint32_t type = 0u;
+    float shadow_z = 0.0f;
 
     out[0] = out[1] = out[2] = out[3] = 0;
     if (!(p_regs[0x80] & (1u << unit))) return;   /* Azahar: {0,0,0,0} */
-    if (unit == 0u && ((cfg >> 28) & 7u) == 5u) return;   /* Azahar: nur Einheit 0 beachtet den Typ */
-    if ((p_regs[base + 4u] & 0x0FFFFFFFu) == 0u) { out[3] = 255; return; }
+    if (texaddr == 0u) { out[3] = 255; return; }
     if (w <= 0 || h <= 0) return;
-    if (!p_texel_wrapped(c, unit, (int)(u * (float)w), (int)(v * (float)h), out))
+
+    if (unit == 0u) {
+        type = (cfg >> 28) & 7u;
+        switch (type) {
+        case 1u: case 4u: {                    /* Cube / ShadowCube */
+            uint32_t face = 0u;
+            float cu, cv;
+            p_cube_coord(u, v, tc0_w, &cu, &cv, &shadow_z, &face);
+            u = cu; v = cv;
+            texaddr = p_cube_phys_addr(face);
+            break;
+        }
+        case 2u:                                /* Shadow2D */
+            if (!(p_regs[0x8B] & 1u) && tc0_w != 0.0f) { u /= tc0_w; v /= tc0_w; }
+            shadow_z = fabsf(tc0_w);
+            break;
+        case 3u:                                /* Projection2D */
+            if (tc0_w != 0.0f) { u /= tc0_w; v /= tc0_w; }
+            break;
+        case 5u:                                /* Disabled */
+            return;
+        default:
+            break;
+        }
+    }
+
+    if (!p_texel_wrapped(c, unit, texaddr, (int)(u * (float)w), (int)(v * (float)h), out))
         out[0] = out[1] = out[2] = out[3] = 0;
+
+    if (unit == 0u && (type == 2u || type == 4u)) {
+        /* Azahar: z_int = min(shadow_z,1)*0xFFFFFF - (bias << 1);
+           z_ref = (w<<16)|(z<<8)|y; Density = (z_ref >= z_int) ? x : 0. */
+        int z_int = (int)((shadow_z < 1.0f ? shadow_z : 1.0f) * 16777215.0f);
+        int z_ref;
+        unsigned density;
+        z_int -= (int)((p_regs[0x8B] >> 1) & 0x7FFFFFu) << 1;
+        z_ref = (out[3] << 16) | (out[2] << 8) | out[1];
+        density = (z_ref >= z_int) ? out[0] : 0u;
+        out[0] = out[1] = out[2] = out[3] = (unsigned char)density;
+    }
 }
 
 /* ================= TEV (Fragment-Combiner) =================
@@ -641,7 +775,17 @@ static void p_sample_tex(ArmCpu *c, uint32_t unit, float u, float v,
  *   +0 sources, +1 modifiers, +2 ops, +3 const_color, +4 scales.
  */
 typedef struct { unsigned char c[4]; } PicaColor;
-typedef struct { float pos[4]; float color[4]; float uv[3][2]; } PicaVertex;
+/* Azahar pica/output_vertex.h: Semantic 0..3 POSITION, 4..7 QUATERNION,
+   8..11 COLOR, 12/13 TEXCOORD0, 14/15 TEXCOORD1, 16 TEXCOORD0_W,
+   18..20 VIEW, 22/23 TEXCOORD2. */
+typedef struct {
+    float pos[4];
+    float quat[4];
+    float color[4];
+    float uv[3][2];
+    float tc0_w;
+    float view[3];
+} PicaVertex;
 
 /* Primitive Assembly (Azahar pica/primitive_assembly.cpp): zwei gepufferte
  * Vertices; bei Strip wird jedes zweite Dreieck als (v2,v1,v3) ausgegeben.
@@ -701,6 +845,451 @@ static void p_apply_fog(float depth, PicaColor *out)
         float fog_c = (float)((color >> (8u * i)) & 0xFFu);
         out->c[i] = (unsigned char)(fog_factor * (float)out->c[i] +
                                     (1.0f - fog_factor) * fog_c);
+    }
+}
+
+
+/* ================= Fragment-Lighting (Azahar sw_lighting.cpp) =================
+ * Register 0x140..0x1D9 (Pica::LightingRegs):
+ *   0x140 + n*0x10  LightSrc n: specular_0, specular_1, diffuse, ambient,
+ *                   Position x/y (f16), z (f16), Spot x/y, z (fix1.1.11),
+ *                   config, dist_atten_bias/scale (f20)
+ *   0x1C0 global_ambient, 0x1C2 max_light_index, 0x1C3 config0,
+ *   0x1C4 config1, 0x1C5 lut_config, 0x1C6 disable,
+ *   0x1C8..0x1CF lut_data (schreibt LUT[type][index], index++),
+ *   0x1D0 abs_lut_input, 0x1D1 lut_input, 0x1D2 lut_scale,
+ *   0x1D9 light_enable (3 Bit je Slot).
+ */
+#define LIGHT_LUT_COUNT 24
+static uint32_t g_light_lut[LIGHT_LUT_COUNT][256];
+
+static void p_light_lut_write(uint32_t value)
+{
+    uint32_t cfg = p_regs[0x1C5];
+    uint32_t type = (cfg >> 8) & 0x1Fu;
+    uint32_t idx = cfg & 0xFFu;
+    if (type < LIGHT_LUT_COUNT) g_light_lut[type][idx] = value;
+    p_regs[0x1C5] = (cfg & ~0xFFu) | ((idx + 1u) & 0xFFu);
+}
+
+/* LutEntry: Bits0..11 value (0.0.12), Bits12..22 diff (0.0.11),
+   Bit23 neg_difference. */
+static float p_light_lut_lookup(uint32_t lut, unsigned index, float delta)
+{
+    uint32_t e = g_light_lut[lut % LIGHT_LUT_COUNT][index & 0xFFu];
+    float value = (float)(e & 0xFFFu) / 4095.0f;
+    float diff = (float)((e >> 12) & 0x7FFu) / 2047.0f;
+    if (e & (1u << 23)) diff = -diff;
+    return value + diff * delta;
+}
+
+/* Pica::LightingRegs::LightColor: 10-Bit-Felder, 255 entspricht 1.0. */
+static void p_light_color(uint32_t v, float out[3])
+{
+    out[0] = (float)((v >> 20) & 0x3FFu) / 255.0f;
+    out[1] = (float)((v >> 10) & 0x3FFu) / 255.0f;
+    out[2] = (float)(v & 0x3FFu) / 255.0f;
+}
+
+static int p_light_sampler_supported(uint32_t config, uint32_t sampler)
+{
+    if (sampler >= 8u && sampler <= 15u) sampler = 8u;   /* SpotlightAttenuation */
+    switch (sampler) {
+    case 0u: return config != 1u;                        /* Distribution0 */
+    case 1u: return config != 0u && config != 1u && config != 5u;
+    case 8u: return config != 2u && config != 3u;        /* SpotlightAttenuation */
+    case 3u: return config != 0u && config != 2u && config != 4u;  /* Fresnel */
+    case 6u: return config != 3u;                        /* ReflectRed */
+    case 4u: case 5u:                                    /* ReflectBlue/Green */
+        return config == 4u || config == 5u || config == 8u;
+    default: return 0;
+    }
+}
+
+static float p_light_scale(uint32_t s)
+{
+    switch (s & 7u) {
+    case 0u: return 1.0f;
+    case 1u: return 2.0f;
+    case 2u: return 4.0f;
+    case 3u: return 8.0f;
+    case 6u: return 0.25f;
+    case 7u: return 0.5f;
+    default: return 0.0f;
+    }
+}
+
+static float p_v3_dot(const float a[3], const float b[3])
+{
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+static void p_v3_cross(const float a[3], const float b[3], float o[3])
+{
+    o[0] = a[1] * b[2] - a[2] * b[1];
+    o[1] = a[2] * b[0] - a[0] * b[2];
+    o[2] = a[0] * b[1] - a[1] * b[0];
+}
+
+/* Normalisiert in-place und liefert die Laenge (Azahar Vec3::Normalize). */
+static float p_v3_normalize(float v[3])
+{
+    float len = sqrtf(p_v3_dot(v, v));
+    if (len != 0.0f) { v[0] /= len; v[1] /= len; v[2] /= len; }
+    return len;
+}
+
+static void p_v3_normalized(const float in[3], float out[3])
+{
+    out[0] = in[0]; out[1] = in[1]; out[2] = in[2];
+    p_v3_normalize(out);
+}
+
+/* Common::QuaternionRotate: v + 2*Cross(q.xyz, Cross(q.xyz, v) + v*q.w). */
+static void p_quat_rotate(const float q[4], const float v[3], float o[3])
+{
+    float qv[3], t[3], c[3];
+    int i;
+    qv[0] = q[0]; qv[1] = q[1]; qv[2] = q[2];
+    p_v3_cross(qv, v, t);
+    for (i = 0; i < 3; i++) t[i] += v[i] * q[3];
+    p_v3_cross(qv, t, c);
+    for (i = 0; i < 3; i++) o[i] = v[i] + 2.0f * c[i];
+}
+
+typedef struct {
+    const float *normal;
+    const float *half_vector;
+    const float *norm_view;
+    const float *light_vector;
+    const float *tangent;
+    float spot_dir[3];
+    uint32_t config;
+} LightCtx;
+
+/* Azahar sw_lighting.cpp get_lut_value. */
+static float p_light_lut_value(const LightCtx *ctx, uint32_t input, int abs_val,
+                               uint32_t scale_enum, uint32_t sampler)
+{
+    float result = 0.0f, nh[3];
+    unsigned index;
+    float delta, scale;
+
+    switch (input) {
+    case 0u:                                  /* NH */
+        p_v3_normalized(ctx->half_vector, nh);
+        result = p_v3_dot(ctx->normal, nh);
+        break;
+    case 1u:                                  /* VH */
+        p_v3_normalized(ctx->half_vector, nh);
+        result = p_v3_dot(ctx->norm_view, nh);
+        break;
+    case 2u:                                  /* NV */
+        result = p_v3_dot(ctx->normal, ctx->norm_view);
+        break;
+    case 3u:                                  /* LN */
+        result = p_v3_dot(ctx->light_vector, ctx->normal);
+        break;
+    case 4u:                                  /* SP */
+        result = p_v3_dot(ctx->light_vector, ctx->spot_dir);
+        break;
+    case 5u:                                  /* CP */
+        if (ctx->config == 8u) {
+            float proj[3];
+            int i;
+            p_v3_normalized(ctx->half_vector, nh);
+            {
+                float d = p_v3_dot(ctx->normal, nh);
+                for (i = 0; i < 3; i++) proj[i] = nh[i] - ctx->normal[i] * d;
+            }
+            result = p_v3_dot(proj, ctx->tangent);
+        }
+        break;
+    default:
+        break;
+    }
+
+    if (abs_val) {
+        result = (result < 0.0f) ? -result : result;
+        {
+            float flr = floorf(result * 256.0f);
+            if (flr < 0.0f) flr = 0.0f;
+            if (flr > 255.0f) flr = 255.0f;
+            index = (unsigned)flr;
+            delta = result * 256.0f - (float)index;
+        }
+    } else {
+        float flr = floorf(result * 128.0f);
+        int8_t signed_index;
+        if (flr < -128.0f) flr = -128.0f;
+        if (flr > 127.0f) flr = 127.0f;
+        signed_index = (int8_t)flr;
+        delta = result * 128.0f - (float)signed_index;
+        index = (unsigned)(uint8_t)signed_index;
+    }
+    scale = p_light_scale(scale_enum);
+    return scale * p_light_lut_lookup(sampler, index, delta);
+}
+
+/* Azahar SwRenderer::ComputeFragmentsColors. */
+static void p_compute_fragments(const PicaColor tex[4], const float quat_in[4],
+                                const float view_in[3], PicaColor *out_primary,
+                                PicaColor *out_secondary)
+{
+    const uint32_t config0 = p_regs[0x1C3];
+    const uint32_t config1 = p_regs[0x1C4];
+    const uint32_t lut_input = p_regs[0x1D1];
+    const uint32_t lut_scale = p_regs[0x1D2];
+    const uint32_t abs_lut = p_regs[0x1D0];
+    const uint32_t config = (config0 >> 4) & 0xFu;
+    const uint32_t max_light = p_regs[0x1C2] & 7u;
+    float shadow[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    float surface_normal[3], surface_tangent[3];
+    float normal[3], tangent[3];
+    float quat[4], view[3];
+    float diffuse_sum[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    float specular_sum[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    float gal[3];
+    uint32_t num, i, li;
+
+    quat[0] = quat_in[0]; quat[1] = quat_in[1];
+    quat[2] = quat_in[2]; quat[3] = quat_in[3];
+    {
+        float l = sqrtf(quat[0] * quat[0] + quat[1] * quat[1] +
+                        quat[2] * quat[2] + quat[3] * quat[3]);
+        if (l != 0.0f) for (i = 0; i < 4u; i++) quat[i] /= l;
+    }
+    view[0] = view_in[0]; view[1] = view_in[1]; view[2] = view_in[2];
+
+    if (config0 & 1u) {                       /* enable_shadow */
+        uint32_t sel = (config0 >> 24) & 3u;
+        for (i = 0; i < 4u; i++) shadow[i] = (float)tex[sel].c[i] / 255.0f;
+        if (config0 & (1u << 18))             /* shadow_invert */
+            for (i = 0; i < 4u; i++) shadow[i] = 1.0f - shadow[i];
+    }
+
+    if (((config0 >> 28) & 3u) != 0u) {       /* bump_mode != None */
+        uint32_t sel = (config0 >> 22) & 3u;
+        float perturbation[3];
+        for (i = 0; i < 3u; i++)
+            perturbation[i] = (float)tex[sel].c[i] / 127.5f - 1.0f;
+        if (((config0 >> 28) & 3u) == 1u) {   /* NormalMap */
+            if (!(config0 & (1u << 30))) {    /* disable_bump_renorm */
+                float z2 = 1.0f - (perturbation[0] * perturbation[0] +
+                                   perturbation[1] * perturbation[1]);
+                perturbation[2] = sqrtf(z2 > 0.0f ? z2 : 0.0f);
+            }
+            surface_normal[0] = perturbation[0];
+            surface_normal[1] = perturbation[1];
+            surface_normal[2] = perturbation[2];
+            surface_tangent[0] = 1.0f;
+            surface_tangent[1] = 0.0f;
+            surface_tangent[2] = 0.0f;
+        } else {                              /* TangentMap */
+            surface_normal[0] = 0.0f;
+            surface_normal[1] = 0.0f;
+            surface_normal[2] = 1.0f;
+            surface_tangent[0] = perturbation[0];
+            surface_tangent[1] = perturbation[1];
+            surface_tangent[2] = perturbation[2];
+        }
+    } else {
+        surface_normal[0] = 0.0f;
+        surface_normal[1] = 0.0f;
+        surface_normal[2] = 1.0f;
+        surface_tangent[0] = 1.0f;
+        surface_tangent[1] = 0.0f;
+        surface_tangent[2] = 0.0f;
+    }
+
+    p_quat_rotate(quat, surface_normal, normal);
+    p_quat_rotate(quat, surface_tangent, tangent);
+
+    for (li = 0; li <= max_light; li++) {
+        num = (p_regs[0x1D9] >> (li * 4u)) & 7u;
+        {
+            const uint32_t lb = 0x140u + num * 0x10u;
+            const uint32_t lcfg = p_regs[lb + 9u];
+            float position[3], light_vector[3], norm_view[3], half_vector[3];
+            float refl_value[3], specular_0[3], specular_1[3];
+            float light_diffuse[3], light_ambient[3];
+            float shadow_p[3] = {1.0f, 1.0f, 1.0f};
+            float shadow_s[3] = {1.0f, 1.0f, 1.0f};
+            float dist_atten = 1.0f, spot_atten = 1.0f;
+            float d0_lut = 1.0f, d1_lut = 1.0f;
+            float dot_product, clamp_highlights = 1.0f;
+            float length;
+            LightCtx ctx;
+            int abs_val;
+
+            position[0] = p_pica_small_float(p_regs[lb + 4u] & 0xFFFFu, 10, 5);
+            position[1] = p_pica_small_float((p_regs[lb + 4u] >> 16) & 0xFFFFu, 10, 5);
+            position[2] = p_pica_small_float(p_regs[lb + 5u] & 0xFFFFu, 10, 5);
+
+            if (lcfg & 1u) {
+                light_vector[0] = position[0];
+                light_vector[1] = position[1];
+                light_vector[2] = position[2];
+            } else {
+                light_vector[0] = position[0] + view[0];
+                light_vector[1] = position[1] + view[1];
+                light_vector[2] = position[2] + view[2];
+            }
+            length = p_v3_normalize(light_vector);
+            p_v3_normalized(view, norm_view);
+            half_vector[0] = norm_view[0] + light_vector[0];
+            half_vector[1] = norm_view[1] + light_vector[1];
+            half_vector[2] = norm_view[2] + light_vector[2];
+
+            if (!(config1 & (1u << (24u + num)))) {   /* dist attenuation */
+                float scale = p_pica_small_float(p_regs[lb + 0xBu] & 0xFFFFFu, 12, 7);
+                float bias = p_pica_small_float(p_regs[lb + 0xAu] & 0xFFFFFu, 12, 7);
+                float sample_loc = scale * length + bias;
+                float flr;
+                unsigned lutindex;
+                float delta;
+                if (sample_loc < 0.0f) sample_loc = 0.0f;
+                if (sample_loc > 1.0f) sample_loc = 1.0f;
+                flr = floorf(sample_loc * 256.0f);
+                if (flr < 0.0f) flr = 0.0f;
+                if (flr > 255.0f) flr = 255.0f;
+                lutindex = (unsigned)flr;
+                delta = sample_loc * 256.0f - (float)lutindex;
+                dist_atten = p_light_lut_lookup(16u + num, lutindex, delta);
+            }
+
+            ctx.normal = normal;
+            ctx.half_vector = half_vector;
+            ctx.norm_view = norm_view;
+            ctx.light_vector = light_vector;
+            ctx.tangent = tangent;
+            ctx.config = config;
+            {
+                int32_t sx = ((int32_t)(p_regs[lb + 6u] << 19)) >> 19;
+                int32_t sy = ((int32_t)((p_regs[lb + 6u] >> 16) << 19)) >> 19;
+                int32_t sz = ((int32_t)(p_regs[lb + 7u] << 19)) >> 19;
+                ctx.spot_dir[0] = (float)sx / 2047.0f;
+                ctx.spot_dir[1] = (float)sy / 2047.0f;
+                ctx.spot_dir[2] = (float)sz / 2047.0f;
+            }
+
+            if (!(config1 & (1u << (8u + num))) &&
+                p_light_sampler_supported(config, 8u)) {
+                abs_val = ((abs_lut >> 9) & 1u) == 0;
+                spot_atten = p_light_lut_value(&ctx, (lut_input >> 8) & 7u,
+                                               abs_val, (lut_scale >> 8) & 7u, 8u + num);
+            }
+
+            if (!(config1 & (1u << 16)) &&
+                p_light_sampler_supported(config, 0u)) {
+                abs_val = ((abs_lut >> 1) & 1u) == 0;
+                d0_lut = p_light_lut_value(&ctx, lut_input & 7u, abs_val,
+                                           lut_scale & 7u, 0u);
+            }
+            p_light_color(p_regs[lb + 0u], specular_1);   /* specular_0 Kanal */
+            specular_0[0] = d0_lut * specular_1[0];
+            specular_0[1] = d0_lut * specular_1[1];
+            specular_0[2] = d0_lut * specular_1[2];
+
+            if (!(config1 & (1u << 20)) && p_light_sampler_supported(config, 6u)) {
+                abs_val = ((abs_lut >> 25) & 1u) == 0;
+                refl_value[0] = p_light_lut_value(&ctx, (lut_input >> 24) & 7u,
+                                                  abs_val, (lut_scale >> 24) & 7u, 6u);
+            } else {
+                refl_value[0] = 1.0f;
+            }
+            if (!(config1 & (1u << 21)) && p_light_sampler_supported(config, 5u)) {
+                abs_val = ((abs_lut >> 21) & 1u) == 0;
+                refl_value[1] = p_light_lut_value(&ctx, (lut_input >> 20) & 7u,
+                                                  abs_val, (lut_scale >> 20) & 7u, 5u);
+            } else {
+                refl_value[1] = refl_value[0];
+            }
+            if (!(config1 & (1u << 22)) && p_light_sampler_supported(config, 4u)) {
+                abs_val = ((abs_lut >> 17) & 1u) == 0;
+                refl_value[2] = p_light_lut_value(&ctx, (lut_input >> 16) & 7u,
+                                                  abs_val, (lut_scale >> 16) & 7u, 4u);
+            } else {
+                refl_value[2] = refl_value[0];
+            }
+
+            if (!(config1 & (1u << 17)) &&
+                p_light_sampler_supported(config, 1u)) {
+                abs_val = ((abs_lut >> 5) & 1u) == 0;
+                d1_lut = p_light_lut_value(&ctx, (lut_input >> 4) & 7u, abs_val,
+                                           (lut_scale >> 4) & 7u, 1u);
+            }
+            p_light_color(p_regs[lb + 1u], specular_1);
+            specular_1[0] = d1_lut * refl_value[0] * specular_1[0];
+            specular_1[1] = d1_lut * refl_value[1] * specular_1[1];
+            specular_1[2] = d1_lut * refl_value[2] * specular_1[2];
+
+            if (li == max_light && !(config1 & (1u << 19)) &&
+                p_light_sampler_supported(config, 3u)) {
+                float fresnel;
+                abs_val = ((abs_lut >> 13) & 1u) == 0;
+                fresnel = p_light_lut_value(&ctx, (lut_input >> 12) & 7u, abs_val,
+                                            (lut_scale >> 12) & 7u, 3u);
+                if (config0 & (1u << 2)) diffuse_sum[3] = fresnel;
+                if (config0 & (1u << 3)) specular_sum[3] = fresnel;
+            }
+
+            dot_product = p_v3_dot(light_vector, normal);
+            if (lcfg & 2u) {                  /* two_sided_diffuse */
+                dot_product = fabsf(dot_product);
+            } else if (dot_product < 0.0f) {
+                dot_product = 0.0f;
+            }
+
+            if (config0 & (1u << 27))         /* clamp_highlights */
+                clamp_highlights = (dot_product == 0.0f) ? 0.0f : 1.0f;
+
+            if (lcfg & 0xCu) {                /* geometric_factor_0/1 */
+                float geo = p_v3_dot(half_vector, half_vector);
+                geo = (geo == 0.0f) ? 0.0f : (dot_product / geo < 1.0f ? dot_product / geo : 1.0f);
+                if (lcfg & 4u) {
+                    specular_0[0] *= geo; specular_0[1] *= geo; specular_0[2] *= geo;
+                }
+                if (lcfg & 8u) {
+                    specular_1[0] *= geo; specular_1[1] *= geo; specular_1[2] *= geo;
+                }
+            }
+
+            if ((config0 & (1u << 16)) && !(config1 & (1u << num))) {
+                shadow_p[0] = shadow[0]; shadow_p[1] = shadow[1]; shadow_p[2] = shadow[2];
+            }
+            if ((config0 & (1u << 17)) && !(config1 & (1u << num))) {
+                shadow_s[0] = shadow[0]; shadow_s[1] = shadow[1]; shadow_s[2] = shadow[2];
+            }
+
+            p_light_color(p_regs[lb + 2u], light_diffuse);
+            p_light_color(p_regs[lb + 3u], light_ambient);
+            for (i = 0; i < 3u; i++) {
+                float diffuse = (light_diffuse[i] * dot_product * shadow_p[i] +
+                                 light_ambient[i]) * dist_atten * spot_atten;
+                float specular = (specular_0[i] + specular_1[i]) * clamp_highlights *
+                                 dist_atten * spot_atten * shadow_s[i];
+                diffuse_sum[i] += diffuse;
+                specular_sum[i] += specular;
+            }
+        }
+    }
+
+    if (config0 & (1u << 19)) {               /* shadow_alpha */
+        if (config0 & (1u << 2)) diffuse_sum[3] *= shadow[3];
+        if (config0 & (1u << 3)) specular_sum[3] *= shadow[3];
+    }
+    p_light_color(p_regs[0x1C0], gal);
+    for (i = 0; i < 3u; i++) diffuse_sum[i] += gal[i];
+
+    for (i = 0; i < 4u; i++) {
+        float d = diffuse_sum[i], s = specular_sum[i];
+        if (d < 0.0f) d = 0.0f;
+        if (d > 1.0f) d = 1.0f;
+        if (s < 0.0f) s = 0.0f;
+        if (s > 1.0f) s = 1.0f;
+        out_primary->c[i] = (unsigned char)(d * 255.0f);
+        out_secondary->c[i] = (unsigned char)(s * 255.0f);
     }
 }
 
@@ -845,7 +1434,8 @@ static unsigned char p_alpha_combine(unsigned op, const unsigned char in[3])
     }
 }
 
-static PicaColor p_tev(const PicaColor tex[4], const PicaColor *primary)
+static PicaColor p_tev(const PicaColor tex[4], const PicaColor *primary,
+                       const PicaColor *pfc, const PicaColor *sfc)
 {
     PicaColor zero = {{0, 0, 0, 0}};
     PicaColor output = {{0, 0, 0, 0}};
@@ -885,9 +1475,9 @@ static PicaColor p_tev(const PicaColor tex[4], const PicaColor *primary)
             if (cs1 == 0xFu) cs1 = cs3;
             if (cs2 == 0xFu) cs2 = cs3;
         }
-        src1 = p_tev_source(cs1, tex, primary, &zero, &zero, &buffer, cst, &output);
-        src2 = p_tev_source(cs2, tex, primary, &zero, &zero, &buffer, cst, &output);
-        src3 = p_tev_source(cs3, tex, primary, &zero, &zero, &buffer, cst, &output);
+        src1 = p_tev_source(cs1, tex, primary, pfc, sfc, &buffer, cst, &output);
+        src2 = p_tev_source(cs2, tex, primary, pfc, sfc, &buffer, cst, &output);
+        src3 = p_tev_source(cs3, tex, primary, pfc, sfc, &buffer, cst, &output);
         p_color_modifier(cm1, &src1, cin[0]);
         p_color_modifier(cm2, &src2, cin[1]);
         p_color_modifier(cm3, &src3, cin[2]);
@@ -896,9 +1486,9 @@ static PicaColor p_tev(const PicaColor tex[4], const PicaColor *primary)
         if (cop == 7) {         /* Dot3_RGBA: Alpha = Rot */
             aout = cout[0];
         } else {
-            asrc1 = p_tev_source(as1, tex, primary, &zero, &zero, &buffer, cst, &output);
-            asrc2 = p_tev_source(as2, tex, primary, &zero, &zero, &buffer, cst, &output);
-            asrc3 = p_tev_source(as3, tex, primary, &zero, &zero, &buffer, cst, &output);
+            asrc1 = p_tev_source(as1, tex, primary, pfc, sfc, &buffer, cst, &output);
+            asrc2 = p_tev_source(as2, tex, primary, pfc, sfc, &buffer, cst, &output);
+            asrc3 = p_tev_source(as3, tex, primary, pfc, sfc, &buffer, cst, &output);
             ain[0] = p_alpha_modifier(am1, &asrc1);
             ain[1] = p_alpha_modifier(am2, &asrc2);
             ain[2] = p_alpha_modifier(am3, &asrc3);
@@ -1274,11 +1864,15 @@ static void p_clip_lerp(float f, const PicaVertex *a, const PicaVertex *b, PicaV
     int i, k;
     for (i = 0; i < 4; i++) {
         o->pos[i] = a->pos[i] * f + b->pos[i] * (1.0f - f);
+        o->quat[i] = a->quat[i] * f + b->quat[i] * (1.0f - f);
         o->color[i] = a->color[i] * f + b->color[i] * (1.0f - f);
     }
     for (k = 0; k < 3; k++)
         for (i = 0; i < 2; i++)
             o->uv[k][i] = a->uv[k][i] * f + b->uv[k][i] * (1.0f - f);
+    o->tc0_w = a->tc0_w * f + b->tc0_w * (1.0f - f);
+    for (k = 0; k < 3; k++)
+        o->view[k] = a->view[k] * f + b->view[k] * (1.0f - f);
 }
 
 /* Sutherland-Hodgman gegen eine Ebene; inside = dot(pos+bias, coeff) >= -eps. */
@@ -1386,9 +1980,10 @@ static void p_process_tri(ArmCpu *c, const PicaVertex *v0, const PicaVertex *v1,
         for (py = min_y + 8; py < max_y; py += 16) {
             for (px = min_x + 8; px < max_x; px += 16) {
                 int w0, w1, w2, wsum;
-                float bw0, bw1, bw2, iw, depth;
-                float prim[4], tuv[3][2];
+                float bw0, bw1, bw2, iw, depth, tc0_w;
+                float prim[4], tuv[3][2], quat[4], view[3];
                 PicaColor primary, tex_col[4];
+                PicaColor pfc, sfc;
                 PicaColor tev_out;
                 unsigned char texbuf[4];
                 int i, unit;
@@ -1421,6 +2016,13 @@ static void p_process_tri(ArmCpu *c, const PicaVertex *v0, const PicaVertex *v1,
                     tuv[i][1] = (v0->uv[i][1] * bw0 + v1->uv[i][1] * bw1 +
                                  v2->uv[i][1] * bw2) * iw;
                 }
+                tc0_w = (v0->tc0_w * bw0 + v1->tc0_w * bw1 + v2->tc0_w * bw2) * iw;
+                for (i = 0; i < 4; i++)
+                    quat[i] = (v0->quat[i] * bw0 + v1->quat[i] * bw1 +
+                               v2->quat[i] * bw2) * iw;
+                for (i = 0; i < 3; i++)
+                    view[i] = (v0->view[i] * bw0 + v1->view[i] * bw1 +
+                               v2->view[i] * bw2) * iw;
 
                 for (i = 0; i < 4; i++) {
                     float f = prim[i];
@@ -1432,11 +2034,18 @@ static void p_process_tri(ArmCpu *c, const PicaVertex *v0, const PicaVertex *v1,
                     tex_col[i].c[0] = tex_col[i].c[1] = tex_col[i].c[2] = tex_col[i].c[3] = 0;
                 for (unit = 0; unit < 3u; unit++) {
                     int ci = (unit == 2u && ((p_regs[0x80] >> 13) & 1u)) ? 1 : (int)unit;
-                    p_sample_tex(c, unit, tuv[ci][0], tuv[ci][1], texbuf);
+                    p_sample_tex(c, unit, tuv[ci][0], tuv[ci][1], tc0_w, texbuf);
                     for (i = 0; i < 4; i++) tex_col[unit].c[i] = texbuf[i];
                 }
 
-                tev_out = p_tev(tex_col, &primary);
+                /* Fragment-Lighting (Azahar sw_rasterizer.cpp): nur wenn
+                   0x1C6 Bit0 (lighting.disable) = 0. */
+                for (i = 0; i < 4; i++)
+                    pfc.c[i] = sfc.c[i] = 0;
+                if (!(p_regs[0x1C6] & 1u))
+                    p_compute_fragments(tex_col, quat, view, &pfc, &sfc);
+
+                tev_out = p_tev(tex_col, &primary, &pfc, &sfc);
 
                 /* Alpha-Test (Azahar DoAlphaTest) */
                 if (p_regs[0x104] & 1u) {
@@ -1961,11 +2570,16 @@ static void p_vs_process(const float attrs[16][4], PicaVertex *v)
         }
     }
     for (i = 0; i < 4; i++) v->pos[i] = slot[i];
+    for (i = 0; i < 4; i++) v->quat[i] = slot[4 + i];
     for (i = 0; i < 4; i++) v->color[i] = slot[8 + i];
     v->uv[0][0] = slot[12];
     v->uv[0][1] = slot[13];
     v->uv[1][0] = slot[14];
     v->uv[1][1] = slot[15];
+    v->tc0_w = slot[16];           /* Azahar output_vertex.cpp: TEXCOORD0_W */
+    v->view[0] = slot[18];         /* VIEW 18..20 */
+    v->view[1] = slot[19];
+    v->view[2] = slot[20];
     v->uv[2][0] = slot[22];       /* Azahar output_vertex.cpp: TEXCOORD2 22/23
                                      (16 ist TEXCOORD0_W, 18..20 ist VIEW) */
     v->uv[2][1] = slot[23];
@@ -2260,6 +2874,7 @@ static void p_write_reg(ArmCpu *c, uint32_t id, uint32_t value, uint32_t mask,
 
     p_vs_reg_write(c, id, value);
     if (id >= 0xE8u && id <= 0xEFu) p_fog_lut_write(value);
+    if (id >= 0x1C8u && id <= 0x1CFu) p_light_lut_write(value);
 
     if (id == 0x010u) {             /* Finalize / irq_request */
         /* Azahar: every_byte_match(irq_request, irq_compare) -> P3D; bei
