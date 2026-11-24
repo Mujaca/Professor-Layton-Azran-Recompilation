@@ -2054,6 +2054,33 @@ static void file_command(Ipc *r, uint32_t *p) {
             ipc_put(r, 0);
             break;
         }
+        case 0x080C: { /* OpenLinkFile: neue Dateisitzung auf denselben Backend */
+            /* Azahar file.cpp: MakeBuilder(1,2), Push(Result), PushMoveObjects.
+               Die neue Sitzung hat eigene Position/Groesse, teilt aber die
+               Datei (hier: eigener Host-Handle auf denselben Pfad). */
+            FileSlot *ns = NULL;
+            for (int i = 0; i < MAX_FILES; i++) {
+                if (!g_files[i].used) { ns = &g_files[i]; break; }
+            }
+            uint32_t nh = 0;
+            if (ns != NULL) {
+                memset(ns, 0, sizeof(*ns));
+                ns->used = 1;
+                ns->size = f->size;
+                snprintf(ns->path, sizeof(ns->path), "%s", f->path);
+                if (f->fp != NULL && f->path[0] != 0) {
+                    ns->fp = fopen(f->path, "r+b");
+                    if (ns->fp == NULL) ns->fp = fopen(f->path, "rb");
+                }
+                nh = (uint32_t)alloc_handle(SVC_FILE, "file-link");
+                if (nh != 0 && nh < MAX_HANDLES) g_handles[nh].file = (int)(ns - g_files);
+            }
+            if (g_log) printf("[file] OpenLinkFile %s -> handle %u\n", f->path, nh);
+            ipc_begin(r, 0x080C, 1, 2);
+            put_result(r);
+            ipc_put_handle(r, nh);
+            break;
+        }
         case 0x0808: { /* Close */
             if (f->fp) fclose(f->fp);
             f->used = 0;
@@ -3695,8 +3722,10 @@ static void dispatch_ipc(uint32_t handle) {
     /* Fallback: Datei-/FS-Kommandos auch dann richtig routen, wenn das
        Handle im HLE einer anderen Kategorie zugeordnet ist (im Trace
        sendet das Spiel 0x0802/0x0803/0x0808 auf Handle 4 = "sync"). */
-    /* 0x08xx IMMER nach Kommandoform routen: das Spiel schickt Datei-
-       Kommandos auch auf Handles, die wir anders vergeben haben. */
+    /* 0x08xx: bei bekanntem Datei-/Verzeichnis-/FS-Handle entscheidet das
+       Handle (Azahar: der Dienst hinter der Session waehlt den Handler;
+       0x080C ist auf einer Datei OpenLinkFile, auf fs:USER OpenArchive).
+       Nur bei unbekanntem Handle nach Kommandoform routen. */
     if ((cmd & 0xFF00u) == 0x0800u) {
         int handle_is_fs = (service == SVC_FS_USER || service == SVC_FS_LDR);
         int handle_is_file = (h != NULL && h->file >= 0);

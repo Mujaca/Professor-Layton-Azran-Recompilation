@@ -919,6 +919,17 @@ einen **Vertex-Shader-Interpreter/Übersetzer** und **TEV**.
   absolute Codezeiger (ARM `pc+8`, Thumb `Align(pc+4,4)`); `tbb/tbh` nutzen
   Byte-/Halbwort-Offsets ab `Align(pc+4,4)`. Der Scanner legt diese Ziele als
   Bloecke an (`scan.ldr_pc_table`/`tbb_table`).
+* **Funktionserkennung / Seeds** (verifiziert 2026-11-24):
+  - Direkte Calls: `bl` bleibt im Modus des Aufrufers, `blx #imm` wechselt ihn
+    (Thumb -> ARM, ARM -> Thumb; das Thumb-Bit des Ziels ist dort implizit).
+    Wird der Wechsel ignoriert, dekodiert der Scanner ARM-Helfer im
+    Thumb-Modus (oder umgekehrt) und erzeugt Scheinbefehle samt Scheinaufrufen.
+  - Funktionszeiger: Bit 0 des Zeigerworts bedeutet Thumb. Init-/Konstruktor-
+    Tabellen koennen auch in den ersten 4 KiB ab Image-Basis (`0x00100000`)
+    stehen; dieser Bereich ist kein Datenbereich.
+  - Ein Zeiger-/Prolog-Kandidat, der mitten in bereits dekodiertem Code liegt,
+    ist kein Funktionsanfang und wird verworfen. Direkte Call-Ziele (`bl`/
+    `blx`) bleiben dagegen autoritativ.
 * **LDREX/STREX/CLREX**: Die Reservierung gilt pro (Adresse, Groesse). Sie
   wird von jedem Store auf den ueberwachten Bereich, von `CLREX`, von einem
   Exception-Eintritt (SVC) und von einem Threadwechsel entwertet (ARMv6K;
