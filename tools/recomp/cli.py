@@ -359,6 +359,29 @@ def _merge_ldrpc_fragments(funcs, res, data):
         print("ldr-pc-Fragmente gemerged: %d" % len(drop))
     return funcs
 
+def has_indirect_pc(fn):
+    """True, wenn die Funktion PC aus einem Register/Speicher setzt.
+
+    `mov pc, lr` ist eine Rueckkehr und braucht keine dynamische Tabelle;
+    alle anderen PC-Schreibweisen (ldr pc, add pc, mov pc, rN) koennen auf
+    beliebige Instruktionen der Funktion zeigen.
+    """
+    import capstone.arm as A
+    for blk in fn.blocks:
+        for ins in blk.insns:
+            if ins.id in (A.ARM_INS_ADD, A.ARM_INS_SUB,
+                          A.ARM_INS_LDR, A.ARM_INS_MOV,
+                          A.ARM_INS_TBB, A.ARM_INS_TBH):
+                ops = isa.split_operands(ins.op_str)
+                if not ops or not isa.is_pc(ops[0]):
+                    continue
+                if ins.id == A.ARM_INS_MOV and len(ops) > 1 and \
+                        isa.reg_num(ops[1]) == 14:
+                    continue
+                return True
+    return False
+
+
 def generate(res, path, max_funcs=None, trace=False, data=None):
     u32 = lambda v: v & 0xFFFFFFFF
     needed = set()
@@ -440,13 +463,26 @@ def generate(res, path, max_funcs=None, trace=False, data=None):
             n_arm += 1
         if data is not None:
             _split_ldrpc_blocks(fn, data)
+        # Doppelte Blockadressen (aus Tabellen-Splits) zusammenfassen; zwei
+        # Labels an derselben Adresse waeren sonst ein C-Fehler.
+        uniq = {}
+        for b in fn.blocks:
+            if b.addr not in uniq or len(b.insns) > len(uniq[b.addr].insns):
+                uniq[b.addr] = b
+        fn.blocks = [uniq[a] for a in sorted(uniq)]
         em = emit.Emitter(fn.addr, fn.thumb)
         em.block_labels = set(b.addr for b in fn.blocks)
+        if has_indirect_pc(fn):
+            em.pc_targets = set(i.address for b in fn.blocks for i in b.insns)
         out.append("void fn_%08X(ArmCpu *c) {" % u32(fn.addr))
         _entry = fn.addr if any(b.addr == fn.addr for b in fn.blocks) else fn.blocks[0].addr
         out.append("  goto %s;" % em.label(_entry))
+        labeled = set()
         for blk in fn.blocks:
+            if blk.addr in labeled:
+                continue
             out.append("%s:" % em.label(blk.addr))
+            labeled.add(blk.addr)
             em.ret_bx = return_bx_in_block(blk)
             em.it_cond = emit.it_conditions(blk.insns) if fn.thumb else {}
             for ln in BLOCK_HOOKS.get(u32(blk.addr), ()):
@@ -454,6 +490,10 @@ def generate(res, path, max_funcs=None, trace=False, data=None):
             if trace:
                 out.append("  arm_trace_block(c, 0x%08Xu, %du);" % (u32(blk.addr), 1 if fn.thumb else 0))
             for ins in blk.insns:
+                if (em.pc_targets is not None
+                        and ins.address not in labeled):
+                    out.append("%s:" % em.label(ins.address))
+                    labeled.add(ins.address)
                 lines, _ = instruction_lines(em, ins)
                 for ln in lines:
                     out.append("  " + ln)

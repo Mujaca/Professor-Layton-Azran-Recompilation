@@ -125,12 +125,92 @@ gebaut und mit `tools/frontier.py` gemessen; der Stand blieb **9/10
 | `SleepThread` 50-ms-Deckel | volle Schlafzeit, `ns <= 0` = Yield | `kernel/svc.cpp` |
 | `DuplicateHandle` kopierte nur den Namen | Alias-Slot/Refcount auf dasselbe Objekt; Pseudo-Handles `0xFFFF8000/1` sind echte Slots | `kernel/handle_table.cpp` |
 | APT `GetLockHandle`/`Initialize` neue Objekte | liefern dasselbe Lock/Notification-/Parameter-Event | `apt/applet_manager.cpp` |
+| HID `GetIPCHandles` legte bei jedem Aufruf neue Handles an; Shared Memory blieb leer, Events wurden nie signalisiert | ein Modul je Prozess (0x1000 Shared Memory + 5 OneShot-Events); Pad-/Touch-/Accel-/Gyro-Ringe mit Azahar-Takt und Systemticks, `svcMapMemoryBlock` blendet den Block ein | `hid/hid.cpp`, `hid/hid.h`; Beleg `[map] MapMemoryBlock h=2 addr=10000000`, `[hid] pads=N ticks=...` |
+
+**Host-Eingabe (kein Workaround):** `runtime/platform/window.c` bildet Tastatur
+(A/B/X/Y, L/R, Start/Select, Steuerkreuz, Circle-Pad) und die Maus ueber dem
+unteren Screen auf `HleHidInput` ab (`runtime/platform/hid_ring.h`); das
+Circle-Pad der Tastatur wird wie Azahar `analog_from_button`/`hid.cpp` auf den
+Einheitskreis normiert und mit `0x9A` skaliert (Diagonale also 109, nicht
+154/154). `hle_hid_set_input` schreibt nur in den Host-Puffer; die HID-Ringe
+werden ausschliesslich in `hid_poll` unter dem Gast-Lock aktualisiert (aus
+`hle_pump`, den Warteschleifen und dem VBlank-Thread). Kopiert werden nur die
+von Azahar geschriebenen Ringbereiche, nicht die ganze 0x1000-Byte-Seite.
+Ohne Eingabe schreibt HID den neutralen Zustand mit fortlaufenden
+Zeitstempeln, Touch ohne Druck `x=y=0`, Accelerometer-Ruhelage `(0,-512,0)`
+(Erdbeschleunigung des Motion-Emulators).
+
+**Host-Bildausgabe (kein Workaround):** `runtime/platform/framebuffer.h` liest
+die vom Spiel gemeldeten Puffer spaltenweise (`address + x*stride +
+(239-y)*bpp`) und decodiert die fuenf GSP-Pixelformate; Fenster und
+`--shot datei.bmp` zeigen beide Screens untereinander (oben 400x240, unten
+320x240). `runtime/platform/gsp_fb.h` bildet `GPU::SetBufferSwap` nach
+(address_left1/2 nach `active_fb`, Register-`active_fb` aus `shown_fb`), und
+`runtime/kernel/hle.c` uebernimmt den sichtbaren Puffer erst beim VBlank. Der
+VBlank-Thread liest die FrameBufferInfo und loescht ihr dirty-Flag atomar
+unter dem Gast-Lock (wie die GSP-Signalisierung in die InterruptRelayQueue),
+damit ein Buffer-Swap des Spiels nicht verloren gehen kann.
+Getestet mit synthetischen Puffern in `tests/framebuffer_test.py`. Im
+natuerlichen Boot schreibt das Spiel inzwischen seine FrameBufferInfo in den
+GSP-Shared-Memory; der VBlank-Pfad uebernimmt sie
+(`[gsp] SetBufferSwap screen=0 fb=0x1F346500 stride=0x321 fmt=1 (VBlank)`,
+reproduzierbar). Damit ist M2 belegt (eigener Framebuffer des Spiels, kein
+Host-Eingriff); der IPC-Aufruf `0x0005` selbst kommt weiterhin nicht vor.
+
+
+**Y2R (kein Workaround):** `runtime/platform/y2r.h` bildet die echte
+YUV→RGB-Umwandlung nach (Azahar `core/hw/y2r.cpp`): YUV422/YUV420 in 8/16 Bit
+und YUYV, Ausgabe RGBA8/RGB8/RGB5A1/RGB565, Rotation je 8×8-Kachel, lineare
+oder PICA-8×8-Ausgabe, Koeffizientensätze inkl. `SetCoefficient`,
+`transfer_unit`/`gap` als DMA-Einheiten, Alpha. Alle Konfigurationskommandos
+werden gespeichert; `StartConversion` rechnet in die von
+`SetSendingY/U/V/YUYV` und `SetReceiving` gemeldeten Gast-Puffer und
+signalisiert danach das `GetTransferEndEvent`-Event nach `MinY2RDelay`
+(≈186 µs). Getestet mit synthetischen Bildern in `tests/y2r_test.py`; das
+Spiel nutzt den Konverter erst bei der Video-Wiedergabe, im natürlichen Boot
+werden nur `DriverInitialize`, `SetTransferEndInterrupt` und
+`GetTransferEndEvent` erreicht.
 
 Offen (dokumentierte Abweichung): srv-`GetServiceHandle` mit `flags`-Bit0 == 0
 müsste in Azahar auf eine spätere Registrierung warten; der Port hat keinen
 Dienst-Registrierungsdienst und meldet sofort den Fehler. Ein zweiter
 `APT:Initialize`-Aufruf liefert in Azahar `AlreadyExists`, hier erneut Erfolg
 mit denselben Objekten. Beide Pfade kommen im Boot bisher nicht vor.
+
+**fs-Archive (2026-11-24):** `runtime/kernel/fs_archive.c` bildet SaveData
+(0x4), ExtSaveData (0x6), SharedExtSaveData (0x7) und SystemSaveData (0x8) auf
+`out/savedata/{savedata,extsavedata,sharedextsavedata,systemsavedata}/...` ab.
+Kommandos, Result-Codes und das 0x228-Byte-Directory-Entry-Layout folgen Azahar
+(`fs_user.cpp`, `archive_*.cpp`, `disk_archive.cpp`, `path_parser.cpp`);
+Directory-Objekte sind echte Kernel-Handles mit eigenem Stream. Bewusste
+Host-Abweichungen:
+
+* SaveData nutzt `program_id = 0`, weil der Port `fs:REG`/das Codeset-
+  Program-ID nicht abbildet (Azahar-`ClientSlot::program_id` ist ohne
+  Registrierung ebenfalls 0). Azahar liefert fuer ein fehlendes SaveData
+  `NotFormatted` (0xC8A04554); der Port ebenso, das Spiel formatiert selbst.
+* SharedExtSaveData ist auf echter Hardware ein bereits vorhandenes
+  Systemarchiv. Der Archiv-Layer legt es **nicht** mehr an: ein fehlendes
+  Shared-ExtSaveData liefert wie Azahar `NotFormatted` (0xC8A04554), ein
+  fehlendes normales ExtSaveData `NotFound/InvalidState` (0xC8A04478).
+  `hle_init` stellt das Titel-Archiv `00048000/F000000B` (`/gamecoin.dat`,
+  belegt aus `reports/azahar_trace.txt` OpenArchive 7 + OpenFile mode=3) beim
+  Start in `out/savedata` bereit (`fs_archive_provision_shared`); das ist
+  Host-Zustand, kein Gastzustand und kein Spielcode-Eingriff.
+
+Weitere Angleichungen an Azahar (2026-11-24, Review): die vier
+Usage-Result-Codes tragen das FS-Modul 17 (0x4400): InvalidPath 0xE0E046BE,
+UnsupportedOpenFlags 0xE0C046F8, UnexpectedFileOrDirectory 0xE0C04702,
+WriteBeyondEnd 0xE0E046C1. `OpenFile` lehnt `mode == 0` und Create ohne Write
+ab; ExtSaveData lehnt das Create-Flag und `CreateFile(size 0)` ab, setzt
+Dateien auf feste Groesse (`FixSizeDiskFile`: Schreiben hinter das Ende ->
+WriteBeyondEnd, am Ende 0 Bytes, sonst kappen). `RenameDirectory` hat eine
+eigene Funktion. `GetFreeBytes` liefert 32 MiB (Azahar-Stub). `0x0831`
+(CreateSharedExtSaveData) bleibt wie in Azahar ohne Handler; `0x0851` liest
+die Parameter in Azahar-Reihenfolge (dirs, files, size u64). Alle
+Gastspeicherzugriffe der Pfaddekodierung und der Directory-Reads
+(`count * 0x228`) sind gegen `mem_size` geprueft.
+
 
 Diese Liste stammt aus dem Review der Nachtarbeit (2026-11-24) gegen Azahar.
 
@@ -170,6 +250,17 @@ ndm, ptm, gsp, dsp, y2r, boss). Damit entfielen `wa-fs-client-slot` sowie die
 Antwort.
 
 ## 6. Befunde (offene Ursachen, kein Workaround eingebaut)
+
+### VFP-Semantik korrigiert – kein Workaround 2026-11-24
+
+Der Recompiler erzeugte VFP-Code mit vier Abweichungen: `vcmp` setzte das
+C-Flag bei Gleichheit/Groesser nicht, `vcvt.f32.s32`/`f32<->f64` nutzten die
+Host-Rundung (nearest) statt FPSCR (3DS-Default: Richtung Null), `vmla` u.a.
+ignorierten FPSCR (Default-NaN/FTZ) und Doppelpraezisions-VMLA sowie
+`vmov dN, Ra, Rb` fehlten. Korrigiert in `runtime/cpu/arm_cpu.c` (Helfer) und
+`tools/recomp/emit.py`; Belege/Fuzz: `tools/vfp_difftest.py` (Unicorn-Referenz)
+und feste Faelle in `tests/mvp_selftest.py`. Kein Code-Patch, kein Eintrag in
+`tools/workarounds/`.
 
 ### Gast-Threads liefen nie – behoben 2026-11-24
 
@@ -298,11 +389,13 @@ einem Kernel-Wait stehen; `boss:U` ist weiter offen.
 
 
 `dsp cmd 0x0015 RegisterInterruptEvents` merkt sich das Ereignis je
-(InterruptType, Pipe); `cmd 0x0007 SetSemaphore` signalisiert danach die
-Pipe-Ereignisse (Azahar `DSP_DSP::SignalInterrupt`). Vorher blieb der
-Hauptthread direkt nach `SetSemaphore` auf seinem eigenen Event (Handle 35,
-`HLE_KLOG`) stehen; jetzt laufen `ReadPipeIfPossible`/`ConvertProcessAddress`
-weiter. **Pipe-Inhalt (2026-11-24):** `WriteProcessPipe(Audio, Init)` liefert
+(InterruptType, Pipe). `SetSemaphore` ist im HLE ein No-op wie in Azahar
+`DspHle::SetSemaphore`; seit `runtime/audio/dsp_hle.c` existiert, signalisiert
+der Audio-Thread `InterruptType::Pipe`/`DspPipe::Audio` nach jedem Audio-Frame
+(160 Samples, 4,889 ms) und verarbeitet die beiden DSP-Regionen. Vorher blieb
+der Hauptthread direkt nach `SetSemaphore` auf seinem eigenen Event (Handle
+35, `HLE_KLOG`) stehen; jetzt laufen `ReadPipeIfPossible`/
+`ConvertProcessAddress` weiter. **Pipe-Inhalt (2026-11-24):** `WriteProcessPipe(Audio, Init)` liefert
 jetzt die 15 DSP-Struktur-Adressen, die das Spiel zu 30
 `ConvertProcessAddress`-Aufrufen verarbeitet (wie `reports/azahar_trace.txt`);
 `ReadPipe`/`ReadPipeIfPossible` lesen echte Puffer. `boss:U` bleibt offen.

@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
+#include <fenv.h>
 
 #include "arm_cpu.h"
 
@@ -3390,7 +3391,17 @@ int gpu_run_pica_list(ArmCpu *c, uint32_t addr, uint32_t size)
         memset(g_diag_hist, 0, sizeof(g_diag_hist));
         g_diag_jumps = 0;
     }
-    p_run_list(c, gpu_pica_phys_to_guest(addr), size, &ctx, 0);
+    {
+        /* Die Gast-VFP stellt die Host-Rundung des Threads auf den FPSCR-
+           Modus (3DS: round-toward-zero). Die PICA-Pipeline ist Hardware
+           mit eigener Arithmetik; der Software-Renderer rechnet daher immer
+           mit Rundung zum Naechsten und stellt den Gastmodus danach wieder
+           her. */
+        int saved_round = fegetround();
+        if (saved_round != FE_TONEAREST) fesetround(FE_TONEAREST);
+        p_run_list(c, gpu_pica_phys_to_guest(addr), size, &ctx, 0);
+        if (saved_round != FE_TONEAREST) fesetround(saved_round);
+    }
     g_pica_lists++;
     if (diag) {
         int i, first = 1;
