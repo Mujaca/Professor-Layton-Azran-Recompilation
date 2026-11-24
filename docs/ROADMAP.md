@@ -79,3 +79,6 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | 2026-11-24 | pica-review-fixes | 9/10 | boss:U | 0 |
 | 2026-11-24 | pica-lighting | 9/10 | boss:U | 0 |
 | 2026-11-24 | pica-dphi-format | 9/10 | boss:U | 0 |
+| 2026-11-24 | srv-namenslaenge | 9/10 | boss:U | 0 |
+| 2026-11-24 | naechste-divergenz-1 | 9/10 | boss:U | 0 |
+| 2026-11-24 | recomp-difftest | 9/10 | boss:U | 0 |

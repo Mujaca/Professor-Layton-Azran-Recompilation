@@ -79,7 +79,8 @@ def emit(emitter, ins, base, ops):
         d, m = r
         rot = 0
         if len(ops) > 2:
-            rot = isa.imm_value(ops[2].split()[-1]) or 0
+            amt = isa.imm_value(ops[2].split()[-1]) or 0
+            rot = amt // 8  # arm_ext16 erwartet Anzahl 8-Bit-Rotationen
         return ["c->r[%d] = arm_ext16(%d, c->r[%d], %d);"
                 % (d, 1 if base == "sxtb16" else 0, m, rot)]
 

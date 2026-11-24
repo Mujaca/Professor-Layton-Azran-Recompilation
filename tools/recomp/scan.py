@@ -72,6 +72,18 @@ def direct_target(ins):
     return None
 
 
+def call_target_thumb(ins, caller_thumb):
+    """Modus des Aufrufziels: BL behaelt den Modus, BLX wechselt ihn.
+
+    (Thumb-BLX springt in ARM-Code und umgekehrt; emit.py setzt c->t
+    entsprechend. Vorher wurde jedes BLX-Ziel als Thumb geseedet, wodurch
+    ARM-Funktionen im 0x29xxxx-Bereich als Thumb dekodiert wurden.)
+    """
+    if ins.id == A.ARM_INS_BLX:
+        return not caller_thumb
+    return caller_thumb
+
+
 def decode_function(data, fn, visited):
     # Modus automatisch erkennen, falls der Seed falsch geraten war
     if isa.decode(data, fn.addr, thumb=fn.thumb) is None:
@@ -96,7 +108,7 @@ def decode_function(data, fn, visited):
             if ins.id in (A.ARM_INS_BL, A.ARM_INS_BLX):
                 tgt = direct_target(ins)
                 if tgt is not None:
-                    fn.calls.add((tgt, ins.id == A.ARM_INS_BLX or fn.thumb))
+                    fn.calls.add((tgt, call_target_thumb(ins, fn.thumb)))
             nxt = cur + ins.size
             if is_terminator(ins):
                 tgt = direct_target(ins)
