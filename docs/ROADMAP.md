@@ -84,3 +84,4 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | 2026-11-24 | recomp-difftest | 9/10 | boss:U | 0 |
 | 2026-11-24 | m3-draws | 10/10 | None | 0 |
 | 2026-11-24 | pica-lighting-fixes | 10/10 | None | 0 |
+| 2026-11-24 | pica-geometry-shader | 10/10 | None | 0 |

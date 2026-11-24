@@ -2307,6 +2307,411 @@ static void test_texture_projection_cube(ArmCpu *c, unsigned char *mem)
           "ShadowCube: Face +X, shadow_z 0.6, z_ref 0xFFFFFF => Density 0x44");
 }
 
+/* ================== Geometrie-Shader (Shader-Einheit 3) ==================
+ * Azahar geometry_pipeline.cpp / shader_unit.cpp (GeometryEmitter) /
+ * regs_pipeline.h / pica_core.cpp: Register 0x280..0x2AF (Programm 0x29B,
+ * Swizzle 0x2A5, 0x289 input_buffer_config, 0x28A main_offset, 0x28B/0x28C
+ * Input-Map, 0x28D output_mask), Pipeline 0x229/0x244/0x24A/0x252/0x254 und
+ * EMIT 0x2A / SETEMIT 0x2B (Bits0..1 vertex_id, Bit2 prim_emit, Bit3 winding).
+ * Erwartungswerte kommen aus der Azahar-Semantik, nicht aus dem Port:
+ * die drei VS-Ausgaben fuellen den GS-Eingangspuffer, der GS emittiert sie in
+ * der Reihenfolge der EMITs, die Primitive Assembly (Topologie Shader) bildet
+ * daraus das Dreieck. */
+
+/* SETEMIT-Kodierung (nihstro shader_bytecode.h). */
+static uint32_t ins_setemit(uint32_t vertex_id, uint32_t prim_emit, uint32_t winding)
+{
+    return (0x2Bu << 26) | (vertex_id & 3u) | ((prim_emit & 1u) << 2) |
+           ((winding & 1u) << 3);
+}
+
+static uint32_t *emit_gs_program(uint32_t *p, const uint32_t *words, int n)
+{
+    int i;
+    p = emit(p, 0x29B, 0);
+    for (i = 0; i < n; i++) p = emit(p, 0x29C, words[i]);
+    return p;
+}
+
+static uint32_t *emit_gs_swizzle0(uint32_t *p, uint32_t w)
+{
+    p = emit(p, 0x2A5, 0);
+    return emit(p, 0x2A6, w);
+}
+
+/* GS-Programm: mov oX, vi + EMIT fuer i = 0..2; das letzte mit prim_emit. */
+static int t_gs_words_emit3(uint32_t *w, uint32_t dest, int winding)
+{
+    int i, n = 0;
+    for (i = 0; i < 3; i++) {
+        w[n++] = ins_common(0x13u, 0u, (uint32_t)i, 0u, dest, 0u);
+        w[n++] = ins_setemit((uint32_t)i, (i == 2) ? 1u : 0u,
+                             (i == 2) ? (uint32_t)winding : 0u);
+        w[n++] = 0x2Au << 26;
+    }
+    w[n++] = 0x22u << 26;
+    return n;
+}
+
+/* Rahmen: Viewport 8x8, TEV-Konstante rot, RGBA8-Farbziel 8x8. */
+static uint32_t *t_emit_fb_red8(uint32_t *q)
+{
+    q = emit_viewport(q, 8, 8);
+    q = emit_tev0(q, 0xEu, 0xEu, 0xFF0000FFu);
+    return t_emit_fb(q, 0x40000u, 8, 8, 0u);
+}
+
+static void test_gs_point(ArmCpu *c, unsigned char *mem)
+{
+    uint32_t w[10], *q, size, o;
+    int n;
+
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_pos4(c, 0, -1.0f, -1.0f, 0.0f);
+    t_pos4(c, 16, -1.0f, 1.0f, 0.0f);
+    t_pos4(c, 32, 1.0f, -1.0f, 0.0f);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_pos_setup(q);            /* VS: attr0->v0, o0->POSITION, mask 1 */
+    q = emit(q, 0x229, 2u);             /* use_gs = Yes */
+    q = emit(q, 0x24A, 0u);             /* 1 VS-Ausgangsattribut */
+    q = emit(q, 0x251, 0u);
+    q = emit(q, 0x252, 0u);             /* GSMode Point */
+    q = emit(q, 0x25E, 3u << 8);        /* Topologie Shader */
+    q = emit(q, 0x289, 2u);             /* 3 GS-Eingangsattribute */
+    q = emit(q, 0x28B, 0x210u);         /* attr0->v0, attr1->v1, attr2->v2 */
+    q = emit(q, 0x28C, 0u);
+    q = emit(q, 0x28A, 0u);             /* GS-Einstieg bei Wort 0 */
+    q = emit(q, 0x28D, 1u);             /* GS output_mask = o0 */
+    n = t_gs_words_emit3(w, 0u, 0);
+    q = emit_gs_program(q, w, n);
+    q = emit_gs_swizzle0(q, swz_xyzw());
+    q = t_emit_fb_red8(q);
+    q = emit(q, 0x228, 3u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 1, 5, 8, 8, 4);
+    check(mem[o + 3] == 0xFF && mem[o + 2] == 0 && mem[o + 1] == 0,
+          "GS Point: 3 VS-Ausgaben fuellen den Puffer, 3 EMITs => Dreieck");
+}
+
+static void test_gs_fixed_primitive(ArmCpu *c, unsigned char *mem)
+{
+    uint32_t w[10], *q, size, o;
+
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_pos4(c, 0, -1.0f, -1.0f, 0.0f);
+    t_pos4(c, 16, -1.0f, 1.0f, 0.0f);
+    t_pos4(c, 32, 1.0f, -1.0f, 0.0f);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_pos_setup(q);
+    q = emit(q, 0x229, 2u);
+    q = emit(q, 0x24A, 0u);
+    q = emit(q, 0x251, 0u);
+    q = emit(q, 0x252, 2u | (2u << 8)); /* FixedPrimitive, 3 Vertices, Stride 1 */
+    q = emit(q, 0x25E, 3u << 8);
+    q = emit(q, 0x289, 1u << 8);        /* input_to_uniform = 1 */
+    q = emit(q, 0x28A, 0u);
+    q = emit(q, 0x28D, 1u);
+    /* FixedPrimitive: die Vertexdaten stehen in den Uniforms f[0..2],
+       das Programm liest sie als c0..c2. */
+    w[0] = ins_common(0x13u, 0u, 0x20u, 0u, 0u, 0u);
+    w[1] = ins_setemit(0u, 0u, 0u);
+    w[2] = 0x2Au << 26;
+    w[3] = ins_common(0x13u, 0u, 0x21u, 0u, 0u, 0u);
+    w[4] = ins_setemit(1u, 0u, 0u);
+    w[5] = 0x2Au << 26;
+    w[6] = ins_common(0x13u, 0u, 0x22u, 0u, 0u, 0u);
+    w[7] = ins_setemit(2u, 1u, 0u);
+    w[8] = 0x2Au << 26;
+    w[9] = 0x22u << 26;
+    q = emit_gs_program(q, w, 10);
+    q = emit_gs_swizzle0(q, swz_xyzw());
+    q = t_emit_fb_red8(q);
+    q = emit(q, 0x228, 3u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 1, 5, 8, 8, 4);
+    check(mem[o + 3] == 0xFF && mem[o + 2] == 0 && mem[o + 1] == 0,
+          "GS FixedPrimitive: Vertexdaten in Uniforms f0..f2, 3 EMITs => Dreieck");
+}
+
+static void test_gs_variable_primitive(ArmCpu *c, unsigned char *mem)
+{
+    uint32_t w[10], *q, size, o;
+    uint16_t idx[4];
+
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_pos4(c, 0, -1.0f, -1.0f, 0.0f);
+    t_pos4(c, 16, -1.0f, 1.0f, 0.0f);
+    t_pos4(c, 32, 1.0f, -1.0f, 0.0f);
+    idx[0] = 3; idx[1] = 0; idx[2] = 1; idx[3] = 2;
+    memcpy(mem + ((VTX + 0x300u) & 0x1FFFFFFFu), idx, sizeof(idx));
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_pos_setup(q);
+    q = emit(q, 0x229, 2u | (1u << 31));   /* use_gs Yes + variable_primitive */
+    q = emit(q, 0x24A, 0u);
+    q = emit(q, 0x251, 0u);
+    q = emit(q, 0x252, 1u);                /* GSMode VariablePrimitive */
+    q = emit(q, 0x254, 3u);                /* 4 Hauptvertices (alle) */
+    q = emit(q, 0x25E, 3u << 8);
+    q = emit(q, 0x289, 1u << 8);           /* input_to_uniform = 1 */
+    q = emit(q, 0x227, 0x300u | 0x80000000u);  /* u16-Indexpuffer ab Basis */
+    q = emit(q, 0x28A, 0u);
+    q = emit(q, 0x28D, 1u);
+    /* f[0] = Vertexzahl, f[1..3] = Vertexdaten (c1..c3). */
+    w[0] = ins_common(0x13u, 0u, 0x21u, 0u, 0u, 0u);
+    w[1] = ins_setemit(0u, 0u, 0u);
+    w[2] = 0x2Au << 26;
+    w[3] = ins_common(0x13u, 0u, 0x22u, 0u, 0u, 0u);
+    w[4] = ins_setemit(1u, 0u, 0u);
+    w[5] = 0x2Au << 26;
+    w[6] = ins_common(0x13u, 0u, 0x23u, 0u, 0u, 0u);
+    w[7] = ins_setemit(2u, 1u, 0u);
+    w[8] = 0x2Au << 26;
+    w[9] = 0x22u << 26;
+    q = emit_gs_program(q, w, 10);
+    q = emit_gs_swizzle0(q, swz_xyzw());
+    q = t_emit_fb_red8(q);
+    q = emit(q, 0x228, 4u);                /* Index 0 = Vertexzahl, dann 3 */
+    q = emit(q, 0x22F, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 1, 5, 8, 8, 4);
+    check(mem[o + 3] == 0xFF && mem[o + 2] == 0 && mem[o + 1] == 0,
+          "GS VariablePrimitive: erster Index = Vertexzahl, Daten in f1..f3 => Dreieck");
+}
+
+/* 0x244 gs_unit_exclusive_configuration + Programm-Spiegelung: bei 0/0 teilt
+   Einheit 3 das VS-Programm (Azahar pica_core.cpp), bei 1 bleibt ihr Programm
+   leer und ohne EMIT entsteht kein Dreieck. */
+static void test_gs_exclusive_program_share(ArmCpu *c, unsigned char *mem)
+{
+    int pass;
+    for (pass = 0; pass < 2; pass++) {
+        uint32_t w[11], *q, size, o;
+
+        gpu_pica_reset();
+        memset(mem + 0x40000u, 0, 0x100);
+        t_pos4(c, 0, -1.0f, -1.0f, 0.0f);
+        t_pos4(c, 16, -1.0f, 1.0f, 0.0f);
+        t_pos4(c, 32, 1.0f, -1.0f, 0.0f);
+        q = (uint32_t *)(mem + LIST);
+        q = emit(q, 0x200, VTX >> 3);
+        q = emit(q, 0x201, 0x0Fu);
+        q = emit(q, 0x202, 0u);
+        q = emit(q, 0x203, 0u);
+        q = emit(q, 0x204, 0u);
+        q = emit(q, 0x205, (1u << 28) | (16u << 16));
+        q = emit(q, 0x244, pass ? 1u : 0u);   /* exclusive configuration */
+        q = emit(q, 0x229, 0u);               /* beim Upload: GS aus */
+        q = emit(q, 0x2B9, 0u);
+        q = emit(q, 0x2BB, 0u);
+        q = emit(q, 0x4F, 1u);
+        q = emit(q, 0x50, 0x03020100u);
+        q = emit(q, 0x2BD, 1u);               /* VS-Ausgang nur o0 (Position) */
+        /* Gemeinsames Programm: VS schreibt o0, der GS emittiert o1. */
+        w[0] = ins_common(0x13u, 0u, 0x00u, 0u, 0u, 0u);   /* mov o0,v0 */
+        w[1] = ins_common(0x13u, 0u, 0x00u, 0u, 1u, 0u);   /* mov o1,v0 */
+        w[2] = ins_setemit(0u, 0u, 0u);
+        w[3] = 0x2Au << 26;
+        w[4] = ins_common(0x13u, 0u, 0x01u, 0u, 1u, 0u);   /* mov o1,v1 */
+        w[5] = ins_setemit(1u, 0u, 0u);
+        w[6] = 0x2Au << 26;
+        w[7] = ins_common(0x13u, 0u, 0x02u, 0u, 1u, 0u);   /* mov o1,v2 */
+        w[8] = ins_setemit(2u, 1u, 0u);
+        w[9] = 0x2Au << 26;
+        w[10] = 0x22u << 26;
+        q = emit_program(q, w, 11);
+        q = emit_swizzle0(q, swz_xyzw());
+        /* Draw mit aktivem GS (Point, 3 Eingangsattribute, Ausgang o1). */
+        q = emit(q, 0x229, 2u);
+        q = emit(q, 0x24A, 0u);
+        q = emit(q, 0x251, 0u);
+        q = emit(q, 0x252, 0u);
+        q = emit(q, 0x25E, 3u << 8);
+        q = emit(q, 0x289, 2u);
+        q = emit(q, 0x28B, 0x210u);
+        q = emit(q, 0x28C, 0u);
+        q = emit(q, 0x28A, 0u);
+        q = emit(q, 0x28D, 2u);               /* GS output_mask = o1 */
+        q = t_emit_fb_red8(q);
+        q = emit(q, 0x228, 3u);
+        q = emit(q, 0x22E, 0u);
+        size = (uint32_t)((unsigned char *)q - (mem + LIST));
+        gpu_run_pica_list(c, LIST, size);
+        o = t_fb_off(0x40000u, 1, 5, 8, 8, 4);
+        if (pass) {
+            check(mem[o + 3] == 0 && mem[o + 2] == 0,
+                  "GS exclusive (0x244=1): Programm nicht gespiegelt => kein EMIT, kein Dreieck");
+        } else {
+            check(mem[o + 3] == 0xFF && mem[o + 2] == 0 && mem[o + 1] == 0,
+                  "GS Programm-Spiegelung (0x244=0, 0x229=0 beim Upload) => EMIT laeuft");
+        }
+    }
+}
+
+/* SETEMIT-winding invertiert in Topologie Shader die Windung des naechsten
+   Dreiecks (Azahar primitive_assembly.cpp). Mit Cull-Modus KeepClockWise
+   (0x40=1) wird das Dreieck (-1,-1),(1,-1),(-1,1) nur mit winding=1 gezeichnet. */
+static void test_gs_winding(ArmCpu *c, unsigned char *mem)
+{
+    int pass;
+    for (pass = 0; pass < 2; pass++) {
+        uint32_t w[10], *q, size, o;
+        int n;
+
+        gpu_pica_reset();
+        memset(mem + 0x40000u, 0, 0x100);
+        t_pos4(c, 0, -1.0f, -1.0f, 0.0f);
+        t_pos4(c, 16, 1.0f, -1.0f, 0.0f);
+        t_pos4(c, 32, -1.0f, 1.0f, 0.0f);
+        q = (uint32_t *)(mem + LIST);
+        q = t_emit_pos_setup(q);
+        q = emit(q, 0x40, 1u);              /* Cull: nur im Uhrzeigersinn */
+        q = emit(q, 0x229, 2u);
+        q = emit(q, 0x24A, 0u);
+        q = emit(q, 0x251, 0u);
+        q = emit(q, 0x252, 0u);
+        q = emit(q, 0x25E, 3u << 8);        /* Topologie Shader */
+        q = emit(q, 0x289, 2u);
+        q = emit(q, 0x28B, 0x210u);
+        q = emit(q, 0x28C, 0u);
+        q = emit(q, 0x28A, 0u);
+        q = emit(q, 0x28D, 1u);
+        n = t_gs_words_emit3(w, 0u, pass);
+        q = emit_gs_program(q, w, n);
+        q = emit_gs_swizzle0(q, swz_xyzw());
+        q = t_emit_fb_red8(q);
+        q = emit(q, 0x228, 3u);
+        q = emit(q, 0x22E, 0u);
+        size = (uint32_t)((unsigned char *)q - (mem + LIST));
+        gpu_run_pica_list(c, LIST, size);
+        o = t_fb_off(0x40000u, 1, 5, 8, 8, 4);
+        if (pass) {
+            check(mem[o + 3] == 0xFF && mem[o + 2] == 0 && mem[o + 1] == 0,
+                  "GS SETEMIT winding=1 invertiert die Windung => Dreieck trotz Culling");
+        } else {
+            check(mem[o + 3] == 0 && mem[o + 2] == 0,
+                  "GS ohne winding: Windung bleibt, KeepClockWise verwirft das Dreieck");
+        }
+    }
+}
+
+/* Doppelte Ausgangsbank (Azahar shader_unit.h ShaderUnit::output/output_bank):
+   EMIT liest die aktuell beschriebene Bank und wechselt danach. Ein EMIT ohne
+   Schreibzugriff liefert daher die Werte von vor zwei EMITs; hier wird damit
+   das zuvor emittierte Vertex 1 erneut gesetzt und das Dreieck vollstaendig.
+   Ohne Bankwechsel waere das dritte gelesene Vertex C statt B und das Dreieck
+   degeneriert (A,C,C) => kein Pixel. */
+static void test_gs_output_bank(ArmCpu *c, unsigned char *mem)
+{
+    uint32_t w[12], *q, size, o;
+    int n = 0;
+
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_pos4(c, 0, -1.0f, -1.0f, 0.0f);
+    t_pos4(c, 16, -1.0f, 1.0f, 0.0f);
+    t_pos4(c, 32, 1.0f, -1.0f, 0.0f);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_pos_setup(q);
+    q = emit(q, 0x229, 2u);
+    q = emit(q, 0x24A, 0u);
+    q = emit(q, 0x251, 0u);
+    q = emit(q, 0x252, 0u);
+    q = emit(q, 0x25E, 3u << 8);
+    q = emit(q, 0x289, 2u);
+    q = emit(q, 0x28B, 0x210u);
+    q = emit(q, 0x28C, 0u);
+    q = emit(q, 0x28A, 0u);
+    q = emit(q, 0x28D, 1u);
+    w[n++] = ins_common(0x13u, 0u, 0x00u, 0u, 0u, 0u);   /* mov o0,v0 */
+    w[n++] = ins_setemit(0u, 0u, 0u);
+    w[n++] = 0x2Au << 26;
+    w[n++] = ins_common(0x13u, 0u, 0x01u, 0u, 0u, 0u);   /* mov o0,v1 */
+    w[n++] = ins_setemit(1u, 0u, 0u);
+    w[n++] = 0x2Au << 26;
+    w[n++] = ins_common(0x13u, 0u, 0x02u, 0u, 0u, 0u);   /* mov o0,v2 */
+    w[n++] = ins_setemit(2u, 0u, 0u);
+    w[n++] = 0x2Au << 26;
+    w[n++] = ins_setemit(1u, 1u, 0u);                    /* prim_emit ohne Schreiben */
+    w[n++] = 0x2Au << 26;
+    w[n++] = 0x22u << 26;
+    q = emit_gs_program(q, w, n);
+    q = emit_gs_swizzle0(q, swz_xyzw());
+    q = t_emit_fb_red8(q);
+    q = emit(q, 0x228, 3u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 1, 5, 8, 8, 4);
+    check(mem[o + 3] == 0xFF && mem[o + 2] == 0 && mem[o + 1] == 0,
+          "GS Ausgangsbank: EMIT ohne Schreiben liest die Werte von vor zwei EMITs");
+}
+
+/* Immediate-Modus (0x232 = 0xF, Attribute ueber 0x233..0x235) geht wie in
+ * Azahar PicaCore::DrawImmediate durch die Geometrie-Pipeline: erst der
+ * dritte Immediate-Vertex fuellt den Point-Puffer und startet den GS. Der
+ * SETEMIT-winding des GS wirkt daher auch hier; ohne Pipeline-Unterstuetzung
+ * wuerde die Immediate-Ausgabe direkt in die Primitive Assembly gehen und
+ * der Cull-Modus KeepClockWise das Dreieck verwerfen.
+ * Azahar immediate.Reset() (Schreiben von 0x232) setzt
+ * reset_geometry_pipeline; der naechste Flush konfiguriert die Pipeline neu. */
+static void test_gs_immediate(ArmCpu *c, unsigned char *mem)
+{
+    static const float pos[3][3] = {
+        { -1.0f, -1.0f, 0.0f }, { 1.0f, -1.0f, 0.0f }, { -1.0f, 1.0f, 0.0f }
+    };
+    int pass;
+
+    for (pass = 0; pass < 2; pass++) {
+        uint32_t w[10], *q, size, o, pack[3];
+        int n, v, i;
+
+        gpu_pica_reset();
+        memset(mem + 0x40000u, 0, 0x100);
+        q = (uint32_t *)(mem + LIST);
+        q = t_emit_pos_setup(q);
+        q = emit(q, 0x40, 1u);              /* Cull: nur im Uhrzeigersinn */
+        q = emit(q, 0x242, 0u);             /* 1 Immediate-Attribut je Vertex */
+        q = emit(q, 0x229, 2u);
+        q = emit(q, 0x24A, 0u);
+        q = emit(q, 0x251, 0u);
+        q = emit(q, 0x252, 0u);             /* Point */
+        q = emit(q, 0x25E, 3u << 8);
+        q = emit(q, 0x289, 2u);             /* 3 GS-Eingangsattribute */
+        q = emit(q, 0x28B, 0x210u);
+        q = emit(q, 0x28C, 0u);
+        q = emit(q, 0x28A, 0u);
+        q = emit(q, 0x28D, 1u);
+        n = t_gs_words_emit3(w, 0u, (uint32_t)pass);
+        q = emit_gs_program(q, w, n);
+        q = emit_gs_swizzle0(q, swz_xyzw());
+        q = t_emit_fb_red8(q);
+        /* Immediate-Modus: je drei f24-Woerter ein Attribut (ein Vertex). */
+        q = emit(q, 0x232, 0xFu);
+        for (v = 0; v < 3; v++) {
+            f24_pack3(pos[v][0], pos[v][1], pos[v][2], 1.0f, pack);
+            for (i = 0; i < 3; i++) q = emit(q, 0x233u + (uint32_t)i, pack[i]);
+        }
+        size = (uint32_t)((unsigned char *)q - (mem + LIST));
+        gpu_run_pica_list(c, LIST, size);
+        o = t_fb_off(0x40000u, 1, 5, 8, 8, 4);
+        if (pass) {
+            check(mem[o + 3] == 0xFF && mem[o + 2] == 0 && mem[o + 1] == 0,
+                  "GS Immediate: 3 Immediate-Vertices fuellen den Puffer, winding=1 dreht");
+        } else {
+            check(mem[o + 3] == 0 && mem[o + 2] == 0,
+                  "GS Immediate ohne winding: KeepClockWise verwirft das Dreieck");
+        }
+    }
+}
+
 int main(void) {
 
     static unsigned char mem[0x100000];
@@ -2894,6 +3299,13 @@ int main(void) {
     test_lighting(&c, mem);
     test_lighting_review(&c, mem);
     test_texture_projection_cube(&c, mem);
+    test_gs_point(&c, mem);
+    test_gs_fixed_primitive(&c, mem);
+    test_gs_variable_primitive(&c, mem);
+    test_gs_exclusive_program_share(&c, mem);
+    test_gs_winding(&c, mem);
+    test_gs_output_bank(&c, mem);
+    test_gs_immediate(&c, mem);
 
     printf("ERGEBNIS: %s\n", fails == 0 ? "OK" : "FEHLER");
     return fails == 0 ? 0 : 1;

@@ -265,6 +265,57 @@ MMU/Seitentabelle hat.
 Das Titelbild ist ein 3D-Render (`title.xc`): korrekte Darstellung braucht
 zusätzlich **TEV** und die Rasterizer-Zustände (Viewport/Clip/Depth).
 
+### Geometrie-Shader (Shader-Einheit 3)
+
+Quelle: Azahar `pica/regs_shader.h`, `pica/regs_pipeline.h`,
+`pica/geometry_pipeline.cpp`, `pica/shader_unit.cpp` (`GeometryEmitter`),
+`pica/pica_core.cpp` (`HandleSpecialReg`), nihstro `shader_bytecode.h`.
+
+* Register `0x280..0x2AF` sind eine zweite Shader-Einheit mit demselben
+  Aufbau wie der VS (`0x2B0..0x2DF`, Versatz -0x30): `0x280`
+  `bool_uniforms`, `0x281..0x284` `int_uniforms`, `0x289`
+  `input_buffer_config` (Bits 0..3 `max_input_attribute_index`, 8..15
+  `input_to_uniform`, 24..31 `shader_mode` 8 = GS / 0xA0 = VS), `0x28A`
+  `main_offset`, `0x28B`/`0x28C` Input-Map (4 Bit je Attribut), `0x28D`
+  `output_mask`, `0x290` Uniform-Index (Bit31 = float32), `0x291..0x298`
+  `set_value`, `0x29B` Programm-Offset, `0x29C..0x2A3` `set_word`, `0x2A5`
+  Swizzle-Offset, `0x2A6..0x2AD` `set_word`. Programm- und Swizzle-RAM sind je
+  4096 Wörter groß; die **VS**-Register adressieren nur Wort 0..511
+  (Schreibzugriffe darüber werden verworfen), die GS-Register alle 4096.
+* Pipeline: `0x229` Bits 0..1 `use_gs` (2 = an), Bit31 `variable_primitive`;
+  `0x242` `max_input_attribute_index` des Vertex-Loaders/Immediate-Modus;
+  `0x244` `gs_unit_exclusive_configuration` (0: VS-Uploads spiegeln Programm,
+  Swizzle, Uniforms, Bool-/Int-Uniforms und `output_mask` nach Einheit 3,
+  solange `use_gs == 0`); `0x24A`/`0x251` `vs_outmap_total_minus_1_a/b`
+  (Anzahl VS-Ausgangsattribute); `0x252` `gs_config` (Bits 0..7 Modus
+  0 Point / 1 VariablePrimitive / 2 FixedPrimitive, 8..11
+  `fixed_vertex_num_minus_1`, 12..15 `stride_minus_1`, 16..23 `start_index`);
+  `0x254` `variable_vertex_main_num_minus_1`.
+* **Point:** VS-Ausgaben füllen den GS-Eingangspuffer (`0x289` Bits 0..3 + 1
+  Attribute); ist er voll, läuft der GS mit Input-Map `0x28B`/`0x28C`.
+  **VariablePrimitive:** der erste Wert eines Index-Batches ist die
+  Vertexzahl und steht danach als Uniform `f[0]`; die Vertexdaten landen ab
+  `f[1]` in den Uniforms, nur die ersten `0x254+1` Vertices erhalten alle
+  Attribute, alle weiteren nur Attribut 0. **FixedPrimitive:** wie Variable,
+  aber feste Vertexzahl ab `start_index`. Ohne GS geht die VS-Ausgabe direkt
+  in die Primitive Assembly.
+* `EMIT` (0x2A) kopiert die Ausgangsregister laut `output_mask` nach
+  `buffer[vertex_id]` und wechselt danach die Ausgangsbank. Es gibt **zwei**
+  Bänke: ein zwischen zwei EMITs nicht beschriebenes Register liefert den
+  Wert von vor zwei EMITs. Bei `prim_emit` gehen alle drei Puffer in die
+  Primitive Assembly; `winding` invertiert dort (nur Topologie Shader)
+  die Windung des nächsten Dreiecks. `SETEMIT` (0x2B): Bits 0..1
+  `vertex_id`, Bit 2 `prim_emit`, Bit 3 `winding`. Bool-Uniform b15 ist nach
+  jedem GS-Aufruf gesetzt.
+* `ConfigOutput` kopiert `output_mask` (0x28D) beim `Reconfigure` (je Draw)
+  in den Emitter; spätere Schreibzugriffe auf 0x28D wirken erst beim nächsten
+  Draw. Der Immediate-Modus (`0x232 == 0xF`, Attribute über `0x233..0x235`)
+  läuft ebenfalls durch die Geometrie-Pipeline (`PicaCore::DrawImmediate`);
+  `immediate.Reset()` beim Schreiben von 0x232 setzt
+  `reset_geometry_pipeline`, sodass erst der nächste Immediate-Flush
+  rekonfiguriert und der Backend-Zustand über weitere Vertices erhalten
+  bleibt.
+
 ### Rasterizer, Clipping, TEV und Farbziel
 
 Quelle: Azahar `renderer_software/sw_rasterizer.cpp`, `sw_clipper.cpp`,

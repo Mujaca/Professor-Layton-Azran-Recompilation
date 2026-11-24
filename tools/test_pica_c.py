@@ -51,6 +51,22 @@ Review-Checks: Abs-Zweig nur bei two_sided fabs (sonst max(0,...)) fuer
 negative NH/LN, FlipQuaternionIfOpposite vor Clipping, bump_mode 3
 (Normal/Tangente 0), Mehrfach-Licht, Spot-Daempfung, D0/D1-Specular,
 Reflect RGB, Clamp-Highlights und globales Ambient.
+
+Geometrie-Shader (Azahar pica/geometry_pipeline.cpp, shader_unit.cpp
+GeometryEmitter, pica_core.cpp HandleSpecialReg, regs_pipeline.h): eigene
+Shader-Einheit 3 mit Registern 0x280..0x2AF (Programm 0x29B/0x29C, Swizzle
+0x2A5/0x2A6, Input-Konfiguration 0x289, Einstieg 0x28A, Input-Map 0x28B/
+0x28C, output_mask 0x28D), Pipeline-Konfiguration 0x229 (use_gs,
+variable_primitive), 0x244 (gs_unit_exclusive_configuration, Programm-/
+Swizzle-/Uniform-Spiegelung), 0x24A/0x251 (VS-Ausgangsattribute), 0x252
+(Point/VariablePrimitive/FixedPrimitive inkl. Vertexzahl/Stride/Startindex),
+0x254, Topologie Shader 0x25E und EMIT 0x2A / SETEMIT 0x2B (vertex_id,
+prim_emit, winding, doppelte Ausgangsbank, output_mask-Kopie bei Reconfigure).
+Der Immediate-Modus (0x232 = 0xF, Attribute 0x233..0x235) geht ebenfalls durch
+die Pipeline (PicaCore::DrawImmediate). Erwartungen: Pufferaufbau im
+Point-Modus, Vertexdaten in Uniforms (Variable/Fixed), Index = Vertexzahl,
+Spiegelung nur ohne exclusive-Konfiguration, Winding-Invertierung (auch im
+Immediate-Modus) und Bankwechsel.
 """
 import os
 import subprocess
