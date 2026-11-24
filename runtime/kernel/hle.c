@@ -2868,7 +2868,9 @@ static void gsp_vblank_fb_update(ArmCpu *c, int tid) {
         fbu = c->mem + base;
         if ((fbu[1] & 1u) == 0u) continue;   /* nicht aktualisiert */
         idx = fbu[0] & 1u;
-        info = base + 8u + idx * 0x20u;
+        /* Azahar gsp_gpu.h: FrameBufferUpdate = {u8 index, u8 dirty, u16 pad,
+           FrameBufferInfo[2] (je 0x1C Byte) ab +4} -> [1] bei +0x20. */
+        info = base + 4u + idx * 0x1Cu;
         memcpy(&active, c->mem + info + 0u, 4);
         memcpy(&left, c->mem + info + 4u, 4);
         memcpy(&right, c->mem + info + 8u, 4);
