@@ -969,6 +969,39 @@ einen **Vertex-Shader-Interpreter/Übersetzer** und **TEV**.
 * VNEG/VABS sind Bitoperationen (Vorzeichen invertieren/loeschen) und
   unterliegen weder FTZ noch der NaN-Kanonisierung.
 
+### DSP/Medien- und Statusbefehle (2026-11-24 verifiziert)
+
+* **MRS/MSR (APSR)**: MRS liefert NZCV (31..28), Q (27), GE (19..16), das
+  T-Bit (5) und die Modusbits. Im User-Mode ist der Modus 0x10. MSR maskiert
+  nach Feld: `apsr_nzcvq` schreibt 31..27, `apsr_g` nur 19..16; andere
+  Felder bleiben unveraendert. CPSR/SPSR-Schreibzugriffe (privilegiert) sind
+  im Port nicht abgebildet. (`tools/recomp/emit.py`, `ArmCpu.cpsr_mode`.)
+* **SMMUL/SMMLA/SMMLS**: `Ra` liegt im **oberen** 32-Bit-Wort:
+  `SMMLA = (Ra<<32 + Rn*Rm) >> 32`, `SMMLS = (Ra<<32 - Rn*Rm) >> 32`,
+  `SMMUL` ohne Ra. Das ist *kein* `Ra + (Produkt>>32)` mit
+  vorzeichenerweitertem Ra (Azahar dyncom `SMMLA_INST`, mit Unicorn belegt).
+* **SMUAD/SMUADX/SMUSD/SMUSDX**: `p1 = lo*lo`, `p2 = hi*hi`; SMUAD addiert,
+  SMUSD subtrahiert `p2`. Das X-Suffix tauscht die Halbwoerter des *zweiten*
+  Operanden. Q wird bei signed Ueberlauf der Addition gesetzt; die
+  Subtraktion kann mit 16-Bit-Produkten nicht ueberlaufen.
+* **SMLAD/SMLSD**: wie oben, zusaetzlich `+ Ra`; Q bei Ueberlauf beider
+  Additionen. **SMLALD/SMLSLD**: 64-Bit-Akkumulator `RdHi:RdLo` plus
+  Produktpaar (immer addiert, `sub` waehlt `p1-p2`).
+* **UMAAL**: `RdLo:RdHi = Rn*Rm + RdLo + RdHi` (unsigned, 64 Bit).
+* **SXTAB16/UXTAB16**: die Extension wird **je 16-Bit-Lane** zu Rn addiert;
+  ein Uebertrag der unteren Haelfte laeuft nicht in die obere.
+* **SWP/SWPB**: `temp = [Rn]; [Rn] = Rm; Rd = temp` (Rd/Rm duerfen nicht
+  gleich sein; keine Exklusiv-Semantik).
+* **LDRT/STRT** sind immer post-indexiert; im User-Mode verhalten sie sich
+  wie LDR/STR. **LDM/STM mit `^`** adressieren im User-Mode dieselben
+  r0-r12; `pc` in der Liste ist ein Interworking-Sprung.
+* **Logische Operationen mit Immediate**: C ist Bit 31 des expandierten
+  Immediates, wenn der Shifter tatsaechlich rotiert; bei Rotation 0 bleibt C
+  unveraendert. Thumb-2: die Muster `00XY00XY`/`XY00XY00`/`XYXYXYXY` lassen C
+  unveraendert, sonst gilt die Rotationsregel (ARM ARM ThumbExpandImm_C).* **ARMv6K kennt kein `rbit`** (erst ARMv6T2/ARMv7); `setend` existiert in
+  ARMv6, kommt im Spiel-Image aber nicht vor. Kein Code im Port erzeugt
+  Big-Endian-Zugriffe.
+
 ## Quellen
 * https://www.3dbrew.org/wiki/IPC, /RomFS, /GSP_Shared_Memory, /GPU/Internal_Registers
 * libctru: `source/services/{apt,gsp,srv,fs}.c`, `source/ndsp/ndsp.c`

@@ -61,6 +61,11 @@ TBB_IDS = tuple(getattr(A, n) for n in ("ARM_INS_TBB", "ARM_INS_TBH")
 
 SHIFT = {"lsl": "SH_LSL", "lsr": "SH_LSR", "asr": "SH_ASR", "ror": "SH_ROR"}
 
+# Logische DP-Operationen: ihr C-Flag kommt aus dem Shifter (auch bei
+# Immediate-Operanden), arithmetische setzen es aus dem Uebertrag.
+LOGICAL_DP = {"DP_AND", "DP_EOR", "DP_ORR", "DP_BIC", "DP_MOV", "DP_MVN",
+              "DP_TST", "DP_TEQ"}
+
 VFP_ARITH = {"vadd": 0, "vsub": 1, "vmul": 2, "vdiv": 3}
 VFP_UNARY = {"vneg": 4, "vabs": 5, "vsqrt": 6}
 
@@ -77,7 +82,8 @@ CORE_BASES = {"nop", "hint", "pld", "pldw", "clrex", "cdp", "cdp2",
               "ldc", "stc", "mcrr", "mrrc", "lsl", "lsr", "asr", "ror",
               "rrx", "uxth", "uxtb", "sxth", "sxtb", "uxtah", "sxtah", "ldrd", "strd",
               "ldrex", "strex", "mrc", "mcr", "ldm", "stm", "push", "pop", "rev",
-              "rev16", "revsh", "usat", "ssat", "qadd", "qsub", "sdiv", "udiv"}
+              "rev16", "revsh", "usat", "ssat", "qadd", "qsub", "sdiv", "udiv",
+              "swp", "swpb"}
 
 
 def _known(core):
@@ -183,8 +189,7 @@ def _build_aliases():
                          ("ARM_INS_LDRT", "ARM_INS_LDR"), ("ARM_INS_STRT", "ARM_INS_STR"),
                          ("ARM_INS_LDRBT", "ARM_INS_LDRB"), ("ARM_INS_STRBT", "ARM_INS_STRB"),
                          ("ARM_INS_LDRHT", "ARM_INS_LDRH"), ("ARM_INS_STRHT", "ARM_INS_STRH"),
-                         ("ARM_INS_LDRSBT", "ARM_INS_LDRSB"), ("ARM_INS_LDRSHT", "ARM_INS_LDRSH"),
-                         ("ARM_INS_SMLSLD", "ARM_INS_SMULL")):
+                         ("ARM_INS_LDRSBT", "ARM_INS_LDRSB"), ("ARM_INS_LDRSHT", "ARM_INS_LDRSH")):
         a = getattr(A, name, None)
         b = getattr(A, target, None)
         if a is not None and b is not None:
@@ -218,6 +223,42 @@ class Emitter:
         if self.thumb:
             return (pc + 4) & ~3
         return pc + 8
+
+    def imm_shifter_carry(self, ins):
+        """Carry-Ausgang eines Immediate-Shifters (nur logische DP-Ops).
+
+        ARM: bei Rotation 0 bleibt C unveraendert, sonst ist C Bit 31 des
+        expandierten Immediates. Thumb-2 (modifiziertes Immediate): die
+        Muster 00XY00XY/XY00XY00/XYXYXYXY lassen C unveraendert, sonst
+        C = Bit 31 nach der Rotation (ARM ARM ThumbExpandImm_C).
+        """
+        try:
+            b = ins.bytes
+        except Exception:
+            return -1
+        if not b:
+            return -1
+        if not self.thumb:
+            if len(b) < 4:
+                return -1
+            imm12 = int.from_bytes(b[:4], "little") & 0xFFF
+            rot = ((imm12 >> 8) & 0xF) * 2
+            if rot == 0:
+                return -1
+            v = imm12 & 0xFF
+            v = ((v >> rot) | (v << (32 - rot))) & 0xFFFFFFFF
+            return (v >> 31) & 1
+        if len(b) < 4:
+            return -1
+        hw1 = int.from_bytes(b[0:2], "little")
+        hw2 = int.from_bytes(b[2:4], "little")
+        imm12 = (((hw1 >> 10) & 1) << 11) | (((hw2 >> 12) & 7) << 8) | (hw2 & 0xFF)
+        if (imm12 >> 10) == 0:
+            return -1
+        unrot = 0x80 | (imm12 & 0x7F)
+        rot = imm12 >> 7
+        v = ((unrot >> rot) | (unrot << (32 - rot))) & 0xFFFFFFFF
+        return (v >> 31) & 1
 
     def label(self, addr):
         return "L_%08X_%08X" % (self.func, u32(addr))
@@ -259,6 +300,11 @@ class Emitter:
             if v is None:
                 raise Unsupported(t)
             return "0x%08Xu" % u32(v)
+        n = isa.reg_num(t[1:]) if t.startswith("-") else None
+        if n is not None:
+            # Negative Register-Offsets (`ldr r0, [r1, -r2, lsl #2]`) sind
+            # modular zu rechnen.
+            return "(0u - c->r[%d])" % n
         n = isa.reg_num(t)
         if n is None:
             raise Unsupported(t)
@@ -322,12 +368,18 @@ class Emitter:
             rest = ops[1:]
         o2, sh = self.operand2(rest, pc)
         sf = sets_flags(ins, self.thumb, in_it)
+        sc = -1
+        if sh is None and sf and code in LOGICAL_DP and len(rest) == 1 \
+                and rest[0].strip().startswith("#"):
+            # Immediate-Operand: C kann vom Rotationsteil abhaengen.
+            sc = self.imm_shifter_carry(ins)
         if sh:
             lines = ["{", "  int sh = -1;",
                      "  arm_dp(c, %s, %d, %s, %s, %d, sh);" % (code, rd, rn, o2, sf),
                      "}"]
         else:
-            lines = ["arm_dp(c, %s, %d, %s, %s, %d, -1);" % (code, rd, rn, o2, sf)]
+            lines = ["arm_dp(c, %s, %d, %s, %s, %d, %d);"
+                     % (code, rd, rn, o2, sf, sc)]
         if writes and rd == 15:
             src = isa.reg_num(ops[1]) if len(ops) > 1 else None
             if code == "DP_MOV" and src == 14:
@@ -701,6 +753,25 @@ class Emitter:
 
         if base == "clrex":
             return ["arm_excl_clear(c);"]
+
+        if base in ("swp", "swpb"):
+            d = isa.reg_num(ops[0]) if len(ops) > 0 else None
+            n = isa.reg_num(ops[1]) if len(ops) > 1 else None
+            if d is None or n is None or len(ops) < 3:
+                raise Unsupported(ins.op_str)
+            mem_txt = ops[2].strip()
+            if not (mem_txt.startswith("[") and mem_txt.endswith("]")):
+                raise Unsupported(ins.op_str)
+            inner = isa.split_operands(mem_txt[1:-1])
+            rn = isa.reg_num(inner[0]) if inner else None
+            if rn is None:
+                raise Unsupported(ins.op_str)
+            size = 1 if base == "swpb" else 4
+            # SWP: temp = [Rn]; [Rn] = Rm; Rd = temp (ARM ARM A8.8.160).
+            return ["{ uint32_t a = c->r[%d];" % rn,
+                    "  uint32_t v = arm_ld(c, a, %d, 0);" % size,
+                    "  arm_st(c, a, %d, c->r[%d]);" % (size, n),
+                    "  c->r[%d] = v; }" % d]
 
         if base in ("nop", "hint", "pld", "pldw", "dbg", "sev", "wfe", "wfi",
                     "it", "cdp", "cdp2", "ldc", "stc", "mcrr", "mrrc") or base.startswith(("ldc", "stc")):
@@ -1098,16 +1169,31 @@ class Emitter:
             rd = isa.reg_num(ops[0])
             if rd is None:
                 raise Unsupported(ins.op_str)
-            lines = ["c->r[%d] = (c->n << 31) | (c->z << 30) | (c->c << 29) | (c->v << 28);" % rd]
+            # APSR: NZCVQ (Bits 31..27), GE (19..16), T (5) und der
+            # User-Mode (0x10). Das Spiel laeuft immer im User-Mode.
+            lines = ["c->r[%d] = (c->n << 31) | (c->z << 30) | (c->c << 29) | "
+                     "(c->v << 28) | (c->qflag << 27) | (c->ge << 16) | "
+                     "(c->t << 5) | c->cpsr_mode;" % rd]
         elif ins.id == A.ARM_INS_MSR:
             ops = isa.split_operands(ins.op_str)
-            if len(ops) < 2 or ops[1].startswith("#"):
+            if len(ops) < 2:
                 raise Unsupported(ins.op_str)
-            rn = isa.reg_num(ops[1])
-            if rn is None:
+            fields = ops[0].lower()
+            if "cpsr" in fields or "spsr" in fields:
+                # Nur APSR-Felder sind abbildbar (kein privilegierter Modus).
                 raise Unsupported(ins.op_str)
-            lines = ["{ uint32_t v = c->r[%d]; c->n = (v >> 31) & 1u; c->z = (v >> 30) & 1u; "
-                     "c->c = (v >> 29) & 1u; c->v = (v >> 28) & 1u; }" % rn]
+            upd = []
+            for ch, field, bit in (("n", "n", 31), ("z", "z", 30),
+                                   ("c", "c", 29), ("v", "v", 28),
+                                   ("q", "qflag", 27)):
+                if ch in fields:
+                    upd.append("c->%s = (v >> %d) & 1u;" % (field, bit))
+            if "g" in fields:
+                upd.append("c->ge = (v >> 16) & 0xFu;")
+            if not upd:
+                raise Unsupported(ins.op_str)
+            lines = ["{ uint32_t v = %s;" % self.value(ops[1], pc)] + \
+                    ["  " + u for u in upd] + ["}"]
         elif ins.id == A.ARM_INS_CLZ:
             ops = isa.split_operands(ins.op_str)
             rd = isa.reg_num(ops[0])

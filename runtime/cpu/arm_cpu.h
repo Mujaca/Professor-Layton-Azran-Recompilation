@@ -15,6 +15,7 @@ typedef struct ArmCpu {
     /* APSR-Flags */
     uint32_t n, z, c, v;
     uint32_t t;              /* Thumb-Bit */
+    uint32_t cpsr_mode;      /* CPSR-Modusbits (Gast laeuft im User-Mode 0x10) */
     /* VFP: rohe 32-Bit-Ansicht, 32 s-Register / 16 d-Register */
     uint32_t sreg[64];
     uint32_t fpscr;
@@ -129,5 +130,14 @@ uint32_t arm_usad(ArmCpu *c, uint32_t a, uint32_t b, int accumulate, uint32_t ac
 uint32_t arm_qadd32(ArmCpu *c, int op, uint32_t a, uint32_t b);
 uint32_t arm_smla16(ArmCpu *c, uint32_t rn, uint32_t rm, uint32_t ra,
                     int ntop, int mtop, int accumulate);
+
+/* ARMv6-DSP: SMMUL/SMMLA/SMMLS, SMUAD/SMUSD, SMLAD/SMLSD, SMLALD/SMLSLD,
+ * UMAAL (Azahar dyncom, ARM ARM A8.8). */uint32_t arm_smmul(int mode, uint32_t a, uint32_t b, uint32_t acc);
+uint32_t arm_dual16(ArmCpu *c, int sub, uint32_t a, uint32_t b, int exchange);
+uint32_t arm_smlad(ArmCpu *c, int sub, uint32_t a, uint32_t b, uint32_t acc,
+                   int exchange);
+void arm_smlald(ArmCpu *c, int rdlo, int rdhi, int sub, uint32_t a, uint32_t b,
+                int exchange);
+void arm_umaal(ArmCpu *c, int rdlo, int rdhi, uint32_t a, uint32_t b);
 
 #endif

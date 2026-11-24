@@ -33,18 +33,45 @@ bedingte Ausfuehrung inkl. IT-Bloecken). Jeder Fall laeuft einmal in Unicorn
 (Referenz) und einmal als recompilierter C-Code; verglichen werden r0-r14,
 NZCVQ/GE und ein Speicher-Digest.
 
+Zusaetzlich gezielt abgedeckt (2026-11-24):
+
+* `ldm`/`stm` in allen vier Adressierungsarten mit/ohne Writeback, `^`-Form
+  (User-Registerbank; r0-r12) und `pc` in der Liste (Interworking-Sprung),
+* `swp`/`swpb`, `ldrt`/`strt`/`ldrbt`/`strbt`/`ldrht`/`strht` (immer
+  post-indexiert), negative Register-Offsets (`[r1, -r2, lsl #2]`),
+* `mrs`/`msr` auf APSR-Feldern (NZCVQ und GE getrennt; MRS liefert
+  zusaetzlich T-Bit und Modusbits 0x10),
+* `smmul`/`smmla`/`smmls` (Ra liegt im oberen Wort), `smuad(x)`/`smusd(x)`,
+  `smlad(x)`/`smlsd(x)` inkl. Q-Flag bei Ueberlauf, `smlald(x)`/`smlsld(x)`,
+  `umaal`, `sxtab16`/`uxtab16` (16-Bit-Halbwort-Addition, ROR),
+* Thumb-2-Breitformen mit Shift-Operanden (`add.w ..., ror #n`,
+  `mov.w/mvn.w/cmp.w/tst.w ... ror #n`).
+
+Nicht Teil des Tests: `rbit` (ARM11 ist ARMv6K; RBIT wurde erst mit ARMv6T2/
+ARMv7 eingefuehrt) und `setend` (in ARMv6 vorhanden, kommt im Spiel-Image
+nicht vor).
+
 ```powershell
+python tools/recomp_difftest.py --fast            # deterministisch, < 60 s
+python tools/recomp_difftest.py --seeds 20 --count 2000 --mode arm
 python tools/recomp_difftest.py --seed 7 --count 200
 python tools/recomp_difftest.py --mode arm --quick --filter sbc
 python tools/recomp_difftest.py --mode cf          # Kontrollfluss-Suite
 ```
+
+`--fast` ist der feste Regressionlauf (Seed 1, systematische Faelle beider
+Modi ohne Zusatz-Zufallsfolgen plus vier Kontrollfluss-Faelle); er braucht auf
+einem Entwicklungsrechner ~35-40 s. `--seeds N` wiederholt denselben Lauf mit
+N aufeinanderfolgenden Seeds (breiter Lauf, z. B. `--seeds 20 --count 2000`
+je Modus; Laufzeit beachten).
 
 Die Kontrollfluss-Suite (`--mode cf`) baut je Fall ein eigenes Programm aus
 mehreren Funktionen (ARM/Thumb gemischt) und vergleicht gegen Unicorn:
 bedingte Rueckkehr (`bxcc lr`, `popcc {pc}`, `ldrcc pc`, `movcc pc,lr`),
 `ldm sp!,{..,pc}` mit Interworking, `blx reg/imm` in beide Richtungen,
 Tail-Calls (`b`), Sprungtabellen (`add pc,pc,rN,lsl #2`,
-`ldrls pc,[pc,rN,lsl #2]`, Thumb `tbb`/`tbh`), alle IT-Masken,
+`ldrls pc,[pc,rN,lsl #2]`, Thumb `tbb`/`tbh` inkl. 16-Bit-Offsets > 255 und
+dem maximalen Byte-Offset 0xFF), alle IT-Masken,
 `cbz`/`cbnz`-Schleifen und Fallthrough zwischen Funktionseinstiegen.
 Verglichen werden r0-r14, NZCVQ/GE und der Daten-Digest.
 

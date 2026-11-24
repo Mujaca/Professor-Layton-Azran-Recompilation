@@ -48,8 +48,9 @@ OUT = os.path.join(ROOT, "out", "difftest")
 # --------------------------------------------------------------------------
 # Fall-Generatoren
 # --------------------------------------------------------------------------
-def _add(cases, asm, regs=None, small=False, note=""):
-    cases.append({"asm": asm, "regs": regs or {}, "small": small, "note": note})
+def _add(cases, asm, regs=None, small=False, note="", user_mode=False):
+    cases.append({"asm": asm, "regs": regs or {}, "small": small, "note": note,
+                  "user_mode": user_mode})
 
 
 def _rot_imm(rng):
@@ -171,17 +172,180 @@ def arm_media_cases(rng):
     for m in ("usat16", "ssat16"):
         _add(cases, "%s r%d, #%d, r%d" % (m, R(), rng.randrange(1, 17), R()), note=m)
     for m in ("ubfx", "sbfx"):
+        lsb = rng.randrange(0, 16)
         _add(cases, "%s r%d, r%d, #%d, #%d"
-             % (m, R(), R(), rng.randrange(0, 24), rng.randrange(1, 25)), note=m)
+             % (m, R(), R(), lsb, rng.randrange(1, 32 - lsb + 1)), note=m)
+    lsb = rng.randrange(0, 16)
     _add(cases, "bfi r%d, r%d, #%d, #%d"
-         % (R(), R(), rng.randrange(0, 24), rng.randrange(1, 25)), note="bfi")
+         % (R(), R(), lsb, rng.randrange(1, 32 - lsb + 1)), note="bfi")
+    lsb = rng.randrange(0, 16)
     _add(cases, "bfc r%d, #%d, #%d"
-         % (R(), rng.randrange(0, 24), rng.randrange(1, 25)), note="bfc")
+         % (R(), lsb, rng.randrange(1, 32 - lsb + 1)), note="bfc")
     return cases
 
 
 def _mem_base(rng):
     return DATA_BASE + 0x400 + 4 * rng.randrange(0, 32)
+
+
+def _ldm_forms(cases, rng, thumb):
+    """Alle LDM/STM-Adressierungsarten inkl. ^-Form und PC in der Liste.
+
+    In der SVC-Mode-Referenz (Unicorn) sind r0-r12 auch bei der ^-Form
+    dieselben Register; r13/r14 waeren die gebankten User-Register, die der
+    Port nicht modelliert. Darum nur r0-r12 in den ^-Listen.
+    """
+    sfx = ".w" if thumb else ""
+    for mode in ("ia", "ib", "da", "db"):
+        for wb in (False, True):
+            base = rng.randrange(1, 13)
+            pool = [r for r in range(13) if r != base]
+            lst = sorted(rng.sample(pool, 3))
+            b = _mem_base(rng)
+            regs = "{%s}" % ", ".join("r%d" % r for r in lst)
+            _add(cases, "ldm%s%s r%d%s, %s" % (mode, sfx, base,
+                                               "!" if wb else "", regs),
+                 regs={base: b}, small=True, note="ldm%s%s" % (mode, " wb" if wb else ""))
+            _add(cases, "stm%s%s r%d%s, %s" % (mode, sfx, base,
+                                               "!" if wb else "", regs),
+                 regs={base: b}, small=True, note="stm%s%s" % (mode, " wb" if wb else ""))
+            # ^-Form (S-Bit): in SVC-Mode sind r0-r12 ungebankt.
+            if not wb:
+                _add(cases, "ldm%s%s r%d, %s ^" % (mode, sfx, base, regs),
+                     regs={base: b}, small=True, note="ldm%s ^" % mode)
+                _add(cases, "stm%s%s r%d, %s ^" % (mode, sfx, base, regs),
+                     regs={base: b}, small=True, note="stm%s ^" % mode)
+            else:
+                _add(cases, "ldm%s%s r%d!, %s ^" % (mode, sfx, base, regs),
+                     regs={base: b}, small=True, note="ldm%s wb ^" % mode)
+                _add(cases, "stm%s%s r%d!, %s ^" % (mode, sfx, base, regs),
+                     regs={base: b}, small=True, note="stm%s wb ^" % mode)
+    # PC in der Liste: Ziel 0 beendet den Lauf in Unicorn (Endadresse 0).
+    for wb in (False, True):
+        base = rng.randrange(1, 13)
+        others = sorted(rng.sample([r for r in range(13) if r != base], 2))
+        zr = rng.choice([r for r in range(13)
+                         if r not in (base, others[0], others[1])])
+        b = _mem_base(rng)
+        txt = "mov r%d, #0\nstr r%d, [r%d, #8]\n" % (zr, zr, base)
+        txt += "ldm%s%s r%d%s, {r%d, r%d, pc}" % ("ia", sfx, base,
+                                                  "!" if wb else "",
+                                                  others[0], others[1])
+        _add(cases, txt, regs={base: b, zr: 0}, small=True,
+             note="ldm pc" + (" wb" if wb else ""))
+    # Stack-Adressierung mit PC (pop {.., pc} ueber einen echten LDM).
+    _add(cases, "mov r4, #0\nstr r4, [sp, #-8]\nstr r4, [sp, #-4]\n"
+                "ldmdb sp!, {r4, pc}",
+         small=True, note="ldmdb sp! pc")
+
+
+def _swp_cases(cases, rng, thumb):
+    R = lambda: rng.randrange(13)
+    for m in ("swp", "swpb"):
+        for _ in range(3):
+            d, n, base = R(), R(), R()
+            if len({d, n, base}) < 3:
+                continue
+            b = _mem_base(rng)
+            _add(cases, "%s r%d, r%d, [r%d]" % (m, d, n, base),
+                 regs={base: b, n: rng.getrandbits(32)}, small=True, note=m)
+
+
+def _transfer_cases(cases, rng, thumb):
+    """ldrt/strt: die T-Varianten sind immer post-indexiert."""
+    for m in ("ldrt", "strt", "ldrbt", "strbt", "ldrht", "strht"):
+        for _ in range(2):
+            base = 1
+            b = _mem_base(rng)
+            rd = rng.choice([r for r in range(13) if r != base])
+            off = rng.choice([4, 8, 0x10, rng.randrange(1, 0x20)])
+            _add(cases, "%s r%d, [r%d], #%d" % (m, rd, base, off),
+                 regs={base: b}, small=True, note=m)
+
+
+def _dsp2_cases(cases, rng, thumb):
+    """ARMv6-DSP-Erweiterungen: SMULxy/SMLAD/SMLALD/SMMUL/UMAAL.
+
+    Die 32-Bit-Thumb-2-Kodierungen dieser Klasse tragen keinen .w-Suffix
+    (keystone lehnt ``smmul.w`` ab).
+    """
+    R = lambda: rng.randrange(13)
+    sfx = ""
+    for m in ("smmul", "smmla", "smmls"):
+        for _ in range(2):
+            d, n, mm = R(), R(), R()
+            if len({d, n, mm}) < 3:
+                continue
+            if m == "smmul":
+                _add(cases, "%s%s r%d, r%d, r%d" % (m, sfx, d, n, mm), note=m)
+            else:
+                a = R()
+                if a in (d, n, mm):
+                    continue
+                _add(cases, "%s%s r%d, r%d, r%d, r%d" % (m, sfx, d, n, mm, a), note=m)
+    for m in ("smuad", "smuadx", "smusd", "smusdx"):
+        d, n, mm = R(), R(), R()
+        if len({d, n, mm}) == 3:
+            _add(cases, "%s%s r%d, r%d, r%d" % (m, sfx, d, n, mm), note=m)
+    for m in ("smlad", "smladx", "smlsd", "smlsdx"):
+        d, n, mm, a = R(), R(), R(), R()
+        if len({d, n, mm, a}) == 4:
+            _add(cases, "%s%s r%d, r%d, r%d, r%d" % (m, sfx, d, n, mm, a), note=m)
+    for m in ("smlald", "smlaldx", "smlsld", "smlsldx"):
+        lo = rng.randrange(0, 12, 2)
+        hi = lo + 1
+        n, mm = R(), R()
+        if n in (lo, hi) or mm in (lo, hi):
+            continue
+        _add(cases, "%s%s r%d, r%d, r%d, r%d" % (m, sfx, lo, hi, n, mm), note=m)
+    for _ in range(2):
+        lo = rng.randrange(0, 12, 2)
+        hi = lo + 1
+        n, mm = R(), R()
+        if n in (lo, hi) or mm in (lo, hi):
+            continue
+        _add(cases, "umaal%s r%d, r%d, r%d, r%d" % (sfx, lo, hi, n, mm), note="umaal")
+    if not thumb:
+        # Keystone kennt die Thumb-2-Kodierung von SXTAB16/UXTAB16 nicht.
+        for m in ("sxtab16", "uxtab16"):
+            d, n, mm = R(), R(), R()
+            if len({d, n, mm}) == 3:
+                _add(cases, "%s%s r%d, r%d, r%d" % (m, sfx, d, n, mm), note=m)
+                _add(cases, "%s%s r%d, r%d, r%d, ror #%d"
+                     % (m, sfx, d, n, mm, rng.choice([8, 16, 24])),
+                     note=m + " ror")
+    # Feste Grenzfaelle: Q-Flag bei Ueberlauf der Produktsumme/Addition,
+    # 64-Bit-Ueberlauf und Saettigung.
+    fixed = [
+        ("smuad%s r6, r3, r8" % sfx,
+         {3: 0x80008000, 8: 0x80008000}, "smuad q"),
+        ("smusd%s r6, r3, r8" % sfx,
+         {3: 0x80008000, 8: 0x7FFF7FFF}, "smusd"),
+        ("smlad%s r6, r3, r8, r9" % sfx,
+         {3: 0x7FFF7FFF, 8: 0x7FFF7FFF, 9: 0x7FFFFFFF}, "smlad q"),
+        ("smlsd%s r6, r3, r8, r9" % sfx,
+         {3: 0x80007FFF, 8: 0x80007FFF, 9: 0x80000000}, "smlsd q"),
+        ("smlald%s r6, r7, r3, r8" % sfx,
+         {3: 0xFFFFFFFF, 8: 0xFFFFFFFF, 6: 0xFFFFFFFF, 7: 0xFFFFFFFF}, "smlald wrap"),
+        ("umaal%s r6, r7, r3, r8" % sfx,
+         {3: 0xFFFFFFFF, 8: 0xFFFFFFFF, 6: 0xFFFFFFFF, 7: 0xFFFFFFFF}, "umaal wrap"),
+        ("smmul%s r6, r3, r8" % sfx, {3: 0xFFFF0000, 8: 0x00020000}, "smmul neg"),
+        ("smmls%s r6, r3, r8, r4" % sfx,
+         {3: 0xFFFF0000, 8: 0x00020000, 4: 0x10000000}, "smmls"),
+    ]
+    for asm, rg, note in fixed:
+        _add(cases, asm, regs=rg, note=note)
+
+
+def _status_cases(cases):
+    """MRS/MSR APSR: NZCVQ- und GE-Felder getrennt."""
+    _add(cases, "mrs r0, apsr", note="mrs apsr", user_mode=True)
+    _add(cases, "msr apsr_nzcvq, r3\nmrs r0, apsr", regs={3: 0xA0000000},
+         small=True, note="msr nzcvq", user_mode=True)
+    _add(cases, "msr apsr_g, r3\nmrs r0, apsr", regs={3: 0x000A0000},
+         small=True, note="msr g", user_mode=True)
+    _add(cases, "msr apsr_nzcvqg, r3\nmrs r0, apsr", regs={3: 0xF00F0000},
+         small=True, note="msr nzcvqg", user_mode=True)
 
 
 def arm_mem_cases(rng):
@@ -192,11 +356,20 @@ def arm_mem_cases(rng):
         rd = rng.choice([r for r in range(13) if r != base])
         ro = rng.choice([r for r in range(13) if r not in (base, rd)])
         for form in ("[rB]", "[rB, #4]", "[rB, #-4]", "[rB, rO]",
-                     "[rB, rO, lsl #2]", "[rB, #4]!", "[rB], #4", "[rB], rO"):
+                     "[rB, rO, lsl #2]", "[rB, -rO]", "[rB, #4]!", "[rB], #4", "[rB], rO"):
             txt = "%s r%d, %s" % (op, rd, form)
             txt = txt.replace("rB", "r%d" % base).replace("rO", "r%d" % ro)
-            _add(cases, txt, regs={base: b}, small=True, note=op + " " + form)
+            rg = {base: b}
+            if "rO" in form:
+                # Der Offset-Registerwert muss im Datenfenster bleiben.
+                rg[ro] = rng.randrange(0, 0x80)
+            _add(cases, txt, regs=rg, small=True, note=op + " " + form)
             rd = rng.choice([r for r in range(13) if r != base])
+    _ldm_forms(cases, rng, False)
+    _swp_cases(cases, rng, False)
+    _transfer_cases(cases, rng, False)
+    _dsp2_cases(cases, rng, False)
+    _status_cases(cases)
     for op in ("ldrd", "strd"):
         for _ in range(4):
             b = _mem_base(rng)
@@ -253,6 +426,21 @@ def arm_mem_cases(rng):
 def thumb_dp_cases(rng):
     cases = []
     R = lambda: rng.randrange(13)
+    # Thumb-2-Breitformen mit expliziten Shift-Operanden (auch ror).
+    for op in ("add", "sub", "rsb", "and", "orr", "eor", "bic"):
+        for sh in ("lsl", "lsr", "asr", "ror"):
+            _add(cases, "%s.w r%d, r%d, r%d, %s #%d"
+                 % (op, R(), R(), R(), sh, rng.randrange(1, 32)),
+                 note=op + ".w " + sh)
+    for sh in ("lsl", "lsr", "asr", "ror"):
+        _add(cases, "mov.w r%d, r%d, %s #%d" % (R(), R(), sh, rng.randrange(1, 32)),
+             note="mov.w " + sh)
+        _add(cases, "mvn.w r%d, r%d, %s #%d" % (R(), R(), sh, rng.randrange(1, 32)),
+             note="mvn.w " + sh)
+        _add(cases, "cmp.w r%d, r%d, %s #%d" % (R(), R(), sh, rng.randrange(1, 32)),
+             note="cmp.w " + sh)
+        _add(cases, "tst.w r%d, r%d, %s #%d" % (R(), R(), sh, rng.randrange(1, 32)),
+             note="tst.w " + sh)
     for op in ("and", "eor", "sub", "rsb", "add", "adc", "sbc", "orr", "bic"):
         _add(cases, "%s.w r%d, r%d, r%d" % (op, R(), R(), R()), note=op + ".w")
         _add(cases, "%ss.w r%d, r%d, r%d" % (op, R(), R(), R()), note=op + "s.w")
@@ -303,10 +491,14 @@ def thumb_mem_cases(rng):
         rd = rng.choice([r for r in range(13) if r != base])
         ro = rng.choice([r for r in range(13) if r not in (base, rd)])
         for form in ("[rB]", "[rB, #4]", "[rB, #-4]", "[rB, rO]",
-                     "[rB, rO, lsl #2]", "[rB, #4]!", "[rB], #4"):
+                     "[rB, rO, lsl #2]", "[rB, -rO]", "[rB, #4]!", "[rB], #4",
+                     "[rB], rO"):
             txt = "%s.w r%d, %s" % (op, rd, form)
             txt = txt.replace("rB", "r%d" % base).replace("rO", "r%d" % ro)
-            _add(cases, txt, regs={base: b}, small=True, note=op + ".w " + form)
+            rg = {base: b}
+            if "rO" in form:
+                rg[ro] = rng.randrange(0, 0x80)
+            _add(cases, txt, regs=rg, small=True, note=op + ".w " + form)
             rd = rng.choice([r for r in range(13) if r != base])
     for op in ("ldrd", "strd"):
         for _ in range(4):
@@ -331,6 +523,8 @@ def thumb_mem_cases(rng):
     _add(cases, "push {r0, r4, lr}", note="push")
     _add(cases, "pop {r0, r4}", note="pop")
     _add(cases, "push.w {r1-r5, lr}", note="push.w")
+    _ldm_forms(cases, rng, True)
+    _transfer_cases(cases, rng, True)
     return cases
 
 
@@ -341,8 +535,9 @@ def thumb_media_cases(rng):
               "uqsub8", "sqsub8", "uhadd8", "shadd8", "uhsub8", "shsub8"):
         _add(cases, "%s r%d, r%d, r%d" % (m, R(), R(), R()), note=m)
     for m in ("uadd16", "sadd16", "usub16", "ssub16", "uqadd16", "sqadd16",
-              "uqsub16", "sqsub16"):
+              "uqsub16", "sqsub16", "uhadd16", "shadd16", "uhsub16", "shsub16"):
         _add(cases, "%s r%d, r%d, r%d" % (m, R(), R(), R()), note=m)
+    _dsp2_cases(cases, rng, True)
     _add(cases, "sel r%d, r%d, r%d" % (R(), R(), R()), note="sel")
     _add(cases, "usad8 r%d, r%d, r%d" % (R(), R(), R()), note="usad8")
     _add(cases, "usada8 r%d, r%d, r%d, r%d" % (R(), R(), R(), R()), note="usada8")
@@ -366,12 +561,15 @@ def thumb_media_cases(rng):
     for m in ("usat16", "ssat16"):
         _add(cases, "%s r%d, #%d, r%d" % (m, R(), rng.randrange(1, 17), R()), note=m)
     for m in ("ubfx", "sbfx"):
+        lsb = rng.randrange(0, 16)
         _add(cases, "%s r%d, r%d, #%d, #%d"
-             % (m, R(), R(), rng.randrange(0, 24), rng.randrange(1, 25)), note=m)
+             % (m, R(), R(), lsb, rng.randrange(1, 32 - lsb + 1)), note=m)
+    lsb = rng.randrange(0, 16)
     _add(cases, "bfi r%d, r%d, #%d, #%d"
-         % (R(), R(), rng.randrange(0, 24), rng.randrange(1, 25)), note="bfi")
+         % (R(), R(), lsb, rng.randrange(1, 32 - lsb + 1)), note="bfi")
+    lsb = rng.randrange(0, 16)
     _add(cases, "bfc r%d, #%d, #%d"
-         % (R(), rng.randrange(0, 24), rng.randrange(1, 25)), note="bfc")
+         % (R(), lsb, rng.randrange(1, 32 - lsb + 1)), note="bfc")
     for m in ("clz", "rev", "rev16", "revsh", "sxtb", "sxth", "uxtb", "uxth"):
         _add(cases, "%s r%d, r%d" % (m, R(), R()), note=m)
         _add(cases, "%s.w r%d, r%d, ror #%d" % (m, R(), R(), rng.choice([8, 16, 24])),
@@ -477,18 +675,21 @@ def reference_run(cases, thumb, rng):
         regs.append(STACK)
         regs.append(0)
         case["init_regs"] = regs
-        for r in range(15):
-            uc.reg_write(UREGS[r], regs[r])
         flags = {"n": rng.randrange(2), "z": rng.randrange(2),
                  "c": rng.randrange(2), "v": rng.randrange(2)}
         case["flags"] = flags
         ge = rng.randrange(16)
         case["ge"] = ge
-        cpsr = 0x13 | (flags["n"] << 31) | (flags["z"] << 30) | \
+        cpsr = (0x10 if case.get("user_mode") else 0x13) | \
+               (flags["n"] << 31) | (flags["z"] << 30) | \
                (flags["c"] << 29) | (flags["v"] << 28) | (ge << 16)
         if thumb:
             cpsr |= 0x20  # T-Bit: Unicorn waehlt Thumb ueber CPSR.T/Startadresse
+        # CPSR zuerst: im User-Mode sind r13/r14 gebankt, ein Register-Write
+        # vor dem Moduswechsel landete sonst in der falschen Bank.
         uc.reg_write(U.UC_ARM_REG_CPSR, cpsr)
+        for r in range(15):
+            uc.reg_write(UREGS[r], regs[r])
         try:
             # Unicorn erkennt Thumb am Bit 0 der Startadresse (Uc-Modus allein
             # reicht in 2.1.4 nicht aus).
@@ -567,6 +768,7 @@ def gen_harness(cases, refs, path, img):
         f = case["flags"]
         L.append("  c.n=%du; c.z=%du; c.c=%du; c.v=%du; c.ge=0x%Xu;"
                  % (f["n"], f["z"], f["c"], f["v"], case["ge"]))
+        L.append("  c.cpsr_mode = 0x%Xu;" % (0x10 if case.get("user_mode") else 0x13))
         L.append("  fn_%08X(&c);" % case["addr"])
         L.append('  if (c.aborted) { printf("FAIL %d aborted\\n"); g_fail++; return; }' % idx)
         want = "{%s}" % ", ".join("0x%08Xu" % v for v in refs[idx]["regs"][:15])
@@ -857,6 +1059,27 @@ def _cf_cases():
         raw=[(0x08, (4).to_bytes(2, "little")),
              (0x0a, (8).to_bytes(2, "little"))])
 
+    # tbh mit 16-Bit-Offsets > 255 (hohes Byte muss wirken).
+    _cf("thumb_tbh_large", [
+        ("push {r4, lr}\nmovs r4, #0\ntbh [pc, r1, lsl #1]\n", True),
+        (0x408, "adds r0, #11\nbx lr\n", True),
+        (0x2008, "adds r0, #22\nbx lr\n", True),
+        (0x4006, "adds r0, #33\nbx lr\n", True),
+        (0x4008, "adds r0, #44\nbx lr\n", True),
+    ], thumb=True, regs={"r0": 512, "r1": 1},
+        raw=[(0x08, (0x0200).to_bytes(2, "little")),
+             (0x0a, (0x1000).to_bytes(2, "little")),
+             (0x0c, (0x1FFF).to_bytes(2, "little")),
+             (0x0e, (0x2000).to_bytes(2, "little"))])
+
+    # tbb mit maximalem Byte-Offset (0xFF -> 510 Byte vorwaerts).
+    _cf("thumb_tbb_max", [
+        ("push {r4, lr}\nmovs r4, #0\ntbb [pc, r1]\n", True),
+        (0x10, "adds r0, #66\nbx lr\n", True),
+        (0x206, "adds r0, #55\nbx lr\n", True),
+    ], thumb=True, regs={"r0": 1, "r1": 0},
+        raw=[(0x08, bytes([0xFF, 0x04]))])
+
     # --- Thumb: Fallthrough in die naechste Funktion (mehrere Einstiege) --
     _cf("thumb_fallthrough_multi", [
         ("movs r0, #62\n", True),
@@ -992,7 +1215,7 @@ def cf_harness(case, img, ref, path):
         fh.write("\n".join(L))
 
 
-def run_control_flow(seed, filt):
+def run_control_flow(seed, filt, only=None):
     _cf_cases()
     rng = random.Random(seed * 7919 + 3)
     fails = 0
@@ -1000,6 +1223,8 @@ def run_control_flow(seed, filt):
     os.makedirs(OUT, exist_ok=True)
     for idx, case in enumerate(CF_CASES):
         if filt and filt.lower() not in case["name"].lower():
+            continue
+        if only is not None and case["name"] not in only:
             continue
         total += 1
         img, entries = cf_assemble(case)
@@ -1029,19 +1254,40 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Differentieller Recompiler-Test")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--count", type=int, default=80, help="zusaetzliche Zufallsfolgen")
+    ap.add_argument("--seeds", type=int, default=1,
+                    help="Anzahl aufeinanderfolgender Seeds ab --seed")
     ap.add_argument("--mode", choices=("arm", "thumb", "both", "cf"), default="both")
     ap.add_argument("--quick", action="store_true")
+    ap.add_argument("--fast", action="store_true",
+                    help="deterministischer Kurzlauf (Seed 1, < 60 s)")
     ap.add_argument("--filter", default=None)
     args = ap.parse_args(argv)
     if args.quick:
         args.count = 5
+    if args.fast:
+        args.seed = 1
+        args.seeds = 1
+        args.count = 0
+        args.mode = "both"
     if args.mode == "cf":
         run_control_flow(args.seed, args.filter)
         return 0
     total = fails = 0
     modes = ("arm", "thumb") if args.mode == "both" else (args.mode,)
-    for mode in modes:
-        n, fail = run_mode(mode, args.seed, args.count, args.filter)
+    for s in range(args.seed, args.seed + args.seeds):
+        if args.seeds > 1:
+            print("== Seed %d ==" % s)
+        for mode in modes:
+            n, fail = run_mode(mode, s, args.count, args.filter)
+            total += n
+            fails += fail
+    if args.fast:
+        # Zusaetzlich ein kleiner, deterministischer Teil der
+        # Kontrollfluss-Suite (voller Lauf: --mode cf).
+        n, fail = run_control_flow(
+            args.seed, None,
+            only={"arm_bxeq_fallthrough", "arm_addpc_table",
+                  "thumb_tbb", "thumb_tbh_large"})
         total += n
         fails += fail
     print("\n%d Faelle geprueft, %d Modus-Fehler" % (total, fails))

@@ -23,6 +23,9 @@ void arm_cpu_init(ArmCpu *c, void *mem, uint32_t size) {
      * Null, Inexact-Cumulative. Das steuert VFP-Ergebnisse und Vergleiche. */
     c->fpscr = 0x03C00010u;
     vfp_apply_rounding(c->fpscr);
+    /* Gast-Threads laufen auf der 3DS im User-Mode; das MRS-Ergebnis
+     * (APSR + T-Bit + Modusbits) haengt davon ab. */
+    c->cpsr_mode = 0x10u;
     g_pool_cpu = c;
     {
         const char *mw = getenv("ARM_MEMWATCH");
@@ -1158,6 +1161,85 @@ uint32_t arm_smla16(ArmCpu *c, uint32_t rn, uint32_t rm, uint32_t ra,
         c->qflag = 1;
     }
     return (uint32_t)sum;
+}
+
+/* ---- ARMv6-DSP (SMUAD/SMLAD/SMLALD/SMMUL/UMAAL) ---- */
+
+/* Produktpaar aus den 16-Bit-Haelften; exchange tauscht die Haelften von b
+ * (Azahar dyncom: bei gesetztem m-Bit wird Rm halbwortweise getauscht). */
+static void dsp_dual(uint32_t a, uint32_t b, int exchange, int32_t *p1, int32_t *p2) {
+    int32_t a_lo = (int16_t)(a & 0xFFFFu), a_hi = (int16_t)(a >> 16);
+    int32_t b_lo = (int16_t)(b & 0xFFFFu), b_hi = (int16_t)(b >> 16);
+    if (exchange) { int32_t t = b_lo; b_lo = b_hi; b_hi = t; }
+    *p1 = (int32_t)((int64_t)a_lo * b_lo);
+    *p2 = (int32_t)((int64_t)a_hi * b_hi);
+}
+
+static int add_overflow_q(ArmCpu *c, int32_t a, int32_t b, int32_t r) {
+    if (((a ^ r) & (b ^ r)) < 0) {
+        c->qflag = 1;
+        return 1;
+    }
+    return 0;
+}
+
+uint32_t arm_dual16(ArmCpu *c, int sub, uint32_t a, uint32_t b, int exchange) {
+    int32_t p1, p2;
+    dsp_dual(a, b, exchange, &p1, &p2);
+    if (!sub) {
+        int32_t r = (int32_t)((uint32_t)p1 + (uint32_t)p2);
+        add_overflow_q(c, p1, p2, r);
+        return (uint32_t)r;
+    }
+    /* SMUSD: p1 - p2; ein Ueberlauf ist mit 16-Bit-Produkten nicht
+     * erreichbar (Azahar prueft nur die Addition). */
+    return (uint32_t)((uint32_t)p1 - (uint32_t)p2);
+}
+
+uint32_t arm_smlad(ArmCpu *c, int sub, uint32_t a, uint32_t b, uint32_t acc,
+                   int exchange) {
+    int32_t p1, p2;
+    dsp_dual(a, b, exchange, &p1, &p2);
+    int32_t sum;
+    if (!sub) {
+        sum = (int32_t)((uint32_t)p1 + (uint32_t)p2);
+        add_overflow_q(c, p1, p2, sum);
+    } else {
+        sum = (int32_t)((uint32_t)p1 - (uint32_t)p2);
+    }
+    int32_t r = (int32_t)((uint32_t)sum + acc);
+    add_overflow_q(c, sum, (int32_t)acc, r);
+    return (uint32_t)r;
+}
+
+void arm_smlald(ArmCpu *c, int rdlo, int rdhi, int sub, uint32_t a, uint32_t b,
+                int exchange) {
+    int32_t p1, p2;
+    dsp_dual(a, b, exchange, &p1, &p2);
+    int32_t pv = sub ? (int32_t)((uint32_t)p1 - (uint32_t)p2)
+                     : (int32_t)((uint32_t)p1 + (uint32_t)p2);
+    uint64_t acc = ((uint64_t)c->r[rdhi] << 32) | (uint64_t)c->r[rdlo];
+    uint64_t sum = acc + (uint64_t)(int64_t)pv;
+    c->r[rdlo] = (uint32_t)sum;
+    c->r[rdhi] = (uint32_t)(sum >> 32);
+}
+
+uint32_t arm_smmul(int mode, uint32_t a, uint32_t b, uint32_t acc) {
+    int64_t prod = (int64_t)(int32_t)a * (int64_t)(int32_t)b;
+    /* Ra liegt im *oberen* Wort: Ergebnis ist (Ra:0x00000000 +- Produkt) >> 32
+     * (Azahar dyncom SMMLA/SMMLS, ARM ARM A8.8.142). */
+    uint64_t sum;
+    if (mode == 0) sum = (uint64_t)prod;
+    else if (mode == 1) sum = ((uint64_t)acc << 32) + (uint64_t)prod;
+    else sum = ((uint64_t)acc << 32) - (uint64_t)prod;
+    return (uint32_t)(sum >> 32);
+}
+
+void arm_umaal(ArmCpu *c, int rdlo, int rdhi, uint32_t a, uint32_t b) {
+    uint64_t sum = (uint64_t)a * (uint64_t)b + (uint64_t)c->r[rdlo]
+                 + (uint64_t)c->r[rdhi];
+    c->r[rdlo] = (uint32_t)sum;
+    c->r[rdhi] = (uint32_t)(sum >> 32);
 }
 
 

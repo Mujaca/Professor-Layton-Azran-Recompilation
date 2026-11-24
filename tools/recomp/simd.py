@@ -21,6 +21,11 @@ QADD = {"qadd": 0, "qsub": 1, "qdadd": 2, "qdsub": 3}
 NAMES = set(SIMD8) | set(SIMD16) | set(SMLA) | set(SMUL) | set(QADD) | {
     "sel", "uxtb16", "sxtb16", "pkhbt", "pkhtb", "usat16", "ssat16",
     "usad8", "usada8", "ldrexd", "strexd", "adr",
+    "smmul", "smmla", "smmls",
+    "smuad", "smuadx", "smusd", "smusdx",
+    "smlad", "smladx", "smlsd", "smlsdx",
+    "smlald", "smlaldx", "smlsld", "smlsldx",
+    "umaal", "sxtab16", "uxtab16",
 }
 
 
@@ -178,5 +183,69 @@ def emit(emitter, ins, base, ops):
         else:
             target = ins.address + 8 + v
         return ["c->r[%d] = 0x%08Xu;" % (d, target & 0xFFFFFFFF)]
+
+    if base in ("sxtab16", "uxtab16"):
+        r = _regs(ops, 3)
+        if r is None:
+            return None
+        d, n, m = r
+        rot = 0
+        if len(ops) > 3 and ops[3].lower().startswith("ror"):
+            rot = (isa.imm_value(ops[3].split()[-1]) or 0) // 8
+        # SXTAB16/UXTAB16 addieren *je Halbwort* (16-Bit-Lanes), ein Uebertrag
+        # der unteren Haelfte darf nicht in die obere laufen (ARM ARM).
+        e = "arm_ext16(%d, c->r[%d], %d)" % (1 if base == "sxtab16" else 0, m, rot)
+        return ["{ uint32_t e = %s;" % e,
+                "  c->r[%d] = ((c->r[%d] + e) & 0xFFFFu) |"
+                " (((c->r[%d] >> 16) + (e >> 16)) & 0xFFFFu) << 16; }"
+                % (d, n, n)]
+
+    if base in ("smmul", "smmla", "smmls"):
+        if base == "smmul":
+            r = _regs(ops, 3)
+        else:
+            r = _regs(ops, 4)
+        if r is None:
+            return None
+        mode = {"smmul": 0, "smmla": 1, "smmls": 2}[base]
+        d, n, m = r[0], r[1], r[2]
+        if len(r) > 3:
+            return ["c->r[%d] = arm_smmul(%d, c->r[%d], c->r[%d], c->r[%d]);"
+                    % (d, mode, n, m, r[3])]
+        return ["c->r[%d] = arm_smmul(0, c->r[%d], c->r[%d], 0);" % (d, n, m)]
+
+    if base in ("smuad", "smuadx", "smusd", "smusdx"):
+        r = _regs(ops, 3)
+        if r is None:
+            return None
+        d, n, m = r
+        return ["c->r[%d] = arm_dual16(c, %d, c->r[%d], c->r[%d], %d);"
+                % (d, 1 if "smusd" in base else 0, n, m,
+                   1 if base.endswith("x") else 0)]
+
+    if base in ("smlad", "smladx", "smlsd", "smlsdx"):
+        r = _regs(ops, 4)
+        if r is None:
+            return None
+        d, n, m, a = r
+        return ["c->r[%d] = arm_smlad(c, %d, c->r[%d], c->r[%d], c->r[%d], %d);"
+                % (d, 1 if "smlsd" in base else 0, n, m, a,
+                   1 if base.endswith("x") else 0)]
+
+    if base in ("smlald", "smlaldx", "smlsld", "smlsldx"):
+        r = _regs(ops, 4)
+        if r is None:
+            return None
+        lo, hi, n, m = r
+        return ["arm_smlald(c, %d, %d, %d, c->r[%d], c->r[%d], %d);"
+                % (lo, hi, 1 if "smlsld" in base else 0, n, m,
+                   1 if base.endswith("x") else 0)]
+
+    if base == "umaal":
+        r = _regs(ops, 4)
+        if r is None:
+            return None
+        lo, hi, n, m = r
+        return ["arm_umaal(c, %d, %d, c->r[%d], c->r[%d]);" % (lo, hi, n, m)]
 
     return None
