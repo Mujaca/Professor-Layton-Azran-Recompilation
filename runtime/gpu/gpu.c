@@ -615,7 +615,10 @@ static int p_attr_elem_size(int fmt)
 static void p_attr_config(PicaAttrCfg *ac)
 {
     uint32_t i, l;
-    ac->base = gpu_pica_phys_to_guest(((p_regs[0x200] >> 1) & 0x0FFFFFFFu) * 16u);
+    /* Physisch: Basis + Loader-Offset ergibt die physische Adresse; erst
+       die Summe wird in den Gastspeicher umgerechnet (Basis liegt oft im
+       VRAM-Fenster 0x18000000, die Daten per Offset im FCRAM). */
+    ac->base = ((p_regs[0x200] >> 1) & 0x0FFFFFFFu) * 16u;
     ac->total = (int)((p_regs[0x202] >> 28) & 0xFu) + 1;
     for (i = 0; i < 16; i++) {
         uint32_t nib;
@@ -667,7 +670,7 @@ static void p_load_attrs(ArmCpu *c, uint32_t vert, float out[16][4])
             continue;
         }
         {
-            uint32_t a = ac.base + ac.src[i] + ac.stride[i] * vert;
+            uint32_t a = gpu_pica_phys_to_guest(ac.base + ac.src[i] + ac.stride[i] * vert);
             int es = p_attr_elem_size(ac.fmt[i]);
             for (k = 0; k < ac.ncomp[i] && k < 4; k++)
                 out[i][k] = p_attr_comp(c, a + (uint32_t)(k * es), ac.fmt[i]);
@@ -2625,12 +2628,13 @@ static void p_process_tri(ArmCpu *c, const PicaVertex *v0, const PicaVertex *v1,
         int min_y = y[0] < y[1] ? (y[0] < y[2] ? y[0] : y[2]) : (y[1] < y[2] ? y[1] : y[2]);
         int max_x = x[0] > x[1] ? (x[0] > x[2] ? x[0] : x[2]) : (x[1] > x[2] ? x[1] : x[2]);
         int max_y = y[0] > y[1] ? (y[0] > y[2] ? y[0] : y[2]) : (y[1] > y[2] ? y[1] : y[2]);
-        uint32_t sc = p_regs[0x65];
-        int sc_mode = (int)(sc & 3u);
-        int sx1 = (int)(sc & 0x3FFu) << 4;
-        int sy1 = (int)((sc >> 16) & 0x3FFu) << 4;
-        int sx2 = (int)((p_regs[0x66] & 0x3FFu) + 1u) << 4;
-        int sy2 = (int)(((p_regs[0x66] >> 16) & 0x3FFu) + 1u) << 4;
+        /* Azahar regs_internal.cpp: 0x065 SCISSORTEST_MODE, 0x066 _POS
+           (x1/y1), 0x067 _DIM (x2/y2, inklusiv). */
+        int sc_mode = (int)(p_regs[0x65] & 3u);
+        int sx1 = (int)(p_regs[0x66] & 0x3FFu) << 4;
+        int sy1 = (int)((p_regs[0x66] >> 16) & 0x3FFu) << 4;
+        int sx2 = (int)((p_regs[0x67] & 0x3FFu) + 1u) << 4;
+        int sy2 = (int)(((p_regs[0x67] >> 16) & 0x3FFu) + 1u) << 4;
         int bias0, bias1, bias2;
         float invw[3];
         int py, px;
@@ -3624,11 +3628,13 @@ static uint32_t p_read16m(ArmCpu *c, uint32_t addr)
 /* Index-Puffer 0x227 (Offset relativ zur Attributbasis, Bit31 = u16). */
 static uint32_t p_index_vertex(ArmCpu *c, uint32_t i)
 {
-    uint32_t base = gpu_pica_phys_to_guest(((p_regs[0x200] >> 1) & 0x0FFFFFFFu) * 16u);
+    /* Indexpuffer: physische Adresse = Attribut-Basis + Offset (0x227),
+       erst danach in den Gastspeicher umrechnen. */
+    uint32_t base = ((p_regs[0x200] >> 1) & 0x0FFFFFFFu) * 16u;
     uint32_t off = p_regs[0x227] & 0x0FFFFFFFu;
     int u16 = (int)((p_regs[0x227] >> 31) & 1u);
-    if (u16) return p_read16m(c, base + off + i * 2u);
-    return p_read8m(c, base + off + i);
+    if (u16) return p_read16m(c, gpu_pica_phys_to_guest(base + off + i * 2u));
+    return p_read8m(c, gpu_pica_phys_to_guest(base + off + i));
 }
 
 /* ---- Default-Attribut-/Immediate-Modus (0x232, Azahar SubmitImmediate) ---- */
