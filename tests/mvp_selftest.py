@@ -872,13 +872,20 @@ def main():
             print("[%s] FEHLER: %s" % (case["name"], status))
             failed += 1
 
-    print("\n%d/%d Tests bestanden" % (len(CASES) - failed, len(CASES)))
     if not exclusive_monitor_test():
         failed += 1
     if not discovery_tests():
         failed += 1
-    total = len(CASES) + 2
-    print("%d/%d Tests inkl. Exklusiv-Monitor und Discovery bestanden" % (total - failed, total))
+    # Scheduler-/Kernel-Entscheidungen (reine Logik, ohne OS-Threads).
+    print("[sched] pruefe Prioritaeten/Ticks/Wait-Index ...")
+    r = subprocess.run([sys.executable, os.path.join(ROOT, "tests", "sched_selftest.py")],
+                       capture_output=True, text=True)
+    sys.stdout.write(r.stdout)
+    if r.returncode != 0:
+        sys.stdout.write(r.stderr)
+        failed += 1
+    total = len(CASES) + 3
+    print("\n%d/%d Tests inkl. Exklusiv-Monitor, Discovery und Scheduler bestanden" % (total - failed, total))
     return 1 if failed else 0
 
 

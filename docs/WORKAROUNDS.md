@@ -96,6 +96,7 @@ deshalb lief der frühere Versuch in eine Endlosschleife; Puffer ist jetzt
 | Kennung | Ort | Wirkung |
 |---|---|---|
 | – | `dispatch_ipc` | leitet Kommandos nach Form statt nach Handle um (APT/cfg/fs) |
+| – | Thread-Scheduler | alle Gast-Threads laufen kooperativ auf **einem** Host-Thread; Prioritaeten gelten nur an SVC-/Yield-Grenzen, `GetCurrentProcessorNumber`/`GetThreadIdealProcessor` liefern die ExHeader-/CreateThread-Id (0 AppCore, 1 SysCore), ein zweiter Kern wird nicht simuliert |
 | – | generierter Code | unbekannte Aufrufziele = No-op (geloggt in `out/missing_calls.txt`) |
 | – | `arm_mem_read/write` | Zugriffe außerhalb des Speichers liefern 0 statt Abbruch (`ARM_STRICT=1` bricht ab) |
 | – | fs `OpenFile`, `file_command` | Sentinel-Dateislot und Erfolg auch bei fehlgeschlagenem Open; `romfs_image.bin` mit Offset +0x1000 |
@@ -250,6 +251,41 @@ ndm, ptm, gsp, dsp, y2r, boss). Damit entfielen `wa-fs-client-slot` sowie die
 Antwort.
 
 ## 6. Befunde (offene Ursachen, kein Workaround eingebaut)
+
+### Stall nach der zweiten PICA-Liste: Futex-Mutex bei `0x0040F120` – offen 2026-11-24
+
+**Befund:** Der natuerliche Boot bleibt nach der zweiten PICA-Liste
+(`size=250 ops=103 draws=0`) stehen: `lists=2`, kein `SetBufferSwap`
+(M2 flaky). Vor dem Stall stimmt die IPC-/SVC-Folge mit der Referenz
+(Azahar-Zeilen 300-465) ueberein; `trace-diff --kind ipc` meldet als erstes
+nur Azahars interne Zeile `cfg.LoadConfigNANDSaveFile` (kein Kommando).
+
+**Belege:**
+* `ARM_MEMWATCH=40F124` (Owner-Feld des rekursiven C-Mutex): letzter
+  Schreibzugriff setzt den Owner auf TLS `0x1FF8C000` (Gast-Thread `0xC`);
+  danach wird er nie geloescht.
+* `HLE_KLOG=1`: drei Waiter auf `svcArbitrateAddress(handle, 0x0040F120,
+  type=1, value=0)` – tid 0, 0xB, 0xC, jeweils `mem=-2`; danach erscheint
+  **kein weiterer** `[karb]`-Eintrag (Log-Limit 300 nicht erreicht), d. h.
+  keiner der drei wurde geweckt bzw. hat den Mutex erneut angefordert.
+* `HLE_WAIT_LOG`/`[kblock]`: tid 0xC steht in keinem SVC-Wait; die Perfmap
+  (39 s) zeigt 19,1 M Bloecke fuer Thread 12 (heiss `fn_00269E94`,
+  `fn_00287A28`/`0x08`). Der Halter laeuft also weiter und verlaesst den
+  kritischen Abschnitt nicht – kein verlorener Syscall-Wakeup.
+* Beteiligte Funktionen: `fn_0028F04C`/`fn_0028F014` sind
+  `__gthread_mutex`-Lock/Unlock um `0x0040F120` (Rekursionszaehler
+  `0x287A08`/`0x287A28`, bei 0 der Futex-Wake ueber `svc #0x22` in
+  `0x2658F8`).
+
+**Naechster Schritt:** Den kritischen Abschnitt von tid 0xC lokalisieren
+(PC-Ring/Perfmap direkt nach dem letzten Owner-Schreibzugriff) und das
+Objekt bestimmen, auf das der Halter dort wartet. Keine Spieladresse im
+Kernel noetig.
+
+**Nebenbefund:** Der Notification-Thread (tid 1) sendet `srv 0x000B
+ReceiveNotification`, das in der Referenz nicht vorkommt (Azahar: nullptr-
+Handler, liefert ebenfalls Erfolg). Zu pruefen ist `EnableNotification`
+(Port-Sema max. 2, Azahar `MAX_PENDING_NOTIFICATIONS = 16`).
 
 ### IPC-Folge bis OpenLinkFile – Dienst-Routing/Reply behoben 2026-11-24
 
