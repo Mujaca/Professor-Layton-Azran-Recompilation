@@ -151,7 +151,7 @@ Die Maske wird byteweise angewandt (`Azahar ExpandBitsToBytes`, z. B. `0x5`
 |---|---|
 | `0x010` | `irq_request` (Finalize): bei Byte-Treffer gegen `irq_compare` (`0x020`) P3D-Interrupt; `irq_autostop` (`0x034`, Default 1) beendet die Liste. GSP-Defaults: `irq_compare=0x12345678`, `irq_mask=0xFFFFFFF0`, `irq_autostop=1`. |
 | `0x080` | `main_config`: Bit0..2 Textur 0..2 enable, Bit10 Textur 3, Bit13 `texture2_use_coord1`, Bit16 `clear_texture_cache` |
-| `0x081`/`0x091`/`0x099` | Textureinheit 0/1/2: `+0` border_color, `+1` Größe (h Bits 0..10, w 16..26), `+2` Wrap (`wrap_t` Bits 8..10, `wrap_s` 12..14), Filter (mag Bit 1, min Bit 2, mip Bit 24), Typ Bits 28..30 (0 = 2D, 5 = disabled), `+3` LOD, `+4` Adresse>>3 |
+| `0x081`/`0x091`/`0x099` | Textureinheit 0/1/2: `+0` border_color, `+1` Größe (h Bits 0..10, w 16..26), `+2` Wrap (`wrap_t` Bits 8..10, `wrap_s` 12..14), Filter (mag Bit 1, min Bit 2, mip Bit 24), Typ Bits 28..30 (0 = 2D, 5 = disabled), `+3` LOD, `+4` Adresse>>3. **Nur Einheit 0 beachtet den Typ** (3dbrew; Azahar `TextureColor`); Einheit 3 ist die prozedurale Textur (0xA8..0xB7), kein adressiertes Bild. |
 | `0x08E`/`0x096`/`0x09E` | Texturformat 0..13: RGBA8, RGB8, RGB5A1, RGB565, RGBA4, IA8, RG8 (HILO8), I8, A8, IA4, I4, A4, ETC1, ETC1A4 |
 | `0x200` | Attribut-Puffer-Basis (physische Adresse = `(reg>>1)*16`) |
 | `0x201`/`0x202` | Attributformate; `0x202` Bits 28..31 = Attributanzahl-1 |
@@ -209,7 +209,8 @@ MMU/Seitentabelle hat.
   (Index-Puffer, `vertex_offset` wird ignoriert).
 * Ausgang: `output_mask` 0x2BD wählt o0..o15; 0x04F `vs_output_total`,
   0x050..0x056 `vs_output_attributes` (5-Bit-Semantik je Komponente:
-  POSITION 0..3, COLOR 8..11, TEXCOORD0 12/13). Nicht gemappte Semantiken
+  POSITION 0..3, COLOR 8..11, TEXCOORD0 12/13, TEXCOORD1 14/15,
+  TEXCOORD0_W 16, VIEW 18..20, TEXCOORD2 22/23). Nicht gemappte Semantiken
   sind 1.0; Farben werden vor der Interpolation abs/saturiert.
 * Instruktionen sind ein Wort: Opcode Bits26..31, Swizzle-Muster je
   `operand_desc_id`. Bedingungen vergleichen `refx`/`refy` mit
@@ -299,6 +300,16 @@ Quelle: Azahar `renderer_software/sw_rasterizer.cpp`, `sw_clipper.cpp`,
   (W-Buffer) wird zusätzlich mit `w` skaliert. `z_int =
   depth * (2^Bits - 1)`; Schreibzugriff nur bei `depth_write_enable` und
   erlaubtem Schreiben. Stencil-Test greift nur bei D24S8.
+* **Fog:** `fog_mode` 0xE0 Bits0..2 (0 aus, 5 Fog, 7 Gas), `fog_flip`
+  Bit16, Farbe 0xE1 r/g/b. Die 128 LUT-Einträge werden über 0xE8..0xEF
+  geladen: jedes Wort landet bei `fog_lut_offset` (0xE6) % 128, danach
+  inkrementiert die Hardware den Offset. Eintrag = Bits13..23 `value`
+  (0.0.11) und Bits0..12 `difference` (1.1.11), jeweils /2047.
+  `fog_index = (flip ? 1-depth : depth) * 128`; Faktor = `value +
+  difference * (fog_index - floor(fog_index))`, geklemmt auf 0..1; Ergebnis
+  `fog*farbe + (1-fog)*fog_color` auf RGB. Reihenfolge im Pixel:
+  TEV → Alpha-Test → Fog → Depth/Stencil → Blending (Azahar
+  `sw_rasterizer.cpp`).
 * **Texturkoordinaten:** `t` wird vor dem Sample invertiert
   (`t = height-1 - wrapped(t)`), da Texturen von unten nach oben liegen.
 

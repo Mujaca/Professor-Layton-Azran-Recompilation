@@ -27,6 +27,12 @@ Wrap-Modi 0..5 (Border-Farbe), Nearest-/Linear-Filter.
 Framebuffer (Azahar sw_framebuffer.cpp, sw_rasterizer.cpp): Farbziel-
 Formate inkl. Byte-Reihenfolge, alle 16 LogicOps, Alpha-Test, Blending
 (Add/SrcAlpha/1-SrcAlpha), Depth-Test/-Write (D24S8) und Stencil-Test.
+
+Fog (Azahar sw_rasterizer.cpp WriteFog): LUT-Upload 0xE6/0xE8..0xEF
+(Offset + Inkrement), fog_mode 0xE0 Bits0..2, fog_flip Bit16, fog_color
+0xE1, Index/Fraktion und Mischung vor dem Depth-Test. Texturzustand:
+TEXCOORD2 ist Semantic 22/23 (nicht 16/17), und nur Einheit 0 beachtet
+den Texturtyp (Bits28..30, 3dbrew/Azahar sw_rasterizer.cpp TextureColor).
 """
 import os
 import subprocess

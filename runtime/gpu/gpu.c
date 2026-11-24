@@ -10,10 +10,12 @@
  * 0x04F..0x056 (POSITION, COLOR, TEXCOORD0..2).
  * Fragment-Pipeline: Sutherland-Hodgman-Clipping, 12.4-Coverage, TEV
  * 0x0C0..0x0FD, Texturen 0x080..0x09F (alle 14 Formate, 8x8-Morton,
- * Wrap/Border/Filter), Output-Merger 0x100..0x107 (Blending, LogicOp,
- * Alpha-Test) und Farb-/Tiefenziel 0x110..0x11E (Kanalmasken, RGBA8/RGB8/
- * RGB5A1/RGB565/RGBA4, Depth-Test/Write, Stencil, D16/D24/D24S8).
- * Noch offen (ROADMAP M5): Fog, Lighting, Mipmaps, Proctex.
+ * Wrap/Border/Filter; nur Einheit 0 beachtet den Typ, TEXCOORD2 = 22/23),
+ * Output-Merger 0x100..0x107 (Blending, LogicOp, Alpha-Test) und
+ * Farb-/Tiefenziel 0x110..0x11E (Kanalmasken, RGBA8/RGB8/
+ * RGB5A1/RGB565/RGBA4, Depth-Test/Write, Stencil, D16/D24/D24S8) sowie
+ * Fog (0xE0/0xE1/0xE6/0xE8..0xEF, Azahar sw_rasterizer.cpp WriteFog).
+ * Noch offen (ROADMAP M5): Lighting, Mipmaps, Proctex.
  */
 
 #include <stdint.h>
@@ -122,6 +124,9 @@ static uint32_t p_regs[PICA_NREGS] = {
     [0x034] = 0x00000001u,  /* irq_autostop */
 };
 
+/* Fog-LUT (0xE8..0xEF schreiben bei 0xE6 % 128, danach Offset++). */
+static uint32_t g_fog_lut[128];
+
 static void p_vs_reset(void);
 static void p_vs_reset_draw_state(void);
 
@@ -156,6 +161,7 @@ uint32_t gpu_pica_reg(uint32_t id)
 void gpu_pica_reset(void)
 {
     memset(p_regs, 0, sizeof(p_regs));
+    memset(g_fog_lut, 0, sizeof(g_fog_lut));
     p_regs[0x020] = 0x12345678u;
     p_regs[0x030] = 0xFFFFFFF0u;
     p_regs[0x034] = 0x00000001u;
@@ -674,7 +680,7 @@ static void p_sample_tex(ArmCpu *c, uint32_t unit, float u, float v,
 
     out[0] = out[1] = out[2] = out[3] = 0;
     if (!(p_regs[0x80] & (1u << unit))) return;   /* Azahar: {0,0,0,0} */
-    if (((cfg >> 28) & 7u) == 5u) return;         /* type Disabled */
+    if (unit == 0u && ((cfg >> 28) & 7u) == 5u) return;   /* Azahar: nur Einheit 0 beachtet den Typ */
     if ((p_regs[base + 4u] & 0x0FFFFFFFu) == 0u) { out[3] = 255; return; }
     if (w <= 0 || h <= 0) return;
 
@@ -714,6 +720,53 @@ static void p_sample_tex(ArmCpu *c, uint32_t unit, float u, float v,
  */
 typedef struct { unsigned char c[4]; } PicaColor;
 typedef struct { float pos[4]; float color[4]; float uv[3][2]; } PicaVertex;
+
+/* ================= Fog (Azahar sw_rasterizer.cpp WriteFog) =================
+ * 0xE0 Bits0..2 fog_mode (0 None, 5 Fog, 7 Gas), Bit16 fog_flip; 0xE1
+ * fog_color r/g/b. Die 128 LUT-Eintraege werden ueber 0xE8..0xEF geladen:
+ * jedes geschriebene Wort landet bei fog_lut_offset (0xE6) % 128, danach
+ * inkrementiert die Hardware den Offset (pica_core.cpp HandleSpecialReg).
+ * Eintrag: Bits13..23 value (0.0.11), Bits0..12 difference (1.1.11).
+ */
+
+static void p_fog_lut_write(uint32_t value)
+{
+    uint32_t off = p_regs[0xE6] & 0xFFFFu;
+    g_fog_lut[off % 128u] = value;
+    p_regs[0xE6] = (off + 1u) & 0xFFFFu;   /* Azahar: fog_lut_offset++ */
+}
+
+/* Ergebnis von TEV in-place: out = factor*out + (1-factor)*fog_color.
+ * Reihenfolge im Azahar-Pixelshader: Alpha-Test, Fog, Depth/Stencil. */
+static void p_apply_fog(float depth, PicaColor *out)
+{
+    uint32_t mode = p_regs[0xE0] & 7u;
+    uint32_t color = p_regs[0xE1];
+    float fog_index, fog_i_f, fog_f, fog_factor;
+    float value, diff;
+    uint32_t entry;
+    unsigned i;
+
+    if (mode != 5u) return;                /* nur FogMode::Fog */
+    fog_index = ((p_regs[0xE0] & (1u << 16)) ? (1.0f - depth) : depth) * 128.0f;
+    /* Azahar clampt nur den LUT-Index, nicht die Fraktion. */
+    fog_i_f = floorf(fog_index);
+    if (fog_i_f < 0.0f) fog_i_f = 0.0f;
+    if (fog_i_f > 127.0f) fog_i_f = 127.0f;
+    fog_f = fog_index - fog_i_f;
+    entry = g_fog_lut[(unsigned)fog_i_f];
+    value = (float)((entry >> 13) & 0x7FFu) / 2047.0f;
+    diff = (float)(((int32_t)(entry << 19)) >> 19) / 2047.0f;
+    fog_factor = value + diff * fog_f;
+    if (fog_factor < 0.0f) fog_factor = 0.0f;
+    if (fog_factor > 1.0f) fog_factor = 1.0f;
+    for (i = 0; i < 3u; i++) {
+        float fog_c = (float)((color >> (8u * i)) & 0xFFu);
+        out->c[i] = (unsigned char)(fog_factor * (float)out->c[i] +
+                                    (1.0f - fog_factor) * fog_c);
+    }
+}
+
 
 static const unsigned TEV_STAGE_BASE[6] = {0xC0u, 0xC8u, 0xD0u, 0xD8u, 0xF0u, 0xF8u};
 
@@ -1454,6 +1507,7 @@ static void p_process_tri(ArmCpu *c, const PicaVertex *v0, const PicaVertex *v1,
                     depth *= iw * (float)wsum;
                 if (depth < 0.0f) depth = 0.0f;
                 if (depth > 1.0f) depth = 1.0f;
+                p_apply_fog(depth, &tev_out);
                 if (p_fb_configured() && !p_depth_stencil_test(c, (uint32_t)(px >> 4),
                                                                (uint32_t)(py >> 4), depth))
                     continue;
@@ -1970,8 +2024,9 @@ static void p_vs_process(const float attrs[16][4], PicaVertex *v)
     v->uv[0][1] = slot[13];
     v->uv[1][0] = slot[14];
     v->uv[1][1] = slot[15];
-    v->uv[2][0] = slot[16];
-    v->uv[2][1] = slot[17];
+    v->uv[2][0] = slot[22];       /* Azahar output_vertex.cpp: TEXCOORD2 22/23
+                                     (16 ist TEXCOORD0_W, 18..20 ist VIEW) */
+    v->uv[2][1] = slot[23];
     for (i = 0; i < 4; i++) {
         float c = v->color[i];
         if (c < 0.0f) c = -c;             /* Azahar: abs + saturate */
@@ -2265,6 +2320,7 @@ static void p_write_reg(ArmCpu *c, uint32_t id, uint32_t value, uint32_t mask,
     ctx->ops++;
 
     p_vs_reg_write(c, id, value);
+    if (id >= 0xE8u && id <= 0xEFu) p_fog_lut_write(value);
 
     if (id == 0x010u) {             /* Finalize / irq_request */
         /* Azahar: every_byte_match(irq_request, irq_compare) -> P3D; bei

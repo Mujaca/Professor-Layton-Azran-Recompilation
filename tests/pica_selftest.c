@@ -707,6 +707,198 @@ static void test_depth_stencil(ArmCpu *c, unsigned char *mem)
           "Stencil-Test schlaegt fehl => Farbe/Stencil unveraendert");
 }
 
+static void test_texture_type_and_tc2(ArmCpu *c, unsigned char *mem)
+{
+    /* Azahar pica/output_vertex.cpp: TEXCOORD2 sind Semantic 22/23; 16 ist
+       TEXCOORD0_W. sw_rasterizer.cpp TextureColor: nur Textureinheit 0
+       beachtet den Typ (Bits28..30), Einheit 1/2 ignorieren ihn. */
+    static const unsigned char red[4] = {0xFF, 0x00, 0x00, 0xFF};
+    static const unsigned char green[4] = {0x00, 0xFF, 0x00, 0xFF};
+    unsigned char *tile = mem + TEX;
+    uint32_t *q, size, o, words[3];
+    int v;
+
+    /* 1) Einheit 2 sampelt TEXCOORD2 (22/23): Vertex-Shader legt attr2 nach
+          o1 mit Semantik 22/23. Textur rot, nur Texel (7,0) gruen. */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    memset(tile, 0, 0x100);
+    for (v = 0; v < 64; v++) t_tex_encode(tile, 0, (unsigned)v, red);
+    t_tex_encode(tile, 0, (unsigned)t_morton(7, 0), green);
+    {
+        static const float p[3][2] = {{-1.0f, -1.0f}, {3.0f, -1.0f}, {-1.0f, 3.0f}};
+        for (v = 0; v < 3; v++) {
+            float f[12];
+            memset(f, 0, sizeof(f));
+            f[0] = p[v][0]; f[1] = p[v][1]; f[2] = 0.0f; f[3] = 1.0f;
+            f[4] = 0.0f; f[5] = 0.0f; f[6] = 0.0f; f[7] = 1.0f;
+            f[8] = 0.5f; f[9] = 0.5f; f[10] = 0.0f; f[11] = 1.0f;
+            memcpy(mem + ((VTX3 + (uint32_t)v * 48u) & 0x1FFFFFFFu), f, sizeof(f));
+        }
+    }
+    q = (uint32_t *)(mem + LIST);
+    q = emit(q, 0x200, VTX3 >> 3);
+    q = emit(q, 0x201, 0xFFFu);                /* attr0..2: float, 4 Komp. */
+    q = emit(q, 0x202, 2u << 28);              /* 3 Attribute */
+    q = emit(q, 0x203, 0u);
+    q = emit(q, 0x204, 0x0210u);               /* comps: attr0, attr1, attr2 */
+    q = emit(q, 0x205, (3u << 28) | (48u << 16));
+    q = emit(q, 0x2B9, 2u);
+    q = emit(q, 0x2BB, 0x210u);                /* attr0->v0, attr1->v1, attr2->v2 */
+    q = emit(q, 0x4F, 2u);
+    q = emit(q, 0x50, 0x03020100u);            /* o0 = POSITION */
+    q = emit(q, 0x51, 0x1F1F1716u);            /* o1 = TEXCOORD2 (22/23) */
+    q = emit(q, 0x2BD, 3u);
+    words[0] = ins_common(0x13u, 0u, 0x00u, 0u, 0u, 0u);   /* mov o0,v0 */
+    words[1] = ins_common(0x13u, 0u, 0x02u, 0u, 1u, 0u);   /* mov o1,v2 */
+    words[2] = 0x22u << 26;
+    q = emit_program(q, words, 3);
+    q = emit_swizzle0(q, swz_xyzw());
+    q = emit(q, 0x80, 1u << 2);                /* texture2_enable */
+    q = emit(q, 0x9A, (8u << 16) | 8u);
+    q = emit(q, 0x9B, 0u);
+    q = emit(q, 0x9D, TEX >> 3);
+    q = emit(q, 0x9E, 0u);                     /* RGBA8 */
+    q = emit_viewport(q, 8, 8);
+    q = emit(q, 0x228, 3u);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit_tev0(q, 5u, 5u, 0u);              /* Quelle Texture2 */
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 1, 2, 8, 8, 4);
+    check(mem[o + 3] == 0xFF && mem[o + 2] == 0x00 && mem[o + 1] == 0x00,
+          "Texture2 nutzt TEXCOORD2 22/23 (0.5,0.5) => rot");
+
+    /* 2) Typ 5 (Disabled) auf Einheit 1 wird ignoriert (nur Einheit 0). */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    memset(tile, 0, 0x100);
+    for (v = 0; v < 64; v++) t_tex_encode(tile, 0, (unsigned)v, red);
+    t_quad_vertices(c, VTX, 0.0f, 0.5f, 0.5f, 0.5f, 0.5f);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad(q, VTX, 8, 8);
+    q = emit(q, 0x80, 1u << 1);                /* texture1_enable */
+    q = emit(q, 0x92, (8u << 16) | 8u);
+    q = emit(q, 0x93, 5u << 28);               /* type = Disabled */
+    q = emit(q, 0x95, TEX >> 3);
+    q = emit(q, 0x96, 0u);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit_tev0(q, 4u, 4u, 0u);              /* Quelle Texture1 */
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 1, 2, 8, 8, 4);
+    check(mem[o + 3] == 0xFF && mem[o + 2] == 0x00 && mem[o + 1] == 0x00,
+          "Texture1 ignoriert Typ Disabled (3dbrew: nur Einheit 0)");
+
+    /* 3) Einheit 0 mit Typ Disabled liefert (0,0,0,0). */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_quad_vertices(c, VTX, 0.0f, 0.5f, 0.5f, 0.5f, 0.5f);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad(q, VTX, 8, 8);
+    q = emit(q, 0x80, 1u);                     /* texture0_enable */
+    q = emit(q, 0x82, (8u << 16) | 8u);
+    q = emit(q, 0x83, 5u << 28);               /* type = Disabled */
+    q = emit(q, 0x85, TEX >> 3);
+    q = emit(q, 0x8E, 0u);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit_tev0(q, 3u, 3u, 0u);              /* Quelle Texture0 */
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 1, 2, 8, 8, 4);
+    check(mem[o + 3] == 0 && mem[o + 2] == 0 && mem[o + 1] == 0 && mem[o + 0] == 0,
+          "Texture0 mit Typ Disabled => (0,0,0,0)");
+}
+
+static void test_fog(ArmCpu *c, unsigned char *mem)
+{
+    uint32_t *q, size, o;
+    /* Azahar sw_rasterizer.cpp WriteFog + pica_core.cpp HandleSpecialReg:
+     * Fog-LUT-Eintrag = Bits13..23 value/2047, Bits0..12 signed diff/2047.
+     * fog_index = (flip ? 1-depth : depth) * 128; Index-LUT + Diff*Fraktion.
+     * Fog-Farbe 0xE1 r/g/b = (0x10,0x20,0x30); Quelle Rot (255,0,0,255). */
+
+    /* 1) Wert 1024/2047 bei Index 64 (depth 0.5, Faktor ~0.5):
+       0xE6=64, 0xE8 schreibt genau dorthin, danach steht der Offset auf 65. */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_quad_vertices(c, VTX, -0.5f, 0.0f, 0.0f, 1.0f, 1.0f);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad(q, VTX, 8, 8);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x4D, f24raw(-1.0f));          /* depth = -z */
+    q = emit(q, 0x4E, f24raw(0.0f));
+    q = emit(q, 0xE6, 64u);
+    q = emit(q, 0xE8, 1024u << 13);
+    q = emit(q, 0xE1, 0x00302010u);
+    q = emit(q, 0xE0, 5u);                     /* fog_mode = Fog */
+    q = emit_tev0(q, 0xEu, 0xEu, 0xFF0000FFu);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 1, 2, 8, 8, 4);
+    check(gpu_pica_reg(0xE6) == 65u,
+          "Fog-LUT: 0xE8 schreibt bei 0xE6 und inkrementiert den Offset");
+    check(mem[o + 0] == 0xFF && mem[o + 1] == 0x17 && mem[o + 2] == 0x0F &&
+          mem[o + 3] == 0x87,
+          "Fog-Faktor 1024/2047 mischt Quelle mit Fog-Farbe (~135,15,23)");
+
+    /* 2) fog_flip: LUT[96] = Faktor 1.0. Depth 0.25 ohne Flip -> Index 32
+       (LUT 0 => volle Fog-Farbe); mit Flip -> Index 96 (Quelle unveraendert). */
+    {
+        int flip;
+        for (flip = 0; flip < 2; flip++) {
+            gpu_pica_reset();
+            memset(mem + 0x40000u, 0, 0x100);
+            t_quad_vertices(c, VTX, -0.25f, 0.0f, 0.0f, 1.0f, 1.0f);
+            q = (uint32_t *)(mem + LIST);
+            q = t_emit_quad(q, VTX, 8, 8);
+            q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+            q = emit(q, 0x4D, f24raw(-1.0f));
+            q = emit(q, 0x4E, f24raw(0.0f));
+            q = emit(q, 0xE6, 96u);
+            q = emit(q, 0xE8, 2047u << 13);
+            q = emit(q, 0xE1, 0x00302010u);
+            q = emit(q, 0xE0, 5u | ((uint32_t)flip << 16));
+            q = emit_tev0(q, 0xEu, 0xEu, 0xFF0000FFu);
+            q = emit(q, 0x22E, 0u);
+            size = (uint32_t)((unsigned char *)q - (mem + LIST));
+            gpu_run_pica_list(c, LIST, size);
+            o = t_fb_off(0x40000u, 1, 2, 8, 8, 4);
+            check(flip ? (mem[o + 3] == 0xFF && mem[o + 2] == 0x00 &&
+                         mem[o + 1] == 0x00)
+                       : (mem[o + 3] == 0x10 && mem[o + 2] == 0x20 &&
+                          mem[o + 1] == 0x30),
+                  flip ? "fog_flip: Index 96 => Quelle bleibt (Faktor 1)"
+                       : "fog_flip: Index 32 ohne Eintrag => volle Fog-Farbe");
+        }
+    }
+
+    /* 3) Fraktion: depth = 32.5/128, LUT[32] = value 0, diff 2047 => 0.5. */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_quad_vertices(c, VTX, -0.25390625f, 0.0f, 0.0f, 1.0f, 1.0f);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad(q, VTX, 8, 8);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x4D, f24raw(-1.0f));
+    q = emit(q, 0x4E, f24raw(0.0f));
+    q = emit(q, 0xE6, 32u);
+    q = emit(q, 0xE8, 0x7FFu);                 /* value 0, diff +1.0 */
+    q = emit(q, 0xE1, 0x00302010u);
+    q = emit(q, 0xE0, 5u);
+    q = emit_tev0(q, 0xEu, 0xEu, 0xFF0000FFu);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 1, 2, 8, 8, 4);
+    check(mem[o + 3] == 0x87 && mem[o + 2] == 0x10 && mem[o + 1] == 0x18,
+          "Fog-Fraktion: LUT-Difference * 0.5 => (135,16,24)");
+}
+
 static void test_blend(ArmCpu *c, unsigned char *mem)
 {
     /* Quelle (128,64,32,192), Ziel (16,32,48,64), Add mit
@@ -1294,6 +1486,8 @@ int main(void) {
     test_logic_ops(&c, mem);
     test_alpha_test(&c, mem);
     test_depth_stencil(&c, mem);
+    test_texture_type_and_tc2(&c, mem);
+    test_fog(&c, mem);
     test_blend(&c, mem);
 
     printf("ERGEBNIS: %s\n", fails == 0 ? "OK" : "FEHLER");
