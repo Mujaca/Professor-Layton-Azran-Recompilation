@@ -157,6 +157,9 @@ absichtlich nicht zum Commit-Gate.
 `[perf] N blocks in M ms (R/s)`; Format von `tools/g3ds/runner.py`),
 `HLE_PICA_DIAG=1` (PICA-Register-Histogramm je Liste inkl. Kanal-Spruengen,
 Rohdump nach `scratch/pica/list_<addr>_<size>.bin`),
+`HLE_YSTAT=1` (Yield-/Lock-Statistik der kooperativen Gast-Threads: Yields,
+Wandzeit in Lock-Abgaben, Zeit mit freiem Gast-Lock; je ~1 s eine Zeile
+`[ystat]`),
 `HLE_STALLDUMP=1` (bei jedem 300. Host-Frame die letzten 12 Bloecke je
 Gast-Thread auf stderr, um Haenger ohne IPC zu lokalisieren).
 
