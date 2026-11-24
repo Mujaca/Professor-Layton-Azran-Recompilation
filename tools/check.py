@@ -33,6 +33,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--full", action="store_true")
     ap.add_argument("--quick", action="store_true")
+    ap.add_argument("--min-services", type=int, default=None,
+                    help="Mindestwert statt letzter ROADMAP-Zeile (nur fuer bewusst erlaubte Rueckschritte)")
     a = ap.parse_args()
     py = sys.executable
     step("Recompiler-Semantik", [py, "tests/mvp_selftest.py"])
@@ -43,7 +45,7 @@ def main():
         return
     step("Build", [py, "tools/build.py"] + ([] if a.full else ["--no-gen"]))
     step("Tool-Selbsttest", [py, "tools/selftest_tools.py"])
-    need = roadmap_services()
+    need = roadmap_services() if a.min_services is None else a.min_services
     step("Frontier >= %d Dienste" % need, [py, "tools/frontier.py", "--min-services", str(need)])
     print("OK")
 
