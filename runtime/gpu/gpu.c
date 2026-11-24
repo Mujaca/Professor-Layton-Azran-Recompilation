@@ -1,17 +1,19 @@
-/* PICA200-Kommandolisten-Ausfuehrer + Software-Rasterizer (Teilmenge).
+/* PICA200-Kommandolisten-Ausfuehrer + Software-Rasterizer.
  *
  * gpu_run_pica_list() liest Paare (value, header) wie die echte GPU
- * (docs/REFERENCE.md, PICA200) und fuehrt Draws (0x22E/0x22F) mit einem
- * heuristischen Rasterizer aus: Position = Attribut 0, UV = erstes
- * 2-Komponenten-Attribut, Textur 0 aus 0x080..0x08E.
+ * (docs/REFERENCE.md, PICA200) und fuehrt Draws (0x22E/0x22F) aus.
  *
  * Vertex-Pipeline: Vertex-Shader-Interpreter (0x2B0..0x2DF: Uniforms,
  * Programm, Swizzle, Arithmetik, CALL/IF/LOOP/BREAK) und Attribute-Loader
  * (0x200..0x227 inkl. Defaults, Index-Puffer 0x22F, Immediate 0x232) nach
  * Azahar shader_interpreter.cpp/vertex_loader.cpp; Ausgangs-Mapping
- * 0x04F..0x056. Ohne geladenes Programm bleibt die alte Draw-Heuristik.
- * Fehlt noch (ROADMAP M5): TEV (0x0C0..), Viewport/Clip/Depth,
- * Blend-Zustand, Ausgabe in das vom Spiel konfigurierte Farbziel (0x11C..).
+ * 0x04F..0x056 (POSITION, COLOR, TEXCOORD0..2).
+ * Fragment-Pipeline: Sutherland-Hodgman-Clipping, 12.4-Coverage, TEV
+ * 0x0C0..0x0FD, Texturen 0x080..0x09F (alle 14 Formate, 8x8-Morton,
+ * Wrap/Border/Filter), Output-Merger 0x100..0x107 (Blending, LogicOp,
+ * Alpha-Test) und Farb-/Tiefenziel 0x110..0x11E (Kanalmasken, RGBA8/RGB8/
+ * RGB5A1/RGB565/RGBA4, Depth-Test/Write, Stencil, D16/D24/D24S8).
+ * Noch offen (ROADMAP M5): Fog, Lighting, Mipmaps, Proctex.
  */
 
 #include <stdint.h>
@@ -366,65 +368,341 @@ static void p_load_attrs(ArmCpu *c, uint32_t vert, float out[16][4])
     }
 }
 
-/* Textur 0 (falls aktiv) als RGBA-Quelle. Format aus Reg 0x8E,
-   Adresse aus Reg 0x85, Groesse aus Reg 0x82. */
-static uint32_t p_texel(ArmCpu *c, float u, float v, int *ok)
+/* ================= Texturen (0x080..0x09F) =================
+ * Azahar texture_decode.cpp: Jede 8x8-Kachel liegt Morton-verschachtelt
+ * (VideoCore::MortonInterleave) im Speicher; Texturen liegen von unten nach
+ * oben, deshalb wird t vor dem Sample invertiert. Formate
+ * (TexturingRegs::TextureFormat): 0 RGBA8, 1 RGB8, 2 RGB5A1, 3 RGB565,
+ * 4 RGBA4, 5 IA8, 6 RG8 (HILO8), 7 I8, 8 A8, 9 IA4, 10 I4, 11 A4,
+ * 12 ETC1, 13 ETC1A4.
+ * Kanalreihenfolge wie Azahar common/color.h: RGBA8 im Speicher a,b,g,r
+ * (32-Bit-Wort 0xRRGGBBAA), RGB8 b,g,r, IA8 a,i. */
+static uint32_t p_tex_tile_size(uint32_t fmt)
 {
-    uint32_t cfg = p_regs[0x82];
-    uint32_t fmt = p_regs[0x8E] & 0xFu;
-    /* 0x85: Adresse >> 3; PICA-Adressen sind physisch. */
-    uint32_t addr = gpu_pica_phys_to_guest((p_regs[0x85] & 0x0FFFFFFFu) * 8u);
-    int w = (int)((cfg >> 16) & 0x7FFu);
-    int h = (int)(cfg & 0x7FFu);
-    /* Enable steht in main_config (0x80) Bit 0, nicht in 0x81. */
-    if (!(p_regs[0x80] & 1u) || w <= 0 || h <= 0) { *ok = 0; return 0; }
-    {
-        int x = (int)(u * (float)w);
-        int y = (int)(v * (float)h);
-        if (x < 0) x = 0; if (x >= w) x = w - 1;
-        if (y < 0) y = 0; if (y >= h) y = h - 1;
-        uint32_t o = (addr + (uint32_t)(y * w + x) * 2u) & 0x1FFFFFFFu;
-        uint32_t r = 255, g = 255, b = 255, a = 255;
-        switch (fmt) {
-        case 0: /* RGBA8 */
-            o = (addr + (uint32_t)(y * w + x) * 4u) & 0x1FFFFFFFu;
-            if (o + 4u <= c->mem_size) {
-                r = c->mem[o]; g = c->mem[o + 1]; b = c->mem[o + 2]; a = c->mem[o + 3];
-            }
-            break;
-        case 1: /* RGB8 */
-            o = (addr + (uint32_t)(y * w + x) * 3u) & 0x1FFFFFFFu;
-            if (o + 3u <= c->mem_size) { r = c->mem[o]; g = c->mem[o + 1]; b = c->mem[o + 2]; }
-            break;
-        case 3: /* RGB565 */
-            if (o + 2u <= c->mem_size) {
-                uint32_t v = c->mem[o] | ((uint32_t)c->mem[o + 1] << 8);
-                r = ((v >> 11) & 0x1F) * 255 / 31;
-                g = ((v >> 5) & 0x3F) * 255 / 63;
-                b = (v & 0x1F) * 255 / 31;
-            }
-            break;
-        case 4: /* RGBA4 */
-            if (o + 2u <= c->mem_size) {
-                uint32_t v = c->mem[o] | ((uint32_t)c->mem[o + 1] << 8);
-                r = ((v >> 12) & 0xF) * 17; g = ((v >> 8) & 0xF) * 17;
-                b = ((v >> 4) & 0xF) * 17; a = (v & 0xF) * 17;
-            }
-            break;
-        case 5: /* IA8 */
-            if (o + 2u <= c->mem_size) { r = g = b = c->mem[o]; a = c->mem[o + 1]; }
-            break;
-        case 7: /* I8 */
-            if (o + 1u <= c->mem_size) { r = g = b = c->mem[o]; }
-            break;
-        case 8: /* A8 */
-            if (o + 1u <= c->mem_size) { a = c->mem[o]; }
-            break;
-        default:
-            break;
+    switch (fmt) {
+    case 0: return 4u * 64u;                 /* RGBA8 */
+    case 1: return 3u * 64u;                 /* RGB8 */
+    case 2: case 3: case 4: case 5: case 6: return 2u * 64u;
+    case 7: case 8: case 9: return 64u;
+    case 10: case 11: return 32u;            /* I4/A4, 4 Bit */
+    case 12: return 32u;                     /* ETC1: 4 Subtiles * 8 B */
+    case 13: return 64u;                     /* ETC1A4: 4 Subtiles * 16 B */
+    default: return 0u;
+    }
+}
+
+static uint32_t p_morton_interleave(uint32_t x, uint32_t y)
+{
+    static const uint32_t xlut[8] = {0x00, 0x01, 0x04, 0x05, 0x10, 0x11, 0x14, 0x15};
+    static const uint32_t ylut[8] = {0x00, 0x02, 0x08, 0x0A, 0x20, 0x22, 0x28, 0x2A};
+    return xlut[x % 8u] + ylut[y % 8u];
+}
+
+static unsigned p_c4to8(unsigned v) { v &= 0xFFu; return (unsigned)(uint8_t)((v << 4) | v); }
+static unsigned p_c5to8(unsigned v) { v &= 0xFFu; return (unsigned)(uint8_t)((v << 3) | (v >> 2)); }
+static unsigned p_c6to8(unsigned v) { v &= 0xFFu; return (unsigned)(uint8_t)((v << 2) | (v >> 4)); }
+
+/* ETC1-Subtile (Azahar texture/etc1.cpp SampleETC1Subtile). */
+static void p_etc1_texel(uint64_t t, unsigned x, unsigned y, unsigned char out[3])
+{
+    static const int mod[8][2] = {{2, 8}, {5, 17}, {9, 29}, {13, 42},
+                                  {18, 60}, {24, 80}, {33, 106}, {47, 183}};
+    unsigned texel = 4u * x + y;
+    unsigned idx1 = (unsigned)((t >> 37) & 7u);
+    unsigned idx2 = (unsigned)((t >> 34) & 7u);
+    int r, g, b, i;
+
+    if ((t >> 32) & 1u) {
+        unsigned s = x;
+        x = y;
+        y = s;
+    }
+    if ((t >> 33) & 1u) {
+        r = (int)((t >> 59) & 0x1Fu);
+        g = (int)((t >> 51) & 0x1Fu);
+        b = (int)((t >> 43) & 0x1Fu);
+        if (x >= 2) {
+            int dr = (int)((t >> 56) & 7u);
+            int dg = (int)((t >> 48) & 7u);
+            int db = (int)((t >> 40) & 7u);
+            if (dr & 4) dr -= 8;
+            if (dg & 4) dg -= 8;
+            if (db & 4) db -= 8;
+            r += dr;
+            g += dg;
+            b += db;
         }
-        *ok = 1;
-        return (r & 0xFFu) | ((g & 0xFFu) << 8) | ((b & 0xFFu) << 16) | ((a & 0xFFu) << 24);
+        r = (int)p_c5to8((unsigned)r);
+        g = (int)p_c5to8((unsigned)g);
+        b = (int)p_c5to8((unsigned)b);
+    } else {
+        unsigned sb = (x < 2) ? 44u : 40u;
+        unsigned sg = (x < 2) ? 52u : 48u;
+        unsigned sr = (x < 2) ? 60u : 56u;
+        b = (int)p_c4to8((unsigned)((t >> sb) & 0xFu));
+        g = (int)p_c4to8((unsigned)((t >> sg) & 0xFu));
+        r = (int)p_c4to8((unsigned)((t >> sr) & 0xFu));
+    }
+    i = mod[(x < 2) ? idx1 : idx2][(unsigned)((t >> texel) & 1u)];
+    if ((t >> (16u + texel)) & 1u) i = -i;
+    r += i;
+    g += i;
+    b += i;
+    out[0] = (unsigned char)(r < 0 ? 0 : (r > 255 ? 255 : r));
+    out[1] = (unsigned char)(g < 0 ? 0 : (g > 255 ? 255 : g));
+    out[2] = (unsigned char)(b < 0 ? 0 : (b > 255 ? 255 : b));
+}
+
+/* Ein Texel einer 8x8-Kachel dekodieren; mo = p_morton_interleave(fx, fy). */
+static void p_decode_texel(const uint8_t *tile, uint32_t fmt, uint32_t mo,
+                           unsigned char out[4])
+{
+    out[0] = out[1] = out[2] = 0;
+    out[3] = 255;
+    switch (fmt) {
+    case 0: {                                          /* RGBA8: a,b,g,r */
+        const uint8_t *s = tile + mo * 4u;
+        out[0] = s[3];
+        out[1] = s[2];
+        out[2] = s[1];
+        out[3] = s[0];
+        break;
+    }
+    case 1: {                                          /* RGB8: b,g,r */
+        const uint8_t *s = tile + mo * 3u;
+        out[0] = s[2];
+        out[1] = s[1];
+        out[2] = s[0];
+        break;
+    }
+    case 2: case 3: case 4: {                          /* 16 Bit */
+        const uint8_t *s = tile + mo * 2u;
+        unsigned v = (unsigned)s[0] | ((unsigned)s[1] << 8);
+        if (fmt == 2u) {                               /* RGB5A1 */
+            out[0] = (unsigned char)p_c5to8((v >> 11) & 0x1Fu);
+            out[1] = (unsigned char)p_c5to8((v >> 6) & 0x1Fu);
+            out[2] = (unsigned char)p_c5to8((v >> 1) & 0x1Fu);
+            out[3] = (unsigned char)((v & 1u) ? 255u : 0u);
+        } else if (fmt == 3u) {                        /* RGB565 */
+            out[0] = (unsigned char)p_c5to8((v >> 11) & 0x1Fu);
+            out[1] = (unsigned char)p_c6to8((v >> 5) & 0x3Fu);
+            out[2] = (unsigned char)p_c5to8(v & 0x1Fu);
+        } else {                                       /* RGBA4 */
+            out[0] = (unsigned char)p_c4to8((v >> 12) & 0xFu);
+            out[1] = (unsigned char)p_c4to8((v >> 8) & 0xFu);
+            out[2] = (unsigned char)p_c4to8((v >> 4) & 0xFu);
+            out[3] = (unsigned char)p_c4to8(v & 0xFu);
+        }
+        break;
+    }
+    case 5: {                                          /* IA8: a,i */
+        const uint8_t *s = tile + mo * 2u;
+        out[0] = out[1] = out[2] = s[1];
+        out[3] = s[0];
+        break;
+    }
+    case 6: {                                          /* RG8 (HILO8) */
+        const uint8_t *s = tile + mo * 2u;
+        out[0] = s[1];
+        out[1] = s[0];
+        out[2] = 0;
+        break;
+    }
+    case 7: {                                          /* I8 */
+        out[0] = out[1] = out[2] = tile[mo];
+        break;
+    }
+    case 8: {                                          /* A8 */
+        out[0] = out[1] = out[2] = 0;
+        out[3] = tile[mo];
+        break;
+    }
+    case 9: {                                          /* IA4: iiii aaaa */
+        unsigned v = tile[mo];
+        out[0] = out[1] = out[2] = (unsigned char)p_c4to8((v >> 4) & 0xFu);
+        out[3] = (unsigned char)p_c4to8(v & 0xFu);
+        break;
+    }
+    case 10: case 11: {                                /* I4 / A4 */
+        const uint8_t *s = tile + mo / 2u;
+        unsigned v = (mo & 1u) ? ((*s & 0xF0u) >> 4) : (*s & 0x0Fu);
+        v = p_c4to8(v);
+        if (fmt == 10u) {
+            out[0] = out[1] = out[2] = (unsigned char)v;
+        } else {
+            out[0] = out[1] = out[2] = 0;
+            out[3] = (unsigned char)v;
+        }
+        break;
+    }
+    case 12: case 13: {                                /* ETC1 / ETC1A4 */
+        unsigned has_alpha = (fmt == 13u);
+        unsigned ssz = has_alpha ? 16u : 8u;
+        unsigned fx = mo & 7u;
+        unsigned fy = mo >> 3;
+        const uint8_t *s = tile + (fx / 4u + 2u * (fy / 4u)) * ssz;
+        unsigned char rgb[3];
+        if (has_alpha) {
+            uint64_t pa = 0;
+            unsigned k;
+            for (k = 0; k < 8u; k++) pa |= (uint64_t)s[k] << (8u * k);
+            out[3] = (unsigned char)p_c4to8((unsigned)((pa >> (4u * (fx * 4u + fy))) & 0xFu));
+            s += 8;
+        }
+        {
+            uint64_t td = 0;
+            unsigned k;
+            for (k = 0; k < 8u; k++) td |= (uint64_t)s[k] << (8u * k);
+            p_etc1_texel(td, fx % 4u, fy % 4u, rgb);
+        }
+        out[0] = rgb[0];
+        out[1] = rgb[1];
+        out[2] = rgb[2];
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+/* Register-Gruppen der Textureinheiten: 0x81/0x91/0x99, Format
+   0x8E/0x96/0x9E (TexturingRegs, ASSERT_REG_POSITION). */
+static uint32_t p_tex_base(uint32_t unit)
+{
+    return (unit == 0u) ? 0x81u : ((unit == 1u) ? 0x91u : 0x99u);
+}
+
+static uint32_t p_tex_fmt_reg(uint32_t unit)
+{
+    return (unit == 0u) ? 0x8Eu : ((unit == 1u) ? 0x96u : 0x9Eu);
+}
+
+/* Wrap-Modus (Azahar sw_texturing.cpp GetWrappedTexCoord). */
+static int p_wrap_coord(uint32_t mode, int val, int size)
+{
+    switch (mode) {
+    case 4u:                                   /* ClampToEdge2 */
+        if (val < 0) return (int)((unsigned)val % (unsigned)size);
+        /* fallthrough */
+    case 0u:                                   /* ClampToEdge */
+        if (val < 0) val = 0;
+        if (val > size - 1) val = size - 1;
+        return val;
+    case 1u:                                   /* ClampToBorder */
+        return val;
+    case 2u: case 5u: case 6u: case 7u:        /* Repeat/Border2/Repeat2/3 */
+        return (int)((unsigned)val % (unsigned)size);
+    case 3u: {                                 /* MirroredRepeat */
+        unsigned c = (unsigned)val % (unsigned)(2 * size);
+        if (c >= (unsigned)size) c = (unsigned)(2 * size) - 1u - c;
+        return (int)c;
+    }
+    default:
+        return (int)((unsigned)val % (unsigned)size);
+    }
+}
+
+/* Texel einer Einheit an (x,y) ohne Wrap (Koordinaten bereits im Bild). */
+static int p_lookup_texel(ArmCpu *c, uint32_t unit, int x, int y,
+                          unsigned char out[4])
+{
+    uint32_t size = p_regs[p_tex_base(unit) + 1u];
+    uint32_t fmt = p_regs[p_tex_fmt_reg(unit)] & 0xFu;
+    int w = (int)((size >> 16) & 0x7FFu);
+    int h = (int)(size & 0x7FFu);
+    uint32_t ts = p_tex_tile_size(fmt);
+    uint32_t off;
+
+    if (w <= 0 || h <= 0 || ts == 0u) return 0;
+    if (x < 0 || y < 0 || x >= w || y >= h) return 0;
+    off = gpu_pica_phys_to_guest((p_regs[p_tex_base(unit) + 4u] & 0x0FFFFFFFu) * 8u)
+        + (uint32_t)(y / 8) * ts * (uint32_t)(w / 8)
+        + (uint32_t)(x / 8) * ts;
+    if (off + ts > c->mem_size) return 0;
+    p_decode_texel(c->mem + off, fmt,
+                   p_morton_interleave((uint32_t)(x & 7), (uint32_t)(y & 7)), out);
+    return 1;
+}
+
+/* Eine Adresse inkl. Wrap/Border/Farbtiefe (t invertiert) sampeln. */
+static int p_texel_wrapped(ArmCpu *c, uint32_t unit, int s, int t,
+                           unsigned char out[4])
+{
+    uint32_t base = p_tex_base(unit);
+    uint32_t cfg = p_regs[base + 2u];
+    uint32_t size = p_regs[base + 1u];
+    uint32_t border = p_regs[base];
+    uint32_t ws = (cfg >> 12) & 7u;
+    uint32_t wt = (cfg >> 8) & 7u;
+    int w = (int)((size >> 16) & 0x7FFu);
+    int h = (int)(size & 0x7FFu);
+    int border_s, border_t;
+
+    out[0] = out[1] = out[2] = 0;
+    out[3] = 255;
+    if (w <= 0 || h <= 0) return 0;
+    border_s = (ws == 1u) ? (s < 0 || s >= w) : (ws == 5u && s >= w);
+    border_t = (wt == 1u) ? (t < 0 || t >= h) : (wt == 5u && t >= h);
+    if (border_s || border_t) {
+        out[0] = (unsigned char)(border & 0xFFu);
+        out[1] = (unsigned char)((border >> 8) & 0xFFu);
+        out[2] = (unsigned char)((border >> 16) & 0xFFu);
+        out[3] = (unsigned char)((border >> 24) & 0xFFu);
+        return 1;
+    }
+    s = p_wrap_coord(ws, s, w);
+    t = p_wrap_coord(wt, t, h);
+    if (s < 0 || s >= w || t < 0 || t >= h) {
+        out[3] = 0;
+        return 0;
+    }
+    return p_lookup_texel(c, unit, s, h - 1 - t, out);
+}
+
+/* Sample einer Textureinheit 0..2 (Azahar sw_rasterizer.cpp TextureColor).
+ * Filter: Hardware waehlt mag/min ueber die LOD; ohne Ableitungen wird
+ * linear verwendet, sobald einer der beiden Filter linear ist. */
+static void p_sample_tex(ArmCpu *c, uint32_t unit, float u, float v,
+                         unsigned char out[4])
+{
+    uint32_t base = p_tex_base(unit);
+    uint32_t cfg = p_regs[base + 2u];
+    uint32_t size = p_regs[base + 1u];
+    int w = (int)((size >> 16) & 0x7FFu);
+    int h = (int)(size & 0x7FFu);
+    int linear;
+
+    out[0] = out[1] = out[2] = out[3] = 0;
+    if (!(p_regs[0x80] & (1u << unit))) return;   /* Azahar: {0,0,0,0} */
+    if (((cfg >> 28) & 7u) == 5u) return;         /* type Disabled */
+    if ((p_regs[base + 4u] & 0x0FFFFFFFu) == 0u) { out[3] = 255; return; }
+    if (w <= 0 || h <= 0) return;
+
+    linear = (int)(((cfg >> 1) & 1u) | ((cfg >> 2) & 1u));
+    if (!linear) {
+        if (!p_texel_wrapped(c, unit, (int)(u * (float)w), (int)(v * (float)h), out))
+            out[0] = out[1] = out[2] = out[3] = 0;
+        return;
+    }
+    {
+        float fs = u * (float)w - 0.5f;
+        float ft = v * (float)h - 0.5f;
+        int s0 = (int)floorf(fs);
+        int t0 = (int)floorf(ft);
+        float a = fs - (float)s0;
+        float b = ft - (float)t0;
+        unsigned char p00[4], p10[4], p01[4], p11[4];
+        int i;
+        p_texel_wrapped(c, unit, s0, t0, p00);
+        p_texel_wrapped(c, unit, s0 + 1, t0, p10);
+        p_texel_wrapped(c, unit, s0, t0 + 1, p01);
+        p_texel_wrapped(c, unit, s0 + 1, t0 + 1, p11);
+        for (i = 0; i < 4; i++) {
+            float top = (float)p00[i] * (1.0f - a) + (float)p10[i] * a;
+            float bot = (float)p01[i] * (1.0f - a) + (float)p11[i] * a;
+            float val = top * (1.0f - b) + bot * b;
+            out[i] = (unsigned char)(val < 0.0f ? 0.0f : (val > 255.0f ? 255.0f : roundf(val)));
+        }
     }
 }
 
@@ -435,7 +713,7 @@ static uint32_t p_texel(ArmCpu *c, float u, float v, int *ok)
  *   +0 sources, +1 modifiers, +2 ops, +3 const_color, +4 scales.
  */
 typedef struct { unsigned char c[4]; } PicaColor;
-typedef struct { float pos[4]; float color[4]; float uv[2]; } PicaVertex;
+typedef struct { float pos[4]; float color[4]; float uv[3][2]; } PicaVertex;
 
 static const unsigned TEV_STAGE_BASE[6] = {0xC0u, 0xC8u, 0xD0u, 0xD8u, 0xF0u, 0xF8u};
 
@@ -699,9 +977,9 @@ static void p_fb_read(ArmCpu *c, uint32_t x, uint32_t y, unsigned char out[4])
     uint32_t fmt = (p_regs[0x116] >> 16) & 7u;
     out[0] = out[1] = out[2] = out[3] = 0;
     switch (fmt) {
-    case 1: /* RGB8 */
+    case 1: /* RGB8: b,g,r (Azahar DecodeRGB8) */
         if (off + 3u <= c->mem_size) {
-            out[0] = c->mem[off + 0u]; out[1] = c->mem[off + 1u]; out[2] = c->mem[off + 2u];
+            out[2] = c->mem[off + 0u]; out[1] = c->mem[off + 1u]; out[0] = c->mem[off + 2u];
             out[3] = 255;
         }
         break;
@@ -732,10 +1010,10 @@ static void p_fb_read(ArmCpu *c, uint32_t x, uint32_t y, unsigned char out[4])
             out[3] = (unsigned char)((v & 0xFu) * 17u);
         }
         break;
-    default: /* RGBA8 */
+    default: /* RGBA8: a,b,g,r (Azahar DecodeRGBA8) */
         if (off + 4u <= c->mem_size) {
-            out[0] = c->mem[off + 0u]; out[1] = c->mem[off + 1u];
-            out[2] = c->mem[off + 2u]; out[3] = c->mem[off + 3u];
+            out[3] = c->mem[off + 0u]; out[2] = c->mem[off + 1u];
+            out[1] = c->mem[off + 2u]; out[0] = c->mem[off + 3u];
         }
         break;
     }
@@ -746,44 +1024,254 @@ static void p_fb_write(ArmCpu *c, uint32_t x, uint32_t y, const unsigned char in
     uint32_t addr = gpu_pica_phys_to_guest((p_regs[0x11C] & 0x0FFFFFFFu) * 8u);
     uint32_t off = addr + p_fb_pixel_offset(x, y);
     uint32_t fmt = (p_regs[0x116] >> 16) & 7u;
+    unsigned r = in[0], g = in[1], b = in[2], a = in[3];
     switch (fmt) {
-    case 1: /* RGB8 */
-        if (off + 3u <= c->mem_size) { c->mem[off] = in[0]; c->mem[off + 1] = in[1]; c->mem[off + 2] = in[2]; }
+    case 1: /* RGB8: b,g,r */
+        if (off + 3u <= c->mem_size) {
+            c->mem[off] = (uint8_t)b; c->mem[off + 1] = (uint8_t)g; c->mem[off + 2] = (uint8_t)r;
+        }
         break;
     case 2: /* RGB5A1 */
         if (off + 2u <= c->mem_size) {
-            uint32_t v = (((uint32_t)in[0] * 31u / 255u) << 11) |
-                         (((uint32_t)in[1] * 31u / 255u) << 6) |
-                         (((uint32_t)in[2] * 31u / 255u) << 1) |
-                         (in[3] ? 1u : 0u);
+            uint32_t v = ((r >> 3) << 11) | ((g >> 3) << 6) | ((b >> 3) << 1) | (a >> 7);
             c->mem[off] = (uint8_t)(v & 0xFFu); c->mem[off + 1] = (uint8_t)(v >> 8);
         }
         break;
     case 3: /* RGB565 */
         if (off + 2u <= c->mem_size) {
-            uint32_t v = (((uint32_t)in[0] * 31u / 255u) << 11) |
-                         (((uint32_t)in[1] * 63u / 255u) << 5) |
-                         ((uint32_t)in[2] * 31u / 255u);
+            uint32_t v = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
             c->mem[off] = (uint8_t)(v & 0xFFu); c->mem[off + 1] = (uint8_t)(v >> 8);
         }
         break;
     case 4: /* RGBA4 */
         if (off + 2u <= c->mem_size) {
-            uint32_t v = (((uint32_t)in[0] * 15u / 255u) << 12) |
-                         (((uint32_t)in[1] * 15u / 255u) << 8) |
-                         (((uint32_t)in[2] * 15u / 255u) << 4) |
-                         ((uint32_t)in[3] * 15u / 255u);
+            uint32_t v = ((r >> 4) << 12) | ((g >> 4) << 8) | ((b >> 4) << 4) | (a >> 4);
             c->mem[off] = (uint8_t)(v & 0xFFu); c->mem[off + 1] = (uint8_t)(v >> 8);
         }
         break;
-    default: /* RGBA8 */
+    default: /* RGBA8: a,b,g,r */
         if (off + 4u <= c->mem_size) {
-            c->mem[off] = in[0]; c->mem[off + 1] = in[1];
-            c->mem[off + 2] = in[2]; c->mem[off + 3] = in[3];
+            c->mem[off] = (uint8_t)a; c->mem[off + 1] = (uint8_t)b;
+            c->mem[off + 2] = (uint8_t)g; c->mem[off + 3] = (uint8_t)r;
         }
         break;
     }
 }
+
+/* ================= Tiefe/Stencil (0x11B, 0x115/0x116) =================
+ * Azahar sw_framebuffer.cpp GetDepth/SetDepth/GetStencil/SetStencil: gleiche
+ * Kachelung wie das Farbziel, Bytes je Pixel nach Format (D16=2, D24=3,
+ * D24S8=4), Werte little endian, Stencil im vierten Byte. */
+static uint32_t p_depth_fmt(void) { return p_regs[0x116] & 3u; }
+
+static uint32_t p_depth_bpp(void)
+{
+    switch (p_depth_fmt()) {
+    case 0u: return 2u;               /* D16 */
+    case 2u: return 3u;               /* D24 */
+    default: return 4u;               /* D24S8 */
+    }
+}
+
+static uint32_t p_depth_bits(void) { return (p_depth_fmt() == 0u) ? 16u : 24u; }
+
+static uint32_t p_depth_pixel_offset(uint32_t x, uint32_t y)
+{
+    uint32_t width = p_regs[0x11D] & 0x7FFu;
+    uint32_t hraw = (p_regs[0x11D] >> 12) & 0x3FFu;
+    uint32_t bpp = p_depth_bpp();
+    if (width == 0u) width = (uint32_t)g_fb_w;
+    y = hraw - y;
+    return p_morton_offset(x, y, bpp) + (y & ~7u) * width * bpp;
+}
+
+static int p_depth_addr(ArmCpu *c, uint32_t x, uint32_t y, uint32_t *out)
+{
+    uint32_t reg = p_regs[0x11B] & 0x0FFFFFFFu;
+    uint32_t off;
+    if (reg == 0u) return 0;
+    off = gpu_pica_phys_to_guest(reg * 8u) + p_depth_pixel_offset(x, y);
+    if (off + p_depth_bpp() > c->mem_size) return 0;
+    *out = off;
+    return 1;
+}
+
+static uint32_t p_depth_get(ArmCpu *c, uint32_t x, uint32_t y)
+{
+    uint32_t off = 0;
+    if (!p_depth_addr(c, x, y, &off)) return 0xFFFFFFFFu;
+    if (p_depth_fmt() == 0u)
+        return (uint32_t)c->mem[off] | ((uint32_t)c->mem[off + 1u] << 8);
+    return (uint32_t)c->mem[off] | ((uint32_t)c->mem[off + 1u] << 8)
+         | ((uint32_t)c->mem[off + 2u] << 16);
+}
+
+static void p_depth_set(ArmCpu *c, uint32_t x, uint32_t y, uint32_t z)
+{
+    uint32_t off = 0;
+    if ((p_regs[0x115] & 3u) == 0u) return;      /* allow_depth_stencil_write */
+    if (!p_depth_addr(c, x, y, &off)) return;
+    c->mem[off] = (uint8_t)(z & 0xFFu);
+    if (p_depth_fmt() != 0u) {
+        c->mem[off + 1u] = (uint8_t)((z >> 8) & 0xFFu);
+        c->mem[off + 2u] = (uint8_t)((z >> 16) & 0xFFu);
+    }
+}
+
+static uint32_t p_stencil_get(ArmCpu *c, uint32_t x, uint32_t y)
+{
+    uint32_t off = 0;
+    if (p_depth_fmt() != 3u) return 0u;
+    if (!p_depth_addr(c, x, y, &off)) return 0u;
+    return c->mem[off + 3u];
+}
+
+static void p_stencil_set(ArmCpu *c, uint32_t x, uint32_t y, uint32_t s)
+{
+    uint32_t off = 0;
+    if (p_depth_fmt() != 3u) return;
+    if ((p_regs[0x115] & 3u) == 0u) return;
+    if (!p_depth_addr(c, x, y, &off)) return;
+    c->mem[off + 3u] = (uint8_t)(s & 0xFFu);
+}
+
+/* ---- Blending, LogicOp, Vergleiche (Azahar sw_framebuffer.cpp/sw_rasterizer.cpp) ---- */
+static unsigned p_blend_factor(uint32_t f, int ch, const unsigned char src[4],
+                               const unsigned char dst[4], uint32_t cst)
+{
+    unsigned cc = (cst >> (8 * ch)) & 0xFFu;
+    unsigned ca = (cst >> 24) & 0xFFu;
+    switch (f & 0xFu) {
+    case 0u: return 0u;
+    case 1u: return 255u;
+    case 2u: return src[ch];
+    case 3u: return 255u - src[ch];
+    case 4u: return dst[ch];
+    case 5u: return 255u - dst[ch];
+    case 6u: return src[3];
+    case 7u: return 255u - src[3];
+    case 8u: return dst[3];
+    case 9u: return 255u - dst[3];
+    case 10u: return cc;
+    case 11u: return 255u - cc;
+    case 12u: return ca;
+    case 13u: return 255u - ca;
+    case 14u: {                                /* SourceAlphaSaturate */
+        unsigned m = 255u - dst[3];
+        return (ch == 3) ? 255u : (src[3] < m ? src[3] : m);
+    }
+    default: return src[ch];
+    }
+}
+
+static int p_blend_eq(uint32_t eq, int s, int d)
+{
+    switch (eq & 7u) {
+    case 1u: return (s - d) / 255;             /* Subtract */
+    case 2u: return (d - s) / 255;             /* ReverseSubtract */
+    case 3u: return (s < d ? s : d) / 255;     /* Min */
+    case 4u: return (s > d ? s : d) / 255;     /* Max */
+    default: return (s + d) / 255;             /* Add */
+    }
+}
+
+static unsigned p_logic_op(uint32_t lop, unsigned s, unsigned d)
+{
+    switch (lop & 0xFu) {
+    case 0u: return 0u;                        /* Clear */
+    case 1u: return s & d;                     /* And */
+    case 2u: return s & (~d & 0xFFu);          /* AndReverse */
+    case 3u: return s;                         /* Copy */
+    case 4u: return 255u;                      /* Set */
+    case 5u: return (~s) & 0xFFu;              /* CopyInverted */
+    case 6u: return d;                         /* NoOp */
+    case 7u: return (~d) & 0xFFu;              /* Invert */
+    case 8u: return (~(s & d)) & 0xFFu;        /* Nand */
+    case 9u: return (s | d) & 0xFFu;           /* Or */
+    case 10u: return (~(s | d)) & 0xFFu;       /* Nor */
+    case 11u: return (s ^ d) & 0xFFu;          /* Xor */
+    case 12u: return (~(s ^ d)) & 0xFFu;       /* Equiv */
+    case 13u: return ((~s) & d) & 0xFFu;       /* AndInverted */
+    case 14u: return (s | (~d)) & 0xFFu;       /* OrReverse */
+    default: return ((~s) | d) & 0xFFu;        /* OrInverted */
+    }
+}
+
+/* a <op> b; Reihenfolge wie Azahar (Stencil: ref,dest; Tiefe: z,ref_z). */
+static int p_compare(uint32_t fn, unsigned a, unsigned b)
+{
+    switch (fn & 7u) {
+    case 0u: return 0;                         /* Never */
+    case 1u: return 1;                         /* Always */
+    case 2u: return a == b;                    /* Equal */
+    case 3u: return a != b;                    /* NotEqual */
+    case 4u: return a < b;                     /* LessThan */
+    case 5u: return a <= b;                    /* LessThanOrEqual */
+    case 6u: return a > b;                     /* GreaterThan */
+    default: return a >= b;                    /* GreaterThanOrEqual */
+    }
+}
+
+static uint32_t p_stencil_action(uint32_t act, uint32_t old, uint32_t ref)
+{
+    switch (act & 7u) {
+    case 1u: return 0u;                        /* Zero */
+    case 2u: return ref & 0xFFu;               /* Replace */
+    case 3u: return old < 254u ? old + 1u : 255u;   /* Increment (sat.) */
+    case 4u: return old > 0u ? old - 1u : 0u;       /* Decrement (sat.) */
+    case 5u: return (~old) & 0xFFu;            /* Invert */
+    case 6u: return (old + 1u) & 0xFFu;        /* IncrementWrap */
+    case 7u: return (old - 1u) & 0xFFu;        /* DecrementWrap */
+    default: return old;                       /* Keep */
+    }
+}
+
+/* Azahar sw_rasterizer.cpp DoDepthStencilTest. */
+static int p_depth_stencil_test(ArmCpu *c, uint32_t x, uint32_t y, float depth)
+{
+
+    uint32_t dm = p_regs[0x107];
+    uint32_t sf = p_regs[0x105];
+    uint32_t so = p_regs[0x106];
+    uint32_t stencil_enable = (sf & 1u) && (p_depth_fmt() == 3u);
+    uint32_t old_stencil = 0u;
+    uint32_t ref = (sf >> 16) & 0xFFu;
+
+    if (stencil_enable) {
+        uint32_t im = (sf >> 24) & 0xFFu;
+        uint32_t wm = (sf >> 8) & 0xFFu;
+        uint32_t ns;
+        old_stencil = p_stencil_get(c, x, y);
+        if (!p_compare((sf >> 4) & 7u, ref & im, old_stencil & im)) {
+            ns = p_stencil_action(so, old_stencil, ref);
+            p_stencil_set(c, x, y, (ns & wm) | (old_stencil & ~wm));
+            return 0;
+        }
+    }
+    if (dm & 1u) {                             /* depth_test_enable */
+        uint32_t bits = p_depth_bits();
+        uint32_t z = (uint32_t)(depth * (float)((1u << bits) - 1u));
+        uint32_t ref_z = p_depth_get(c, x, y);
+        if (!p_compare((dm >> 4) & 7u, z, ref_z)) {
+            if (stencil_enable) {
+                uint32_t wm = (sf >> 8) & 0xFFu;
+                uint32_t ns = p_stencil_action((so >> 4) & 7u, old_stencil, ref);
+                p_stencil_set(c, x, y, (ns & wm) | (old_stencil & ~wm));
+            }
+            return 0;
+        }
+    }
+    if ((p_regs[0x115] & 3u) != 0u && (dm & (1u << 12))) {   /* depth_write_enable */
+        p_depth_set(c, x, y, (uint32_t)(depth * (float)((1u << p_depth_bits()) - 1u)));
+    }
+    if (stencil_enable) {
+        uint32_t wm = (sf >> 8) & 0xFFu;
+        uint32_t ns = p_stencil_action((so >> 8) & 7u, old_stencil, ref);
+        p_stencil_set(c, x, y, (ns & wm) | (old_stencil & ~wm));
+    }
+    return 1;
+}
+
 
 /* ================= Clipping (Azahar sw_rasterizer.cpp AddTriangle) ================= */
 static float p_dot4(const float a[4], const float b[4])
@@ -793,12 +1281,14 @@ static float p_dot4(const float a[4], const float b[4])
 
 static void p_clip_lerp(float f, const PicaVertex *a, const PicaVertex *b, PicaVertex *o)
 {
-    int i;
+    int i, k;
     for (i = 0; i < 4; i++) {
         o->pos[i] = a->pos[i] * f + b->pos[i] * (1.0f - f);
         o->color[i] = a->color[i] * f + b->color[i] * (1.0f - f);
     }
-    for (i = 0; i < 2; i++) o->uv[i] = a->uv[i] * f + b->uv[i] * (1.0f - f);
+    for (k = 0; k < 3; k++)
+        for (i = 0; i < 2; i++)
+            o->uv[k][i] = a->uv[k][i] * f + b->uv[k][i] * (1.0f - f);
 }
 
 /* Sutherland-Hodgman gegen eine Ebene; inside = dot(pos+bias, coeff) >= -eps. */
@@ -903,13 +1393,12 @@ static void p_process_tri(ArmCpu *c, const PicaVertex *v0, const PicaVertex *v1,
         for (py = min_y + 8; py < max_y; py += 16) {
             for (px = min_x + 8; px < max_x; px += 16) {
                 int w0, w1, w2, wsum;
-                float bw0, bw1, bw2, iw;
-                float prim[4], u, v;
+                float bw0, bw1, bw2, iw, depth;
+                float prim[4], tuv[3][2];
                 PicaColor primary, tex_col[4];
                 PicaColor tev_out;
                 unsigned char texbuf[4];
-                int ok = 0;
-                int i;
+                int i, unit;
 
                 if (sc_mode == 1) {      /* Exclude */
                     if (px >= sx1 && px < sx2 && py >= sy1 && py < sy2) continue;
@@ -926,110 +1415,76 @@ static void p_process_tri(ArmCpu *c, const PicaVertex *v0, const PicaVertex *v1,
 
                 for (i = 0; i < 4; i++)
                     prim[i] = (v0->color[i] * bw0 + v1->color[i] * bw1 + v2->color[i] * bw2) * iw;
-                u = (v0->uv[0] * bw0 + v1->uv[0] * bw1 + v2->uv[0] * bw2) * iw;
-                v = (v0->uv[1] * bw0 + v1->uv[1] * bw1 + v2->uv[1] * bw2) * iw;
+                for (i = 0; i < 3; i++) {
+                    tuv[i][0] = (v0->uv[i][0] * bw0 + v1->uv[i][0] * bw1 +
+                                 v2->uv[i][0] * bw2) * iw;
+                    tuv[i][1] = (v0->uv[i][1] * bw0 + v1->uv[i][1] * bw1 +
+                                 v2->uv[i][1] * bw2) * iw;
+                }
 
                 for (i = 0; i < 4; i++) {
                     float f = prim[i];
-                    if (f < 0.0f) f = 0.0f; if (f > 1.0f) f = 1.0f;
+                    if (f < 0.0f) f = 0.0f;
+                    if (f > 1.0f) f = 1.0f;
                     primary.c[i] = (unsigned char)roundf(f * 255.0f);
                 }
-                for (i = 0; i < 4; i++) tex_col[i].c[0] = tex_col[i].c[1] =
-                    tex_col[i].c[2] = tex_col[i].c[3] = 0;
-                {
-                    uint32_t t = p_texel(c, u, v, &ok);
-                    if (ok) {
-                        texbuf[0] = (unsigned char)(t & 0xFFu);
-                        texbuf[1] = (unsigned char)((t >> 8) & 0xFFu);
-                        texbuf[2] = (unsigned char)((t >> 16) & 0xFFu);
-                        texbuf[3] = (unsigned char)((t >> 24) & 0xFFu);
-                    } else {
-                        texbuf[0] = texbuf[1] = texbuf[2] = texbuf[3] = 0;
-                    }
-                    for (i = 0; i < 4; i++) tex_col[0].c[i] = texbuf[i];
+                for (i = 0; i < 4; i++)
+                    tex_col[i].c[0] = tex_col[i].c[1] = tex_col[i].c[2] = tex_col[i].c[3] = 0;
+                for (unit = 0; unit < 3u; unit++) {
+                    int ci = (unit == 2u && ((p_regs[0x80] >> 13) & 1u)) ? 1 : (int)unit;
+                    p_sample_tex(c, unit, tuv[ci][0], tuv[ci][1], texbuf);
+                    for (i = 0; i < 4; i++) tex_col[unit].c[i] = texbuf[i];
                 }
 
                 tev_out = p_tev(tex_col, &primary);
 
+                /* Alpha-Test (Azahar DoAlphaTest) */
+                if (p_regs[0x104] & 1u) {
+                    uint32_t fn = (p_regs[0x104] >> 4) & 7u;
+                    uint32_t ref = (p_regs[0x104] >> 8) & 0xFFu;
+                    if (!p_compare(fn, tev_out.c[3], ref)) continue;
+                }
+
+                /* Tiefe: Azahar screenpos.z interpoliert, dann Range/Offset
+                 * (0x4D/0x4E) und optional W-Buffer (0x6D). */
+                depth = (v0->pos[2] * bw0 + v1->pos[2] * bw1 + v2->pos[2] * bw2) /
+                        (float)wsum;
+                depth = depth * p_f24_to_float(p_regs[0x4D]) + p_f24_to_float(p_regs[0x4E]);
+                if ((p_regs[0x6D] & 1u) == 0u)      /* DepthBuffering::WBuffering */
+                    depth *= iw * (float)wsum;
+                if (depth < 0.0f) depth = 0.0f;
+                if (depth > 1.0f) depth = 1.0f;
+                if (p_fb_configured() && !p_depth_stencil_test(c, (uint32_t)(px >> 4),
+                                                               (uint32_t)(py >> 4), depth))
+                    continue;
+
                 if (p_fb_configured()) {
                     unsigned char dest[4];
                     unsigned char result[4];
-                    uint32_t om = p_regs[0x100];
-                    uint32_t mask = p_regs[0x108];
-                    int blend = (int)((om >> 8) & 1u);
                     unsigned char bl[4];
+                    uint32_t om = p_regs[0x100];
+                    uint32_t mask = p_regs[0x107];
                     int k;
                     p_fb_read(c, (uint32_t)(px >> 4), (uint32_t)(py >> 4), dest);
-                    if (blend) {
+                    if (om & (1u << 8)) {           /* alphablend_enable */
                         uint32_t p = p_regs[0x101];
-                        int eq_rgb = (int)(p & 7u), eq_a = (int)((p >> 8) & 7u);
-                        int fs_rgb = (int)((p >> 16) & 0xFu), fd_rgb = (int)((p >> 20) & 0xFu);
-                        int fs_a = (int)((p >> 24) & 0xFu), fd_a = (int)((p >> 28) & 0xFu);
-                        unsigned char sf[4], df[4];
+                        uint32_t cst = p_regs[0x103];
                         for (k = 0; k < 4; k++) {
-                            int ch = (k == 3) ? 3 : k;
-                            int sfac = (k == 3) ? fs_a : fs_rgb;
-                            int dfac = (k == 3) ? fd_a : fd_rgb;
-                            int s = 0, d = 0;
-                            switch (sfac) {
-                            case 0: s = 0; break;
-                            case 1: s = 255; break;
-                            case 2: s = tev_out.c[ch]; break;
-                            case 3: s = 255 - tev_out.c[ch]; break;
-                            case 4: s = dest[ch]; break;
-                            case 5: s = 255 - dest[ch]; break;
-                            case 6: s = tev_out.c[3]; break;
-                            case 7: s = 255 - tev_out.c[3]; break;
-                            case 8: s = dest[3]; break;
-                            case 9: s = 255 - dest[3]; break;
-                            default: s = 255; break;
-                            }
-                            switch (dfac) {
-                            case 0: d = 0; break;
-                            case 1: d = 255; break;
-                            case 2: d = tev_out.c[ch]; break;
-                            case 3: d = 255 - tev_out.c[ch]; break;
-                            case 4: d = dest[ch]; break;
-                            case 5: d = 255 - dest[ch]; break;
-                            case 6: d = tev_out.c[3]; break;
-                            case 7: d = 255 - tev_out.c[3]; break;
-                            case 8: d = dest[3]; break;
-                            case 9: d = 255 - dest[3]; break;
-                            default: d = 255; break;
-                            }
-                            sf[k] = (unsigned char)s; df[k] = (unsigned char)d;
-                        }
-                        for (k = 0; k < 4; k++) {
-                            int eq = (k == 3) ? eq_a : eq_rgb;
-                            int sv = tev_out.c[k] * sf[k];
-                            int dv = dest[k] * df[k];
-                            int r;
-                            switch (eq) {
-                            case 1: r = (sv - dv) / 255; break;
-                            case 2: r = (dv - sv) / 255; break;
-                            case 3: r = (sv < dv ? sv : dv) / 255; break;
-                            case 4: r = (sv > dv ? sv : dv) / 255; break;
-                            default: r = (sv + dv) / 255; break;
-                            }
-                            if (r < 0) r = 0; if (r > 255) r = 255;
+                            int sfac = (int)((k == 3) ? ((p >> 24) & 0xFu) : ((p >> 16) & 0xFu));
+                            int dfac = (int)((k == 3) ? ((p >> 28) & 0xFu) : ((p >> 20) & 0xFu));
+                            int sv = tev_out.c[k] * (int)p_blend_factor((uint32_t)sfac, k,
+                                                                       tev_out.c, dest, cst);
+                            int dv = dest[k] * (int)p_blend_factor((uint32_t)dfac, k,
+                                                                   tev_out.c, dest, cst);
+                            int r = p_blend_eq((k == 3) ? (p >> 8) : p, sv, dv);
+                            if (r < 0) r = 0;
+                            if (r > 255) r = 255;
                             bl[k] = (unsigned char)r;
                         }
                     } else {
-                        /* LogicOp (0x102 Bits 0..3); Standard Copy = 3. */
                         uint32_t lop = p_regs[0x102] & 0xFu;
-                        for (k = 0; k < 4; k++) {
-                            unsigned s = tev_out.c[k], d = dest[k], r;
-                            switch (lop) {
-                            case 0: r = 0; break;
-                            case 1: r = s & d; break;
-                            case 3: r = s; break;
-                            case 9: r = s | d; break;
-                            case 11: r = s ^ d; break;
-                            case 15: r = s | ((~d) & 0xFFu); break;
-                            default: r = s; break;
-                            }
-                            bl[k] = (unsigned char)(r & 0xFFu);
-                        }
+                        for (k = 0; k < 4; k++)
+                            bl[k] = (unsigned char)p_logic_op(lop, tev_out.c[k], dest[k]);
                     }
                     result[0] = (mask & (1u << 8)) ? bl[0] : dest[0];
                     result[1] = (mask & (1u << 9)) ? bl[1] : dest[1];
@@ -1096,10 +1551,12 @@ static void p_raster_tri(ArmCpu *c, const PicaVertex *a, const PicaVertex *b,
 
     for (i = 0; i < n; i++) {
         float invw = 1.0f / in[i].pos[3];
-        int k;
+        int k, m;
         in[i].pos[3] = invw;
+        in[i].pos[2] *= invw;              /* Azahar screenpos.z = z / w */
         for (k = 0; k < 4; k++) in[i].color[k] *= invw;
-        for (k = 0; k < 2; k++) in[i].uv[k] *= invw;
+        for (m = 0; m < 3; m++)
+            for (k = 0; k < 2; k++) in[i].uv[m][k] *= invw;
         {
             float sx = (in[i].pos[0] * invw + 1.0f) * half_x + (float)corner_x;
             float sy = (in[i].pos[1] * invw + 1.0f) * half_y + (float)corner_y;
@@ -1509,8 +1966,12 @@ static void p_vs_process(const float attrs[16][4], PicaVertex *v)
     }
     for (i = 0; i < 4; i++) v->pos[i] = slot[i];
     for (i = 0; i < 4; i++) v->color[i] = slot[8 + i];
-    v->uv[0] = slot[12];
-    v->uv[1] = slot[13];
+    v->uv[0][0] = slot[12];
+    v->uv[0][1] = slot[13];
+    v->uv[1][0] = slot[14];
+    v->uv[1][1] = slot[15];
+    v->uv[2][0] = slot[16];
+    v->uv[2][1] = slot[17];
     for (i = 0; i < 4; i++) {
         float c = v->color[i];
         if (c < 0.0f) c = -c;             /* Azahar: abs + saturate */
@@ -1525,8 +1986,12 @@ static void p_vertex_from_attrs(const float attrs[16][4], PicaVertex *v, int use
         p_vs_process(attrs, v);
     } else {
         memcpy(v->pos, attrs[0], 4 * sizeof(float));
-        v->uv[0] = attrs[1][0];
-        v->uv[1] = attrs[1][1];
+        v->uv[0][0] = attrs[1][0];
+        v->uv[0][1] = attrs[1][1];
+        v->uv[1][0] = attrs[1][0];
+        v->uv[1][1] = attrs[1][1];
+        v->uv[2][0] = attrs[1][0];
+        v->uv[2][1] = attrs[1][1];
         v->color[0] = v->color[1] = v->color[2] = v->color[3] = 1.0f;
     }
     g_vs_last_vertex = *v;

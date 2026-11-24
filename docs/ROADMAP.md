@@ -71,3 +71,4 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | 2026-11-24 | pica-cmdlist | 3/10 | hid:USER | 0 |
 | 2026-11-24 | pica-shader | 3/10 | hid:USER | 0 |
 | 2026-11-24 | pica-raster-tev | 3/10 | hid:USER | 0 |
+| 2026-11-24 | pica-texturen-blend | 3/10 | hid:USER | 0 |

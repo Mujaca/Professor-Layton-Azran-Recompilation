@@ -18,8 +18,12 @@
  *   - physisch -> Gast-Linearspeicher (VRAM 0x18000000, FCRAM 0x20000000)
  *
  * Erwartung: das Dreieck wird mit der Textur (rot) gefuellt; nach
- * 0x80=0 faellt p_texel auf Weiss zurueck. HLE_PICA_RENDER=1 setzt der
- * Runner (tools/test_pica_c.py).
+ * 0x80=0 liefert die deaktivierte Einheit (0,0,0,0) wie Azahar.
+ * HLE_PICA_RENDER=1 setzt der Runner (tools/test_pica_c.py).
+ *
+ * Ergaenzt (Azahar texture_decode.cpp/sw_texturing.cpp/sw_framebuffer.cpp):
+ * 8x8-Morton-Texturen in allen 14 Formaten, Wrap-Modi, Nearest/Linear,
+ * Farbziel-Formate, LogicOps, Alpha-/Depth-/Stencil-Test und Blending.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -175,6 +179,558 @@ static uint32_t *emit_attr0(uint32_t *p, uint32_t base)
     return p;
 }
 
+/* ================= Erweiterte PICA-Tests =================
+ * Erwartungswerte aus Azahar: texture_decode.cpp (8x8-Morton-Kacheln,
+ * Kanalreihenfolge), sw_texturing.cpp (Wrap), sw_framebuffer.cpp (Formate,
+ * Blending, LogicOp), sw_rasterizer.cpp (Alpha-/Depth-/Stencil-Test). */
+
+static uint32_t t_morton(int x, int y)
+{
+    static const uint32_t xl[8] = {0x00, 0x01, 0x04, 0x05, 0x10, 0x11, 0x14, 0x15};
+    static const uint32_t yl[8] = {0x00, 0x02, 0x08, 0x0A, 0x20, 0x22, 0x28, 0x2A};
+    return xl[x % 8] + yl[y % 8];
+}
+
+/* Byte-Offset eines Pixels im gekachelten Farbziel (Azahar sw_framebuffer). */
+static uint32_t t_fb_off(uint32_t base, int x, int y, int w, int h, int bpp)
+{
+    int yp = (h - 1) - y;
+    uint32_t i = t_morton(x, yp) + (uint32_t)(x & ~7) * 8u;
+    return base + (i + (uint32_t)(yp & ~7) * (uint32_t)w) * (uint32_t)bpp;
+}
+
+/* Sechs Vertices fuer ein Quad ueber den Clip-Raum (2 Dreiecke),
+   Position float3 + UV float2, Stride 20. */
+static void t_quad_vertices(ArmCpu *c, uint32_t vtx, float z,
+                            float u0, float v0, float u1, float v1)
+{
+    static const float xy[6][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, -1}, {1, 1}, {-1, 1}};
+    int i;
+    for (i = 0; i < 6; i++) {
+        float f[5];
+        f[0] = xy[i][0];
+        f[1] = xy[i][1];
+        f[2] = z;
+        f[3] = u0 + (xy[i][0] + 1.0f) * 0.5f * (u1 - u0);
+        f[4] = v0 + (xy[i][1] + 1.0f) * 0.5f * (v1 - v0);
+        memcpy(c->mem + ((vtx + (uint32_t)i * 20u) & 0x1FFFFFFFu), f, sizeof(f));
+    }
+}
+
+static uint32_t *t_emit_quad(uint32_t *q, uint32_t vtx, int vw, int vh)
+{
+    q = emit(q, 0x200, vtx >> 3);
+    q = emit(q, 0x201, 0x7B);              /* attr0 float3, attr1 float2 */
+    q = emit(q, 0x202, 1u << 28);
+    q = emit(q, 0x203, 0u);
+    q = emit(q, 0x204, 0x210u);
+    q = emit(q, 0x205, (3u << 28) | (20u << 16));
+    q = emit(q, 0x206, 12u);
+    q = emit(q, 0x207, 1u);
+    q = emit(q, 0x208, (1u << 28) | (20u << 16));
+    q = emit(q, 0x228, 6u);
+    q = emit_viewport(q, vw, vh);
+    return q;
+}
+
+static uint32_t *t_emit_fb(uint32_t *q, uint32_t addr, int w, int h, uint32_t fmt)
+{
+    q = emit(q, 0x116, (fmt & 7u) << 16);
+    q = emit(q, 0x11C, addr >> 3);
+    q = emit(q, 0x11D, (uint32_t)w | ((uint32_t)(h - 1) << 12));
+    q = emit(q, 0x107, 0x00000F00u);
+    q = emit(q, 0x102, 3u);                /* LogicOp Copy */
+    q = emit(q, 0x113, 1u);                /* allow_color_write */
+    return q;
+}
+
+static uint32_t *t_emit_tex(uint32_t *q, uint32_t addr, int w, int h, int fmt,
+                            uint32_t cfg)
+{
+    q = emit(q, 0x80, 1u);                 /* texture0_enable */
+    q = emit(q, 0x82, ((uint32_t)w << 16) | (uint32_t)h);
+    q = emit(q, 0x83, cfg);
+    q = emit(q, 0x85, addr >> 3);
+    q = emit(q, 0x8E, (uint32_t)fmt);
+    return q;
+}
+
+/* Ein Texel im Azahar-Layout kodieren (mo = Morton-Index in der Kachel). */
+static void t_tex_encode(unsigned char *tile, int fmt, unsigned mo,
+                         const unsigned char c[4])
+{
+    switch (fmt) {
+    case 0:                                /* RGBA8: a,b,g,r */
+        tile[mo * 4 + 0] = c[3]; tile[mo * 4 + 1] = c[2];
+        tile[mo * 4 + 2] = c[1]; tile[mo * 4 + 3] = c[0];
+        break;
+    case 1:                                /* RGB8: b,g,r */
+        tile[mo * 3 + 0] = c[2]; tile[mo * 3 + 1] = c[1]; tile[mo * 3 + 2] = c[0];
+        break;
+    case 2: case 3: case 4: {
+        unsigned v;
+        if (fmt == 2)
+            v = ((c[0] >> 3) << 11) | ((c[1] >> 3) << 6) | ((c[2] >> 3) << 1) | (c[3] >> 7);
+        else if (fmt == 3)
+            v = ((c[0] >> 3) << 11) | ((c[1] >> 2) << 5) | (c[2] >> 3);
+        else
+            v = ((c[0] >> 4) << 12) | ((c[1] >> 4) << 8) | ((c[2] >> 4) << 4) | (c[3] >> 4);
+        tile[mo * 2 + 0] = (unsigned char)(v & 0xFFu);
+        tile[mo * 2 + 1] = (unsigned char)(v >> 8);
+        break;
+    }
+    case 5:                                /* IA8: a,i */
+        tile[mo * 2 + 0] = c[3]; tile[mo * 2 + 1] = c[0];
+        break;
+    case 6:                                /* RG8: g,r */
+        tile[mo * 2 + 0] = c[1]; tile[mo * 2 + 1] = c[0];
+        break;
+    case 7:
+        tile[mo] = c[0];
+        break;
+    case 8:
+        tile[mo] = c[3];
+        break;
+    case 9:                                /* IA4 */
+        tile[mo] = (unsigned char)(((c[0] >> 4) << 4) | (c[3] >> 4));
+        break;
+    case 10: case 11: {
+        unsigned v = (fmt == 10) ? (c[0] >> 4) : (c[3] >> 4);
+        unsigned char *s = tile + mo / 2;
+        if (mo & 1u) *s = (unsigned char)((*s & 0x0Fu) | (v << 4));
+        else *s = (unsigned char)((*s & 0xF0u) | v);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+static void test_textures(ArmCpu *c, unsigned char *mem)
+{
+    static const struct {
+        int fmt; const char *name;
+        unsigned char col[4]; unsigned char exp[4];
+    } cases[] = {
+        {0, "RGBA8",  {0x11, 0x22, 0x33, 0x44}, {0x11, 0x22, 0x33, 0x44}},
+        {1, "RGB8",   {0x12, 0x34, 0x56, 0xFF}, {0x12, 0x34, 0x56, 0xFF}},
+        {2, "RGB5A1", {0xF8, 0x08, 0x10, 0xFF}, {0xFF, 0x08, 0x10, 0xFF}},
+        {3, "RGB565", {0xF8, 0xFC, 0x10, 0xFF}, {0xFF, 0xFF, 0x10, 0xFF}},
+        {4, "RGBA4",  {0xFF, 0x22, 0x33, 0x44}, {0xFF, 0x22, 0x33, 0x44}},
+        {5, "IA8",    {0x55, 0x55, 0x55, 0xAA}, {0x55, 0x55, 0x55, 0xAA}},
+        {6, "RG8",    {0x12, 0x34, 0x00, 0xFF}, {0x12, 0x34, 0x00, 0xFF}},
+        {7, "I8",     {0x77, 0x77, 0x77, 0xFF}, {0x77, 0x77, 0x77, 0xFF}},
+        {8, "A8",     {0x00, 0x00, 0x00, 0x99}, {0x00, 0x00, 0x00, 0x99}},
+        {9, "IA4",    {0x55, 0x55, 0x55, 0xAA}, {0x55, 0x55, 0x55, 0xAA}},
+        {10, "I4",    {0x77, 0x77, 0x77, 0xFF}, {0x77, 0x77, 0x77, 0xFF}},
+        {11, "A4",    {0x00, 0x00, 0x00, 0x33}, {0x00, 0x00, 0x00, 0x33}},
+    };
+    uint32_t *q, size;
+    int ci, x, y;
+
+    for (ci = 0; ci < (int)(sizeof(cases) / sizeof(cases[0])); ci++) {
+        int fmt = cases[ci].fmt;
+        uint32_t tile = 0x20000u;
+        uint32_t ts = (uint32_t)(fmt == 0 ? 256 : fmt == 1 ? 192 :
+                                 (fmt <= 6 ? 128 : (fmt <= 9 ? 64 : 32)));
+        gpu_pica_reset();
+        memset(mem + 0x40000u, 0, 0x200);
+        memset(mem + tile, 0, ts);
+        for (y = 0; y < 8; y++)
+            for (x = 0; x < 8; x++)
+                t_tex_encode(mem + tile, fmt, t_morton(x, y), cases[ci].col);
+        t_quad_vertices(c, VTX, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f);
+        q = (uint32_t *)(mem + LIST);
+        q = t_emit_quad(q, VTX, 8, 8);
+        q = t_emit_tex(q, tile, 8, 8, fmt, 0u);
+        q = t_emit_fb(q, 0x40000u, 8, 8, 0u);      /* RGBA8 */
+        q = emit_tev0(q, 3u, 3u, 0u);              /* Texture0 */
+        q = emit(q, 0x22E, 0u);
+        size = (uint32_t)((unsigned char *)q - (mem + LIST));
+        gpu_run_pica_list(c, LIST, size);
+        {
+            char msg[96];
+            int ok = 1;
+            for (y = 0; y < 8 && ok; y++)
+                for (x = 0; x < 8; x++) {
+                    uint32_t o = t_fb_off(0x40000u, x, y, 8, 8, 4);
+                    if (mem[o + 3] != cases[ci].exp[0] || mem[o + 2] != cases[ci].exp[1] ||
+                        mem[o + 1] != cases[ci].exp[2] || mem[o + 0] != cases[ci].exp[3]) {
+                        ok = 0;
+                        break;
+                    }
+                }
+            sprintf(msg, "Textur %s (Morton 8x8), Pixel (x,y) == Texel (x,7-y)",
+                    cases[ci].name);
+            check(ok, msg);
+        }
+    }
+}
+
+static void test_texture_morton(ArmCpu *c, unsigned char *mem)
+{
+    /* Nur (1,2) rot und (6,5) gruen; alle anderen Texel schwarz. */
+    uint32_t *q, size;
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x200);
+    memset(mem + 0x20000u, 0, 256);
+    mem[0x20000u + t_morton(1, 2) * 4 + 3] = 0xFF;   /* r */
+    mem[0x20000u + t_morton(6, 5) * 4 + 2] = 0xFF;   /* g (byte 2) */
+    t_quad_vertices(c, VTX, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad(q, VTX, 8, 8);
+    q = t_emit_tex(q, 0x20000u, 8, 8, 0, 0u);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit_tev0(q, 3u, 3u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    {
+        uint32_t a = t_fb_off(0x40000u, 1, 5, 8, 8, 4);   /* Texel (1,2) */
+        uint32_t b = t_fb_off(0x40000u, 6, 2, 8, 8, 4);   /* Texel (6,5) */
+        uint32_t z = t_fb_off(0x40000u, 0, 0, 8, 8, 4);
+        check(mem[a + 3] == 0xFF && mem[a + 2] == 0 && mem[a + 1] == 0,
+              "Morton: Texel (1,2) liegt bei Pixel (1,5)");
+        check(mem[b + 3] == 0 && mem[b + 2] == 0xFF,
+              "Morton: Texel (6,5) liegt bei Pixel (6,2)");
+        check(mem[z + 3] == 0 && mem[z + 2] == 0 && mem[z + 1] == 0,
+              "Morton: unbelegte Texel bleiben schwarz");
+    }
+}
+
+static void test_texture_wrap(ArmCpu *c, unsigned char *mem)
+{
+    static const struct {
+        uint32_t cfg; const char *name; unsigned exp_r;
+    } cases[] = {
+        {2u << 12, "Repeat", 0x40},
+        {0u, "ClampToEdge", 0x30},
+        {3u << 12, "MirroredRepeat", 0x30},
+        {1u << 12, "ClampToBorder", 0xDD},
+        {5u << 12, "ClampToBorder2 (negativ = Repeat)", 0x40},
+    };
+    int i;
+    for (i = 0; i < (int)(sizeof(cases) / sizeof(cases[0])); i++) {
+        uint32_t *q, size, o;
+        gpu_pica_reset();
+        memset(mem + 0x40000u, 0, 0x100);
+        memset(mem + 0x20000u, 0, 64);
+        /* 2x2 I8; ein Tile (width/8 = 0 => stride 0). */
+        mem[0x20000u + t_morton(0, 0)] = 0x10;
+        mem[0x20000u + t_morton(1, 0)] = 0x20;
+        mem[0x20000u + t_morton(0, 1)] = 0x30;
+        mem[0x20000u + t_morton(1, 1)] = 0x40;
+        t_quad_vertices(c, VTX, 0.0f, -1.0f, 0.0f, 2.0f, 1.0f);
+        q = (uint32_t *)(mem + LIST);
+        q = t_emit_quad(q, VTX, 8, 8);
+        q = t_emit_tex(q, 0x20000u, 2, 2, 7, cases[i].cfg);
+        q = emit(q, 0x81, 0xAABBCCDDu);          /* border_color */
+        q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+        q = emit_tev0(q, 3u, 3u, 0u);
+        q = emit(q, 0x22E, 0u);
+        size = (uint32_t)((unsigned char *)q - (mem + LIST));
+        gpu_run_pica_list(c, LIST, size);
+        o = t_fb_off(0x40000u, 0, 0, 8, 8, 4);
+        {
+            char msg[96];
+            sprintf(msg, "Sampler-Wrap %s => 0x%02X", cases[i].name, cases[i].exp_r);
+            check(mem[o + 3] == cases[i].exp_r, msg);
+        }
+    }
+}
+
+static void test_texture_filter(ArmCpu *c, unsigned char *mem)
+{
+    int pass;
+    for (pass = 0; pass < 2; pass++) {
+        uint32_t *q, size, o;
+        uint32_t cfg = pass ? ((1u << 1) | (1u << 2)) : 0u;   /* linear / nearest */
+        gpu_pica_reset();
+        memset(mem + 0x40000u, 0, 0x100);
+        memset(mem + 0x20000u, 0, 64);
+        mem[0x20000u + t_morton(0, 0)] = 0x00;
+        mem[0x20000u + t_morton(1, 0)] = 0xFF;
+        t_quad_vertices(c, VTX, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f);
+        q = (uint32_t *)(mem + LIST);
+        q = t_emit_quad(q, VTX, 8, 8);
+        q = t_emit_tex(q, 0x20000u, 2, 1, 7, cfg);
+        q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+        q = emit_tev0(q, 3u, 3u, 0u);
+        q = emit(q, 0x22E, 0u);
+        size = (uint32_t)((unsigned char *)q - (mem + LIST));
+        gpu_run_pica_list(c, LIST, size);
+        o = t_fb_off(0x40000u, 3, 0, 8, 8, 4);
+        if (pass)
+            check(mem[o + 3] == 96, "Sampler-Filter linear: u=0.4375 => 96");
+        else
+            check(mem[o + 3] == 0, "Sampler-Filter nearest: u=0.4375 => 0");
+    }
+}
+
+static void test_fb_formats(ArmCpu *c, unsigned char *mem)
+{
+    static const struct {
+        uint32_t fmt; int bpp; const char *name;
+        unsigned char col[4]; unsigned char bytes[4];
+    } cases[] = {
+        {0, 4, "RGBA8",  {0x12, 0x34, 0x56, 0x78}, {0x78, 0x56, 0x34, 0x12}},
+        {1, 3, "RGB8",   {0x12, 0x34, 0x56, 0xFF}, {0x56, 0x34, 0x12, 0x00}},
+        {2, 2, "RGB5A1", {0xF8, 0x08, 0x10, 0xFF}, {0x45, 0xF8, 0x00, 0x00}},
+        {3, 2, "RGB565", {0xF8, 0xFC, 0x10, 0xFF}, {0xE2, 0xFF, 0x00, 0x00}},
+        {4, 2, "RGBA4",  {0xFF, 0x22, 0x33, 0x44}, {0x34, 0xF2, 0x00, 0x00}},
+    };
+    int i;
+    for (i = 0; i < 5; i++) {
+        uint32_t *q, size, o;
+        uint32_t cst = (uint32_t)cases[i].col[0] | ((uint32_t)cases[i].col[1] << 8) |
+                       ((uint32_t)cases[i].col[2] << 16) | ((uint32_t)cases[i].col[3] << 24);
+        gpu_pica_reset();
+        memset(mem + 0x40000u, 0, 0x200);
+        t_quad_vertices(c, VTX, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f);
+        q = (uint32_t *)(mem + LIST);
+        q = t_emit_quad(q, VTX, 8, 8);
+        q = t_emit_fb(q, 0x40000u, 8, 8, cases[i].fmt);
+        q = emit_tev0(q, 0xEu, 0xEu, cst);
+        q = emit(q, 0x22E, 0u);
+        size = (uint32_t)((unsigned char *)q - (mem + LIST));
+        gpu_run_pica_list(c, LIST, size);
+        o = t_fb_off(0x40000u, 1, 2, 8, 8, cases[i].bpp);
+        {
+            char msg[96];
+            int k, ok = 1;
+            for (k = 0; k < cases[i].bpp; k++)
+                if (mem[o + k] != cases[i].bytes[k]) ok = 0;
+            sprintf(msg, "Farbziel-Format %s kodiert (Azahar Encode%s)", cases[i].name,
+                    cases[i].name);
+            check(ok, msg);
+        }
+    }
+
+}
+
+static void test_logic_ops(ArmCpu *c, unsigned char *mem)
+{
+    static const unsigned s = 0x3C, d = 0x0F;
+    uint32_t op;
+    for (op = 0; op < 16u; op++) {
+        uint32_t *q, size, o;
+        unsigned e, r0;
+        switch (op) {
+        case 0: e = 0; break;
+        case 1: e = s & d; break;
+        case 2: e = s & (~d & 0xFFu); break;
+        case 3: e = s; break;
+        case 4: e = 0xFF; break;
+        case 5: e = (~s) & 0xFFu; break;
+        case 6: e = d; break;
+        case 7: e = (~d) & 0xFFu; break;
+        case 8: e = (~(s & d)) & 0xFFu; break;
+        case 9: e = (s | d) & 0xFFu; break;
+        case 10: e = (~(s | d)) & 0xFFu; break;
+        case 11: e = (s ^ d) & 0xFFu; break;
+        case 12: e = (~(s ^ d)) & 0xFFu; break;
+        case 13: e = ((~s) & d) & 0xFFu; break;
+        case 14: e = (s | (~d)) & 0xFFu; break;
+        default: e = ((~s) | d) & 0xFFu; break;
+        }
+        gpu_pica_reset();
+        memset(mem + 0x40000u, 0, 0x100);
+        o = t_fb_off(0x40000u, 1, 2, 8, 8, 4);
+        mem[o + 0] = (unsigned char)d;
+        mem[o + 1] = (unsigned char)d;
+        mem[o + 2] = (unsigned char)d;
+        mem[o + 3] = (unsigned char)d;
+        t_quad_vertices(c, VTX, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f);
+        q = (uint32_t *)(mem + LIST);
+        q = t_emit_quad(q, VTX, 8, 8);
+        q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+        q = emit(q, 0x102, op);                /* LogicOp statt Blending */
+        q = emit_tev0(q, 0xEu, 0xEu, 0x3C3C3C3Cu);
+        q = emit(q, 0x22E, 0u);
+        size = (uint32_t)((unsigned char *)q - (mem + LIST));
+        gpu_run_pica_list(c, LIST, size);
+        r0 = mem[o + 3];
+        {
+            char msg[80];
+            sprintf(msg, "LogicOp 0x%X: src 0x3C, dest 0x0F => 0x%02X", op, e);
+            check(r0 == e, msg);
+        }
+    }
+}
+
+static void test_alpha_test(ArmCpu *c, unsigned char *mem)
+{
+    int pass;
+    for (pass = 0; pass < 2; pass++) {
+        uint32_t *q, size, o;
+        uint32_t at = 1u | (pass ? (7u << 4) : (4u << 4)) | (0x40u << 8);
+        gpu_pica_reset();
+        memset(mem + 0x40000u, 0, 0x100);
+        t_quad_vertices(c, VTX, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f);
+        q = (uint32_t *)(mem + LIST);
+        q = t_emit_quad(q, VTX, 8, 8);
+        q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+        q = emit(q, 0x104, at);                /* alpha_test enable/func/ref */
+        q = emit_tev0(q, 0xEu, 0xEu, 0x40000000u);   /* alpha 0x40 */
+        q = emit(q, 0x22E, 0u);
+        size = (uint32_t)((unsigned char *)q - (mem + LIST));
+        gpu_run_pica_list(c, LIST, size);
+        o = t_fb_off(0x40000u, 1, 2, 8, 8, 4);
+ 
+        check(mem[o + 0] == (pass ? 0x40 : 0x00),
+              pass ? "Alpha-Test GE 0x40 mit alpha 0x40 => geschrieben"
+                   : "Alpha-Test L 0x40 mit alpha 0x40 => verworfen");
+    }
+}
+
+static void test_depth_stencil(ArmCpu *c, unsigned char *mem)
+{
+    uint32_t *q, size, o, dpo;
+    /* 1) Tiefe schreiben: z=0.5, DepthWrite ohne Test. */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x200);
+    memset(mem + 0x44000u, 0, 0x200);
+    t_quad_vertices(c, VTX, -0.5f, 0.0f, 0.0f, 1.0f, 1.0f);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad(q, VTX, 8, 8);
+    q = emit(q, 0x116, 3u);                    /* D24S8, RGBA8 */
+    q = emit(q, 0x4D, f24raw(-1.0f));           /* viewport depth range */
+    q = emit(q, 0x4E, f24raw(0.0f));           /* viewport depth near */
+    q = emit(q, 0x11B, 0x44000u >> 3);
+    q = emit(q, 0x115, 1u);                    /* allow_depth_stencil_write */
+    q = emit(q, 0x11C, 0x40000u >> 3);
+    q = emit(q, 0x11D, 8u | (7u << 12));
+    q = emit(q, 0x107, 0x00000F00u | (1u << 12));   /* RGBA + depth write */
+    q = emit(q, 0x102, 3u);
+    q = emit(q, 0x113, 1u);
+    q = emit_tev0(q, 0xEu, 0xEu, 0xFF0000FFu);     /* rot */
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 1, 2, 8, 8, 4);
+    dpo = t_fb_off(0x44000u, 1, 2, 8, 8, 4);
+    check(mem[o + 3] == 0xFF && mem[dpo + 0] == 0xFF && mem[dpo + 1] == 0xFF &&
+          mem[dpo + 2] == 0x7F && mem[dpo + 3] == 0,
+          "Depth-Write: z=0.5 => 0x7FFFFF im D24S8-Puffer");
+
+    /* 2) Weiter weg (z=0.75) mit LessThan: verworfen. */
+    gpu_pica_reset();
+    t_quad_vertices(c, VTX, -0.75f, 0.0f, 0.0f, 1.0f, 1.0f);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad(q, VTX, 8, 8);
+    q = emit(q, 0x116, 3u);
+    q = emit(q, 0x4D, f24raw(-1.0f));
+    q = emit(q, 0x4E, f24raw(0.0f));
+    q = emit(q, 0x11B, 0x44000u >> 3);
+    q = emit(q, 0x115, 1u);
+    q = emit(q, 0x11C, 0x40000u >> 3);
+    q = emit(q, 0x11D, 8u | (7u << 12));
+    q = emit(q, 0x107, 0x00000F00u | (4u << 4) | 1u | (1u << 12));
+    q = emit(q, 0x102, 3u);
+    q = emit(q, 0x113, 1u);
+    q = emit_tev0(q, 0xEu, 0xEu, 0xFF00FF00u);     /* gruen */
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    check(mem[o + 3] == 0xFF && mem[o + 2] == 0 && mem[dpo + 2] == 0x7F,
+          "Depth-Test LessThan: z=0.75 verworfen, Farbe/Tiefe unveraendert");
+
+    /* 3) Naeher (z=0.25): angenommen. */
+    gpu_pica_reset();
+    t_quad_vertices(c, VTX, -0.25f, 0.0f, 0.0f, 1.0f, 1.0f);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad(q, VTX, 8, 8);
+    q = emit(q, 0x116, 3u);
+    q = emit(q, 0x4D, f24raw(-1.0f));
+    q = emit(q, 0x4E, f24raw(0.0f));
+    q = emit(q, 0x11B, 0x44000u >> 3);
+    q = emit(q, 0x115, 1u);
+    q = emit(q, 0x11C, 0x40000u >> 3);
+    q = emit(q, 0x11D, 8u | (7u << 12));
+    q = emit(q, 0x107, 0x00000F00u | (4u << 4) | 1u | (1u << 12));
+    q = emit(q, 0x102, 3u);
+    q = emit(q, 0x113, 1u);
+    q = emit_tev0(q, 0xEu, 0xEu, 0xFF00FF00u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    check(mem[o + 3] == 0 && mem[o + 2] == 0xFF && mem[dpo + 2] == 0x3F,
+          "Depth-Test LessThan: z=0.25 angenommen (Farbe+Tiefe neu)");
+
+    /* 4) Stencil: Equal ref=1 mit depth_pass=Zero, dann zweiter Draw. */
+    mem[dpo + 3] = 1;                          /* Stencil vorbelegen */
+    gpu_pica_reset();
+    t_quad_vertices(c, VTX, -0.1f, 0.0f, 0.0f, 1.0f, 1.0f);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad(q, VTX, 8, 8);
+    q = emit(q, 0x116, 3u);
+    q = emit(q, 0x4D, f24raw(-1.0f));
+    q = emit(q, 0x4E, f24raw(0.0f));
+    q = emit(q, 0x11B, 0x44000u >> 3);
+    q = emit(q, 0x115, 1u);
+    q = emit(q, 0x11C, 0x40000u >> 3);
+    q = emit(q, 0x11D, 8u | (7u << 12));
+    q = emit(q, 0x107, 0x00000F00u);           /* kein Depth-Test/Write */
+    q = emit(q, 0x105, 1u | (2u << 4) | (0xFFu << 8) | (1u << 16) | (0xFFu << 24));
+    q = emit(q, 0x106, 0u | (0u << 4) | (1u << 8));
+    q = emit(q, 0x102, 3u);
+    q = emit(q, 0x113, 1u);
+    q = emit_tev0(q, 0xEu, 0xEu, 0xFFFF0000u);     /* blau */
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    check(mem[dpo + 3] == 0 && mem[o + 1] == 0xFF,
+          "Stencil Equal/Replace: Durchlauf setzt Stencil 0 und schreibt");
+
+    /* Zweiter Draw: Stencil 0 != ref 1 => kein Schreiben. */
+    gpu_pica_reset();
+    t_quad_vertices(c, VTX, -0.1f, 0.0f, 0.0f, 1.0f, 1.0f);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad(q, VTX, 8, 8);
+    q = emit(q, 0x116, 3u);
+    q = emit(q, 0x4D, f24raw(-1.0f));
+    q = emit(q, 0x4E, f24raw(0.0f));
+    q = emit(q, 0x11B, 0x44000u >> 3);
+    q = emit(q, 0x115, 1u);
+    q = emit(q, 0x11C, 0x40000u >> 3);
+    q = emit(q, 0x11D, 8u | (7u << 12));
+    q = emit(q, 0x107, 0x00000F00u);
+    q = emit(q, 0x105, 1u | (2u << 4) | (0xFFu << 8) | (1u << 16) | (0xFFu << 24));
+    q = emit(q, 0x106, 0u | (0u << 4) | (1u << 8));
+    q = emit(q, 0x102, 3u);
+    q = emit(q, 0x113, 1u);
+    q = emit_tev0(q, 0xEu, 0xEu, 0xFF00FF00u);     /* gruen */
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    check(mem[o + 1] == 0xFF && mem[o + 2] == 0 && mem[dpo + 3] == 0,
+          "Stencil-Test schlaegt fehl => Farbe/Stencil unveraendert");
+}
+
+static void test_blend(ArmCpu *c, unsigned char *mem)
+{
+    /* Quelle (128,64,32,192), Ziel (16,32,48,64), Add mit
+       SrcAlpha / OneMinusSrcAlpha (Azahar sw_framebuffer.cpp). */
+    uint32_t *q, size, o;
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_quad_vertices(c, VTX, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad(q, VTX, 8, 8);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x100, 1u << 8);               /* alphablend_enable */
+    q = emit(q, 0x101, (0u) | (0u << 8) | (6u << 16) | (7u << 20) | (6u << 24) | (7u << 28));
+    q = emit(q, 0x103, 0xFFFFFFFFu);
+    q = emit_tev0(q, 0xEu, 0xEu, 0xC0204080u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    o = t_fb_off(0x40000u, 1, 2, 8, 8, 4);
+    mem[o + 0] = 64; mem[o + 1] = 48; mem[o + 2] = 32; mem[o + 3] = 16;
+    gpu_run_pica_list(c, LIST, size);
+    check(mem[o + 3] == 100 && mem[o + 2] == 56 && mem[o + 1] == 35 && mem[o + 0] == 160,
+          "Blending Add SrcAlpha/1-SrcAlpha => (100,56,35,160)");
+}
+
 int main(void) {
     static unsigned char mem[0x100000];
     ArmCpu c;
@@ -189,9 +745,10 @@ int main(void) {
 
     /* Textur: 2x2 RGB8, alle Texel rot. */
     for (i = 0; i < 4; i++) {
-        mem[TEX + i * 3 + 0] = 255;
+        /* RGB8 liegt wie bei Azahar (common/color.h) als b,g,r im Speicher. */
+        mem[TEX + i * 3 + 0] = 0;
         mem[TEX + i * 3 + 1] = 0;
-        mem[TEX + i * 3 + 2] = 0;
+        mem[TEX + i * 3 + 2] = 255;
     }
     /* 3 Vertices, Stride 20: Position float3, UV float2. */
     set_vertex(&c, 0, -1.0f, -1.0f, 0.0f, 0.0f, 0.0f);
@@ -678,9 +1235,7 @@ int main(void) {
         q = emit_tev0(q, 0u, 0u, 0u);          /* PrimaryColor, Replace */
         q = emit(q, 0x22E, 0u);
         size2 = (uint32_t)((unsigned char *)q - (mem + LIST));
-        printf("DBG interp start\n"); fflush(stdout);
         gpu_run_pica_list(&c, LIST, size2);
-        printf("DBG interp done\n"); fflush(stdout);
         cx = (FB + (120u * 400u + 200u) * 3u) & 0x1FFFFFFFu;
         check(abs((int)mem[cx + 0] - 63) <= 2 &&
               abs((int)mem[cx + 1] - 64) <= 2 &&
@@ -716,7 +1271,7 @@ int main(void) {
         q = emit(q, 0x116, 0u);                /* color_format RGBA8 */
         q = emit(q, 0x11C, 0x40000u >> 3);
         q = emit(q, 0x11D, 400u | ((240u - 1u) << 12));
-        q = emit(q, 0x108, 0x00000F00u);       /* red..alpha enable */
+        q = emit(q, 0x107, 0x00000F00u);       /* red..alpha enable */
         q = emit(q, 0x102, 3u);                /* LogicOp Copy */
         q = emit(q, 0x113, 1u);                /* allow_color_write */
         q = emit(q, 0x22E, 0u);
@@ -725,10 +1280,21 @@ int main(void) {
         /* Pixel (200,120) -> y'=119; Morton: y%8=7 -> 0x2A, x%8=0,
            coarse_x=200 -> +1600; *4 Byte; plus (119&~7)*400*4. */
         off2 = 0x40000u + (42u + 1600u) * 4u + 112u * 400u * 4u;
-        check(mem[off2 + 0] == 0x40 && mem[off2 + 1] == 0x30 &&
-              mem[off2 + 2] == 0x20 && mem[off2 + 3] == 0x10,
-              "Farbziel 0x11C/0x11D: RGBA8 + Morton-Pixel korrekt");
+        /* Azahar EncodeRGBA8: bytes = a,b,g,r (Wort 0xRRGGBBAA). */
+        check(mem[off2 + 3] == 0x40 && mem[off2 + 2] == 0x30 &&
+              mem[off2 + 1] == 0x20 && mem[off2 + 0] == 0x10,
+              "Farbziel 0x11C/0x11D: RGBA8 a,b,g,r + Morton-Pixel korrekt");
     }
+
+    test_textures(&c, mem);
+    test_texture_morton(&c, mem);
+    test_texture_wrap(&c, mem);
+    test_texture_filter(&c, mem);
+    test_fb_formats(&c, mem);
+    test_logic_ops(&c, mem);
+    test_alpha_test(&c, mem);
+    test_depth_stencil(&c, mem);
+    test_blend(&c, mem);
 
     printf("ERGEBNIS: %s\n", fails == 0 ? "OK" : "FEHLER");
     return fails == 0 ? 0 : 1;

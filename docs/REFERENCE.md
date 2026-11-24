@@ -150,8 +150,9 @@ Die Maske wird byteweise angewandt (`Azahar ExpandBitsToBytes`, z. B. `0x5`
 | Register | Bedeutung |
 |---|---|
 | `0x010` | `irq_request` (Finalize): bei Byte-Treffer gegen `irq_compare` (`0x020`) P3D-Interrupt; `irq_autostop` (`0x034`, Default 1) beendet die Liste. GSP-Defaults: `irq_compare=0x12345678`, `irq_mask=0xFFFFFFF0`, `irq_autostop=1`. |
-| `0x080` | Texture-Config, Bit 0 = texture0 enable |
-| `0x082` / `0x085` / `0x08E` | Tex0 Größe (h Bits 0..10, w 16..26) / Adresse>>3 / Format |
+| `0x080` | `main_config`: Bit0..2 Textur 0..2 enable, Bit10 Textur 3, Bit13 `texture2_use_coord1`, Bit16 `clear_texture_cache` |
+| `0x081`/`0x091`/`0x099` | Textureinheit 0/1/2: `+0` border_color, `+1` Größe (h Bits 0..10, w 16..26), `+2` Wrap (`wrap_t` Bits 8..10, `wrap_s` 12..14), Filter (mag Bit 1, min Bit 2, mip Bit 24), Typ Bits 28..30 (0 = 2D, 5 = disabled), `+3` LOD, `+4` Adresse>>3 |
+| `0x08E`/`0x096`/`0x09E` | Texturformat 0..13: RGBA8, RGB8, RGB5A1, RGB565, RGBA4, IA8, RG8 (HILO8), I8, A8, IA4, I4, A4, ETC1, ETC1A4 |
 | `0x200` | Attribut-Puffer-Basis (physische Adresse = `(reg>>1)*16`) |
 | `0x201`/`0x202` | Attributformate; `0x202` Bits 28..31 = Attributanzahl-1 |
 | `0x203 + 3*l` | Loader `l`: Offset, Komponenten, Stride (Bits 16..23) |
@@ -226,7 +227,8 @@ Quelle: Azahar `renderer_software/sw_rasterizer.cpp`, `sw_clipper.cpp`,
 `sw_framebuffer.cpp`, `sw_texturing.cpp`, `pica/regs_*.h`.
 
 * **Clip-Raum:** Position ist `(x,y,z,w)`; sichtbar ist `-w <= x,y <= w`,
-  `0 <= z <= w`, `w > 0`. Zusätzlich optional eine eigene Ebene
+  `-w <= z <= 0`, `w > 0` (PICA-Eigenheit: z zeigt nach hinten, Azahar
+  setzt im GLSL-Shader `gl_Position.z = -z`). Zusätzlich optional eine eigene Ebene
   (`clip_enable` 0x47, Koeffizienten `clip_coef[4]` 0x48..0x4B). Clipping ist
   Sutherland-Hodgman gegen diese 7(+1) Ebenen; ein Dreieck wird zu einem
   Polygon mit bis zu 3+7 Ecken und danach als Fan trianguliert.
@@ -254,13 +256,49 @@ Quelle: Azahar `renderer_software/sw_rasterizer.cpp`, `sw_clipper.cpp`,
   = `1 << scale` (Wert 3 = 1). Combiner-Buffer: 0xE0 Bits 8..11 (RGB) /
   12..15 (Alpha) markieren Stufen 0..3, die den Puffer aktualisieren;
   0xFD ist die Puffer-Farbe.
-* **Farbziel:** Output-Merger 0x100..0x108 (Alpha-Blend / LogicOp,
-  Kanal-Masken Bits 8..11, Depth-Test Bit 0). Framebuffer 0x110..0x11E:
-  `color_buffer_address` 0x11C (physisch = Wert*8), Breite 0x11D Bits 0..10,
-  Höhe als Feld Bits 12..21 (= tatsächliche Höhe - 1, Zugriff `+1`),
-  Flip Bit 24, `color_format` 0x116 Bits 16..18 (RGBA8/RGB8/RGB5A1/
-  RGB565/RGBA4). Pixel liegen 8x8-Morton-gekachelt und von unten nach oben
-  (`y' = height_raw - y`, Offset = `morton(x,y') + (y' & ~7) * width * bpp`).
+* **Texturen:** Jede 8x8-Kachel liegt Morton-verschachtelt
+  (`MortonInterleave(x,y)`, xlut/ylut-Tabellen wie Azahar `VideoCore`), die
+  Kacheln selbst zeilenweise, die Textur von unten nach oben. Bytes je Kachel:
+  RGBA8 256, RGB8 192, 16-Bit-Formate 128, 8-Bit 64, I4/A4 32, ETC1 32,
+  ETC1A4 64. Kanalreihenfolge wie in Azahar `common/color.h` (Speicher =
+  aufsteigende Bytes): RGBA8 `a,b,g,r` (32-Bit-Wort `0xRRGGBBAA`), RGB8
+  `b,g,r`, IA8 `a,i`, RG8 `g,r`, IA4 `iiii aaaa`, I4/A4 zwei Nibbles je Byte
+  (ungerader Morton-Index = oberes Nibble). ETC1 unterteilt jede Kachel in
+  vier 4x4-Subtiles (Differential-/Individual-Modus, `table_subindexes` Bits
+  0..15, `negation_flags` 16..31, flip Bit 32). Adresse = Reg*8 physisch.
+* **Sampler:** `s = trunc(u * width)`, `t = trunc(v * height)`; Wrap-Modi
+  0 ClampToEdge, 1 ClampToBorder (border_color), 2 Repeat, 3 MirroredRepeat,
+  4 ClampToEdge2 (negative Koordinate = Repeat), 5 ClampToBorder2 (positiv
+  außerhalb = Border), 6/7 wie Repeat. Erst wrappen, dann
+  `t = height - 1 - t`. Filter Bits 1 (mag) / 2 (min); linear wird um
+  `u*w - 0.5` bilinear interpoliert.
+* **Farbziel:** Output-Merger 0x100..0x107: 0x100 Bit0..1
+  `fragment_operation_mode`, Bit8 `alphablend_enable`; 0x101 Gleichungen
+  (RGB Bits 0..2, Alpha 8..10) und Faktoren (Src RGB 16..19, Dst RGB 20..23,
+  Src A 24..27, Dst A 28..31); 0x102 LogicOp Bits 0..3; 0x103 `blend_const`;
+  0x104 Alpha-Test (Bit0 enable, Funktion Bits 4..6, Referenz Bits 8..15);
+  0x105 Stencil (enable, Funktion, write_mask, reference, input_mask),
+  0x106 Stencil-Aktionen (stencil_fail/depth_fail/depth_pass); 0x107
+  `depth_test_enable` Bit0, `depth_test_func` Bits 4..6, Kanal-Masken
+  Bits 8..11, `depth_write_enable` Bit 12. Faktoren 0 Zero, 1 One,
+  2/3 Source, 4/5 Dest, 6/7 SourceAlpha, 8/9 DestAlpha, 10/11 ConstantColor,
+  12/13 ConstantAlpha, 14 SourceAlphaSaturate. Gleichungen Add/Subtract/
+  ReverseSubtract/Min/Max, Ergebnis `(s*sf ± d*df) / 255`.
+* **Framebuffer 0x110..0x11E:** `allow_color_write` 0x113,
+  `allow_depth_stencil_write` 0x115, `depth_format` 0x116 Bits 0..1
+  (D16/D24/D24S8), `color_format` 0x116 Bits 16..18 (RGBA8/RGB8/RGB5A1/
+  RGB565/RGBA4), Tiefenpuffer 0x11B, `color_buffer_address` 0x11C
+  (physisch = Wert*8), Breite 0x11D Bits 0..10, Höhe als Feld Bits 12..21
+  (= tatsächliche Höhe - 1, Zugriff `+1`), Flip Bit 24. Pixel liegen
+  8x8-Morton-gekachelt und von unten nach oben (`y' = height_raw - y`,
+  Offset = `morton(x,y') + (y' & ~7) * width * bpp`); Tiefe/Stencil nutzen
+  dieselbe Kachelung mit 2/3/4 Byte je Pixel, D24/D24S8 little endian,
+  Stencil im vierten Byte.
+* **Tiefe:** `depth = interpoliert(z/w) * viewport_depth_range (0x4D) +
+  viewport_depth_near_plane (0x4E)`. Bei `depthmap_enable` 0x6D = 0
+  (W-Buffer) wird zusätzlich mit `w` skaliert. `z_int =
+  depth * (2^Bits - 1)`; Schreibzugriff nur bei `depth_write_enable` und
+  erlaubtem Schreiben. Stencil-Test greift nur bei D24S8.
 * **Texturkoordinaten:** `t` wird vor dem Sample invertiert
   (`t = height-1 - wrapped(t)`), da Texturen von unten nach oben liegen.
 

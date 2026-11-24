@@ -17,9 +17,16 @@ LOOP+aL, IFU, Default-Attribute 0x232, attribut_mask, Index-Puffer 0x227
 (0x22F/u16) und Immediate-Mode 0x232=0xF.
 
 Rasterizer/Fragment (Azahar renderer_software): Clipping, Viewport 0x41/0x43/
-0x68, perspektivkorrekte Interpolation, 12.4-Coverage, TEV 0x0C0..0x0FD
-(Konstantfarbe + interpolierte Vertexfarbe) und Farbziel 0x11C..0x11E
-(RGBA8 + 8x8-Morton).
+0x68, perspektivkorrekte Interpolation, 12.4-Coverage, TEV 0x0C0..0x0FD.
+
+Texturen (Azahar texture_decode.cpp, sw_texturing.cpp): alle 14 Formate
+RGBA8/RGB8/RGB5A1/RGB565/RGBA4/IA8/RG8/I8/A8/IA4/I4/A4/ETC1/ETC1A4 mit
+8x8-Morton-Kacheln und Azahar-Kanalreihenfolge, Kachel-Morton-Test,
+Wrap-Modi 0..5 (Border-Farbe), Nearest-/Linear-Filter.
+
+Framebuffer (Azahar sw_framebuffer.cpp, sw_rasterizer.cpp): Farbziel-
+Formate inkl. Byte-Reihenfolge, alle 16 LogicOps, Alpha-Test, Blending
+(Add/SrcAlpha/1-SrcAlpha), Depth-Test/-Write (D24S8) und Stencil-Test.
 """
 import os
 import subprocess
