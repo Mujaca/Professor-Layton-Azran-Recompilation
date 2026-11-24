@@ -30,6 +30,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "arm_cpu.h"
 #include "gpu.h"
@@ -68,6 +72,130 @@ static uint32_t *emit(uint32_t *p, uint32_t id, uint32_t val) {
 
 static int irq_count = 0;
 static void test_irq(int id) { if (id == 5) irq_count++; }
+
+/* GSP-MMIO-Registerfeld: sammelt alle GSP-Interrupt-IDs. */
+static int mmio_irq_count = 0;
+static int mmio_irq_last = -1;
+static void mmio_irq(int id) { mmio_irq_count++; mmio_irq_last = id; }
+
+/* Azahar VideoCore::GPU::ReadReg/WriteReg + MemoryFill/MemoryTransfer.
+ * Adressen sind die der GSP-Clients (REGS_BEGIN = 0x1EB00000). */
+static void test_gpu_mmio(ArmCpu *c, uint8_t *mem) {
+    const uint32_t REG = 0x1EB00000u;
+    uint32_t v;
+    uint16_t w0, w1;
+
+    gpu_pica_reset();
+    gpu_pica_set_irq_handler(mmio_irq);
+    mmio_irq_count = 0;
+    mmio_irq_last = -1;
+
+    /* Interne PICA-Register, die das Spiel per WriteHWRegs setzt. */
+    gpu_gsp_write_reg(c, REG + 0x401080u, 0x12345678u);   /* irq_compare */
+    gpu_gsp_write_reg(c, REG + 0x4010C0u, 0xFFFFFFF0u);   /* irq_mask */
+    gpu_gsp_write_reg(c, REG + 0x4010D0u, 1u);            /* irq_autostop */
+    check(gpu_pica_reg(0x020) == 0x12345678u &&
+          gpu_pica_reg(0x030) == 0xFFFFFFF0u &&
+          gpu_pica_reg(0x034) == 1u,
+          "MMIO 0x401080/C0/D0 -> PICA 0x020/0x030/0x034");
+    check(gpu_gsp_read_reg(c, REG + 0x401080u) == 0x12345678u,
+          "ReadHWRegs liest das gespeicherte Register");
+
+    gpu_gsp_write_reg_masked(c, REG + 0x401080u, 0xAABBCCDDu, 0x0000FF00u);
+    check(gpu_gsp_read_reg(c, REG + 0x401080u) == 0x1234CC78u,
+          "WriteHWRegsWithMask aendert nur maskierte Bytes");
+
+    /* LCD-Seite (0x1ED02000, RegsLcd::NumIds = 0x400 Woerter): ColorFill
+       liegt bei Index 0x81/0x281, Backlight bei 0x90/0x290. */
+    gpu_gsp_set_lcd_color_fill(c, 1);
+    check(gpu_gsp_read_reg(c, REG + 0x202204u) == 0x01000000u &&
+          gpu_gsp_read_reg(c, REG + 0x202A04u) == 0x01000000u,
+          "SetLcdForceBlack schreibt color_fill_top/bottom (is_enabled Bit24)");
+    gpu_gsp_set_lcd_color_fill(c, 0);
+    check(gpu_gsp_read_reg(c, REG + 0x202204u) == 0u &&
+          gpu_gsp_read_reg(c, REG + 0x202A04u) == 0u,
+          "SetLcdForceBlack(0) loescht die ColorFill wieder");
+    gpu_gsp_write_reg(c, REG + 0x202C00u, 0x12345678u);
+    check(gpu_gsp_read_reg(c, REG + 0x202C00u) == 0x12345678u,
+          "LCD-Registerfenster umfasst RegsLcd::NumIds() = 0x400 Woerter");
+
+    /* MemoryFill 0 (0x1EF00010..0x1C): 16-Bit-Wert, Trigger, finished, PSC0 */
+    gpu_gsp_write_reg(c, REG + 0x400010u, 0x00080000u >> 3);
+    gpu_gsp_write_reg(c, REG + 0x400014u, 0x00080008u >> 3);
+    gpu_gsp_write_reg(c, REG + 0x400018u, 0x0000BEEFu);
+    mmio_irq_count = 0;
+    gpu_gsp_write_reg(c, REG + 0x40001Cu, 1u);
+    v = gpu_gsp_read_reg(c, REG + 0x40001Cu);
+    check((v & 1u) == 0u && (v & 2u) != 0u,
+          "MemoryFill: trigger geloescht, finished gesetzt");
+    memcpy(&w0, mem + 0x80000, 2);
+    memcpy(&w1, mem + 0x80006, 2);
+    check(w0 == 0xBEEFu && w1 == 0xBEEFu,
+          "MemoryFill schreibt den 16-Bit-Wert in den Bereich");
+    check(mmio_irq_count == 1 && mmio_irq_last == 0,
+          "MemoryFill 0 meldet PSC0");
+
+    /* DisplayTransfer-Trigger ohne Groesse: PPF wird trotzdem gemeldet. */
+    mmio_irq_count = 0;
+    gpu_gsp_write_reg(c, REG + 0x400C18u, 1u);
+    v = gpu_gsp_read_reg(c, REG + 0x400C18u);
+    check((v & 1u) == 0u, "Transfer-Trigger wird nach der Operation geloescht");
+    check(mmio_irq_count == 1 && mmio_irq_last == 4,
+          "DisplayTransfer meldet PPF");
+
+    /* GX-Kommando 2 mit beiden Puffern: nur Puffer 1 meldet PSC0. */
+    {
+        uint32_t w[8];
+        memset(w, 0, sizeof(w));
+        w[0] = 0x02u;
+        w[1] = 0x00081000u; w[2] = 0x11223344u; w[3] = 0x00081010u;
+        w[4] = 0x00081020u; w[5] = 0x55667788u; w[6] = 0x00081030u;
+        w[7] = (1u | 0x200u) | ((1u | 0x200u) << 16);  /* Trigger + 32 Bit */
+        mmio_irq_count = 0;
+        gpu_gsp_memory_fill_cmd(c, w);
+        check(mmio_irq_count == 1 && mmio_irq_last == 0,
+              "GX MemoryFill (beide Puffer) meldet nur PSC0");
+        memcpy(&v, mem + 0x81000, 4);
+        check(v == 0x11223344u, "GX MemoryFill 0 schreibt 32-Bit-Wert");
+        memcpy(&v, mem + 0x81028, 4);
+        check(v == 0x55667788u, "GX MemoryFill 1 schreibt 32-Bit-Wert");
+    }
+
+    /* GX-Kommando 4 (TextureCopy): Azahar regs_external.h legt
+       texture_copy.size/input/output bei 0x308/0x309/0x30A ab (nach
+       trigger@0x306 und einem Pad-Wort@0x307); 0x307 bleibt unbenutzt. */
+    {
+        uint32_t w[8];
+        int i;
+        for (i = 0; i < 0x100; i++) mem[0x82000 + i] = (uint8_t)(i + 1);
+        memset(mem + 0x83000, 0, 0x100);
+        memset(w, 0, sizeof(w));
+        w[0] = 0x04u;                       /* TextureCopy */
+        w[1] = 0x00082000u;                 /* Quelle (Gast, ungemappt) */
+        w[2] = 0x00083000u;                 /* Ziel */
+        w[3] = 0x40u;                       /* size */
+        w[4] = 0x00040001u;                 /* input_width 1*16, gap 4*16 */
+        w[5] = 0x00040001u;                 /* output_width 1*16, gap 4*16 */
+        w[6] = 8u;                          /* flags: is_texture_copy */
+        mmio_irq_count = 0;
+        gpu_gsp_texture_copy_cmd(c, w);
+        check(gpu_gsp_read_reg(c, REG + 0x400C20u) == 0x40u &&
+              gpu_gsp_read_reg(c, REG + 0x400C24u) == 0x00040001u &&
+              gpu_gsp_read_reg(c, REG + 0x400C28u) == 0x00040001u,
+              "GX TextureCopy schreibt 0x308/0x309/0x30A");
+        check(gpu_gsp_read_reg(c, REG + 0x400C1Cu) == 0u,
+              "GX TextureCopy laesst das Pad-Register 0x307 leer");
+        check(memcmp(mem + 0x83000, mem + 0x82000, 16) == 0 &&
+              mem[0x83010] == 0 &&
+              memcmp(mem + 0x83050, mem + 0x82050, 16) == 0,
+              "TextureCopy kopiert 16-Byte-Zeilen und respektiert den Gap");
+        check(mmio_irq_count == 1 && mmio_irq_last == 4,
+              "TextureCopy meldet PPF");
+        check(gpu_gsp_read_reg(c, REG + 0x400C18u) == 0u,
+              "TextureCopy loescht den Trigger");
+    }
+}
+
 
 static void set_vertex(ArmCpu *c, uint32_t off, float x, float y, float z,
                        float u, float v) {
@@ -498,6 +626,355 @@ static void test_texture_filter(ArmCpu *c, unsigned char *mem)
         check(mem[o + 3] == 0,
               pass ? "Sampler-Filter linear: Azahar filtert nicht => 0"
                    : "Sampler-Filter nearest: u=0.4375 => 0");
+    }
+}
+
+/* ================= Prozedurale Texturen (Einheit 3) =================
+ * Azahar sw_proctex.cpp + pica_core.cpp (LUT-Upload). Die Erwartungswerte
+ * sind unabhaengig aus den Azahar-Formeln abgeleitet (scratch-Skript):
+ * color_map/alpha_map = lineare Rampe value=i*32 (diff 0), Farbtabelle
+ * color[i] = (i,0,0,255), width 128, offset 0. Rot = floor/round von
+ * lut_coord*127. */
+
+/* Wertetabelle laden: 0xAF = Tabellen-Nr/Startindex, danach je Datenwort
+ * ein Eintrag (Azahar PicaCore::ProcTex inkrementiert den Index). */
+static uint32_t *t_emit_proctex_lut(uint32_t *q, uint32_t table, uint32_t start,
+                                    const uint32_t *values, int n)
+{
+    int i;
+    q = emit(q, 0xAF, ((table & 0xFu) << 8) | (start & 0xFFu));
+    for (i = 0; i < n; i++)
+        q = emit(q, 0xB0u + (uint32_t)(i & 7), values[i]);
+    return q;
+}
+
+/* Lineare Rampen fuer color_map/alpha_map (value=i*32) und Farbtabelle
+ * (color[i]=i, Alpha 255); optional die Noise-LUT komplett auf 4095. */
+static uint32_t *t_emit_proctex_ramps(uint32_t *q, int noise_lut_full)
+{
+    uint32_t buf[256];
+    int i;
+
+    if (noise_lut_full) {
+        for (i = 0; i < 128; i++) buf[i] = 0x0FFFu;
+        q = t_emit_proctex_lut(q, 0u, 0u, buf, 128);
+    }
+    for (i = 0; i < 128; i++) buf[i] = (uint32_t)i * 32u;
+    q = t_emit_proctex_lut(q, 2u, 0u, buf, 128);
+    q = t_emit_proctex_lut(q, 3u, 0u, buf, 128);
+    memset(buf, 0, sizeof(buf));
+    q = t_emit_proctex_lut(q, 5u, 0u, buf, 256);
+    for (i = 0; i < 256; i++) buf[i] = (uint32_t)i | 0xFF000000u;
+    q = t_emit_proctex_lut(q, 4u, 0u, buf, 256);
+    return q;
+}
+
+/* Ein Quad mit konstantem (u,v) zeichnen; TEV-Quelle 6 = Texture3.
+   Liefert die RGBA8-Bytes von Pixel (4,4). */
+static int t_proctex_render(ArmCpu *c, unsigned char *mem, float u, float v,
+                            uint32_t cfg, uint32_t lut, uint32_t off,
+                            int noise_lut_full, unsigned char out[4])
+{
+    uint32_t *q, size, o;
+
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_quad_vertices(c, VTX, 0.0f, u, v, u, v);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad(q, VTX, 8, 8);
+    q = emit(q, 0x80, 1u << 10);               /* texture3_enable */
+    q = emit(q, 0xA9, 0x00000FFFu);            /* Amplitude u/v */
+    q = emit(q, 0xAA, 0x00000FFFu);
+    q = emit(q, 0xAB, 0x38003800u);            /* Frequenz u/v = 0.5 */
+    q = emit(q, 0xA8, cfg);
+    q = emit(q, 0xAC, lut);
+    q = emit(q, 0xAD, off);
+    q = t_emit_proctex_ramps(q, noise_lut_full);
+    q = emit_tev0(q, 6u, 6u, 0u);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    if (size > LIST2 - LIST) return 0;
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    out[0] = mem[o + 3];
+    out[1] = mem[o + 2];
+    out[2] = mem[o + 1];
+    out[3] = mem[o + 0];
+    return 1;
+}
+
+static void test_proctex_combiner(ArmCpu *c, unsigned char *mem)
+{
+    static const struct { uint32_t comb; float u, v; int red; const char *name; } cases[] = {
+        {0u, 0.50f, 0.50f, 64,  "U"},
+        {1u, 0.50f, 0.50f, 32,  "U2"},
+        {2u, 0.75f, 0.25f, 32,  "V"},
+        {3u, 0.50f, 0.25f, 8,   "V2"},
+        {4u, 0.25f, 0.75f, 64,  "Add"},
+        {5u, 0.25f, 0.75f, 40,  "Add2"},
+        {6u, 0.25f, 0.75f, 100, "SqrtAdd2"},
+        {7u, 0.25f, 0.75f, 32,  "Min"},
+        {8u, 0.25f, 0.75f, 95,  "Max"},
+        {9u, 0.25f, 0.75f, 81,  "RMax"},
+    };
+    int i;
+    for (i = 0; i < (int)(sizeof(cases) / sizeof(cases[0])); i++) {
+        unsigned char px[4];
+        uint32_t cfg = 9u | (cases[i].comb << 6);   /* clamp ToEdge, Combiner */
+        char msg[96];
+        int ok = t_proctex_render(c, mem, cases[i].u, cases[i].v, cfg,
+                                  (128u << 11) | 0u, 0u, 0, px);
+        sprintf(msg, "Proctex-Combiner %s => Rot %d", cases[i].name, cases[i].red);
+        check(ok && px[0] == (unsigned char)cases[i].red && px[3] == 255, msg);
+    }
+}
+
+static void test_proctex_clamp_shift(ArmCpu *c, unsigned char *mem)
+{
+    static const struct { uint32_t clamp; float u, v; int red; const char *name; } cases[] = {
+        {0u, 2.5f, 0.5f, 0,   "ToZero"},
+        {1u, 2.5f, 0.5f, 126, "ToEdge"},
+        {2u, 2.5f, 0.5f, 64,  "SymmetricalRepeat"},
+        {3u, 2.5f, 0.5f, 64,  "MirroredRepeat"},
+        {4u, 2.5f, 0.5f, 126, "Pulse"},
+        {5u, 2.5f, 0.5f, 126, "unbekannt => ToEdge"},
+        {0u, -2.5f, 0.5f, 0, "ToZero mit abs(u)"},
+    };
+    int i;
+    for (i = 0; i < (int)(sizeof(cases) / sizeof(cases[0])); i++) {
+        unsigned char px[4];
+        uint32_t cfg = cases[i].clamp | (1u << 3);   /* v_clamp ToEdge */
+        char msg[96];
+        int ok = t_proctex_render(c, mem, cases[i].u, cases[i].v, cfg,
+                                  (128u << 11), 0u, 0, px);
+        sprintf(msg, "Proctex-Clamp %s => Rot %d", cases[i].name, cases[i].red);
+        check(ok && px[0] == (unsigned char)cases[i].red, msg);
+    }
+
+    /* Shift: u_shift=Odd, v=2.6 => +0.5 auf u (0.25 -> 0.75 => 95).
+       v_shift=Even mit u=1.6 => +0.5 auf v (0.25 -> 0.75 => Combiner V 95).
+       u_clamp MirroredRepeat verdoppelt den Shift-Offset auf 1.0;
+       1.25 wird gespiegelt zu 0.75. */
+    {
+        unsigned char px[4];
+        int ok;
+
+        ok = t_proctex_render(c, mem, 0.25f, 2.6f, 9u | (1u << 16),
+                              (128u << 11), 0u, 0, px);
+        check(ok && px[0] == 95, "Proctex-Shift u=Odd (v=2.6) => u 0.75, Rot 95");
+
+        ok = t_proctex_render(c, mem, 0.25f, 2.6f,
+                              3u | (1u << 3) | (1u << 16), (128u << 11), 0u, 0, px);
+        check(ok && px[0] == 95,
+              "Proctex-Shift Odd + MirroredRepeat: Offset 1.0, 1.25 -> 0.75");
+
+        ok = t_proctex_render(c, mem, 1.6f, 0.25f,
+                              9u | (2u << 6) | (2u << 18), (128u << 11), 0u, 0, px);
+        check(ok && px[0] == 95, "Proctex-Shift v=Even (u=1.6) => v 0.75, Rot 95");
+    }
+}
+
+static void test_proctex_noise(ArmCpu *c, unsigned char *mem)
+{
+    /* u=0.3, v=0.4, Frequenz je 0.5 (f16 0x3800), Phase 0, Amplitude
+       4095 (=-1.0). NoiseCoef liefert -0.69 bei leerer Noise-LUT bzw.
+       -0.85 bei LUT=4095; danach abs() und Combiner U => Rot 48 bzw. 69. */
+    unsigned char px[4];
+    int ok;
+    uint32_t cfg = 9u | (1u << 15);
+    uint32_t lut = (128u << 11);
+    uint32_t *q, size, o;
+
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_quad_vertices(c, VTX, 0.0f, 0.3f, 0.4f, 0.3f, 0.4f);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad(q, VTX, 8, 8);
+    q = emit(q, 0x80, 1u << 10);
+    q = emit(q, 0xA8, cfg);
+    q = emit(q, 0xA9, 0x00000FFFu);
+    q = emit(q, 0xAA, 0x00000FFFu);
+    q = emit(q, 0xAB, 0x38003800u);
+    q = emit(q, 0xAC, lut);
+    q = emit(q, 0xAD, 0u);
+    q = t_emit_proctex_ramps(q, 0);
+    q = emit_tev0(q, 6u, 6u, 0u);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    check(mem[o + 3] == 49,
+          "Proctex-Rauschen (leere Noise-LUT): -0.69, Rot 49");
+
+    ok = t_proctex_render(c, mem, 0.3f, 0.4f, cfg, lut, 0u, 1, px);
+    check(ok && px[0] == 69,
+          "Proctex-Rauschen (Noise-LUT=4095): -0.85, Rot 69");
+}
+
+static void test_proctex_alpha_filter(ArmCpu *c, unsigned char *mem)
+{
+    unsigned char px[4];
+    int ok;
+
+    /* separate_alpha: Alpha aus Alpha-Map mit Combiner V, v=0.25 =>
+       value 1024/4095 * 255 = 63.76 => 63. Farbe bleibt Rot 64. */
+    ok = t_proctex_render(c, mem, 0.5f, 0.25f, 9u | (2u << 10) | (1u << 14),
+                          (128u << 11), 0u, 0, px);
+    check(ok && px[0] == 64 && px[3] == 63,
+          "Proctex separate_alpha: Alpha-Map V => 63, Farbe 64");
+
+    /* Filter: Nearest rundet den Index (64), Linear schneidet ab (63).
+       Mipmap-Varianten verhalten sich wie in Azahar (TODO mipmap). */
+    ok = t_proctex_render(c, mem, 0.5f, 0.5f, 9u, (128u << 11) | 0u, 0u, 0, px);
+    check(ok && px[0] == 64, "Proctex-Filter Nearest: Index 63.5 => 64");
+    ok = t_proctex_render(c, mem, 0.5f, 0.5f, 9u, (128u << 11) | 1u, 0u, 0, px);
+    check(ok && px[0] == 63, "Proctex-Filter Linear: 63.5 => 63");
+
+    ok = t_proctex_render(c, mem, 0.5f, 0.5f, 9u, (128u << 11) | 2u, 0u, 0, px);
+    check(ok && px[0] == 64, "Proctex NearestMipmapNearest = Nearest (64)");
+    ok = t_proctex_render(c, mem, 0.5f, 0.5f, 9u, (128u << 11) | 3u, 0u, 0, px);
+    check(ok && px[0] == 63, "Proctex LinearMipmapNearest = Linear (63)");
+    ok = t_proctex_render(c, mem, 0.5f, 0.5f, 9u, (128u << 11) | 4u, 0u, 0, px);
+    check(ok && px[0] == 64, "Proctex NearestMipmapLinear = Nearest (64)");
+    ok = t_proctex_render(c, mem, 0.5f, 0.5f, 9u, (128u << 11) | 5u, 0u, 0, px);
+    check(ok && px[0] == 63, "Proctex LinearMipmapLinear = Linear (63)");
+
+    /* lut_offset level0 = 100, width = 20: index = 100 + 0.500122*19
+       = 109.502 => Nearest 110, Linear 109. */
+    ok = t_proctex_render(c, mem, 0.5f, 0.5f, 9u, (20u << 11), 100u, 0, px);
+    check(ok && px[0] == 110,
+          "Proctex lut_offset 100 + width 20 (Nearest) => 110");
+    ok = t_proctex_render(c, mem, 0.5f, 0.5f, 9u, (20u << 11) | 1u, 100u, 0, px);
+    check(ok && px[0] == 109, "Proctex lut_offset 100 + width 20 (Linear) => 109");
+}
+
+/* LUT-Upload: Index laeuft weiter, 128er-Tabellen modulo 128, 256er
+   modulo 256 (Azahar PicaCore::ProcTex). */
+static void test_proctex_lut_upload(ArmCpu *c, unsigned char *mem)
+{
+    uint32_t buf[256];
+    uint32_t *q, size, o;
+    int i, ok;
+
+    /* Noise-Wertetabelle: 0xAF=127 + ein Wort => Index 0.
+       Farbtabelle: Start 255 + 4 Woerter => Index (255+4)&0xFF = 3. */
+    gpu_pica_reset();
+    q = (uint32_t *)(mem + LIST);
+    q = emit(q, 0xAF, (0u << 8) | 127u);
+    q = emit(q, 0xB0, 0x0FFFu);
+    buf[0] = 0x00FF0000u;               /* Index 255: blau */
+    buf[1] = 0xFF00FF00u;               /* Index 0: gruen */
+    buf[2] = 0xFF0000FFu;               /* Index 1: rot */
+    buf[3] = 0xFF000000u;               /* Index 2: schwarz */
+    q = t_emit_proctex_lut(q, 4u, 255u, buf, 4);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    check(gpu_pica_reg(0xAF) == 0x403u,
+          "Proctex-LUT: 0xAF-Index inkrementiert (255+4 => 3)");
+
+    /* 200 Woerter auf die 128er-Noise-Tabelle: Registerindex 200. */
+    gpu_pica_reset();
+    q = (uint32_t *)(mem + LIST);
+    q = emit(q, 0xAF, (0u << 8) | 0u);
+    for (i = 0; i < 200; i++) q = emit(q, 0xB0, (uint32_t)i);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    check(gpu_pica_reg(0xAF) == 200u,
+          "Proctex-LUT: 200 Woerter => Index 200 (8-Bit-Inkrement)");
+
+    /* Farbtabellen-Umschlag rendern: color_map 0 => lut_coord 0,
+       Farbindex 0 wurde bei Index 256 (nach 255 ab Start 255) geschrieben. */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_quad_vertices(c, VTX, 0.0f, 0.5f, 0.5f, 0.5f, 0.5f);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad(q, VTX, 8, 8);
+    q = emit(q, 0x80, 1u << 10);
+    q = emit(q, 0xA8, 9u);
+    q = emit(q, 0xAC, (1u << 11));             /* width 1 => Index = 0 */
+    q = emit(q, 0xAD, 0u);
+    memset(buf, 0, sizeof(buf));
+    q = t_emit_proctex_lut(q, 2u, 0u, buf, 128);   /* color_map alles 0 */
+    q = t_emit_proctex_lut(q, 4u, 0u, buf, 255);   /* Farbtabelle 0..254 = 0 */
+    buf[0] = 0xFF000000u;                          /* Index 255: schwarz */
+    buf[1] = 0xFF00FF00u;                          /* 256 -> 0: gruen */
+    q = t_emit_proctex_lut(q, 4u, 255u, buf, 2);
+    q = emit_tev0(q, 6u, 6u, 0u);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    ok = (mem[o + 3] == 0 && mem[o + 2] == 255 && mem[o + 1] == 0);
+    check(ok, "Proctex-Farbtabelle: Index 256 faellt auf 0 (gruen)");
+}
+
+/* texture3_coordinates (0x80 Bits 8..9) waehlt unter TEXCOORD0/1/2.
+   Eigenes Vertexprogramm: o1 -> TEXCOORD0 (12/13), o2 -> TEXCOORD1
+   (14/15). tc0=(0.5,0.5), tc1=(2.5,2.5); Clamp ToZero macht aus 2.5 die 0. */
+static void test_proctex_coordinates(ArmCpu *c, unsigned char *mem)
+{
+    int sel;
+    static const int expect[2] = {64, 0};
+    for (sel = 0; sel < 2; sel++) {
+        uint32_t words[4];
+        uint32_t *q, size, o;
+        int i;
+
+        gpu_pica_reset();
+        memset(mem + 0x40000u, 0, 0x100);
+        for (i = 0; i < 6; i++) {
+            static const float xy[6][2] = {{-1, -1}, {1, -1}, {1, 1},
+                                            {-1, -1}, {1, 1}, {-1, 1}};
+            float v[7];
+            v[0] = xy[i][0]; v[1] = xy[i][1]; v[2] = 0.0f;
+            v[3] = 0.5f; v[4] = 0.5f;              /* TEXCOORD0 */
+            v[5] = 2.5f; v[6] = 2.5f;              /* TEXCOORD1 */
+            memcpy(c->mem + ((VTX + (uint32_t)i * 28u) & 0x1FFFFFFFu), v, sizeof(v));
+        }
+        q = (uint32_t *)(mem + LIST);
+        q = emit(q, 0x200, VTX >> 3);
+        q = emit(q, 0x201, 0xB | (7u << 4) | (7u << 8));   /* f3, f2, f2 */
+        q = emit(q, 0x202, 2u << 28);
+        q = emit(q, 0x203, 0u);                 /* Loader 0: attr0/attr1 */
+        q = emit(q, 0x204, 0x10u);
+        q = emit(q, 0x205, (2u << 28) | (28u << 16));
+        q = emit(q, 0x206, 20u);                /* Loader 1: attr2 */
+        q = emit(q, 0x207, 0x2u);
+        q = emit(q, 0x208, (1u << 28) | (28u << 16));
+        q = emit(q, 0x4F, 3u);                  /* 3 Ausgaenge */
+        q = emit(q, 0x50, 0x03020100u);         /* o0 -> POSITION */
+        q = emit(q, 0x51, 0x1F1F0D0Cu);         /* o1 -> TEXCOORD0 */
+        q = emit(q, 0x52, 0x1F1F0F0Eu);         /* o2 -> TEXCOORD1 */
+        q = emit(q, 0x2BD, 7u);
+        q = emit(q, 0x2B9, 2u);
+        q = emit(q, 0x2BB, 0x210u);
+        words[0] = ins_common(0x13u, 0u, 0x00u, 0u, 0u, 0u);
+        words[1] = ins_common(0x13u, 0u, 0x01u, 0u, 1u, 0u);
+        words[2] = ins_common(0x13u, 0u, 0x02u, 0u, 2u, 0u);
+        words[3] = 0x22u << 26;
+        q = emit_program(q, words, 4);
+        q = emit_swizzle0(q, swz_xyzw());
+        q = emit_viewport(q, 8, 8);
+        q = emit(q, 0x228, 6u);
+        q = emit(q, 0x80, (1u << 10) | ((uint32_t)sel << 8));
+        q = emit(q, 0xA8, 8u);
+        q = emit(q, 0xAC, (128u << 11));
+        q = emit(q, 0xAD, 0u);
+        q = t_emit_proctex_ramps(q, 0);
+        q = emit_tev0(q, 6u, 6u, 0u);
+        q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+        q = emit(q, 0x22E, 0u);
+        size = (uint32_t)((unsigned char *)q - (mem + LIST));
+        gpu_run_pica_list(c, LIST, size);
+        o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+        {
+            char msg[96];
+            sprintf(msg, "Proctex texture3_coordinates=%d => Rot %d", sel, expect[sel]);
+            check(mem[o + 3] == (unsigned char)expect[sel], msg);
+        }
     }
 }
 
@@ -1520,6 +1997,44 @@ static uint32_t *t_emit_quad_light(uint32_t *q, uint32_t vtx, int vw, int vh)
     return emit_viewport(q, vw, vh);
 }
 
+static void test_texcache_etc1(ArmCpu *c, unsigned char *mem)
+{
+    static const uint64_t block_red = 0xF000000000000040ull;
+    static const uint64_t block_zero = 0x0000000000000040ull;
+    uint32_t *q, size, o;
+    int i;
+
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    memset(mem + TEX, 0, 64);
+    for (i = 0; i < 4; i++) {
+        uint64_t alpha = (uint64_t)7u << 24;
+        memcpy(mem + TEX + i * 16u, &alpha, 8);
+        memcpy(mem + TEX + i * 16u + 8u, &block_red, 8);
+    }
+    t_quad_vertices(c, VTX, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad(q, VTX, 8, 8);
+    q = t_emit_tex(q, TEX, 8, 8, 13, 0u);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit_tev0(q, 3u, 3u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 1, 5, 8, 8, 4);
+    check(mem[o + 3] == 0xFF && mem[o + 2] == 8 && mem[o + 1] == 8,
+          "Textur-Cache: ETC1A4 erster Draw rot (r1=0xF)");
+
+    /* Quellkachel im Gastspielspeicher aendern (wie ein Upload): der
+       Kachel-Cache muss die Dekodierung verwerfen. r1 0xF -> 0, also
+       erwartet (8,8,8) statt (255,8,8) bei sonst gleichem Block. */
+    for (i = 0; i < 4; i++) memcpy(mem + TEX + i * 16u + 8u, &block_zero, 8);
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 1, 5, 8, 8, 4);
+    check(mem[o + 3] == 8 && mem[o + 2] == 8 && mem[o + 1] == 8 && mem[o + 0] == 0x77,
+          "Textur-Cache: geaenderte Quellkachel wird neu dekodiert");
+}
+
 static void test_lighting(ArmCpu *c, unsigned char *mem)
 {
     static const float view[3] = {0.0f, 0.0f, 1.0f};
@@ -2307,8 +2822,887 @@ static void test_texture_projection_cube(ArmCpu *c, unsigned char *mem)
           "ShadowCube: Face +X, shadow_z 0.6, z_ref 0xFFFFFF => Density 0x44");
 }
 
-int main(void) {
+/* ================== Geometrie-Shader (Shader-Einheit 3) ==================
+ * Azahar geometry_pipeline.cpp / shader_unit.cpp (GeometryEmitter) /
+ * regs_pipeline.h / pica_core.cpp: Register 0x280..0x2AF (Programm 0x29B,
+ * Swizzle 0x2A5, 0x289 input_buffer_config, 0x28A main_offset, 0x28B/0x28C
+ * Input-Map, 0x28D output_mask), Pipeline 0x229/0x244/0x24A/0x252/0x254 und
+ * EMIT 0x2A / SETEMIT 0x2B (Bits0..1 vertex_id, Bit2 prim_emit, Bit3 winding).
+ * Erwartungswerte kommen aus der Azahar-Semantik, nicht aus dem Port:
+ * die drei VS-Ausgaben fuellen den GS-Eingangspuffer, der GS emittiert sie in
+ * der Reihenfolge der EMITs, die Primitive Assembly (Topologie Shader) bildet
+ * daraus das Dreieck. */
 
+/* SETEMIT-Kodierung (nihstro shader_bytecode.h). */
+static uint32_t ins_setemit(uint32_t vertex_id, uint32_t prim_emit, uint32_t winding)
+{
+    return (0x2Bu << 26) | (vertex_id & 3u) | ((prim_emit & 1u) << 2) |
+           ((winding & 1u) << 3);
+}
+
+static uint32_t *emit_gs_program(uint32_t *p, const uint32_t *words, int n)
+{
+    int i;
+    p = emit(p, 0x29B, 0);
+    for (i = 0; i < n; i++) p = emit(p, 0x29C, words[i]);
+    return p;
+}
+
+static uint32_t *emit_gs_swizzle0(uint32_t *p, uint32_t w)
+{
+    p = emit(p, 0x2A5, 0);
+    return emit(p, 0x2A6, w);
+}
+
+/* GS-Programm: mov oX, vi + EMIT fuer i = 0..2; das letzte mit prim_emit. */
+static int t_gs_words_emit3(uint32_t *w, uint32_t dest, int winding)
+{
+    int i, n = 0;
+    for (i = 0; i < 3; i++) {
+        w[n++] = ins_common(0x13u, 0u, (uint32_t)i, 0u, dest, 0u);
+        w[n++] = ins_setemit((uint32_t)i, (i == 2) ? 1u : 0u,
+                             (i == 2) ? (uint32_t)winding : 0u);
+        w[n++] = 0x2Au << 26;
+    }
+    w[n++] = 0x22u << 26;
+    return n;
+}
+
+/* Rahmen: Viewport 8x8, TEV-Konstante rot, RGBA8-Farbziel 8x8. */
+static uint32_t *t_emit_fb_red8(uint32_t *q)
+{
+    q = emit_viewport(q, 8, 8);
+    q = emit_tev0(q, 0xEu, 0xEu, 0xFF0000FFu);
+    return t_emit_fb(q, 0x40000u, 8, 8, 0u);
+}
+
+static void test_gs_point(ArmCpu *c, unsigned char *mem)
+{
+    uint32_t w[10], *q, size, o;
+    int n;
+
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_pos4(c, 0, -1.0f, -1.0f, 0.0f);
+    t_pos4(c, 16, -1.0f, 1.0f, 0.0f);
+    t_pos4(c, 32, 1.0f, -1.0f, 0.0f);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_pos_setup(q);            /* VS: attr0->v0, o0->POSITION, mask 1 */
+    q = emit(q, 0x229, 2u);             /* use_gs = Yes */
+    q = emit(q, 0x24A, 0u);             /* 1 VS-Ausgangsattribut */
+    q = emit(q, 0x251, 0u);
+    q = emit(q, 0x252, 0u);             /* GSMode Point */
+    q = emit(q, 0x25E, 3u << 8);        /* Topologie Shader */
+    q = emit(q, 0x289, 2u);             /* 3 GS-Eingangsattribute */
+    q = emit(q, 0x28B, 0x210u);         /* attr0->v0, attr1->v1, attr2->v2 */
+    q = emit(q, 0x28C, 0u);
+    q = emit(q, 0x28A, 0u);             /* GS-Einstieg bei Wort 0 */
+    q = emit(q, 0x28D, 1u);             /* GS output_mask = o0 */
+    n = t_gs_words_emit3(w, 0u, 0);
+    q = emit_gs_program(q, w, n);
+    q = emit_gs_swizzle0(q, swz_xyzw());
+    q = t_emit_fb_red8(q);
+    q = emit(q, 0x228, 3u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 1, 5, 8, 8, 4);
+    check(mem[o + 3] == 0xFF && mem[o + 2] == 0 && mem[o + 1] == 0,
+          "GS Point: 3 VS-Ausgaben fuellen den Puffer, 3 EMITs => Dreieck");
+}
+
+static void test_gs_fixed_primitive(ArmCpu *c, unsigned char *mem)
+{
+    uint32_t w[10], *q, size, o;
+
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_pos4(c, 0, -1.0f, -1.0f, 0.0f);
+    t_pos4(c, 16, -1.0f, 1.0f, 0.0f);
+    t_pos4(c, 32, 1.0f, -1.0f, 0.0f);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_pos_setup(q);
+    q = emit(q, 0x229, 2u);
+    q = emit(q, 0x24A, 0u);
+    q = emit(q, 0x251, 0u);
+    q = emit(q, 0x252, 2u | (2u << 8)); /* FixedPrimitive, 3 Vertices, Stride 1 */
+    q = emit(q, 0x25E, 3u << 8);
+    q = emit(q, 0x289, 1u << 8);        /* input_to_uniform = 1 */
+    q = emit(q, 0x28A, 0u);
+    q = emit(q, 0x28D, 1u);
+    /* FixedPrimitive: die Vertexdaten stehen in den Uniforms f[0..2],
+       das Programm liest sie als c0..c2. */
+    w[0] = ins_common(0x13u, 0u, 0x20u, 0u, 0u, 0u);
+    w[1] = ins_setemit(0u, 0u, 0u);
+    w[2] = 0x2Au << 26;
+    w[3] = ins_common(0x13u, 0u, 0x21u, 0u, 0u, 0u);
+    w[4] = ins_setemit(1u, 0u, 0u);
+    w[5] = 0x2Au << 26;
+    w[6] = ins_common(0x13u, 0u, 0x22u, 0u, 0u, 0u);
+    w[7] = ins_setemit(2u, 1u, 0u);
+    w[8] = 0x2Au << 26;
+    w[9] = 0x22u << 26;
+    q = emit_gs_program(q, w, 10);
+    q = emit_gs_swizzle0(q, swz_xyzw());
+    q = t_emit_fb_red8(q);
+    q = emit(q, 0x228, 3u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 1, 5, 8, 8, 4);
+    check(mem[o + 3] == 0xFF && mem[o + 2] == 0 && mem[o + 1] == 0,
+          "GS FixedPrimitive: Vertexdaten in Uniforms f0..f2, 3 EMITs => Dreieck");
+}
+
+static void test_gs_variable_primitive(ArmCpu *c, unsigned char *mem)
+{
+    uint32_t w[10], *q, size, o;
+    uint16_t idx[4];
+
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_pos4(c, 0, -1.0f, -1.0f, 0.0f);
+    t_pos4(c, 16, -1.0f, 1.0f, 0.0f);
+    t_pos4(c, 32, 1.0f, -1.0f, 0.0f);
+    idx[0] = 3; idx[1] = 0; idx[2] = 1; idx[3] = 2;
+    memcpy(mem + ((VTX + 0x300u) & 0x1FFFFFFFu), idx, sizeof(idx));
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_pos_setup(q);
+    q = emit(q, 0x229, 2u | (1u << 31));   /* use_gs Yes + variable_primitive */
+    q = emit(q, 0x24A, 0u);
+    q = emit(q, 0x251, 0u);
+    q = emit(q, 0x252, 1u);                /* GSMode VariablePrimitive */
+    q = emit(q, 0x254, 3u);                /* 4 Hauptvertices (alle) */
+    q = emit(q, 0x25E, 3u << 8);
+    q = emit(q, 0x289, 1u << 8);           /* input_to_uniform = 1 */
+    q = emit(q, 0x227, 0x300u | 0x80000000u);  /* u16-Indexpuffer ab Basis */
+    q = emit(q, 0x28A, 0u);
+    q = emit(q, 0x28D, 1u);
+    /* f[0] = Vertexzahl, f[1..3] = Vertexdaten (c1..c3). */
+    w[0] = ins_common(0x13u, 0u, 0x21u, 0u, 0u, 0u);
+    w[1] = ins_setemit(0u, 0u, 0u);
+    w[2] = 0x2Au << 26;
+    w[3] = ins_common(0x13u, 0u, 0x22u, 0u, 0u, 0u);
+    w[4] = ins_setemit(1u, 0u, 0u);
+    w[5] = 0x2Au << 26;
+    w[6] = ins_common(0x13u, 0u, 0x23u, 0u, 0u, 0u);
+    w[7] = ins_setemit(2u, 1u, 0u);
+    w[8] = 0x2Au << 26;
+    w[9] = 0x22u << 26;
+    q = emit_gs_program(q, w, 10);
+    q = emit_gs_swizzle0(q, swz_xyzw());
+    q = t_emit_fb_red8(q);
+    q = emit(q, 0x228, 4u);                /* Index 0 = Vertexzahl, dann 3 */
+    q = emit(q, 0x22F, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 1, 5, 8, 8, 4);
+    check(mem[o + 3] == 0xFF && mem[o + 2] == 0 && mem[o + 1] == 0,
+          "GS VariablePrimitive: erster Index = Vertexzahl, Daten in f1..f3 => Dreieck");
+}
+
+/* 0x244 gs_unit_exclusive_configuration + Programm-Spiegelung: bei 0/0 teilt
+   Einheit 3 das VS-Programm (Azahar pica_core.cpp), bei 1 bleibt ihr Programm
+   leer und ohne EMIT entsteht kein Dreieck. */
+static void test_gs_exclusive_program_share(ArmCpu *c, unsigned char *mem)
+{
+    int pass;
+    for (pass = 0; pass < 2; pass++) {
+        uint32_t w[11], *q, size, o;
+
+        gpu_pica_reset();
+        memset(mem + 0x40000u, 0, 0x100);
+        t_pos4(c, 0, -1.0f, -1.0f, 0.0f);
+        t_pos4(c, 16, -1.0f, 1.0f, 0.0f);
+        t_pos4(c, 32, 1.0f, -1.0f, 0.0f);
+        q = (uint32_t *)(mem + LIST);
+        q = emit(q, 0x200, VTX >> 3);
+        q = emit(q, 0x201, 0x0Fu);
+        q = emit(q, 0x202, 0u);
+        q = emit(q, 0x203, 0u);
+        q = emit(q, 0x204, 0u);
+        q = emit(q, 0x205, (1u << 28) | (16u << 16));
+        q = emit(q, 0x244, pass ? 1u : 0u);   /* exclusive configuration */
+        q = emit(q, 0x229, 0u);               /* beim Upload: GS aus */
+        q = emit(q, 0x2B9, 0u);
+        q = emit(q, 0x2BB, 0u);
+        q = emit(q, 0x4F, 1u);
+        q = emit(q, 0x50, 0x03020100u);
+        q = emit(q, 0x2BD, 1u);               /* VS-Ausgang nur o0 (Position) */
+        /* Gemeinsames Programm: VS schreibt o0, der GS emittiert o1. */
+        w[0] = ins_common(0x13u, 0u, 0x00u, 0u, 0u, 0u);   /* mov o0,v0 */
+        w[1] = ins_common(0x13u, 0u, 0x00u, 0u, 1u, 0u);   /* mov o1,v0 */
+        w[2] = ins_setemit(0u, 0u, 0u);
+        w[3] = 0x2Au << 26;
+        w[4] = ins_common(0x13u, 0u, 0x01u, 0u, 1u, 0u);   /* mov o1,v1 */
+        w[5] = ins_setemit(1u, 0u, 0u);
+        w[6] = 0x2Au << 26;
+        w[7] = ins_common(0x13u, 0u, 0x02u, 0u, 1u, 0u);   /* mov o1,v2 */
+        w[8] = ins_setemit(2u, 1u, 0u);
+        w[9] = 0x2Au << 26;
+        w[10] = 0x22u << 26;
+        q = emit_program(q, w, 11);
+        q = emit_swizzle0(q, swz_xyzw());
+        /* Draw mit aktivem GS (Point, 3 Eingangsattribute, Ausgang o1). */
+        q = emit(q, 0x229, 2u);
+        q = emit(q, 0x24A, 0u);
+        q = emit(q, 0x251, 0u);
+        q = emit(q, 0x252, 0u);
+        q = emit(q, 0x25E, 3u << 8);
+        q = emit(q, 0x289, 2u);
+        q = emit(q, 0x28B, 0x210u);
+        q = emit(q, 0x28C, 0u);
+        q = emit(q, 0x28A, 0u);
+        q = emit(q, 0x28D, 2u);               /* GS output_mask = o1 */
+        q = t_emit_fb_red8(q);
+        q = emit(q, 0x228, 3u);
+        q = emit(q, 0x22E, 0u);
+        size = (uint32_t)((unsigned char *)q - (mem + LIST));
+        gpu_run_pica_list(c, LIST, size);
+        o = t_fb_off(0x40000u, 1, 5, 8, 8, 4);
+        if (pass) {
+            check(mem[o + 3] == 0 && mem[o + 2] == 0,
+                  "GS exclusive (0x244=1): Programm nicht gespiegelt => kein EMIT, kein Dreieck");
+        } else {
+            check(mem[o + 3] == 0xFF && mem[o + 2] == 0 && mem[o + 1] == 0,
+                  "GS Programm-Spiegelung (0x244=0, 0x229=0 beim Upload) => EMIT laeuft");
+        }
+    }
+}
+
+/* SETEMIT-winding invertiert in Topologie Shader die Windung des naechsten
+   Dreiecks (Azahar primitive_assembly.cpp). Mit Cull-Modus KeepClockWise
+   (0x40=1) wird das Dreieck (-1,-1),(1,-1),(-1,1) nur mit winding=1 gezeichnet. */
+static void test_gs_winding(ArmCpu *c, unsigned char *mem)
+{
+    int pass;
+    for (pass = 0; pass < 2; pass++) {
+        uint32_t w[10], *q, size, o;
+        int n;
+
+        gpu_pica_reset();
+        memset(mem + 0x40000u, 0, 0x100);
+        t_pos4(c, 0, -1.0f, -1.0f, 0.0f);
+        t_pos4(c, 16, 1.0f, -1.0f, 0.0f);
+        t_pos4(c, 32, -1.0f, 1.0f, 0.0f);
+        q = (uint32_t *)(mem + LIST);
+        q = t_emit_pos_setup(q);
+        q = emit(q, 0x40, 1u);              /* Cull: nur im Uhrzeigersinn */
+        q = emit(q, 0x229, 2u);
+        q = emit(q, 0x24A, 0u);
+        q = emit(q, 0x251, 0u);
+        q = emit(q, 0x252, 0u);
+        q = emit(q, 0x25E, 3u << 8);        /* Topologie Shader */
+        q = emit(q, 0x289, 2u);
+        q = emit(q, 0x28B, 0x210u);
+        q = emit(q, 0x28C, 0u);
+        q = emit(q, 0x28A, 0u);
+        q = emit(q, 0x28D, 1u);
+        n = t_gs_words_emit3(w, 0u, pass);
+        q = emit_gs_program(q, w, n);
+        q = emit_gs_swizzle0(q, swz_xyzw());
+        q = t_emit_fb_red8(q);
+        q = emit(q, 0x228, 3u);
+        q = emit(q, 0x22E, 0u);
+        size = (uint32_t)((unsigned char *)q - (mem + LIST));
+        gpu_run_pica_list(c, LIST, size);
+        o = t_fb_off(0x40000u, 1, 5, 8, 8, 4);
+        if (pass) {
+            check(mem[o + 3] == 0xFF && mem[o + 2] == 0 && mem[o + 1] == 0,
+                  "GS SETEMIT winding=1 invertiert die Windung => Dreieck trotz Culling");
+        } else {
+            check(mem[o + 3] == 0 && mem[o + 2] == 0,
+                  "GS ohne winding: Windung bleibt, KeepClockWise verwirft das Dreieck");
+        }
+    }
+}
+
+/* Doppelte Ausgangsbank (Azahar shader_unit.h ShaderUnit::output/output_bank):
+   EMIT liest die aktuell beschriebene Bank und wechselt danach. Ein EMIT ohne
+   Schreibzugriff liefert daher die Werte von vor zwei EMITs; hier wird damit
+   das zuvor emittierte Vertex 1 erneut gesetzt und das Dreieck vollstaendig.
+   Ohne Bankwechsel waere das dritte gelesene Vertex C statt B und das Dreieck
+   degeneriert (A,C,C) => kein Pixel. */
+static void test_gs_output_bank(ArmCpu *c, unsigned char *mem)
+{
+    uint32_t w[12], *q, size, o;
+    int n = 0;
+
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_pos4(c, 0, -1.0f, -1.0f, 0.0f);
+    t_pos4(c, 16, -1.0f, 1.0f, 0.0f);
+    t_pos4(c, 32, 1.0f, -1.0f, 0.0f);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_pos_setup(q);
+    q = emit(q, 0x229, 2u);
+    q = emit(q, 0x24A, 0u);
+    q = emit(q, 0x251, 0u);
+    q = emit(q, 0x252, 0u);
+    q = emit(q, 0x25E, 3u << 8);
+    q = emit(q, 0x289, 2u);
+    q = emit(q, 0x28B, 0x210u);
+    q = emit(q, 0x28C, 0u);
+    q = emit(q, 0x28A, 0u);
+    q = emit(q, 0x28D, 1u);
+    w[n++] = ins_common(0x13u, 0u, 0x00u, 0u, 0u, 0u);   /* mov o0,v0 */
+    w[n++] = ins_setemit(0u, 0u, 0u);
+    w[n++] = 0x2Au << 26;
+    w[n++] = ins_common(0x13u, 0u, 0x01u, 0u, 0u, 0u);   /* mov o0,v1 */
+    w[n++] = ins_setemit(1u, 0u, 0u);
+    w[n++] = 0x2Au << 26;
+    w[n++] = ins_common(0x13u, 0u, 0x02u, 0u, 0u, 0u);   /* mov o0,v2 */
+    w[n++] = ins_setemit(2u, 0u, 0u);
+    w[n++] = 0x2Au << 26;
+    w[n++] = ins_setemit(1u, 1u, 0u);                    /* prim_emit ohne Schreiben */
+    w[n++] = 0x2Au << 26;
+    w[n++] = 0x22u << 26;
+    q = emit_gs_program(q, w, n);
+    q = emit_gs_swizzle0(q, swz_xyzw());
+    q = t_emit_fb_red8(q);
+    q = emit(q, 0x228, 3u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 1, 5, 8, 8, 4);
+    check(mem[o + 3] == 0xFF && mem[o + 2] == 0 && mem[o + 1] == 0,
+          "GS Ausgangsbank: EMIT ohne Schreiben liest die Werte von vor zwei EMITs");
+}
+
+/* Immediate-Modus (0x232 = 0xF, Attribute ueber 0x233..0x235) geht wie in
+ * Azahar PicaCore::DrawImmediate durch die Geometrie-Pipeline: erst der
+ * dritte Immediate-Vertex fuellt den Point-Puffer und startet den GS. Der
+ * SETEMIT-winding des GS wirkt daher auch hier; ohne Pipeline-Unterstuetzung
+ * wuerde die Immediate-Ausgabe direkt in die Primitive Assembly gehen und
+ * der Cull-Modus KeepClockWise das Dreieck verwerfen.
+ * Azahar immediate.Reset() (Schreiben von 0x232) setzt
+ * reset_geometry_pipeline; der naechste Flush konfiguriert die Pipeline neu. */
+static void test_gs_immediate(ArmCpu *c, unsigned char *mem)
+{
+    static const float pos[3][3] = {
+        { -1.0f, -1.0f, 0.0f }, { 1.0f, -1.0f, 0.0f }, { -1.0f, 1.0f, 0.0f }
+    };
+    int pass;
+
+    for (pass = 0; pass < 2; pass++) {
+        uint32_t w[10], *q, size, o, pack[3];
+        int n, v, i;
+
+        gpu_pica_reset();
+        memset(mem + 0x40000u, 0, 0x100);
+        q = (uint32_t *)(mem + LIST);
+        q = t_emit_pos_setup(q);
+        q = emit(q, 0x40, 1u);              /* Cull: nur im Uhrzeigersinn */
+        q = emit(q, 0x242, 0u);             /* 1 Immediate-Attribut je Vertex */
+        q = emit(q, 0x229, 2u);
+        q = emit(q, 0x24A, 0u);
+        q = emit(q, 0x251, 0u);
+        q = emit(q, 0x252, 0u);             /* Point */
+        q = emit(q, 0x25E, 3u << 8);
+        q = emit(q, 0x289, 2u);             /* 3 GS-Eingangsattribute */
+        q = emit(q, 0x28B, 0x210u);
+        q = emit(q, 0x28C, 0u);
+        q = emit(q, 0x28A, 0u);
+        q = emit(q, 0x28D, 1u);
+        n = t_gs_words_emit3(w, 0u, (uint32_t)pass);
+        q = emit_gs_program(q, w, n);
+        q = emit_gs_swizzle0(q, swz_xyzw());
+        q = t_emit_fb_red8(q);
+        /* Immediate-Modus: je drei f24-Woerter ein Attribut (ein Vertex). */
+        q = emit(q, 0x232, 0xFu);
+        for (v = 0; v < 3; v++) {
+            f24_pack3(pos[v][0], pos[v][1], pos[v][2], 1.0f, pack);
+            for (i = 0; i < 3; i++) q = emit(q, 0x233u + (uint32_t)i, pack[i]);
+        }
+        size = (uint32_t)((unsigned char *)q - (mem + LIST));
+        gpu_run_pica_list(c, LIST, size);
+        o = t_fb_off(0x40000u, 1, 5, 8, 8, 4);
+        if (pass) {
+            check(mem[o + 3] == 0xFF && mem[o + 2] == 0 && mem[o + 1] == 0,
+                  "GS Immediate: 3 Immediate-Vertices fuellen den Puffer, winding=1 dreht");
+        } else {
+            check(mem[o + 3] == 0 && mem[o + 2] == 0,
+                  "GS Immediate ohne winding: KeepClockWise verwirft das Dreieck");
+        }
+    }
+}
+
+/* =============== Performance-Benchmark (Diagnose, PICA_BENCH=1) ===============
+ * 2000 texturierte Dreiecke (40x25 Quads) ueber den ganzen oberen Screen
+ * (400x240) in einer PICA-Kommandoliste, ein Draw ueber 6000 Vertices.
+ * Drei Varianten mit identischem Gitter:
+ *   tex        Textur + TEV, Lighting aus, kein Depth-Test (2D-UI-Pfad)
+ *   tex+light  zusaetzlich Fragment-Lighting mit einer diffusen Lichtquelle
+ *   tex+depth  zusaetzlich D16-Depth-Test (LessThan) mit Depth-Write
+ * Gemessen wird die Wanduhrzeit pro vollstaendiger Liste (25% Warmlauf).
+ * Der Benchmark veraendert keinen Gastzustand und laeuft nur mit PICA_BENCH=1;
+ * ohne die Variable ist die Ausgabe von tools/test_pica_c.py unveraendert. */
+
+#define BENCH_MEM_SIZE 0x400000u
+#define BENCH_FB       0x00040000u
+#define BENCH_TEX      0x000A0000u
+#define BENCH_VTX      0x000E0000u
+#define BENCH_DEPTH    0x00100000u
+#define BENCH_LIST     0x000FE000u
+#define BENCH_QUADS_X  40
+#define BENCH_QUADS_Y  25
+#define BENCH_TRIS     (BENCH_QUADS_X * BENCH_QUADS_Y * 2)
+#define BENCH_VERTS    (BENCH_TRIS * 3)
+
+static double bench_now_ms(void)
+{
+#ifdef _WIN32
+    LARGE_INTEGER f, c;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c);
+    return (double)c.QuadPart * 1000.0 / (double)f.QuadPart;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1.0e6;
+#endif
+}
+
+/* Gitter erzeugen: 6 Vertices je Quad (Position float3, UV float2, Stride 20). */
+static void bench_vertices(unsigned char *mem)
+{
+    int cx, cy, k;
+    for (cy = 0; cy < BENCH_QUADS_Y; cy++) {
+        for (cx = 0; cx < BENCH_QUADS_X; cx++) {
+            uint32_t q = (uint32_t)(cy * BENCH_QUADS_X + cx);
+            float x0 = -1.0f + 2.0f * (float)cx / (float)BENCH_QUADS_X;
+            float x1 = -1.0f + 2.0f * (float)(cx + 1) / (float)BENCH_QUADS_X;
+            float y0 = -1.0f + 2.0f * (float)cy / (float)BENCH_QUADS_Y;
+            float y1 = -1.0f + 2.0f * (float)(cy + 1) / (float)BENCH_QUADS_Y;
+            float u0 = (float)cx / (float)BENCH_QUADS_X;
+            float u1 = (float)(cx + 1) / (float)BENCH_QUADS_X;
+            float v0 = (float)cy / (float)BENCH_QUADS_Y;
+            float v1 = (float)(cy + 1) / (float)BENCH_QUADS_Y;
+            float xy[6][2] = {{x0, y0}, {x1, y0}, {x1, y1},
+                              {x0, y0}, {x1, y1}, {x0, y1}};
+            for (k = 0; k < 6; k++) {
+                float f[5];
+                uint32_t off = BENCH_VTX + (q * 6u + (uint32_t)k) * 20u;
+                f[0] = xy[k][0];
+                f[1] = xy[k][1];
+                f[2] = 0.0f;
+                f[3] = (xy[k][0] == x0) ? u0 : u1;
+                f[4] = (xy[k][1] == y0) ? v0 : v1;
+                memcpy(mem + off, f, sizeof(f));
+            }
+        }
+    }
+}
+
+static uint32_t bench_build_list(unsigned char *mem, int lighting, int depth,
+                                int texture, int fmt)
+{
+    uint32_t *q = (uint32_t *)(mem + BENCH_LIST);
+    uint32_t *end;
+
+    q = emit(q, 0x200, BENCH_VTX >> 3);
+    q = emit(q, 0x201, 0x7B);              /* attr0 float3, attr1 float2 */
+    q = emit(q, 0x202, 1u << 28);
+    q = emit(q, 0x203, 0u);
+    q = emit(q, 0x204, 0x210u);
+    q = emit(q, 0x205, (3u << 28) | (20u << 16));
+    q = emit(q, 0x206, 12u);
+    q = emit(q, 0x207, 1u);
+    q = emit(q, 0x208, (1u << 28) | (20u << 16));
+    q = emit(q, 0x228, (uint32_t)BENCH_VERTS);
+    q = t_emit_vs_basic(q);
+    q = emit_viewport(q, 400, 240);
+    if (texture) {
+        q = t_emit_tex(q, BENCH_TEX, 256, 256, fmt, 0x00001100u);  /* Repeat */
+        q = emit_tev0(q, 3, 3, 0);         /* Farbe+Alpha aus Textur 0 */
+    } else {
+        q = emit(q, 0x80, 0u);             /* Textur 0 aus */
+        q = emit_tev0(q, 0, 0, 0);         /* Farbe+Alpha = Vertexfarbe */
+    }
+    q = t_emit_fb(q, BENCH_FB, 400, 240, 0u);
+    if (lighting) {
+        q = emit(q, 0x1C6, 0u);            /* lighting.disable = 0 */
+        q = emit(q, 0x142, 0x000003FFu);   /* Licht 0 diffusiv rot */
+        q = emit(q, 0x1C2, 0u);            /* max_light_index */
+        q = emit(q, 0x1D9, 1u);            /* Licht 0 an */
+    } else {
+        q = emit(q, 0x1C6, 1u);            /* Lighting aus */
+    }
+    if (depth) {
+        q = emit(q, 0x116, 0u);            /* D16 */
+        q = emit(q, 0x11C, BENCH_DEPTH >> 3);
+        q = emit(q, 0x107, 0x00001F40u);   /* test LessThan, Maske, write */
+    }
+    q = emit(q, 0x22E, 0u);                /* Draw arrays */
+    end = q;
+    return (uint32_t)((unsigned char *)end - (mem + BENCH_LIST));
+}
+
+static void bench_one(unsigned char *mem, int lighting, int depth, int texture,
+                      int fmt, const char *name)
+{
+    ArmCpu c;
+    uint32_t size = bench_build_list(mem, lighting, depth, texture, fmt);
+    double ms, best = 0.0;
+    int i, frames = 8, warm = 2;
+    uint32_t px = 400u * 240u;
+
+    memset(&c, 0, sizeof(c));
+    arm_cpu_init(&c, mem, BENCH_MEM_SIZE);
+    gpu_pica_reset();
+    memset(mem + BENCH_FB, 0, px * 4u);
+    if (depth) {
+        memset(mem + BENCH_DEPTH, 0xFF, px * 2u);
+    }
+    for (i = 0; i < warm + frames; i++) {
+        double a, b;
+        if (depth && i == warm) memset(mem + BENCH_DEPTH, 0xFF, px * 2u);
+        a = bench_now_ms();
+        gpu_run_pica_list(&c, BENCH_LIST, size);
+        b = bench_now_ms();
+        if (i == warm) best = b - a;
+        else if (i > warm && b - a < best) best = b - a;
+    }
+    ms = best;
+    printf("BENCH %-10s tris=%d px=%u  %.3f ms/frame  (%5.1f fps)  draws=%llu\n",
+           name, BENCH_TRIS, px, ms, ms > 0.0 ? 1000.0 / ms : 0.0,
+           gpu_pica_draw_count());
+}
+
+static int pica_bench(void)
+{
+    unsigned char *mem = (unsigned char *)malloc(BENCH_MEM_SIZE);
+    int i;
+    uint32_t *t;
+
+    if (!mem) {
+        printf("BENCH: kein Speicher\n");
+        return 1;
+    }
+    memset(mem, 0, BENCH_MEM_SIZE);
+    bench_vertices(mem);
+    /* 256x256-RGBA8-Textur mit einem Muster (alle Kacheln belegt). */
+    t = (uint32_t *)(mem + BENCH_TEX);
+    for (i = 0; i < 256 * 256; i++)
+        t[i] = 0xFF000000u | ((uint32_t)(i * 2654435761u) >> 8);
+    printf("BENCH PICA-Rasterizer: %d Dreiecke, 400x240\n", BENCH_TRIS);
+    bench_one(mem, 0, 0, 1, 0, "tex");
+    bench_one(mem, 0, 0, 0, 0, "solid");
+    bench_one(mem, 1, 0, 1, 0, "tex+light");
+    bench_one(mem, 0, 0, 1, 13, "etc1a4");
+    bench_one(mem, 0, 1, 1, 0, "tex+depth");
+    free(mem);
+    return 0;
+}
+
+/* Spezialregister-Semantik aus Azahar pica_core.cpp (HandleSpecialReg,
+ * WriteInternalReg, GPU::WriteReg/SubmitCmdList) und PicaCore::InitializeRegs,
+ * die nicht von den Renderpfaden oben abgedeckt wird. */
+static void test_special_regs(ArmCpu *c, unsigned char *mem)
+{
+    const uint32_t REG = 0x1EB00000u;
+    uint32_t *q, size;
+    uint32_t pack[3];
+    unsigned long long draws;
+    int nops;
+
+    /* InitializeRegs: gs.input_buffer_config = max_input_attribute_index 1
+       (Bits0..3) + shader_mode VS (0xA0 in Bits24..31). */
+    gpu_pica_reset();
+    check(gpu_pica_reg(0x289) == 0x000000A1u,
+          "Reset: 0x289 = 0xA1 (gs max_input_attribute_index 1, shader_mode VS)");
+
+    /* irq_autostop ist ein ganzer u32: der Wert 2 stoppt die Liste ebenfalls
+       (Azahar: if (regs.internal.irq_autostop)). */
+    gpu_pica_reset();
+    gpu_pica_set_irq_handler(test_irq);
+    irq_count = 0;
+    q = (uint32_t *)(mem + LIST);
+    q = emit(q, 0x034, 2u);
+    q = emit(q, 0x010, 0x12345678u);       /* matcht irq_compare */
+    q = emit(q, 0x080, 0x55u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    nops = gpu_run_pica_list(c, LIST, size);
+    check(nops == 2 && gpu_pica_reg(0x080) == 0u,
+          "irq_autostop != 0 beendet die Liste (nicht nur Bit0)");
+    check(irq_count == 1, "Finalize mit passendem irq_compare meldet P3D");
+
+    /* vs.output_mask (0x2BD) spiegelt bei geteilter Konfiguration den
+       ROHWERT als BitField<0,16> nach 0x28D (Azahar Assign(value)). */
+    gpu_pica_reset();
+    q = (uint32_t *)(mem + LIST);
+    q = emit(q, 0x2BD, 0xAABBCCDDu);
+    q = emit_h(q, 0x11223344u, 0x2BD, 0x1u);   /* nur Byte0 maskiert */
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    check(gpu_pica_reg(0x28D) == 0x00003344u,
+          "vs.output_mask spiegelt den Rohwert als 16-Bit-Feld nach 0x28D");
+    gpu_pica_reset();
+    q = (uint32_t *)(mem + LIST);
+    q = emit(q, 0x244, 1u);                    /* exclusive configuration */
+    q = emit(q, 0x2BD, 0x1234u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    check(gpu_pica_reg(0x28D) == 0u,
+          "exclusive GS-Konfiguration verhindert die output_mask-Spiegelung");
+
+    /* 0x232 > 0xF: Azahar verwirft das Attribut (Invalid VS default attribute
+       index) und laesst setup.index stehen; der Port maskierte frueher auf
+       4 Bit und schrieb Attribut 0. */
+    gpu_pica_reset();
+    draws = gpu_pica_draw_count();
+    q = (uint32_t *)(mem + LIST);
+    q = emit(q, 0x232, 0x10u);
+    f24_pack3(1.0f, 2.0f, 3.0f, 4.0f, pack);
+    q = emit(q, 0x233, pack[0]);
+    q = emit(q, 0x233, pack[1]);
+    q = emit(q, 0x233, pack[2]);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    check(gpu_pica_reg(0x232) == 0x10u && gpu_pica_draw_count() == draws,
+          "0x232 > 0xF: Attribut verworfen, Index bleibt stehen");
+
+    /* Trigger 0x23C aus einer Liste macht immer cmd_list.Reset: die alte
+       Liste endet, auch bei Groesse 0, und es gibt kein P3D. Der Trigger
+       bleibt (anders als beim GSP-MMIO-Pfad) im Register stehen. */
+    gpu_pica_reset();
+    irq_count = 0;
+    q = (uint32_t *)(mem + LIST);
+    q = emit(q, 0x238, 0u);                    /* Groesse 0 */
+    q = emit(q, 0x23A, LIST2 >> 3);
+    q = emit(q, 0x23C, 1u);
+    q = emit(q, 0x080, 0x55u);                 /* darf nicht mehr laufen */
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    check(gpu_pica_reg(0x080) == 0u,
+          "Trigger mit Groesse 0 beendet die laufende Liste");
+    check(irq_count == 0, "Trigger mit Groesse 0 meldet kein P3D");
+    check(gpu_pica_reg(0x23C) == 1u,
+          "Trigger aus der Kommandoliste bleibt im Register stehen");
+
+    /* Gueltiger Trigger: neue Liste laeuft, alte endet. */
+    gpu_pica_reset();
+    {
+        uint32_t *q2 = (uint32_t *)(mem + LIST2);
+        uint32_t size2;
+        q2 = emit(q2, 0x080, 0x77u);
+        size2 = (uint32_t)((unsigned char *)q2 - (mem + LIST2));
+        q = (uint32_t *)(mem + LIST);
+        q = emit(q, 0x238, size2 >> 3);
+        q = emit(q, 0x23A, LIST2 >> 3);
+        q = emit(q, 0x23C, 1u);
+        q = emit(q, 0x081, 0x66u);             /* darf nicht mehr laufen */
+        size = (uint32_t)((unsigned char *)q - (mem + LIST));
+        gpu_run_pica_list(c, LIST, size);
+        check(gpu_pica_reg(0x080) == 0x77u && gpu_pica_reg(0x081) == 0u,
+              "0x23C springt in die neue Liste und beendet die alte");
+    }
+
+    /* GSP-MMIO-Trigger (GPU::WriteReg -> SubmitCmdList): die Liste laeuft und
+       der Trigger wird danach geloescht. */
+    gpu_pica_reset();
+    {
+        uint32_t *q2 = (uint32_t *)(mem + LIST2);
+        uint32_t size2;
+        q2 = emit(q2, 0x080, 0x99u);
+        size2 = (uint32_t)((unsigned char *)q2 - (mem + LIST2));
+        gpu_gsp_write_reg(c, REG + 0x4018E0u, size2 >> 3);   /* 0x238 */
+        gpu_gsp_write_reg(c, REG + 0x4018E8u, LIST2 >> 3);   /* 0x23A */
+        gpu_gsp_write_reg(c, REG + 0x4018F0u, 1u);           /* 0x23C */
+        check(gpu_pica_reg(0x080) == 0x99u,
+              "MMIO-Trigger fuehrt die Kommandoliste aus");
+        check(gpu_pica_reg(0x23C) == 0u,
+              "MMIO-Trigger wird nach SubmitCmdList geloescht");
+
+        /* Eine Schreibung, deren Maske den Trigger nicht enthaelt, darf die
+           Liste nicht starten (GPU::SubmitCmdList prueft config.trigger). */
+        gpu_pica_reset();
+        q2 = (uint32_t *)(mem + LIST2);
+        q2 = emit(q2, 0x080, 0xBBu);
+        size2 = (uint32_t)((unsigned char *)q2 - (mem + LIST2));
+        gpu_gsp_write_reg(c, REG + 0x4018E0u, size2 >> 3);
+        gpu_gsp_write_reg(c, REG + 0x4018E8u, LIST2 >> 3);
+        gpu_gsp_write_reg_masked(c, REG + 0x4018F0u, 0u, 0x0000FF00u);
+        check(gpu_pica_reg(0x080) == 0u && gpu_pica_reg(0x23C) == 0u,
+              "MMIO-Schreibung ohne Trigger-Bit startet keine Liste");
+    }
+
+    /* GX-Kommando 0x01 (GPU::Execute SubmitCmdList): Adresse/Groesse landen in
+       den Kommandopuffer-Registern, Trigger danach 0. Laenge 0 ist gueltig:
+       keine Ausfuehrung, kein P3D. */
+    gpu_pica_reset();
+    irq_count = 0;
+    {
+        uint32_t *q2 = (uint32_t *)(mem + LIST2);
+        uint32_t size2;
+        q2 = emit(q2, 0x080, 0xAAu);
+        size2 = (uint32_t)((unsigned char *)q2 - (mem + LIST2));
+        nops = gpu_gsp_submit_cmdlist_cmd(c, LIST2, size2);
+        check(nops == 1 && gpu_pica_reg(0x080) == 0xAAu,
+              "GX SubmitCmdList fuehrt die Liste aus");
+        check(gpu_pica_reg(0x238) == (size2 >> 3) &&
+              gpu_pica_reg(0x23A) == (LIST2 >> 3) &&
+              gpu_pica_reg(0x23C) == 0u,
+              "GX SubmitCmdList schreibt addr/size und loescht den Trigger");
+        gpu_pica_reset();
+        nops = gpu_gsp_submit_cmdlist_cmd(c, LIST2, 0u);
+        check(nops == 0 && irq_count == 0,
+              "GX SubmitCmdList mit Laenge 0: keine Ausfuehrung, kein P3D");
+    }
+}
+
+/* ================= Scissor-Test (0x065/0x066/0x067) =================
+ * Azahar sw_rasterizer.cpp: 0x065 Modus (0 aus, 1 Exclude, 3 Include),
+ * 0x066 x1/y1, 0x067 x2/y2 (jeweils inklusive). Include schneidet das
+ * Bounding-Box des Dreiecks auf das Rechteck, Exclude laesst nur Pixel
+ * ausserhalb durch. Die Rasterizer-y-Achse liegt wie der Framebuffer
+ * von unten (Anzeige-y = Hoehe-1-raster-y). */
+static void test_scissor_rect(ArmCpu *c, unsigned char *mem)
+{
+    static const struct {
+        uint32_t mode;
+        int inside, outside_x, outside_y_hi, outside_y_lo;
+        const char *name;
+    } cases[] = {
+        {3u, 1, 0, 0, 0, "Include"},
+        {1u, 0, 1, 1, 1, "Exclude"},
+        {0u, 1, 1, 1, 1, "Disabled"},
+    };
+    int i;
+    for (i = 0; i < 3; i++) {
+        uint32_t *q, size;
+        uint32_t o;
+        int red;
+        gpu_pica_reset();
+        memset(mem + 0x40000u, 0, 16u * 16u * 4u);
+        t_quad_vertices(c, VTX, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f);
+        q = (uint32_t *)(mem + LIST);
+        q = t_emit_quad(q, VTX, 16, 16);
+        q = t_emit_fb(q, 0x40000u, 16, 16, 0u);
+        q = emit_tev0(q, 0xEu, 0xEu, 0xFF0000FFu);   /* rot, alpha 255 */
+        q = emit(q, 0x65, cases[i].mode & 3u);
+        q = emit(q, 0x66, 4u | (4u << 16));          /* x1=4, y1=4 */
+        q = emit(q, 0x67, 7u | (7u << 16));          /* x2=7, y2=7 inkl. */
+        q = emit(q, 0x22E, 0u);
+        size = (uint32_t)((unsigned char *)q - (mem + LIST));
+        gpu_run_pica_list(c, LIST, size);
+
+        /* Raster (5,5) liegt im Rechteck; die Anzeige liest dieselbe
+           Pixelposition (Framebuffer-y ist bereits von unten gespiegelt). */
+        o = t_fb_off(0x40000u, 5, 5, 16, 16, 4);
+        red = (mem[o + 3] == 0xFF);
+        {
+            char msg[96];
+            sprintf(msg, "Scissor %s: Pixel im Rechteck %s",
+                    cases[i].name, cases[i].inside ? "geschrieben" : "ausgeschlossen");
+            check(red == cases[i].inside, msg);
+        }
+        /* x=2 liegt links vom Rechteck. */
+        o = t_fb_off(0x40000u, 2, 5, 16, 16, 4);
+        red = (mem[o + 3] == 0xFF);
+        check(red == cases[i].outside_x,
+              i == 0 ? "Scissor Include: links ausserhalb bleibt schwarz"
+                     : "Scissor: links ausserhalb wird geschrieben");
+        /* y=13 liegt oberhalb y2=7, y=2 unterhalb y1=4. */
+        o = t_fb_off(0x40000u, 5, 13, 16, 16, 4);
+        red = (mem[o + 3] == 0xFF);
+        check(red == cases[i].outside_y_hi,
+              i == 0 ? "Scissor Include: oberhalb y2 bleibt schwarz"
+                     : "Scissor: oberhalb y2 wird geschrieben");
+        o = t_fb_off(0x40000u, 5, 2, 16, 16, 4);
+        red = (mem[o + 3] == 0xFF);
+        check(red == cases[i].outside_y_lo,
+              i == 0 ? "Scissor Include: unterhalb y1 bleibt schwarz"
+                     : "Scissor: unterhalb y1 wird geschrieben");
+    }
+}
+
+/* ========== Attribut-Loader/Indexpuffer: VRAM-Basis + FCRAM-Offset ==========
+ * 0x200 ist eine physische Basis, 0x203-Datenoffset bzw. 0x227-Indexpuffer-
+ * offset werden vor der Umrechnung addiert. Im Spiel liegt die Basis im
+ * VRAM-Fenster (0x18000000), der Offset schiebt die Daten in den FCRAM
+ * (0x20000000). Der Port muss deshalb die *Summe* abbilden, nicht Basis und
+ * Offset getrennt (sonst landet der Offset im falschen Fenster).
+ * Test mit eigenem Speicher bis 0x14001FFF (FCRAM -> Linear-Heap). */
+static void test_loader_vram_base_fcram_offset(void)
+{
+    const size_t big = 0x14002000u;
+    unsigned char *bm = (unsigned char *)malloc(big);
+    ArmCpu bc;
+    uint32_t *q, size, w[2];
+    float pos[4];
+    float vv[3][3] = {{-1.0f, -1.0f, 0.0f}, {1.0f, -1.0f, 0.0f}, {0.0f, 1.0f, 0.0f}};
+    uint16_t idx[3] = {2, 0, 1};
+    int vi;
+
+    if (bm == NULL) {
+        check(0, "VRAM-Basis/FCRAM-Offset: Speicher fuer Test fehlt");
+        return;
+    }
+    arm_cpu_init(&bc, bm, (uint32_t)big);
+    gpu_pica_reset();
+
+    /* Vertexdaten: physikalisch 0x18000000 + 0x08000040 = 0x20000040,
+       d. h. Gast 0x14000040. */
+    for (vi = 0; vi < 3; vi++)
+        memcpy(bm + 0x14000040u + (size_t)vi * 16u, vv[vi], sizeof(vv[vi]));
+    memcpy(bm + 0x14000140u, idx, sizeof(idx));   /* Indexpuffer 0x20000140 */
+
+    q = (uint32_t *)(bm + LIST);
+    q = emit(q, 0x4F, 1u);
+    q = emit(q, 0x50, 0x03020100u);       /* o0 -> POSITION */
+    q = emit(q, 0x2BD, 1u);               /* output_mask: o0 */
+    q = emit(q, 0x2B9, 0u);
+    q = emit(q, 0x2BB, 0u);
+    q = emit(q, 0x200, 0x03000000u);      /* (reg>>1)*16 = 0x18000000 (VRAM) */
+    q = emit(q, 0x201, 0x0Bu);            /* Attribut 0: float3 */
+    q = emit(q, 0x202, 0u);               /* max_attribute_index 0 */
+    q = emit(q, 0x203, 0x08000040u);      /* + Offset -> FCRAM 0x20000040 */
+    q = emit(q, 0x204, 0u);               /* Komponente 0 = Attribut 0 */
+    q = emit(q, 0x205, (1u << 28) | (16u << 16));
+    w[0] = ins_common(0x13u, 0u, 0x00u, 0u, 0u, 0u);   /* mov o0, v0 */
+    w[1] = 0x22u << 26;                                 /* END */
+    q = emit_program(q, w, 2);
+    q = emit_swizzle0(q, swz_xyzw());
+    q = emit(q, 0x228, 3u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (bm + LIST));
+    gpu_run_pica_list(&bc, LIST, size);
+    gpu_pica_last_vertex(pos, NULL, NULL);
+    check(pos[0] == 0.0f && pos[1] == 1.0f && pos[2] == 0.0f,
+          "Loader: Basis VRAM 0x18000000 + Offset 0x08000040 -> FCRAM 0x20000040");
+
+    /* Derselbe Mechanismus fuer den Indexpuffer 0x227 (u16). */
+    gpu_pica_reset();
+    q = (uint32_t *)(bm + LIST);
+    q = emit(q, 0x4F, 1u);
+    q = emit(q, 0x50, 0x03020100u);
+    q = emit(q, 0x2BD, 1u);
+    q = emit(q, 0x2B9, 0u);
+    q = emit(q, 0x2BB, 0u);
+    q = emit(q, 0x200, 0x03000000u);
+    q = emit(q, 0x201, 0x0Bu);
+    q = emit(q, 0x202, 0u);
+    q = emit(q, 0x203, 0x08000040u);
+    q = emit(q, 0x204, 0u);
+    q = emit(q, 0x205, (1u << 28) | (16u << 16));
+    w[0] = ins_common(0x13u, 0u, 0x00u, 0u, 0u, 0u);
+    w[1] = 0x22u << 26;
+    q = emit_program(q, w, 2);
+    q = emit_swizzle0(q, swz_xyzw());
+    q = emit(q, 0x227, 0x08000140u | (1u << 31));   /* u16, FCRAM 0x20000140 */
+    q = emit(q, 0x228, 3u);
+    q = emit(q, 0x22F, 0u);
+    size = (uint32_t)((unsigned char *)q - (bm + LIST));
+    gpu_run_pica_list(&bc, LIST, size);
+    gpu_pica_last_vertex(pos, NULL, NULL);
+    check(pos[0] == 1.0f && pos[1] == -1.0f && pos[2] == 0.0f,
+          "Indexpuffer: Basis VRAM + Offset 0x08000140 -> FCRAM 0x20000140");
+
+    free(bm);
+}
+
+int main(void) {
     static unsigned char mem[0x100000];
     ArmCpu c;
     uint32_t *p;
@@ -2877,6 +4271,12 @@ int main(void) {
     test_texture_morton(&c, mem);
     test_texture_wrap(&c, mem);
     test_texture_filter(&c, mem);
+    test_proctex_combiner(&c, mem);
+    test_proctex_clamp_shift(&c, mem);
+    test_proctex_noise(&c, mem);
+    test_proctex_alpha_filter(&c, mem);
+    test_proctex_lut_upload(&c, mem);
+    test_proctex_coordinates(&c, mem);
     test_fb_formats(&c, mem);
     test_logic_ops(&c, mem);
     test_alpha_test(&c, mem);
@@ -2891,13 +4291,31 @@ int main(void) {
     test_triangle_strip(&c, mem);
     test_immediate_topology(&c, mem);
     test_etc1(&c, mem);
+    test_texcache_etc1(&c, mem);
     test_uniform_masks(&c, mem);
     test_no_program(&c, mem);
     test_fb_clamp(&c, mem);
     test_lighting(&c, mem);
     test_lighting_review(&c, mem);
     test_texture_projection_cube(&c, mem);
+    test_gs_point(&c, mem);
+    test_gs_fixed_primitive(&c, mem);
+    test_gs_variable_primitive(&c, mem);
+    test_gs_exclusive_program_share(&c, mem);
+    test_gs_winding(&c, mem);
+    test_gs_output_bank(&c, mem);
+    test_gs_immediate(&c, mem);
+    test_gpu_mmio(&c, mem);
+    test_special_regs(&c, mem);
+    test_scissor_rect(&c, mem);
+    test_loader_vram_base_fcram_offset();
 
     printf("ERGEBNIS: %s\n", fails == 0 ? "OK" : "FEHLER");
+    {
+        const char *b = getenv("PICA_BENCH");
+        if (b && *b && *b != '0') {
+            if (pica_bench() != 0) fails++;
+        }
+    }
     return fails == 0 ? 0 : 1;
 }

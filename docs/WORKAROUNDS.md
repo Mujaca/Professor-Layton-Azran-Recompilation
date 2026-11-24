@@ -101,7 +101,7 @@ deshalb lief der frühere Versuch in eine Endlosschleife; Puffer ist jetzt
 | – | `arm_mem_read/write` | Zugriffe außerhalb des Speichers liefern 0 statt Abbruch (`ARM_STRICT=1` bricht ab) |
 | – | fs `OpenFile`, `file_command` | Sentinel-Dateislot und Erfolg auch bei fehlgeschlagenem Open; `romfs_image.bin` mit Offset +0x1000 |
 | – | `gpu_pica_virt_to_phys` | Adressen außerhalb VRAM/Linear-Heap bleiben unverändert (der Port hat keine MMU/Seitentabelle); echtes GSP lehnt sie ab |
-| – | `p_process_tri` | Rasterizer nach Azahar: Sutherland-Hodgman-Clipping (7 Ebenen + 0x47/0x48..0x4B), Viewport 0x41/0x43/0x68, Perspective-Divide, 12.4-Fixed-Point-Coverage + Top-Left-Bias, perspektivkorrekte Attribute, TEV 0x0C0..0x0FD inkl. Combiner-Buffer, Texturen 0x080..0x09F (alle 14 Formate inkl. ETC1/ETC1A4 mit Subtile `x/4+2*(y/4)`, 8x8-Morton, Wrap/Border, keine Filterung wie Azahar), Fog 0xE0/0xE1/0xE6/0xE8..0xEF (LUT-Upload mit Offset-Inkrement, Flip, Index/Fraktion, vor dem Depth-Test), Output-Merger 0x100..0x107 (Alpha-Blend, LogicOp, Alpha-Test, Kanalmasken) und Farb-/Tiefenziel 0x117/0x11C..0x11E (RGBA8/RGB8/RGB565/RGB5A1/RGBA4 in Azahar-Byte-Reihenfolge, D16/D24/D24S8, Depth-/Stencil-Test, 8x8-Morton, Schreibgrenzen des Farbziels). Fragment-Lighting 0x140..0x1D9 nach `sw_lighting.cpp` (Lichtquellen, Distanz-/Spot-Daempfung, Fresnel, Bump-Mapping, Clamp, LUT-Upload 0x1C5/0x1C8..0x1CF) in die TEV-Quellen Primary/SecondaryFragment sowie Texturtypen auf Einheit 0 (Projection2D, Cube/ShadowCube, Shadow2D inkl. Bias, tc0_w). **Noch offen:** Mipmaps, Proctex (Einheit 3). |
+| – | `p_process_tri` | Rasterizer nach Azahar: Sutherland-Hodgman-Clipping (7 Ebenen + 0x47/0x48..0x4B), Viewport 0x41/0x43/0x68, Perspective-Divide, 12.4-Fixed-Point-Coverage + Top-Left-Bias, perspektivkorrekte Attribute, TEV 0x0C0..0x0FD inkl. Combiner-Buffer, Texturen 0x080..0x09F (alle 14 Formate inkl. ETC1/ETC1A4 mit Subtile `x/4+2*(y/4)`, 8x8-Morton, Wrap/Border, keine Filterung wie Azahar), Fog 0xE0/0xE1/0xE6/0xE8..0xEF (LUT-Upload mit Offset-Inkrement, Flip, Index/Fraktion, vor dem Depth-Test), Output-Merger 0x100..0x107 (Alpha-Blend, LogicOp, Alpha-Test, Kanalmasken) und Farb-/Tiefenziel 0x117/0x11C..0x11E (RGBA8/RGB8/RGB565/RGB5A1/RGBA4 in Azahar-Byte-Reihenfolge, D16/D24/D24S8, Depth-/Stencil-Test, 8x8-Morton, Schreibgrenzen des Farbziels). Fragment-Lighting 0x140..0x1D9 nach `sw_lighting.cpp` (Lichtquellen, Distanz-/Spot-Daempfung, Fresnel, Bump-Mapping, Clamp, LUT-Upload 0x1C5/0x1C8..0x1CF) in die TEV-Quellen Primary/SecondaryFragment sowie Texturtypen auf Einheit 0 (Projection2D, Cube/ShadowCube, Shadow2D inkl. Bias, tc0_w) und prozedurale Textur (Einheit 3: LUT-Upload 0x0AF/0xB0..0xB7, Noise, Shift, Clamp, Combiner, separate Alpha, Nearest/Linear nach `sw_proctex.cpp`). **Noch offen:** Mipmaps (im Azahar-Software-Renderer ebenfalls `TODO`; Min-/Mag-Filter wertet er nicht aus). |
 
 Ohne Vertex-Programm (0x2CB/0x2CC) zeichnet der Port nichts mehr; der frühere
 Attribut-Fallback (Attribut 0 als Position, 1 als UV) und der Schreibpfad in
@@ -1008,6 +1008,58 @@ den kooperativen Scheduler und wurde ohne Not (Boot ist 10/10) nicht gemacht.
 Wandzeit in den Lock-Abgaben und die Zeit, in der der Gast-Lock frei lag –
 reine Zaehler, kein Gastzustand.
 
+### fs-Dateipfad geprueft: Read liefert die echten Bytes – Hypothese ausgeschlossen 2026-11-24
+
+**Hypothese:** Der M3-Haenger (Decoder-Thread wartet auf Nachschub, Bit-Refill
+liest Nullen) kommt daher, dass `fs` `File Read` (`0x0802`) weniger/mehr Bytes
+als angefordert liefert, eine falsche `bytes read` zurueckgibt, Lesen ueber
+64 KiB/RomFS-Grenzen scheitert, verlinkte Sitzungen (`0x080C OpenLinkFile`)
+falsch beantwortet werden oder der Read zu frueh zurueckkehrt.
+
+**Messung** (natuerlicher Boot, `HLE_LOG=1`, `out/port.exe --shot x.bmp
+--frames 1800` = 30 s, Log `scratch/fscheck/fsrun.log`; Bytevergleich gegen die
+mit `tools/extract_romfs.py` entpackten RomFS-Dateien):
+
+| Pruefung | Beleg | Ergebnis |
+|---|---|---|
+| Umfang | 87x `file cmd=0x0802` (dazu 0x0803/04/08/0A/0C) | kein `unbehandelt`, kein unbekanntes Kommando |
+| `bytes read == len` | alle 87 `[file] Read ... -> N` | 0 Kurzlesungen, 0 Reads mit 0 Bytes |
+| Video-Datei komplett | `off=0x26B10510` .. `off=0x26BA0510 len=0x12A4` (8x 0x10000 + 0x12A4) | 0x912A4 = 594.596 Byte = exakte Groesse von `lt6/mov/m999.moflex` |
+| Offset-Umrechnung | `romfs_image.bin[0x26B10510+0x1000 ...] == out/romfs/lt6/mov/m999.moflex` (md5 gleich) | Level-3-Basis +0x1000 trifft die echte Datei |
+| Tonspur | `off=0x379F19C0` + 0x1000 == `lt6/snd/uk/stream/MOV_999.dspadpcm.bcstm` (md5 gleich); 0x220 Header + 5x 0x4000 gelesen | Bytes korrekt; Abbruch nach 0x14220 von 0x4F4A0 Byte, weil der **Gast** keine weitere Anfrage stellt |
+| Zielpuffer | `arm_mem_read/write` adressiert `g_cur_mem` flach (nur Adressen >= 0x20000000 werden auf 0x1FFFFFFF maskiert); Ziele 0x0D0007C0/0x0D0907C0, 0x0042C380, 0x0C682378 liegen direkt im Gast-RAM, `fread` schreibt dorthin | kein Mapping-/Aliasverlust |
+| Verlinkte Sitzung | `0x080C` -> Handle 46 mit eigenem `FILE*` und eigener Position; jede Anfrage nennt ihren Offset, jeder Read seekt explizit | Basis- (h=22, Video) und Link-Stream (h=46, Audio) stoeren sich nicht |
+
+Konsequenz: Alle Teilhypothesen sind widerlegt. Die Dateiebene liefert fuer
+beide Streams die echten Dateibytes in voller Laenge an die vom Gast genannten
+Puffer; die Leseanfragen enden, weil der Gast keine weiteren absetzt. Der
+`+0x1000`-Zusatz fuer den SelfNCCH-RomFS-Strom ist durch Bytevergleich belegt
+richtig. **Die Ursache des Ringpuffer-/Frame-Stalls liegt damit nicht im
+fs-Pfad** (Kandidaten bleiben: Ringpuffer-/Event-Bedingung im Gast-Decoder,
+dessen Datengeber, oder eine Recompiler-Semantik im Decoder).
+
+**Zwei Nicht-Azahar-Abweichungen im Dateipfad entfernt (ohne Messwirkung):**
+`runtime/kernel/hle.c` `File Read`/`Write` hatten einen Heuristik-Zweig
+`length > 16 MiB -> offset = 0, length = p[0]`. Azahar
+(`core/hle/service/fs/file.cpp`) parst `(u64 offset, u32 length)` eindeutig;
+der Zweig haette einen echten Read ueber 16 MiB (z. B. eine 19,7-MB-Moflex am
+Stueck) stillschweigend ab Offset 0 gelesen. Im Boot kommt er nicht vor
+(groesster Read 0x14298), die Messung bleibt gleich.
+
+**Weiter offen (nicht geaendert, weil im Boot nicht wirksam):** Azahar
+modelliert die RomFS-Leselatenz (`RomFSDelayGenerator`,
+`max(len*94+582778, 663124)` ns) und schlaeft den Client-Thread
+(`SleepClientThread`), der Port antwortet synchron/sofort; `GetSize` auf dem
+RomFS-Strom meldet die Imagegroesse (0x38B48000) statt der RomFS-Groesse
+(0x38B47000 aus `reports/azahar_trace.txt`), das Spiel fragt `0x0804` aber nur
+auf `/gamecoin.dat` ab.
+
+**Messstand (Erfolgsmetrik):** `y2r cmd=0x0026 StartConversion` = **0** in
+1800 Host-Frames (30 s), Screenshot 400x480 mit **1** Farbe (000000). Der
+Stand mit 41 StartConversion gehoert zum Branch-Stand von `c60cf43`
+(scan.py-Dekodierung der Decoder-Handler); dieser Arbeitsbaum (Baseline
+`fb31a41`) erreicht den Y2R-Framepfad noch nicht. Frontier vorher/nachher
+unveraendert: services 10/10, Divergenz None, M1/M2 ja, M3 nein, 0 Patches.
 ### 41-Frame-Stall: Videodaten sind vollstaendig geladen, Decoder liest ueber das Paketende – Befund 2026-11-24
 
 **Korrektur der Auftragsannahme (belegt):** Der I/O-Thread hungert nicht und
@@ -1051,6 +1103,43 @@ als Ursache des Decoder-Stalls ausgeschlossen.
 Moflex-Paketkopf pruefen. Faellt die Kopierlaenge zu kurz aus oder laeuft der
 Praesentations-Event dem Kopierer davon, liegt die Ursache dort (Event-Kette
 `0x218xxx`/`0x3902E0`); andernfalls ist es der parallele Decoder-Differenztest.
+
+### MOFLEX-Paketlaengen geprueft: Demuxer ist korrekt – Hypothese ausgeschlossen 2026-11-24
+
+**Hypothese:** Der Decoder liest ueber ein Paketende hinaus, weil die
+Paket→Decode-Puffer-Kopie zu kurz ist oder der Demuxer eine falsche
+Paketlaenge berechnet.
+
+**Unabhaengiger Parser:** `m999.moflex` wurde mit einem eigenen Parser nach
+FFmpeg `libavformat/moflex.c` gelesen (Sync-Header `4C32`, be64-Zeitstempel,
+Blockgroesse, Deskriptoren mit `read_var_byte`, Flags, Bit-Paketkoepfe mit
+`stream_index`/`endframe`/`pkt_size = pop_int(13)+1`). Ergebnis: 663
+Videopakete, zusammen 590.740 Byte (Datei 594.596). Die ersten Pakete sind
+94-Byte-Deltas; ab dem 6-s-Sync-Block folgen grosse Frames (1498, 1108, 1440,
+…). Ein Paket bei `0x1093` ueberschreitet die 4096-Byte-Lesegrenze und wird
+im Port ueber einen Sonderpuffer (`0x0CFFEE4C`) gefuehrt.
+
+**Abgleich mit dem Port (`ARM_WATCH=3902E0`, 30-s-Lauf):** Die 64 vor dem
+Stall in die Decoder-Queue geschobenen Pakete stimmen in **Groesse und
+Reihenfolge exakt** mit dem unabhaengigen Parser ueberein (444, 96, 94 …
+1498, 1108; 0 Abweichungen, `r3-r1+1` bzw. Sonderpuffer). Die Ringadressen
+liegen lueckenlos (`+size+2`), d. h. der Demuxer schreibt die Pakete
+vollstaendig und mit der richtigen Laenge.
+
+**Neue Eingrenzung:** `ARM_WATCH=16A590` (Huffman-/Koeffizientendecoder) zeigt
+als Paketpuffer des beobachteten Decodes `0x0CABE504` – das ist das
+1108-Byte-Paket an Dateioffset `0x205F` (der zweite Frame des 6-s-Blocks,
+Payload `0x2065`). Der Bitstromzeiger laeuft in 600 Helper-Aufrufen bis
+`0x0CABF296`, also bereits ueber das Paketende `0x0CABE957` hinaus; der
+`HLE_STALLDUMP`-Stand ist `r1=0x0CABFDFA` mit Nullen ab dort. Der Decoder
+konsumiert fuer diesen Frame also deutlich mehr Bits als die (belegten)
+1108 Byte. Damit ist die Demuxer-/Kopierlaengen-Hypothese widerlegt; offen
+bleibt die Bit-/Frame-Grenzen-Behandlung des Decoders an der Sync-Grenze
+(Kandidat: Recompiler-Semantik im Codebook-/Tabellenwechsel, nicht fs/fs-Read).
+
+**Naechster Schritt:** Frames an der 6-s-Sync-Grenze (`0x1A5B`) mit dem
+Decoder-Differenztest vergleichen; insbesondere die Tabellenauswahl vor
+`0x16BD1C`/`0x16BC1C` und den Bit-Refill `0x16C568` pro Frame.
 
 ### Decoder wird pro 96-Byte-Chunk gerufen; der 64. Aufruf (nach Frame 41) liest 6,4 KiB – Befund 2026-11-24
 
@@ -1285,6 +1374,47 @@ in der Azahar-Referenz (Gap 112/312). Der Y2R-Ausgabepuffer enthaelt die
 echten Filmbilder (8x8-Kacheln, RGB24, 512x240). Offen: das Spiel zeichnet
 die Textur noch nicht (keine PICA-Draws), der Bildschirm bleibt einfarbig.
 
+### Filmtextur-Hypothese ausgeschlossen: das Spiel sendet gar keinen Draw – Befund 2026-11-24
+
+**Hypothese (PICA-Strang):** Der Film wird ueber eine PICA-Textur aus dem
+Y2R-Puffer gezeichnet, aber der Draw-Pfad (0x27B34C -> Builder 0x1323FC)
+fehlt im Port. Dann muesste mindestens eine PICA-Liste die Textur 0x081..0x08E
+auf den Y2R-Ausgabepuffer zeigen bzw. einen Trigger (0x22E/0x22F, Immediate,
+Kanal-Sprung) enthalten.
+
+**Messung** (natuerlicher Boot, `HLE_PICA_DIAG=1`, 900 Host-Frames
+`scratch/pica_diag_900.log`; Rohdumps `scratch/pica/list_*.bin`; zusaetzlich
+1400-Frame-Lauf mit `ARM_WATCH`/`HLE_STALLDUMP`):
+
+| Pruefung | Beleg | Ergebnis |
+|---|---|---|
+| Listen/Trigger | 4179 `[gpu] list`-Zeilen, alle `draws=0` | jeder Trigger fehlt: in **keinem** Rohdump steht das Bytepaar `2E 02`/`2F 02` (54 Dateien, alle Bytepositionen geprueft) |
+| Textur auf Y2R-Puffer | Y2R-Ziele 0x15E3DE00/0x15E9DE00 -> PICA-Adressfeld 0x02BC7BC0/0x02BD3BC0 (`PAddr = address*8`) | **0 Treffer**; tatsaechlich gesetzte Textur 0x085 = 0x030A2340 (-> 0x18511A00, VRAM-Textur) |
+| Immediate-Mode 0x232/0x233/0x234/0x235 | Histogramm zeigt je 12 Schreibzugriffe in mehreren Listen | das ist `vs_default_attributes_setup` (Azahar `regs_internal.h:114`), **kein** Draw-Trigger |
+| Attribut-Loader ohne Trigger | Listen enthalten 0x205..0x227, 0x228, 0x25E, VS-Uniforms 0x2C0/0x2C1 (31-Wort-Block), TEV/Lighting, Texturen 0x080..0x08E, dann Finalize 0x010 | kompletter Draw-**Zustand** wird geschrieben, nur der Draw-Befehl fehlt |
+| Kanal-Spruenge 0x23C/0x23D | `[picadiag] ... jumps=0` in allen Listen | keine |
+| GSP-Kommandos | 64x 0x0001 WriteHWRegs (GPU-Init/Framebuffer), 4x 0x0002 (Trigger/Finished loeschen), 1x 0x000B SetLcdForceBlack, 12006x 0x000C TriggerCmdReqQueue | **kein** 0x0003 DisplayTransfer, 0x0004 TextureCopy oder 0x0007 RequestDma |
+| CPU-Direkt-MMIO | `ARM_MEMWATCHRANGE=1EF00000,1000` | 0 Schreibzugriffe (Trigger kommen ausschliesslich ueber GSP/Kommandolisten) |
+| Renderer-Pfad | `ARM_WATCH`, 1400/1000/700 Frames | 0x27B34C, 0x1323FC, 0x132130, die Aufrufer-Einstiege 0x11AD4C/0x250FE8/0x256E40/0x27B6CC/0x2812EC und alle BL-Aufrufstellen (0x11AD98, 0x251004, 0x256E5C, 0x27B71C, 0x281314) je **0 Treffer** |
+| GSP-Queue | 4179 FlushCacheRegions, 0 `ungueltig` | keine verworfene/abgeschnittene Liste |
+
+**Ergebnis:** Die Hypothese ist widerlegt. Der Port verliert keinen Draw: das
+Spiel schickt nach dem Film **ueberhaupt keinen** Draw (weder Textur-Quad noch
+Immediate/GS/Kanal-Sprung und auch keinen Transfer des Y2R-Puffers). Die
+Engine fuellt ihre Kommandopuffer mit vollstaendigem Material-/Uniform-Zustand
+und beendet jede Liste mit Finalize, ruft aber den Draw-Builder nie auf. Der
+Blocker liegt damit **oberhalb von PICA**: Es fehlt die Szene/der
+Renderer-Aufruf (die Aufrufstellen 0x11AD98/0x251004/0x256E5C/0x27B71C/
+0x281314 und der Builder 0x1323FC sind im gesamten Lauf 0x-frei), nicht
+ein PICA-Befehl. Im selben 1400-Frame-Lauf stehen mehrere Gast-Threads in
+`svc 0x22` auf 0x0040F120 (siehe Abschnitt „Stall nach der zweiten
+PICA-Liste“); der Hauptthread kommt dort nicht zur Szenen-/Draw-Abgabe.
+
+**Naechster Schritt:** Die Bedingung suchen, die den Renderer-Aufruf
+verhindert (Szene-/Node-Liste leer, Movie-Player-Zustand, oder
+Mutex-Halter 0x0040F120). Dafuer den Halter-Thread per
+`tools/cosim/lockstep_run.sh` an seiner heissen Funktion (fn_00269E94) gegen
+Unicorn vergleichen. Kein Workaround eingebaut.
 ### Nach dem Intro-Film: zweite Wiedergabe ohne Praesentation; Savedata-Hypothese ausgeschlossen – Befund 2026-11-24
 
 **Auftragshypothese (fs/Savedata) ist widerlegt.** Die IPC-/fs-Antworten der
@@ -1507,6 +1637,57 @@ leer.
 Ressourcen-Set-Manager um `0x1FBxxx`/`0x23Dxxx` (vtable `0x3C6010`). Erst
 wenn ein *Schreibversuch* auf `0x408918`/`0x408920` existiert und
 fehlschlaegt, ist eine Runtime-Korrektur belegbar.
+### Nach dem Intro-Film: Szenenwechsel laeuft, Titel-Ressourcen werden entpackt (2026-11-24)
+
+**Korrektur der Auftragsannahme (belegt):** Der Film endet nicht nur regulaer mit
+Zustand 2, die Szenen-/Ablaufsteuerung **wechselt auch weiter**. Bisherige
+Notizen („Szene wechselt nicht") beruhten auf Laeufen, die vor dem Filmende
+endeten oder nur den Presenter betrachteten.
+
+**Belege** (natuerlicher Boot, 155-s-Lauf `scratch/scene/w_long.log`,
+`ARM_MEMWATCH=0x00408A40`, `HLE_LOG=1`; 80-s-Lauf mit `ARM_MEMWATCH` auf das
+Zustandsbyte `0x1667FE70`; 40-s-Perfmap `scratch/scene/perf40.txt`):
+
+* **Film-Ende:** Zustandsbyte `obj+8` (`0x1667FE70`) laeuft
+  `1 -> 5 -> 4 -> 8 -> 3 -> 2` (Schreiber `pc=0x00218B7C`, Rueckkehr
+  `lr=0x312808/0x312638/0x312674`). Das Loop-Flag (`fn_00277A44`) ist 0, der
+  Player startet also nicht neu.
+* **Wechsel danach:** Zustand 0 (`lr=0x311B0C`), Objekt wird per
+  `0x1F7980`/`0x28EEE8` (memset) neu initialisiert. Danach oeffnet Thread
+  `th=F82` (TLS `F82xxx`) das SaveData-`/head.lt6` (Read `0x9768` Byte),
+  initialisiert `boss:U` (`InitializeSession`, `GetTaskIdList`,
+  `ReceiveProperty 0x35/0x36` – beide im Port noch generisch) und startet den
+  Ressourcen-Lader `th=F8D`.
+* **Titel-Ressourcen:** `th=F8D` liest genau **5** Eintraege aus dem
+  `.fa`-Archiv (Datei Handle 22): `0x473AE0/0x12E8`, `0x0D312244/0x33340`,
+  `0x121B54A4/0xFEAA8`, `0x122B3F50/0x9278`, `0xD2383B0/0xD9E90`.
+  Weitere fs-Reads gibt es im restlichen Lauf **nicht**; die Daten liegen
+  vollstaendig im Speicher.
+* **Entpacken laeuft:** `fn_00270B14` (Archiv-Eintrag entpacken, Aufrufer
+  `lr=0x26B8D8` in `fn_0026B...`, danach GL-Ressource `0x2804B8`) wird im
+  50-s-Lauf 55x mit **paarweise verschiedenen** `(Quelle, Groesse)` aufgerufen
+  (u. a. `0xFEAA8`, `0x38404`, `0x33340`, `0xD9E90`). Der Perfmap-Hotspot
+  `0x270D20..0x270D88` liegt bei Thread `ti=E` (1,6 M Bloecke in 40 s), der
+  Lader `ti=D` in `fn_00269E94` plus Mutex `0x28F028/0x28F064` (je 11,8 k).
+  Es ist also **kein** Futex-Stillstand: die Entpack-/GL-Init-Kette rechnet.
+* **Was nie passiert:** In 155 s **kein** `draws>=1` (0 Listen mit Draw),
+  **kein** Renderziel-Bind: `ARM_MEMWATCH=0x00408A40` (`ctx0+0x24`) liefert
+  ausschliesslich Wert 0 (400 Treffer), Registry `0x408918/0x408920` bleibt
+  leer. 12.690 `SetBufferSwap` (~6.300 Frames) nur mit den 14 Setup-Listen.
+* **Hauptthread:** `ti=2` schlaeft in einer 1-ms-Poll-Schleife
+  (`r0=0x000F4240`, `lr=0x0010208C`, `0x28F1E8` -> `0x28796C`), also die
+  bekannte Wartestelle mit 1-7 ms Sleep.
+
+**Ergebnis:** Die Bedingung „Film fertig" **ist erfuellt** (Zustand 2, Player
+beendet, Objekt zurueckgesetzt, Szene laeuft weiter). Offen ist die Bedingung
+„Folgeszene geladen/initialisiert": die Titel-Ressourcen werden aus dem `.fa`
+gelesen und entpackt, die GL-/Renderziel-Initialisierung kommt aber nicht bis
+zum Bind, weshalb Registry und Draws leer bleiben. Naechster Schritt: die
+Entpack-/GL-Init-Kette (Thread `ti=D`/`ti=E`, `fn_0026B...` -> `0x270B14` ->
+`0x2804B8`) bis zum Ende verfolgen und pruefen, ob ein Eintrag haengt oder ob
+die Kette nur viele Eintraege abarbeitet; parallel die beiden generischen
+`boss:U`-Kommandos (`0x000E`, `0x0016`) nach Azahar vervollstaendigen.
+Kein Workaround eingebaut.
 ### Erster selbst gerenderter Frame (M3/M4) – 2026-11-24
 
 Drei weitere Fehler verhinderten nach dem Film jedes Bild:
@@ -1613,3 +1794,45 @@ finden. Vier Ursachen lagen hintereinander:
 `[gsp] SetBufferSwap` (M2) und PICA-Listen mit `draws>0` (M3);
 `python tools/check.py --full` ist gruen. Kein Spielcode-Patch, keine
 Eintraege in `tools/workarounds/`.
+### Unterscreen schwarz: das Spiel rendert dort schwarzen Inhalt – Befund 2026-11-24
+
+**Auftragsannahme („der Port zeigt Bildschirm 1 nicht an") ist widerlegt.** Die
+Anzeige und der PICA-/GSP-Pfad fuer den Unterscreen funktionieren; der Inhalt
+ist in der aktuellen Szene nach dem Intro RGB-schwarz.
+
+**Belege** (natuerlicher Boot, `--frames 1800`, Diagnose nur lesend):
+
+* GSP meldet jeden Frame beide Screens: `SetBufferSwap screen=0 fb=0x1F300000`
+  (bzw. `0x1F346500`) und `screen=1 fb=0x1F000000` (bzw. `0x1F038400`),
+  stride `0x2D0`, fmt `0x301` (RGB8). Beide Puffer sind im Shot korrekt
+  gelatcht.
+* `HLE_PICA_TARGET=1`: Das Spiel rendert abwechselnd mit Farbziel
+  `phys=0x182A2300` und `240x400` (oben) bzw. `240x320` (unten), Format RGBA8.
+  Es gibt also echte Unterscreen-Draws.
+* `HLE_GSPQ_LOG=1`: Je Frame sechs `DisplayTransfer`s aus demselben
+  Offscreen-Ziel, u. a. `0x182A2300 -> 0x18000000` und `-> 0x18038400`
+  (Unterscreen, 240x320, flags `0x1001` = flip + RGB8-Ausgabe) sowie
+  `-> 0x18300000`/`0x18346500` (Oben, 240x400). Die Semantik entspricht
+  Azahar `SwBlitter::DisplayTransfer` (tiled RGBA8 -> lineares RGB8, Flip).
+* `HLE_VRAM_DUMP`: Nach 1800 Frames sind die Unterscreen-Puffer
+  `0x1F000000..0x1F070800` komplett 0, der obere Puffer dagegen gefuellt.
+  Die Quelle des Unterscreen-Transfers (`0x1F2A2300`, 240x320) ist in allen
+  102 geprueften Transfers eines 600-Frame-Laufs RGB-schwarz (Alpha teils
+  `0xFF`, also deckend schwarz). Damit ist der schwarze Unterscreen
+  **Spielinhalt dieser Szene**, kein Fehler von GSP/PICA oder der Anzeige.
+* Die Azahar-Referenzbilder (`reports/azahar_topscreen.png` /
+  `azahar_bottomscreen.png`) zeigen den **Titelbildschirm** (weisse UI unten).
+  Der 1800-Frame-Port-Lauf steht noch in der dunklen Folgeszene nach dem Intro;
+  ein Pixelvergleich ist daher nicht sinnvoll (Korrelation ~0,0). Der
+  Farbvergleich/Orientierungsabgleich gehoert zu M5.
+
+**Tests ergaenzt** (`tests/pica_selftest.c`, beide gruen):
+* `test_scissor_rect`: Modus 0/1/3 mit Rechteck `x1/y1=4`, `x2/y2=7`;
+  Include schreibt nur innerhalb, Exclude nur ausserhalb, Disabled schneidet
+  nicht (Azahar `sw_rasterizer.cpp`).
+* `test_loader_vram_base_fcram_offset`: 0x200-Basis `0x18000000` (VRAM) plus
+  Loader-Offset `0x08000040` bzw. Indexpuffer-Offset `0x08000140` landet
+  korrekt bei FCRAM `0x20000040`/`0x20000140` (Gast `0x14000040`/`0x14000140`).
+  Ohne die gemeinsame Umrechnung der Summe schlaegt der Test fehl.
+
+Kein Workaround eingebaut; `tools/workarounds/` bleibt leer.

@@ -143,6 +143,11 @@ Assets: 3 × Level-5-`ARC0` (`lt6_*.fa`), 566 × BCSTM, 34 × MOFLEX. Texturen
   Bit1 input_linear, Bit2 crop_input_lines, Bit5 dont_swizzle, Bits8..10
   bzw. 12..14 Pixelformat, Bits24..25 Scaling. Gekachelt wird in 8x8-Morton-
   Reihenfolge (`VideoCore::GetMortonOffset`).
+  Registerfeld (`regs_external.h`, `DisplayTransferConfig` ab 0x1EF00C00):
+  0x300 input_address, 0x301 output_address, 0x302 output_size,
+  0x303 input_size, 0x304 flags, 0x306 trigger, 0x308 texture_copy.size,
+  0x309 input_width/input_gap (je u16), 0x30A output_width/output_gap.
+  Fuer TextureCopy zaehlt `size & ~0xF`; die unteren 4 Bit werden ignoriert.
 * Spiele warten im Render-Loop auf PDC0/P3D-Interrupts. Ohne korrekt
   signalisierte Events (RegisterInterruptRelayQueue-Event) hängt der
   Render-Task.
@@ -159,7 +164,7 @@ Die Maske wird byteweise angewandt (`Azahar ExpandBitsToBytes`, z. B. `0x5`
 
 | Register | Bedeutung |
 |---|---|
-| `0x010` | `irq_request` (Finalize): bei Byte-Treffer gegen `irq_compare` (`0x020`) P3D-Interrupt; `irq_autostop` (`0x034`, Default 1) beendet die Liste. GSP-Defaults: `irq_compare=0x12345678`, `irq_mask=0xFFFFFFF0`, `irq_autostop=1`. |
+| `0x010` | `irq_request` (Finalize): bei Byte-Treffer gegen `irq_compare` (`0x020`) P3D-Interrupt; `irq_autostop` (`0x034`, Default 1, jeder Wert ungleich 0) beendet die Liste. GSP-Defaults: `irq_compare=0x12345678`, `irq_mask=0xFFFFFFF0`, `irq_autostop=1`. |
 | `0x080` | `main_config`: Bit0..2 Textur 0..2 enable, Bit10 Textur 3, Bit13 `texture2_use_coord1`, Bit16 `clear_texture_cache` |
 | `0x081`/`0x091`/`0x099` | Textureinheit 0/1/2: `+0` border_color, `+1` Größe (h Bits 0..10, w 16..26), `+2` Wrap (`wrap_t` Bits 8..10, `wrap_s` 12..14), Filter (mag Bit 1, min Bit 2, mip Bit 24), Typ Bits 28..30 (0 = 2D, 5 = disabled), `+3` LOD, `+4` Adresse>>3. **Nur Einheit 0 beachtet den Typ** (3dbrew; Azahar `TextureColor`); Einheit 3 ist die prozedurale Textur (0xA8..0xB7), kein adressiertes Bild. |
 | `0x08E`/`0x096`/`0x09E` | Texturformat 0..13: RGBA8, RGB8, RGB5A1, RGB565, RGBA4, IA8, RG8 (HILO8), I8, A8, IA4, I4, A4, ETC1, ETC1A4 |
@@ -172,10 +177,16 @@ Die Maske wird byteweise angewandt (`Azahar ExpandBitsToBytes`, z. B. `0x5`
 | `0x239`/`0x23B`/`0x23D` | Kanal 1: dieselben Felder |
 | `0x2C0`–`0x2FF` | Vertex-Shader (Uniforms, Programm, Swizzle) |
 | `0x0C0`–`0x0FF` | TEV-Stufen |
+| `0x0A8`–`0x0AD` | Prozedurale Textur (Einheit 3): Konfiguration, Noise, LUT-Parameter |
+| `0x0AF` | Proctex-LUT-Index (Bits0..7) und Tabelle (Bits8..11) |
+| `0x0B0`–`0x0B7` | Proctex-LUT-Daten; jedes Wort schreibt bei `index` und erhöht ihn |
 
-Ein Schreibzugriff auf `0x23C`/`0x23D` startet die Liste des Kanals und
-**ersetzt** die laufende Liste (Azahar `cmd_list.Reset`): der Rest der alten
-Liste wird nicht mehr ausgeführt. Ungültige Adresse/Größe meldet P3D.
+Ein Schreibzugriff auf `0x23C`/`0x23D` **in einer Kommandoliste** startet die
+Liste des Kanals und **ersetzt** die laufende Liste (Azahar
+`HandleSpecialReg` -> `cmd_list.Reset`): der Rest der alten Liste wird nicht
+mehr ausgeführt; eine Größe 0 beendet die Verarbeitung. Anders als beim
+GSP-Pfad gibt es dabei keine Gültigkeitsprüfung und kein P3D, und der Trigger
+bleibt im Register stehen.
 
 ### PICA-Adressen
 
@@ -265,6 +276,57 @@ MMU/Seitentabelle hat.
 Das Titelbild ist ein 3D-Render (`title.xc`): korrekte Darstellung braucht
 zusätzlich **TEV** und die Rasterizer-Zustände (Viewport/Clip/Depth).
 
+### Geometrie-Shader (Shader-Einheit 3)
+
+Quelle: Azahar `pica/regs_shader.h`, `pica/regs_pipeline.h`,
+`pica/geometry_pipeline.cpp`, `pica/shader_unit.cpp` (`GeometryEmitter`),
+`pica/pica_core.cpp` (`HandleSpecialReg`), nihstro `shader_bytecode.h`.
+
+* Register `0x280..0x2AF` sind eine zweite Shader-Einheit mit demselben
+  Aufbau wie der VS (`0x2B0..0x2DF`, Versatz -0x30): `0x280`
+  `bool_uniforms`, `0x281..0x284` `int_uniforms`, `0x289`
+  `input_buffer_config` (Bits 0..3 `max_input_attribute_index`, 8..15
+  `input_to_uniform`, 24..31 `shader_mode` 8 = GS / 0xA0 = VS), `0x28A`
+  `main_offset`, `0x28B`/`0x28C` Input-Map (4 Bit je Attribut), `0x28D`
+  `output_mask`, `0x290` Uniform-Index (Bit31 = float32), `0x291..0x298`
+  `set_value`, `0x29B` Programm-Offset, `0x29C..0x2A3` `set_word`, `0x2A5`
+  Swizzle-Offset, `0x2A6..0x2AD` `set_word`. Programm- und Swizzle-RAM sind je
+  4096 Wörter groß; die **VS**-Register adressieren nur Wort 0..511
+  (Schreibzugriffe darüber werden verworfen), die GS-Register alle 4096.
+* Pipeline: `0x229` Bits 0..1 `use_gs` (2 = an), Bit31 `variable_primitive`;
+  `0x242` `max_input_attribute_index` des Vertex-Loaders/Immediate-Modus;
+  `0x244` `gs_unit_exclusive_configuration` (0: VS-Uploads spiegeln Programm,
+  Swizzle, Uniforms, Bool-/Int-Uniforms und `output_mask` nach Einheit 3,
+  solange `use_gs == 0`); `0x24A`/`0x251` `vs_outmap_total_minus_1_a/b`
+  (Anzahl VS-Ausgangsattribute); `0x252` `gs_config` (Bits 0..7 Modus
+  0 Point / 1 VariablePrimitive / 2 FixedPrimitive, 8..11
+  `fixed_vertex_num_minus_1`, 12..15 `stride_minus_1`, 16..23 `start_index`);
+  `0x254` `variable_vertex_main_num_minus_1`.
+* **Point:** VS-Ausgaben füllen den GS-Eingangspuffer (`0x289` Bits 0..3 + 1
+  Attribute); ist er voll, läuft der GS mit Input-Map `0x28B`/`0x28C`.
+  **VariablePrimitive:** der erste Wert eines Index-Batches ist die
+  Vertexzahl und steht danach als Uniform `f[0]`; die Vertexdaten landen ab
+  `f[1]` in den Uniforms, nur die ersten `0x254+1` Vertices erhalten alle
+  Attribute, alle weiteren nur Attribut 0. **FixedPrimitive:** wie Variable,
+  aber feste Vertexzahl ab `start_index`. Ohne GS geht die VS-Ausgabe direkt
+  in die Primitive Assembly.
+* `EMIT` (0x2A) kopiert die Ausgangsregister laut `output_mask` nach
+  `buffer[vertex_id]` und wechselt danach die Ausgangsbank. Es gibt **zwei**
+  Bänke: ein zwischen zwei EMITs nicht beschriebenes Register liefert den
+  Wert von vor zwei EMITs. Bei `prim_emit` gehen alle drei Puffer in die
+  Primitive Assembly; `winding` invertiert dort (nur Topologie Shader)
+  die Windung des nächsten Dreiecks. `SETEMIT` (0x2B): Bits 0..1
+  `vertex_id`, Bit 2 `prim_emit`, Bit 3 `winding`. Bool-Uniform b15 ist nach
+  jedem GS-Aufruf gesetzt.
+* `ConfigOutput` kopiert `output_mask` (0x28D) beim `Reconfigure` (je Draw)
+  in den Emitter; spätere Schreibzugriffe auf 0x28D wirken erst beim nächsten
+  Draw. Der Immediate-Modus (`0x232 == 0xF`, Attribute über `0x233..0x235`)
+  läuft ebenfalls durch die Geometrie-Pipeline (`PicaCore::DrawImmediate`);
+  `immediate.Reset()` beim Schreiben von 0x232 setzt
+  `reset_geometry_pipeline`, sodass erst der nächste Immediate-Flush
+  rekonfiguriert und der Backend-Zustand über weitere Vertices erhalten
+  bleibt.
+
 ### Rasterizer, Clipping, TEV und Farbziel
 
 Quelle: Azahar `renderer_software/sw_rasterizer.cpp`, `sw_clipper.cpp`,
@@ -325,6 +387,28 @@ Quelle: Azahar `renderer_software/sw_rasterizer.cpp`, `sw_clipper.cpp`,
   `t = height - 1 - t`. Der Azahar-Software-Renderer wertet Min-/Mag-Filter
   nicht aus (`TODO: Apply the min and mag filters`), sondern liest immer den
   nächsten Texel.
+* **Prozedurale Textur (Einheit 3, `sw_proctex.cpp`):** eigener Zustand in
+  0x0A8..0x0AD/0x0AF/0xB0..0xB7, kein adressiertes Bild. 0x0A8: `u_clamp`
+  Bits0..2, `v_clamp` 3..5, `color_combiner` 6..9, `alpha_combiner` 10..13,
+  `separate_alpha` Bit14, `noise_enable` Bit15, `u_shift` 16..17,
+  `v_shift` 18..19. 0x0A9/0x0AA: Amplitude (fix1.3.12, Bits0..15 signed)
+  und Phase (float16, Bits16..31). 0x0AB: Frequenz u/v je float16.
+  0x0AC: Filter Bits0..2, `width` Bits11..18. 0x0AD: LUT-Offset `level0`
+  Bits0..7. 0x0AF: `index` Bits0..7, `ref_table` Bits8..11 (0 Noise,
+  2 ColorMap, 3 AlphaMap, 4 Color, 5 ColorDiff); 0xB0..0xB7 schreiben je
+  ein Wort bei `index` und erhöhen ihn (mod 256; 128er-Tabellen modulo 128).
+  Wertetabellen: 128 Einträge, Bits0..11 value/4095, Bits12..23 signed
+  diff/4095. Farbtabellen: 256 × RGBA8; ColorDiff je Kanal signed Byte ×2.
+  Ablauf: `u=|u|`, `v=|v|`; Shift-Offset `0.5` (`1.0` bei MirroredRepeat)
+  aus `((int)v/2)%2` (Odd) bzw. `(((int)v+1)/2)%2` (Even); optional Rauschen
+  (Rand1D/Rand2D-Tabellen, bilinear mit der Noise-LUT); Shift, Clamp
+  (0 ToZero, 1 ToEdge, 2 SymmetricalRepeat, 3 MirroredRepeat, 4 Pulse),
+  Combiner (U, U², V, V², (u+v)/2, (u²+v²)/2, sqrt(u²+v²), Min, Max,
+  RMax) durch die ColorMap-LUT; Farbe = ColorTable[offset + c*(width-1)]
+  (Nearest oder Linear mit Diff-Tabelle). `separate_alpha` ersetzt Alpha
+  durch die AlphaMap desselben Combiners. Die Min-/Mag-Filter der Textur-
+  einheit wertet Azahar nicht aus; Mipmap-LOD ist dort ebenfalls TODO, die
+  Mipmap-Filter verhalten sich wie Nearest/Linear.
 * **Texturtypen (nur Einheit 0, 3dbrew/Azahar `TextureColor`):** Typ in
   0x83 Bits28..30: 0 Texture2D, 1 TextureCube, 2 Shadow2D, 3 Projection2D,
   4 ShadowCube, 5 Disabled (liefert 0,0,0,0). Einheiten 1/2 ignorieren den
@@ -695,6 +779,11 @@ Assets: 3 × Level-5-`ARC0` (`lt6_*.fa`), 566 × BCSTM, 34 × MOFLEX. Texturen
   Bit1 input_linear, Bit2 crop_input_lines, Bit5 dont_swizzle, Bits8..10
   bzw. 12..14 Pixelformat, Bits24..25 Scaling. Gekachelt wird in 8x8-Morton-
   Reihenfolge (`VideoCore::GetMortonOffset`).
+  Registerfeld (`regs_external.h`, `DisplayTransferConfig` ab 0x1EF00C00):
+  0x300 input_address, 0x301 output_address, 0x302 output_size,
+  0x303 input_size, 0x304 flags, 0x306 trigger, 0x308 texture_copy.size,
+  0x309 input_width/input_gap (je u16), 0x30A output_width/output_gap.
+  Fuer TextureCopy zaehlt `size & ~0xF`; die unteren 4 Bit werden ignoriert.
 * Spiele warten im Render-Loop auf PDC0/P3D-Interrupts. Ohne korrekt
   signalisierte Events (RegisterInterruptRelayQueue-Event) hängt der
   Render-Task.
@@ -709,8 +798,11 @@ Assets: 3 × Level-5-`ARC0` (`lt6_*.fa`), 566 × BCSTM, 34 × MOFLEX. Texturen
 * Ein FrameBufferUpdate-Slot (0x40 Byte, GSP-Shared-Memory
   `+0x200 + (2*thread + screen)*0x40`) enthält `index` (Byte 0, `&1` wählt
   den Eintrag), `is_dirty` (Byte 1, Bit0) und zwei FrameBufferInfo-Einträge
-  ab `+0x08`/`+0x28`. GSP übernimmt einen Eintrag nur bei `is_dirty` (und
-  löscht das Flag) oder wenn ein Buffer-Swap erzwungen wird.
+  ab `+0x04`/`+0x20` (Azahar `FrameBufferUpdate`:
+  `u8 index; u8 is_dirty; u16 pad; FrameBufferInfo framebuffer_info[2];
+  u32 pad`, 0x40 Byte).
+  GSP übernimmt einen Eintrag nur bei `is_dirty` (und löscht das Flag) oder
+  wenn ein Buffer-Swap erzwungen wird.
 * `gsp::Gpu SetBufferSwap` (IPC 0x0005) und der VBlank-Pfad schreiben die
   GPU-Framebuffer-Register (Azahar `GPU::SetBufferSwap`,
   `video_core/gpu.cpp`): `address_left1`/`address_left2` werden nach
@@ -893,6 +985,9 @@ ungerader Länge ein Pad-Wort (8-Byte-Ausrichtung).
 | `0x238`–`0x23D` | Kommandopuffer-Kanäle (Größe/Adresse/Jump) |
 | `0x2C0`–`0x2FF` | Vertex-Shader (Uniforms, Programm, Swizzle) |
 | `0x0C0`–`0x0FF` | TEV-Stufen |
+| `0x0A8`–`0x0AD` | Prozedurale Textur (Einheit 3): Konfiguration, Noise, LUT-Parameter |
+| `0x0AF` | Proctex-LUT-Index (Bits0..7) und Tabelle (Bits8..11) |
+| `0x0B0`–`0x0B7` | Proctex-LUT-Daten; jedes Wort schreibt bei `index` und erhöht ihn |
 
 Das Titelbild ist ein 3D-Render (`title.xc`): korrekte Darstellung braucht
 einen **Vertex-Shader-Interpreter/Übersetzer** und **TEV**.
@@ -1069,9 +1164,56 @@ einen **Vertex-Shader-Interpreter/Übersetzer** und **TEV**.
 * **Logische Operationen mit Immediate**: C ist Bit 31 des expandierten
   Immediates, wenn der Shifter tatsaechlich rotiert; bei Rotation 0 bleibt C
   unveraendert. Thumb-2: die Muster `00XY00XY`/`XY00XY00`/`XYXYXYXY` lassen C
-  unveraendert, sonst gilt die Rotationsregel (ARM ARM ThumbExpandImm_C).* **ARMv6K kennt kein `rbit`** (erst ARMv6T2/ARMv7); `setend` existiert in
+  unveraendert, sonst gilt die Rotationsregel (ARM ARM ThumbExpandImm_C).
+* **ARMv6K kennt kein `rbit`** (erst ARMv6T2/ARMv7); `setend` existiert in
   ARMv6, kommt im Spiel-Image aber nicht vor. Kein Code im Port erzeugt
   Big-Endian-Zugriffe.
+
+### GSP/GPU-Register (MMIO, verifiziert gegen Azahar 2026-11-24)
+
+* **Adressbasis:** `gsp::Gpu`-Clients schreiben/lesen GPU-Register mit
+  Offsets ab `REGS_BEGIN = 0x1EB00000` (`gsp_gpu.cpp`). Gueltig ist
+  `addr < 0x420000` und wortausgerichtet; die Puffergroesse kommt aus dem
+  StaticBuffer-Deskriptor (max. `0x80`, der `size`-Parameter der Kommandos
+  wird von Hardware ignoriert). Fehler: `0xE0E02A01`
+  OutOfRangeOrMisaligned, `0xE0E02BEC` InvalidSize, `0xE0E02BF2`
+  MisalignedSize, `0xD8202A06` NoGpuRight, `0xE0E02BF5` InvalidBuffer.
+* **Bereiche** (`VideoCore::GPU::ReadReg/WriteReg`, `VADDR_GPU`):
+  `0x1EF00000..0x1EF00FFF` externe PICA-Register (MemoryFill
+  `0x010..0x02F`, Framebuffer-Konfiguration `0x400..0x5FF`,
+  DisplayTransfer/TextureCopy `0xC00..0xC2F`), `0x1EF01000..0x1EF01BFF`
+  interne PICA-Register (IDs `0x000..0x2FF`, dieselben wie in
+  Kommandolisten), `0x1ED02000..` LCD (ColorFill `0x204`/`0xA04`,
+  Backlight `0x240`/`0xA40`).
+* **Schreiben:** Wert wird gespeichert; `WriteHWRegsWithMask` rechnet
+  `reg = (reg & ~mask) | (value & mask)`. `WriteHWRegRepeat` schreibt jedes
+  Datenwort auf dieselbe Registeradresse.
+* **Trigger** (nach der Operation zurueckgesetzt):
+  * `0x01C`/`0x02C` `control.bit0` -> MemoryFill 0/1; danach `bit1`
+    (finished) = 1 und PSC0/PSC1. Interrupt nur, wenn die Startadresse != 0
+    ist. Bei GX-Kommando 2 mit **beiden** Puffern meldet Puffer 0 keinen
+    Interrupt, Puffer 1 PSC0.
+  * `0xC18` `trigger.bit0` -> DisplayTransfer (Flags Bit3 = TextureCopy),
+    danach PPF.
+  * `0x123C`/`0x123D` -> Kommandoliste Kanal 0/1 (`SubmitCmdList`); der
+    Trigger wird nur bei Wert != 0 ausgefuehrt und danach auf 0 gesetzt. Eine
+    Laenge von 0 ist gueltig (fuehrt nichts aus); ein nicht abbildbarer
+    Bereich meldet P3D. GX-Kommando 0x01 schreibt Adresse/Groesse vorher in
+    `0x238`/`0x23A` (dieselben Register wie ein WriteHWRegs).
+* **Kommandopuffer-Header** (`gsp_command.h`, `TriggerCmdReqQueue`):
+  `index:8`, `number_commands:8`, `status:8`, `should_stop:8`; Kommandos je
+  `0x20` Byte ab `+0x20`, Index laeuft modulo 15. `status=0x1` STOPPED,
+  `0x80` CMD_FAILED; das Fehler-Result steht in `unk[0]` (Header+4). Ein
+  fehlgeschlagenes Kommando setzt 0x80, das Stop-Bit des Kommandos
+  anschliessend 0x1 (Vorrang).
+* **Interrupt-IDs:** PSC0=0, PSC1=1, PDC0=2, PDC1=3, PPF=4, P3D=5, DMA=6.
+  PDC0/PDC1 werden ab `number_interrupts >= 0x20` nicht mehr eingereiht,
+  sondern als `missed_PDC0/1` gezaehlt; andere Interrupts setzen ab `0x34`
+  `error_code = 0x1`.
+* PICA-Finalize (`0x010`): P3D, wenn `irq_request` ein gemeinsames Byte mit
+  `irq_compare` hat (Byte-Vergleich); `irq_autostop` (Default 1) beendet die
+  Liste. GSP setzt die Defaults `irq_compare=0x12345678`,
+  `irq_mask=0xFFFFFFF0`, `irq_autostop=1`.
 
 ## Quellen
 * https://www.3dbrew.org/wiki/IPC, /RomFS, /GSP_Shared_Memory, /GPU/Internal_Registers

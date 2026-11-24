@@ -243,6 +243,13 @@ ab `r0`, `r1` und `r5` als `[watchmem]`-Zeile), `ARM_MEMWATCH=<hex>`,
 `[perf] N blocks in M ms (R/s)`; Format von `tools/g3ds/runner.py`),
 `HLE_PICA_DIAG=1` (PICA-Register-Histogramm je Liste inkl. Kanal-Spruengen,
 Rohdump nach `scratch/pica/list_<addr>_<size>.bin`),
+`HLE_PICA_TARGET=1` (jede Aenderung des PICA-Farbziels 0x11D/0x11E/0x117
+einmal als `[pica] target ...` melden),
+`HLE_PICA_LOG=<n>` (erste n Draws mit Attributbasis, Textur, Vertex-Programm
+und Farbziel),
+`HLE_GSPQ_LOG=1` (GX-Transfers: DisplayTransfer/TextureCopy mit Quelle, Ziel,
+Flags und Groesse sowie MemoryFill-Bereiche),
+`HLE_VRAM_DUMP=<pfad>` (VRAM 0x1F000000..0x1F5FFFFF am Laufende roh sichern),
 `HLE_YSTAT=1` (Yield-/Lock-Statistik der kooperativen Gast-Threads: Yields,
 Wandzeit in Lock-Abgaben, Zeit mit freiem Gast-Lock; je ~1 s eine Zeile
 `[ystat]`),
@@ -294,7 +301,9 @@ aendern (Locks), sind keine Recompiler-Fehler.
 
 `tools/xfsatool/` (Level-5-ARC0/XPCK), `tools/list_xpck.py`,
 `tools/scan_xpck.py`, `tools/scan_pvb.py`, `tools/fa_index.py`,
-`tools/imgc_check.py`, Test `tools/test_imgc_c.py`, PICA-Test `tools/test_pica_c.py`.
+`tools/imgc_check.py`, Test `tools/test_imgc_c.py`, PICA-Test `tools/test_pica_c.py`
+(`--bench` misst zusaetzlich den Software-Rasterizer: 2000 texturierte
+Dreiecke auf 400x240, siehe `docs/GAME_NOTES.md`).
 
 ## Referenz
 

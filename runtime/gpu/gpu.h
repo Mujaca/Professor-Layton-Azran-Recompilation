@@ -31,6 +31,26 @@ void gpu_pica_set_irq_handler(void (*fn)(int id));
 /* Nur fuer Diagnose/Tests: zuletzt geschriebener Registerinhalt. */
 uint32_t gpu_pica_reg(uint32_t id);
 
+/* GPU-MMIO-Registerfeld fuer gsp::Gpu WriteHWRegs/WriteHWRegsWithMask/
+ * WriteHWRegRepeat/ReadHWRegs (Azahar VideoCore::GPU ReadReg/WriteReg).
+ * addr ist die GPU-Virtualadresse (0x1EF00000-Bereich); Schreiben speichert
+ * den Wert, Trigger-Bits starten MemoryFill/DisplayTransfer/Kommandoliste. */
+void gpu_gsp_write_reg(ArmCpu *c, uint32_t addr, uint32_t value);
+void gpu_gsp_write_reg_masked(ArmCpu *c, uint32_t addr, uint32_t value,
+                              uint32_t mask);
+uint32_t gpu_gsp_read_reg(ArmCpu *c, uint32_t addr);
+/* GSP 0x000B SetLcdForceBlack -> Azahar GPU::SetColorFill:
+ * color_fill_top/bottom beider Screens (is_enabled = Bit24). */
+void gpu_gsp_set_lcd_color_fill(ArmCpu *c, int enable_black);
+
+/* GX-Kommandos 0x01..0x04 aus dem GSP-Shared-Memory-Kommandopuffer
+ * (Azahar GPU::Execute): Register schreiben, Operation ausfuehren und die
+ * Interrupts PSC0/PSC1/PPF/P3D ueber den IRQ-Handler melden. */
+int gpu_gsp_submit_cmdlist_cmd(ArmCpu *c, uint32_t paddr, uint32_t size);
+void gpu_gsp_memory_fill_cmd(ArmCpu *c, const uint32_t *w);
+void gpu_gsp_display_transfer_cmd(ArmCpu *c, const uint32_t *w);
+void gpu_gsp_texture_copy_cmd(ArmCpu *c, const uint32_t *w);
+
 /* Vertex-Shader-Zustand (Tests/Diagnose): Float-Uniform idx/comp, ob ein
    Programm hochgeladen ist, und der zuletzt verarbeitete Vertex nach
    Ausgangs-Mapping (POSITION/COLOR/TEXCOORD0). */
