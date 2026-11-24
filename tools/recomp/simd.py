@@ -153,8 +153,9 @@ def emit(emitter, ins, base, ops):
         rn = _mem_base(ops[2])
         if rn is None:
             return None
-        return ["c->r[%d] = arm_mem_read(c, c->r[%d], 4);" % (d, rn),
-                "c->r[%d] = arm_mem_read(c, c->r[%d] + 4, 4);" % (d + 1, rn)]
+        return ["{ uint64_t v = arm_excl_load64(c, c->r[%d]);" % rn,
+                "  c->r[%d] = (uint32_t)v;" % d,
+                "  c->r[%d] = (uint32_t)(v >> 32); }" % (d + 1)]
 
     if base == "strexd":
         r = _regs(ops, 2)
@@ -164,9 +165,8 @@ def emit(emitter, ins, base, ops):
         rn = _mem_base(ops[3])
         if rn is None:
             return None
-        return ["arm_mem_write(c, c->r[%d], 4, c->r[%d]);" % (rn, m),
-                "arm_mem_write(c, c->r[%d] + 4, 4, c->r[%d]);" % (rn, m + 1),
-                "c->r[%d] = 0;" % d]
+        return ["c->r[%d] = arm_excl_store64(c, c->r[%d], c->r[%d], c->r[%d]);"
+                % (d, rn, m, m + 1)]
 
     if base == "adr":
         d = isa.reg_num(ops[0]) if len(ops) > 1 else None

@@ -99,6 +99,15 @@ deshalb lief der frühere Versuch in eine Endlosschleife; Puffer ist jetzt
 | – | generierter Code | unbekannte Aufrufziele = No-op (geloggt in `out/missing_calls.txt`) |
 | – | `arm_mem_read/write` | Zugriffe außerhalb des Speichers liefern 0 statt Abbruch (`ARM_STRICT=1` bricht ab) |
 | – | fs `OpenFile`, `file_command` | Sentinel-Dateislot und Erfolg auch bei fehlgeschlagenem Open; `romfs_image.bin` mit Offset +0x1000 |
+| – | `gpu_pica_virt_to_phys` | Adressen außerhalb VRAM/Linear-Heap bleiben unverändert (der Port hat keine MMU/Seitentabelle); echtes GSP lehnt sie ab |
+| – | `p_process_tri` | Rasterizer nach Azahar: Sutherland-Hodgman-Clipping (7 Ebenen + 0x47/0x48..0x4B), Viewport 0x41/0x43/0x68, Perspective-Divide, 12.4-Fixed-Point-Coverage + Top-Left-Bias, perspektivkorrekte Attribute, TEV 0x0C0..0x0FD inkl. Combiner-Buffer, Texturen 0x080..0x09F (alle 14 Formate inkl. ETC1/ETC1A4 mit Subtile `x/4+2*(y/4)`, 8x8-Morton, Wrap/Border, keine Filterung wie Azahar), Fog 0xE0/0xE1/0xE6/0xE8..0xEF (LUT-Upload mit Offset-Inkrement, Flip, Index/Fraktion, vor dem Depth-Test), Output-Merger 0x100..0x107 (Alpha-Blend, LogicOp, Alpha-Test, Kanalmasken) und Farb-/Tiefenziel 0x117/0x11C..0x11E (RGBA8/RGB8/RGB565/RGB5A1/RGBA4 in Azahar-Byte-Reihenfolge, D16/D24/D24S8, Depth-/Stencil-Test, 8x8-Morton, Schreibgrenzen des Farbziels). Fragment-Lighting 0x140..0x1D9 nach `sw_lighting.cpp` (Lichtquellen, Distanz-/Spot-Daempfung, Fresnel, Bump-Mapping, Clamp, LUT-Upload 0x1C5/0x1C8..0x1CF) in die TEV-Quellen Primary/SecondaryFragment sowie Texturtypen auf Einheit 0 (Projection2D, Cube/ShadowCube, Shadow2D inkl. Bias, tc0_w). **Noch offen:** Mipmaps, Proctex (Einheit 3). |
+
+Ohne Vertex-Programm (0x2CB/0x2CC) zeichnet der Port nichts mehr; der frühere
+Attribut-Fallback (Attribut 0 als Position, 1 als UV) und der Schreibpfad in
+den linearen RGB8-Host-Puffer `g_fb` ohne konfiguriertes Farbziel (0x11D) sind
+entfernt (2026-11-24). Damit gibt es keinen Pfad mehr, der ein Bild ohne
+GSP/PICA-Kommandos erzeugt.
+
 
 Entfernt 2026-11-24 (Fälschungen nach Azahar). Jeder Punkt wurde einzeln
 gebaut und mit `tools/frontier.py` gemessen; der Stand blieb **9/10
@@ -219,6 +228,12 @@ Event; P3D/PPF/PSC0/PSC1/DMA werden von den GX-Kommandos ausgelöst
 (`gsp_process_cmdqueue`). Beleg: Frontier 4 → 9 Dienste (Divergenz boss:U)
 mit identischen 23 Patches.
 
+Seit dem PICA-Parser-Paket meldet der Kommandostrom P3D selbst: Register
+`0x010` (Finalize) vergleicht `irq_request` mit `irq_compare` und signalisiert
+über `gpu_pica_set_irq_handler` das GSP-Relay; `0x23C/0x23D` lösen
+Kanal-Sprünge aus. `gsp_process_cmdqueue` sendet P3D nur noch bei ungültiger
+Liste (Azahar `GPU::SubmitCmdList`), nicht mehr pauschal nach jeder Liste.
+
 Seit dem Kernel-Sync-Paket sind auch `wa-wait-handle0` und
 `wa-thread-exit-unsignaled` entfernt. `hle_svc` fuehrt Mutex, Semaphore,
 Event (OneShot/Sticky/Pulse), Timer und AddressArbiter mit echten
@@ -241,6 +256,17 @@ ndm, ptm, gsp, dsp, y2r, boss). Damit entfielen `wa-fs-client-slot` sowie die
 Antwort.
 
 ## 6. Befunde (offene Ursachen, kein Workaround eingebaut)
+
+### VFP-Semantik korrigiert – kein Workaround 2026-11-24
+
+Der Recompiler erzeugte VFP-Code mit vier Abweichungen: `vcmp` setzte das
+C-Flag bei Gleichheit/Groesser nicht, `vcvt.f32.s32`/`f32<->f64` nutzten die
+Host-Rundung (nearest) statt FPSCR (3DS-Default: Richtung Null), `vmla` u.a.
+ignorierten FPSCR (Default-NaN/FTZ) und Doppelpraezisions-VMLA sowie
+`vmov dN, Ra, Rb` fehlten. Korrigiert in `runtime/cpu/arm_cpu.c` (Helfer) und
+`tools/recomp/emit.py`; Belege/Fuzz: `tools/vfp_difftest.py` (Unicorn-Referenz)
+und feste Faelle in `tests/mvp_selftest.py`. Kein Code-Patch, kein Eintrag in
+`tools/workarounds/`.
 
 ### Gast-Threads liefen nie – behoben 2026-11-24
 
@@ -426,3 +452,28 @@ bedingten `bxne lr` in `fn_00291C64` (siehe oben, „FS-Session fehlte wegen
 bedingtem `bx`“). `tools/fix_romfs_cycles.py` und
 `tools/rebuild_romfs_hash.py` waren dafuer nachweislich nicht noetig und
 sind entfernt.
+
+### Interworking-Veneeren liefen als No-op – behoben 2026-11-24
+
+**Befund:** `out/missing_calls.txt` sammelte 453 Aufrufe an `0x0029226D`
+(von Block `0x00292264`) und Treffer an `0x00100373` (von `0x0024CCEC`).
+Beides sind Linker-Stubs: `0x292264: add r12, pc, #1; bx r12` springt nach
+`0x29226C` (Thumb), `0x24CCEC: ldr pc,[pc,#-4]` laedt das Literal
+`0x00100373`. Die Ziele sind echte Thumb-Funktionen (%d/%u- bzw.
+%x-Handler der Format-Ausgabe), wurden aber nie geseedet, weil sie mitten in
+einer ARM-Funktion liegen bzw. nur ueber ein Literal erreichbar sind; der
+Aufruf wurde zum No-op.
+
+**Korrektur:** `tools/recomp/scan.py` verfolgt PC-relative Konstanten im
+Block (`add/sub rN, pc, #imm`, `adr rN, #imm`) und liest das Literal
+statischer `ldr pc, [pc, #imm]`-Stubs. Ein Ziel mit Bit 0 wird als eigene
+Thumb-Funktion geseedet. Test:
+`tools/selftest_tools.py::test_veneer_thumb_seed`.
+
+**Folge:** `missing_calls.txt` ist im 40-s-Lauf leer; die beiden Funktionen
+`fn_0029226C`/`fn_001006A0` bzw. `fn_00100372`/`fn_001004A0` werden
+ausgefuehrt. Frontier bleibt 10/10; Draw-Trigger (0x22E/0x22F) kommen
+weiterhin in keiner Liste vor. Beleg: `HLE_PICA_DIAG=1` (Register-Histogramm
+je Liste, `docs/TOOLS.md`) zeigt fuer alle Listen nur Setup-Register
+(Rasterizer, Texturen, TEV, Attribut-Loader 0x200..0x229, Shader-Uploads,
+Finalize 0x010), keine 0x22E/0x22F und keine Kanal-Spruenge.
