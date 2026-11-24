@@ -36,6 +36,11 @@ Azahar-Referenz (`reports/azahar_trace.txt`) und meldet:
 | M7 | Audio (DSP/BCSTM), Video (MOFLEX), Saves | manueller Test |
 | M8 | `tools/workarounds/code_patches.json` ist leer | `workarounds == 0` |
 | M9 | Hardware-Renderer: PICA-Kommandolisten werden in eine native Grafik-API (D3D11/Vulkan/OpenGL) übersetzt (Details: `docs/IDEAS.md`). Frühestens nach M4/M5, darf parallel zu M6–M8 laufen | Bildvergleich Software- gegen Hardware-Pfad auf denselben Gast-Frames |
+| M10 | Ton klingt korrekt: Titelmusik ohne Aussetzer und Verzerrung | Hörtest + Vergleich mit einer Azahar-Aufnahme derselben Szene |
+| M11 | Neues Spiel startet: Namenseingabe → erste Spielszene | Screenshots aus dem natürlichen Boot (nur echte Host-Eingabe) |
+| M12 | Titel und Hauptmenü laufen mit ≥ 30 fps (Gast-Frames) | fps-Anzeige im Fenstertitel bzw. `[port] gast=`-Log |
+| M13 | Bild flackert nicht: jeder angezeigte Frame ist vollständig (kein Wechsel zwischen halbfertigen/alten Puffern) | Sichttest im Fenster + Frame-Folge ohne Ausreißer |
+| M14 | Erstes Rätsel spielbar: Eingabe, Lösung, Speichern | manueller Test + Speicherstand lädt erneut |
 
 Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 
