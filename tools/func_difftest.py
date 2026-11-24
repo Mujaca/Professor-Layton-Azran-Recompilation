@@ -298,12 +298,12 @@ def build_harness(entry, snapshot):
     return exe
 
 
-def run_port(entry, snap_path, limit):
+def run_port(entry, snap_path, limit, timeout=600):
     exe = build_harness(entry, snap_path)
     post = os.path.join(OUT, "post.bin")
     trace = os.path.join(OUT, "port_blocks.bin")
     p = subprocess.run([exe, snap_path, post, str(limit), trace], cwd=ROOT,
-                       capture_output=True, text=True, timeout=600)
+                       capture_output=True, text=True, timeout=timeout)
     lines = [l for l in p.stdout.splitlines() if l]
     status = next((l for l in lines if l.startswith(("RETURNED", "LIMIT", "ABORTED"))),
                   "?")

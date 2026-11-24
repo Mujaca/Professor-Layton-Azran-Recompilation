@@ -35,16 +35,39 @@ static char g_dump_path[600];
 static int g_dump_armed = 0;
 static int g_dump_done = 0;
 
+/* ARM_DUMP_LIST=0xADDR,0xADDR,... zusammen mit ARM_DUMP_DIR=<verz>:
+ * je Adresse hoechstens ein Schnappschuss <verz>/dump_XXXXXXXX.bin. Damit
+ * kann ein einziger Bootlauf viele Funktionseinstiege belegen, ohne dass
+ * pro Einstieg ein eigener Lauf noetig ist (tools/cosim/sweep.py). Reine
+ * Diagnose, nur lesend. */
+#define DUMP_LIST_MAX 512
+static uint32_t g_dump_list[DUMP_LIST_MAX];
+static unsigned char g_dump_list_hit[DUMP_LIST_MAX];
+static unsigned g_dump_list_n = 0;
+static char g_dump_dir[512];
+
 static void dump_arm(void)
 {
     const char *p = getenv("ARM_DUMP");
+    const char *list, *dir;
     char *colon;
-    if (p == NULL || *p == '\0') return;
-    g_dump_armed = 1;
-    g_dump_pc = (uint32_t)strtoul(p, &colon, 0);
-    while (*colon == ' ' || *colon == '\t' || *colon == ':' || *colon == '=')
-        colon++;
-    snprintf(g_dump_path, sizeof g_dump_path, "%s", colon);
+    if (p != NULL && *p != '\0') {
+        g_dump_armed = 1;
+        g_dump_pc = (uint32_t)strtoul(p, &colon, 0);
+        while (*colon == ' ' || *colon == '\t' || *colon == ':' || *colon == '=')
+            colon++;
+        snprintf(g_dump_path, sizeof g_dump_path, "%s", colon);
+    }
+    list = getenv("ARM_DUMP_LIST");
+    dir = getenv("ARM_DUMP_DIR");
+    if (list == NULL || *list == '\0' || dir == NULL || *dir == '\0') return;
+    snprintf(g_dump_dir, sizeof g_dump_dir, "%s", dir);
+    while (*list != '\0' && g_dump_list_n < DUMP_LIST_MAX) {
+        g_dump_list[g_dump_list_n++] = (uint32_t)strtoul(list, &colon, 0);
+        if (colon == list) break;
+        list = colon;
+        while (*list == ',' || *list == ' ' || *list == '\t') list++;
+    }
 }
 
 static void dump_put32(FILE *f, uint32_t v)
@@ -67,14 +90,14 @@ static int page_nonzero(const unsigned char *p, uint32_t size)
     return acc != 0;
 }
 
-static void dump_state(ArmCpu *c)
+static void dump_state_to(ArmCpu *c, uint32_t pc, const char *path)
 {
-    FILE *f = fopen(g_dump_path, "wb");
+    FILE *f = fopen(path, "wb");
     uint32_t regions[4096][2];
     unsigned nregions = 0;
     uint32_t addr;
     if (f == NULL) {
-        fprintf(stderr, "[dump] kann %s nicht schreiben\n", g_dump_path);
+        fprintf(stderr, "[dump] kann %s nicht schreiben\n", path);
         return;
     }
     fwrite("ARMDMP01", 1, 8, f);
@@ -113,9 +136,13 @@ static void dump_state(ArmCpu *c)
     fseek(f, 8 + 4 + 16 * 4 + 10 * 4, SEEK_SET);
     dump_put32(f, nregions);
     fclose(f);
-    printf("[dump] 0x%08X: %u Regionen -> %s\n", g_dump_pc, nregions,
-           g_dump_path);
+    printf("[dump] 0x%08X: %u Regionen -> %s\n", pc, nregions, path);
     fflush(stdout);
+}
+
+static void dump_state(ArmCpu *c)
+{
+    dump_state_to(c, g_dump_pc, g_dump_path);
 }
 
 /* ------------------------------------------------------------------ *
@@ -485,6 +512,16 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
     if (g_dump_armed && !g_dump_done && c != NULL && pc == g_dump_pc) {
         g_dump_done = 1;
         dump_state(c);
+    }
+    if (g_dump_list_n != 0 && c != NULL) {
+        for (unsigned i = 0; i < g_dump_list_n; i++) {
+            if (g_dump_list_hit[i] || g_dump_list[i] != pc) continue;
+            char path[700];
+            g_dump_list_hit[i] = 1;
+            snprintf(path, sizeof path, "%s/dump_%08X.bin", g_dump_dir, pc);
+            dump_state_to(c, pc, path);
+            break;
+        }
     }
     if (c != NULL) {
         if (g_ring_on) {

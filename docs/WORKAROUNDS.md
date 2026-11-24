@@ -790,3 +790,35 @@ den kooperativen Scheduler und wurde ohne Not (Boot ist 10/10) nicht gemacht.
 **Diagnose:** neuer Schalter `HLE_YSTAT=1` (`docs/TOOLS.md`) zaehlt Yields,
 Wandzeit in den Lock-Abgaben und die Zeit, in der der Gast-Lock frei lag –
 reine Zaehler, kein Gastzustand.
+
+### Renderziel/Draws: Thumb-PC, Attribut-Loader, Scissor – behoben 2026-11-24
+
+Der Sweep (`tools/cosim/sweep.py`) sollte den fehlenden Renderziel-Pfad
+finden. Vier Ursachen lagen hintereinander:
+
+1. **Recompiler, bedingter ARM-Switch** (`ldr<cond> pc, [pc, rN, lsl #2]`):
+   Der Scanner setzte den Fallthrough hinter die Tabelle, obwohl bei +4 der
+   Default-Zweig steht. Der Default wurde nie dekodiert; im Ressourcenpfad
+   endete ein dynamischer Sprung im No-op (SP-Drift + `svcBreak` vor
+   `SetBufferSwap`). Tests `arm_switch_default_zweig`, `arm_switch_fall`.
+2. **Recompiler, Thumb-Datenverarbeitung mit PC als Registeroperand**
+   (`add rD, pc` u. a.): Der Emitter las `Align(addr+4,4)`. Azahar
+   (`arm_dyncom_run.h`, `CHECK_READ_REG15`) maskiert nur Bit 0, also
+   `addr+4` **ohne** Wortausrichtung; nur Adressrechnungen (`ADR`,
+   `ldr rX,[pc,#imm]`, `add rN, pc, #imm`) benutzen `Align(addr+4,4)`
+   (`CHECK_READ_REG15_WA`). Im `printf` des Spiels zeigte die Formattabelle
+   dadurch zwei Byte zu frueh; Szenen-/Layout-Ressourcen fehlten und das
+   Draw-Gate blieb zu. Test:
+   `tests/mvp_selftest.py::thumb_add_reg_pc_unausgerichtet`.
+3. **PICA Attribut-Loader/Indexpuffer** (`runtime/gpu/gpu.c`): Basis
+   (Register 0x200) und Offset (Quelle 0x227) wurden getrennt in
+   Gastadressen umgerechnet. Die Basis liegt im VRAM-Fenster, die Daten per
+   Offset im FCRAM; richtig ist `gpu_pica_phys_to_guest(basis + offset)`.
+4. **PICA Scissor** (`runtime/gpu/gpu.c`): 0x065 ist der Modus, 0x066 die
+   Position (x1/y1) und 0x067 die Ausdehnung (x2/y2, inklusiv). Der Port
+   las x1/y1 aus 0x065 und erzeugte ein 1x1-Rechteck.
+
+**Beleg:** `python tools/frontier.py` meldet mit den vier Korrekturen
+`[gsp] SetBufferSwap` (M2) und PICA-Listen mit `draws>0` (M3);
+`python tools/check.py --full` ist gruen. Kein Spielcode-Patch, keine
+Eintraege in `tools/workarounds/`.

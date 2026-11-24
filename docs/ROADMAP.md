@@ -109,3 +109,4 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | 2026-11-24 | cosim-unicorn | 10/10 | None | 0 |
 | 2026-11-24 | recomp-fuzz-thumb | 10/10 | None | 0 |
 | 2026-11-24 | recomp-abdeckung-2 | 10/10 | None | 0 |
+| 2026-11-24 | cosim-sweep | 10/10 | None | 0 |

@@ -220,9 +220,17 @@ class Emitter:
         self.it_cond = {}          # id(ins) -> Bedingung aus einem IT-Block
         self.cont_after_call = False  # Rueckkehrung in einen lokalen Block pruefen
 
-    def pc_value(self, pc):
+    def pc_value(self, pc, aligned=True):
+        """Wert von PC als Quelloperand.
+
+        Thumb-Adressrechnungen (ADR, `ldr rX,[pc,#imm]`) benutzen
+        Align(pc+4,4) (Azahar `CHECK_READ_REG15_WA`); Datenverarbeitung mit
+        PC als Register (`add/cmp/mov rX, pc`, 16-Bit) dagegen pc+4 ohne
+        Wortausrichtung (Azahar `CHECK_READ_REG15`, maskiert nur Bit 0).
+        Die Ausrichtung ist eine Eigenschaft der Instruktion, nicht des Modus.
+        """
         if self.thumb:
-            return (pc + 4) & ~3
+            return (pc + 4) & ~3 if aligned else pc + 4
         return pc + 8
 
     def imm_shifter_carry(self, ins):
@@ -311,7 +319,7 @@ class Emitter:
         return lines
 
     # ---------- operands ----------
-    def value(self, tok, pc):
+    def value(self, tok, pc, aligned=True):
         t = tok.strip()
         if t.startswith("#"):
             v = isa.imm_value(t)
@@ -327,10 +335,10 @@ class Emitter:
         if n is None:
             raise Unsupported(t)
         if n == 15:
-            return "0x%08Xu" % u32(self.pc_value(pc))
+            return "0x%08Xu" % u32(self.pc_value(pc, aligned))
         return "c->r[%d]" % n
 
-    def operand2(self, toks, pc):
+    def operand2(self, toks, pc, aligned=True):
         if not toks:
             raise Unsupported("leerer Operand")
         if len(toks) == 2 and toks[0].startswith("#") and toks[1].startswith("#"):
@@ -343,7 +351,7 @@ class Emitter:
             if r:
                 v = ((v >> r) | (v << (32 - r))) & 0xFFFFFFFF
             return "0x%08Xu" % v, None
-        base = self.value(toks[0], pc)
+        base = self.value(toks[0], pc, aligned)
         if len(toks) == 1:
             return base, None
         st = toks[1].strip()
@@ -425,6 +433,14 @@ class Emitter:
         code, uses_rn, writes = DP_OPS[ins.id]
         ops = isa.split_operands(ins.op_str)
         pc = ins.address
+        # 16-Bit-Thumb-DP mit PC als Register: PC = addr+4 (nicht wort-
+        # ausgerichtet, Azahar CHECK_READ_REG15). Nur Adressrechnungen
+        # (ADR, ldr [pc]) runden auf 4 ab (CHECK_READ_REG15_WA).
+        # Nur die Register-Form (letzter Operand kein Immediate) liest PC
+        # unausgerichtet; `add rN, pc, #imm` (ADR) richtet weiterhin aus.
+        aligned_pc = not (self.thumb and getattr(ins, "size", 4) == 2
+                          and ops
+                          and not ops[-1].strip().startswith("#"))
         if writes:
             rd = isa.reg_num(ops[0])
             if rd is None:
@@ -434,16 +450,16 @@ class Emitter:
                     rn = "c->r[%d]" % rd
                     rest = ops[1:]
                 else:
-                    rn = self.value(ops[1], pc)
+                    rn = self.value(ops[1], pc, aligned_pc)
                     rest = ops[2:]
             else:
                 rn = "0"
                 rest = ops[1:]
         else:
             rd = -1
-            rn = self.value(ops[0], pc)
+            rn = self.value(ops[0], pc, aligned_pc)
             rest = ops[1:]
-        o2, sh = self.operand2(rest, pc)
+        o2, sh = self.operand2(rest, pc, aligned_pc)
         sf = sets_flags(ins, self.thumb, in_it)
         sc = -1
         if sh is None and sf and code in LOGICAL_DP and len(rest) == 1 \

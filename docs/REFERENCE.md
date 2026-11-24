@@ -449,8 +449,14 @@ Quelle: Azahar `renderer_software/sw_rasterizer.cpp`, `sw_clipper.cpp`,
 * **Unicorn 2.1.4 (Testwerkzeug)**: Thumb wird nur ueber Bit 0 der
   Startadresse gewaehlt (`emu_start(addr | 1)`); `UC_MODE_THUMB` allein und
   CPSR.T genuegen nicht.
-* **ADR in Thumb** ist PC-relativ mit `Align(PC, 4)` (PC = addr + 4); im
-  Recompiler bereits so umgesetzt.
+* **PC-Lesen in Thumb** richtet sich nach der Instruktion, nicht nach dem
+  Modus (Azahar `arm/dyncom/arm_dyncom_run.h`): Adressrechnungen (`ADR`,
+  `ldr rX,[pc,#imm]`, `add rN, pc, #imm`) lesen `Align(addr+4, 4)`
+  (`CHECK_READ_REG15_WA`), Datenverarbeitung mit PC als Register
+  (`add`/`cmp`/`mov rX, pc`, 16-Bit-High-Register-Formen) liest `addr + 4`
+  **ohne** Wortausrichtung (`CHECK_READ_REG15`). Beleg: bei `0x001000FA`
+  (`add r7, pc`) muss `r7 = 0x003C4358` sein (4-Byte-Tabelle), nicht
+  `0x003C4356`; Test `tests/mvp_selftest.py::thumb_add_pc_ohne_ausrichtung`.
 * **ARM/Thumb-Interworking-Stubs**: `add rN, pc, #imm` (ARM PC = addr + 8,
   `imm` enthält das Thumb-Bit, z. B. `0x292264: add r12, pc, #1; bx r12` ->
   `0x29226C`) bzw. `adr rN, #imm` + `bx rN`. Ebenso `ldr pc, [pc, #imm]` mit
@@ -935,8 +941,14 @@ einen **Vertex-Shader-Interpreter/Übersetzer** und **TEV**.
 * **Unicorn 2.1.4 (Testwerkzeug)**: Thumb wird nur ueber Bit 0 der
   Startadresse gewaehlt (`emu_start(addr | 1)`); `UC_MODE_THUMB` allein und
   CPSR.T genuegen nicht.
-* **ADR in Thumb** ist PC-relativ mit `Align(PC, 4)` (PC = addr + 4); im
-  Recompiler bereits so umgesetzt.
+* **PC-Lesen in Thumb** richtet sich nach der Instruktion, nicht nach dem
+  Modus (Azahar `arm/dyncom/arm_dyncom_run.h`): Adressrechnungen (`ADR`,
+  `ldr rX,[pc,#imm]`, `add rN, pc, #imm`) lesen `Align(addr+4, 4)`
+  (`CHECK_READ_REG15_WA`), Datenverarbeitung mit PC als Register
+  (`add`/`cmp`/`mov rX, pc`, 16-Bit-High-Register-Formen) liest `addr + 4`
+  **ohne** Wortausrichtung (`CHECK_READ_REG15`). Beleg: bei `0x001000FA`
+  (`add r7, pc`) muss `r7 = 0x003C4358` sein (4-Byte-Tabelle), nicht
+  `0x003C4356`; Test `tests/mvp_selftest.py::thumb_add_pc_ohne_ausrichtung`.
 
 
 * **16-Bit-Thumb im IT-Block**: Die "S"-Formen (ADD/SUB/AND/EOR/LSL/LSR/

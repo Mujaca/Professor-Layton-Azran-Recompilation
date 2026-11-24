@@ -159,6 +159,36 @@ Exit-Code 0 = Blockfolge, Register, Flags und Endzustand identisch, 1 =
 Abweichung. Reines Testwerkzeug (Unicorn nur hier, nicht im Produkt); es
 veraendert keinen Gastzustand.
 
+`tools/cosim/sweep.py`: **Funktions-Sweep** auf echten Gastzustand. Ein
+Portlauf mit `HLE_PERFMAP_FILE` (Standard 1200 Frames) liefert
+`(pc, thread, count)` je Basisblock; geschnitten mit der Eintragstabelle
+`{ 0xADDRu, fn_ADDR }` aus `build/gen_boot.c` ergibt das die ausgefuehrten
+Funktionseinstiege. Plan-Reihenfolge: selten/haupt (Hauptthread, `<= --rare`
+Laeufe), heiss/haupt, selten/neben, heiss/neben. Je Funktion wird per
+`ARM_DUMP` am Einstieg ein Schnappschuss genommen (der Port wird beendet,
+sobald die Datei stabil ist) und mit `func_difftest`-Technik blockgleich-
+schrittig gegen Unicorn verglichen (Port-Code aus `build/gen_boot.o`,
+Zeitlimit `--per-func`, Gesamtbudget `--budget`). Klassen: `gleich`,
+`unicorn-ende:svc|tls|mem` (kein Befund), `abweichung:block|ende`,
+`port-limit`, `snapshot-fehlend`. Ein Vorgaengerblock mit
+`ldrex`/`strex`/`swp` markiert die Abweichung als Lock-/Fremdthread-Verdacht.
+Unicorn laeuft mit dem Gastkontext (TLS, FPSCR, `FPEXC.EN`, CP10/CP11 in
+CPACR), sonst endet der Vergleich an der ersten VFP-Instruktion.
+Bericht: `scratch/sweep/report.md`, Einzelbefunde `fail_XXXXXXXX.txt`.
+
+```powershell
+python tools/cosim/sweep.py                                  # Perfmap + Sweep
+python tools/cosim/sweep.py --reuse-perf out/cosim/perfmap.txt --max-funcs 20
+python tools/cosim/sweep.py --sort addr --max-funcs 200       # Fortsetzung
+python tools/cosim/sweep.py --only 0x0028F04C,0x0016A500
+```
+
+Reines Testwerkzeug (Unicorn nur hier), aendert keinen Gastzustand.
+
+Zusatz-Diagnose im Port: `ARM_DUMP_LIST=0xADDR,...` + `ARM_DUMP_DIR=<verz>`
+schreibt je Adresse hoechstens einen `ARMDMP01`-Schnappschuss nach
+`<verz>/dump_XXXXXXXX.bin` (ein Lauf, viele Einstiege; nur lesend).
+
 `tools/recomp/seeds.txt`: zusätzliche Funktionseinstiege (z. B. aus
 `out/missing_calls.txt`).
 
