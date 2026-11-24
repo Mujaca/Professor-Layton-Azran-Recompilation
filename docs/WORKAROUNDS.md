@@ -1308,3 +1308,55 @@ laesst den Player aus Zustand 2 neu starten (Self-Restart `0x312684` ->
 `play`). Dieser Aufruf (bzw. der Titel-Szenen-Zustand, der ihn ausloest)
 kommt im 60-s-Lauf nicht; er haengt am noch fehlenden Draw-/Szenen-Pfad
 (M3/M4), nicht am Y2R-Treiber. Kein Workaround eingebaut.
+
+### Nach dem Intro-Film: Szenenwechsel laeuft, Titel-Ressourcen werden entpackt (2026-11-24)
+
+**Korrektur der Auftragsannahme (belegt):** Der Film endet nicht nur regulaer mit
+Zustand 2, die Szenen-/Ablaufsteuerung **wechselt auch weiter**. Bisherige
+Notizen („Szene wechselt nicht") beruhten auf Laeufen, die vor dem Filmende
+endeten oder nur den Presenter betrachteten.
+
+**Belege** (natuerlicher Boot, 155-s-Lauf `scratch/scene/w_long.log`,
+`ARM_MEMWATCH=0x00408A40`, `HLE_LOG=1`; 80-s-Lauf mit `ARM_MEMWATCH` auf das
+Zustandsbyte `0x1667FE70`; 40-s-Perfmap `scratch/scene/perf40.txt`):
+
+* **Film-Ende:** Zustandsbyte `obj+8` (`0x1667FE70`) laeuft
+  `1 -> 5 -> 4 -> 8 -> 3 -> 2` (Schreiber `pc=0x00218B7C`, Rueckkehr
+  `lr=0x312808/0x312638/0x312674`). Das Loop-Flag (`fn_00277A44`) ist 0, der
+  Player startet also nicht neu.
+* **Wechsel danach:** Zustand 0 (`lr=0x311B0C`), Objekt wird per
+  `0x1F7980`/`0x28EEE8` (memset) neu initialisiert. Danach oeffnet Thread
+  `th=F82` (TLS `F82xxx`) das SaveData-`/head.lt6` (Read `0x9768` Byte),
+  initialisiert `boss:U` (`InitializeSession`, `GetTaskIdList`,
+  `ReceiveProperty 0x35/0x36` – beide im Port noch generisch) und startet den
+  Ressourcen-Lader `th=F8D`.
+* **Titel-Ressourcen:** `th=F8D` liest genau **5** Eintraege aus dem
+  `.fa`-Archiv (Datei Handle 22): `0x473AE0/0x12E8`, `0x0D312244/0x33340`,
+  `0x121B54A4/0xFEAA8`, `0x122B3F50/0x9278`, `0xD2383B0/0xD9E90`.
+  Weitere fs-Reads gibt es im restlichen Lauf **nicht**; die Daten liegen
+  vollstaendig im Speicher.
+* **Entpacken laeuft:** `fn_00270B14` (Archiv-Eintrag entpacken, Aufrufer
+  `lr=0x26B8D8` in `fn_0026B...`, danach GL-Ressource `0x2804B8`) wird im
+  50-s-Lauf 55x mit **paarweise verschiedenen** `(Quelle, Groesse)` aufgerufen
+  (u. a. `0xFEAA8`, `0x38404`, `0x33340`, `0xD9E90`). Der Perfmap-Hotspot
+  `0x270D20..0x270D88` liegt bei Thread `ti=E` (1,6 M Bloecke in 40 s), der
+  Lader `ti=D` in `fn_00269E94` plus Mutex `0x28F028/0x28F064` (je 11,8 k).
+  Es ist also **kein** Futex-Stillstand: die Entpack-/GL-Init-Kette rechnet.
+* **Was nie passiert:** In 155 s **kein** `draws>=1` (0 Listen mit Draw),
+  **kein** Renderziel-Bind: `ARM_MEMWATCH=0x00408A40` (`ctx0+0x24`) liefert
+  ausschliesslich Wert 0 (400 Treffer), Registry `0x408918/0x408920` bleibt
+  leer. 12.690 `SetBufferSwap` (~6.300 Frames) nur mit den 14 Setup-Listen.
+* **Hauptthread:** `ti=2` schlaeft in einer 1-ms-Poll-Schleife
+  (`r0=0x000F4240`, `lr=0x0010208C`, `0x28F1E8` -> `0x28796C`), also die
+  bekannte Wartestelle mit 1-7 ms Sleep.
+
+**Ergebnis:** Die Bedingung „Film fertig" **ist erfuellt** (Zustand 2, Player
+beendet, Objekt zurueckgesetzt, Szene laeuft weiter). Offen ist die Bedingung
+„Folgeszene geladen/initialisiert": die Titel-Ressourcen werden aus dem `.fa`
+gelesen und entpackt, die GL-/Renderziel-Initialisierung kommt aber nicht bis
+zum Bind, weshalb Registry und Draws leer bleiben. Naechster Schritt: die
+Entpack-/GL-Init-Kette (Thread `ti=D`/`ti=E`, `fn_0026B...` -> `0x270B14` ->
+`0x2804B8`) bis zum Ende verfolgen und pruefen, ob ein Eintrag haengt oder ob
+die Kette nur viele Eintraege abarbeitet; parallel die beiden generischen
+`boss:U`-Kommandos (`0x000E`, `0x0016`) nach Azahar vervollstaendigen.
+Kein Workaround eingebaut.
