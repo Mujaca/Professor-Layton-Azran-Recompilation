@@ -50,6 +50,34 @@ def run(cmd, **kw):
     return p
 
 
+class gen_lock:
+    """Systemweite Sperre (Temp-Verzeichnis) um die gen_boot.c-Kompilierung."""
+
+    def __enter__(self):
+        import tempfile
+        import time
+        self.f = open(os.path.join(tempfile.gettempdir(), "3ds_gen_build.lock"), "a+")
+        if os.name == "nt":
+            import msvcrt
+            while True:
+                try:
+                    self.f.seek(0)
+                    msvcrt.locking(self.f.fileno(), msvcrt.LK_NBLCK, 1)
+                    return self
+                except OSError:
+                    time.sleep(2)
+        import fcntl
+        fcntl.flock(self.f, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        if os.name == "nt":
+            import msvcrt
+            self.f.seek(0)
+            msvcrt.locking(self.f.fileno(), msvcrt.LK_UNLCK, 1)
+        self.f.close()
+
+
 def cflags():
     flags = ["-std=c11", "-O1"]
     for inc in INCLUDES:
@@ -89,7 +117,10 @@ def main():
         old = open(stamp).read().strip() if os.path.exists(stamp) else ""
         if digest != old or not os.path.exists(gen_o):
             print("kompiliere gen_boot.c (dauert einige Minuten) ...")
-            run([zig(), "cc"] + cflags() + ["-c", gen_c, "-o", gen_o])
+            # Mehrere Worktrees bauen parallel; gleichzeitige gen_boot.c-
+            # Kompilierungen scheitern am Speicher. Systemweit serialisieren.
+            with gen_lock():
+                run([zig(), "cc"] + cflags() + ["-c", gen_c, "-o", gen_o])
             open(stamp, "w").write(digest)
         else:
             print("gen_boot.o aktuell")
