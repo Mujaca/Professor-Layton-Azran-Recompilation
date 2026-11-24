@@ -2126,10 +2126,12 @@ static void file_command(Ipc *r, uint32_t *p) {
         case 0x0802: { /* Read: (offset u64, size) + MappedBuffer */
             uint64_t offset = (uint64_t)p[0] | ((uint64_t)p[1] << 32);
             uint32_t length = p[2];
-            if (length > 0x01000000u) { /* Fallback: vertauschte Reihenfolge */
-                offset = 0;
-                length = p[0];
-            }
+            /* Azahar file.cpp (File::Read) parst (u64 offset, u32 length)
+               eindeutig; es gibt dort keinen Heuristik-Zweig fuer grosse
+               Laengen. Der frueher hier stehende Fallback
+               (length > 16 MiB -> offset=0, length=p[0]) haette jeden echten
+               Read ueber 16 MiB (z. B. eine 19,7-MB-Moflex am Stueck) still-
+               schweigend ab Offset 0 gelesen. */
             uint32_t addr = 0;
             /* Translate-Deskriptor: {size|flags, adresse} -> Adresse ist das ZWEITE Wort. */
             if (r->translate >= 2) addr = p[r->normal + 1];
@@ -2166,10 +2168,8 @@ static void file_command(Ipc *r, uint32_t *p) {
         case 0x0803: { /* Write: (offset u64, size) + MappedBuffer */
             uint64_t offset = (uint64_t)p[0] | ((uint64_t)p[1] << 32);
             uint32_t length = p[2];
-            if (length > 0x01000000u) { /* Fallback */
-                offset = 0;
-                length = p[0];
-            }
+            /* Azahar file.cpp (File::Write): (u64 offset, u32 length) ohne
+               Heuristik, siehe Read. */
             uint32_t addr = 0;
             /* Translate-Deskriptor: {size|flags, adresse} -> Adresse ist das ZWEITE Wort. */
             if (r->translate >= 2) addr = p[r->normal + 1];

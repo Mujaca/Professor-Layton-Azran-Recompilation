@@ -110,3 +110,4 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | 2026-11-24 | listen-flut | 10/10 | None | 0 |
 | 2026-11-24 | pica-azahar-abgleich | 10/10 | None | 0 |
 | 2026-11-24 | m3-gpu-2 | 10/10 | None | 0 |
+| 2026-11-24 | m3-hang-dateilesen | 10/10 | None | 0 |

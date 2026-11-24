@@ -697,3 +697,56 @@ den kooperativen Scheduler und wurde ohne Not (Boot ist 10/10) nicht gemacht.
 **Diagnose:** neuer Schalter `HLE_YSTAT=1` (`docs/TOOLS.md`) zaehlt Yields,
 Wandzeit in den Lock-Abgaben und die Zeit, in der der Gast-Lock frei lag –
 reine Zaehler, kein Gastzustand.
+
+### fs-Dateipfad geprueft: Read liefert die echten Bytes – Hypothese ausgeschlossen 2026-11-24
+
+**Hypothese:** Der M3-Haenger (Decoder-Thread wartet auf Nachschub, Bit-Refill
+liest Nullen) kommt daher, dass `fs` `File Read` (`0x0802`) weniger/mehr Bytes
+als angefordert liefert, eine falsche `bytes read` zurueckgibt, Lesen ueber
+64 KiB/RomFS-Grenzen scheitert, verlinkte Sitzungen (`0x080C OpenLinkFile`)
+falsch beantwortet werden oder der Read zu frueh zurueckkehrt.
+
+**Messung** (natuerlicher Boot, `HLE_LOG=1`, `out/port.exe --shot x.bmp
+--frames 1800` = 30 s, Log `scratch/fscheck/fsrun.log`; Bytevergleich gegen die
+mit `tools/extract_romfs.py` entpackten RomFS-Dateien):
+
+| Pruefung | Beleg | Ergebnis |
+|---|---|---|
+| Umfang | 87x `file cmd=0x0802` (dazu 0x0803/04/08/0A/0C) | kein `unbehandelt`, kein unbekanntes Kommando |
+| `bytes read == len` | alle 87 `[file] Read ... -> N` | 0 Kurzlesungen, 0 Reads mit 0 Bytes |
+| Video-Datei komplett | `off=0x26B10510` .. `off=0x26BA0510 len=0x12A4` (8x 0x10000 + 0x12A4) | 0x912A4 = 594.596 Byte = exakte Groesse von `lt6/mov/m999.moflex` |
+| Offset-Umrechnung | `romfs_image.bin[0x26B10510+0x1000 ...] == out/romfs/lt6/mov/m999.moflex` (md5 gleich) | Level-3-Basis +0x1000 trifft die echte Datei |
+| Tonspur | `off=0x379F19C0` + 0x1000 == `lt6/snd/uk/stream/MOV_999.dspadpcm.bcstm` (md5 gleich); 0x220 Header + 5x 0x4000 gelesen | Bytes korrekt; Abbruch nach 0x14220 von 0x4F4A0 Byte, weil der **Gast** keine weitere Anfrage stellt |
+| Zielpuffer | `arm_mem_read/write` adressiert `g_cur_mem` flach (nur Adressen >= 0x20000000 werden auf 0x1FFFFFFF maskiert); Ziele 0x0D0007C0/0x0D0907C0, 0x0042C380, 0x0C682378 liegen direkt im Gast-RAM, `fread` schreibt dorthin | kein Mapping-/Aliasverlust |
+| Verlinkte Sitzung | `0x080C` -> Handle 46 mit eigenem `FILE*` und eigener Position; jede Anfrage nennt ihren Offset, jeder Read seekt explizit | Basis- (h=22, Video) und Link-Stream (h=46, Audio) stoeren sich nicht |
+
+Konsequenz: Alle Teilhypothesen sind widerlegt. Die Dateiebene liefert fuer
+beide Streams die echten Dateibytes in voller Laenge an die vom Gast genannten
+Puffer; die Leseanfragen enden, weil der Gast keine weiteren absetzt. Der
+`+0x1000`-Zusatz fuer den SelfNCCH-RomFS-Strom ist durch Bytevergleich belegt
+richtig. **Die Ursache des Ringpuffer-/Frame-Stalls liegt damit nicht im
+fs-Pfad** (Kandidaten bleiben: Ringpuffer-/Event-Bedingung im Gast-Decoder,
+dessen Datengeber, oder eine Recompiler-Semantik im Decoder).
+
+**Zwei Nicht-Azahar-Abweichungen im Dateipfad entfernt (ohne Messwirkung):**
+`runtime/kernel/hle.c` `File Read`/`Write` hatten einen Heuristik-Zweig
+`length > 16 MiB -> offset = 0, length = p[0]`. Azahar
+(`core/hle/service/fs/file.cpp`) parst `(u64 offset, u32 length)` eindeutig;
+der Zweig haette einen echten Read ueber 16 MiB (z. B. eine 19,7-MB-Moflex am
+Stueck) stillschweigend ab Offset 0 gelesen. Im Boot kommt er nicht vor
+(groesster Read 0x14298), die Messung bleibt gleich.
+
+**Weiter offen (nicht geaendert, weil im Boot nicht wirksam):** Azahar
+modelliert die RomFS-Leselatenz (`RomFSDelayGenerator`,
+`max(len*94+582778, 663124)` ns) und schlaeft den Client-Thread
+(`SleepClientThread`), der Port antwortet synchron/sofort; `GetSize` auf dem
+RomFS-Strom meldet die Imagegroesse (0x38B48000) statt der RomFS-Groesse
+(0x38B47000 aus `reports/azahar_trace.txt`), das Spiel fragt `0x0804` aber nur
+auf `/gamecoin.dat` ab.
+
+**Messstand (Erfolgsmetrik):** `y2r cmd=0x0026 StartConversion` = **0** in
+1800 Host-Frames (30 s), Screenshot 400x480 mit **1** Farbe (000000). Der
+Stand mit 41 StartConversion gehoert zum Branch-Stand von `c60cf43`
+(scan.py-Dekodierung der Decoder-Handler); dieser Arbeitsbaum (Baseline
+`fb31a41`) erreicht den Y2R-Framepfad noch nicht. Frontier vorher/nachher
+unveraendert: services 10/10, Divergenz None, M1/M2 ja, M3 nein, 0 Patches.
