@@ -113,3 +113,4 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | 2026-11-24 | m4-nach-film | 10/10 | None | 0 |
 | 2026-11-24 | m4-zweite-wiedergabe | 10/10 | None | 0 |
 | 2026-11-24 | m4-audio-stream | 10/10 | None | 0 |
+| 2026-11-24 | m5-titel-eingabe | 10/10 | None | 0 |

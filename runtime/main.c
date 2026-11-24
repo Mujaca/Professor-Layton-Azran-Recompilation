@@ -86,10 +86,27 @@ static void save_shot(const char *path) {
     }
 }
 
+/* --shot-every N: zusaetzlich alle N Host-Frames ein Bild
+ * ("name_000600.bmp"). Reine Diagnose, kein Gastzustand. */
+static void save_shot_numbered(const char *path, int frame) {
+    char out[512];
+    size_t n = strlen(path);
+    size_t dot = n;
+    while (dot > 0 && path[dot - 1] != '.') dot--;
+    if (dot == 0) {                              /* kein Punkt: anhaengen */
+        snprintf(out, sizeof(out), "%s_%06d", path, frame);
+    } else {
+        snprintf(out, sizeof(out), "%.*s_%06d%s", (int)(dot - 1), path, frame, path + dot - 1);
+    }
+    save_shot(out);
+}
+
 /* Skriptbare Host-Eingabe fuer Testlaeufe: --press start@300:10,a@600
- * (Taste@Host-Frame[:Dauer], Dauer Standard 10 Frames). Geht denselben Weg
- * wie Tastatur/Gamepad (hle_hid_set_input), veraendert keinen Gastzustand. */
-typedef struct { char key[8]; int at; int dur; } PressEv;
+ * (Taste@Host-Frame[:Dauer], Dauer Standard 10 Frames). `touch` nimmt
+ * zusaetzlich Koordinaten auf dem unteren Screen:
+ * touch@9000:20:160:120 (Standard 160,120). Geht denselben Weg wie
+ * Tastatur/Gamepad (hle_hid_set_input), veraendert keinen Gastzustand. */
+typedef struct { char key[8]; int at; int dur; int tx, ty; } PressEv;
 static PressEv g_press[32];
 static int g_press_n = 0;
 
@@ -104,7 +121,9 @@ static void press_parse(const char *spec) {
         *at = 0;
         snprintf(e->key, sizeof(e->key), "%s", tok);
         e->dur = 10;
-        if (sscanf(at + 1, "%d:%d", &e->at, &e->dur) >= 1) g_press_n++;
+        e->tx = 160;
+        e->ty = 120;
+        if (sscanf(at + 1, "%d:%d:%d:%d", &e->at, &e->dur, &e->tx, &e->ty) >= 1) g_press_n++;
     }
 }
 
@@ -118,7 +137,11 @@ static void press_apply(HleHidInput *hi, int frame) {
         else if (!strcmp(e->key, "y")) hi->y = 1;
         else if (!strcmp(e->key, "start")) hi->start = 1;
         else if (!strcmp(e->key, "select")) hi->select = 1;
-        else if (!strcmp(e->key, "touch")) { hi->touch_pressed = 1; hi->touch_x = 160; hi->touch_y = 120; }
+        else if (!strcmp(e->key, "touch")) {
+            hi->touch_pressed = 1;
+            hi->touch_x = (uint16_t)(e->tx < 0 ? 0 : e->tx > 319 ? 319 : e->tx);
+            hi->touch_y = (uint16_t)(e->ty < 0 ? 0 : e->ty > 239 ? 239 : e->ty);
+        }
     }
 }
 
@@ -126,9 +149,11 @@ int main(int argc, char **argv) {
     const char *romfs = "out/romfs";
     const char *shot = NULL;
     int frames_limit = -1;
+    int shot_every = 0;
     setvbuf(stdout, NULL, _IONBF, 0);
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) shot = argv[++i];
+        else if (strcmp(argv[i], "--shot-every") == 0 && i + 1 < argc) shot_every = atoi(argv[++i]);
         else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) frames_limit = atoi(argv[++i]);
         else if (strcmp(argv[i], "--press") == 0 && i + 1 < argc) press_parse(argv[++i]);
         else romfs = argv[i];
@@ -200,6 +225,8 @@ int main(int argc, char **argv) {
 
         compose_frame();
         win_blit(g_rgb, FB_W, FB_H);
+        if (shot != NULL && shot_every > 0 && frames > 0 && (frames % shot_every) == 0)
+            save_shot_numbered(shot, frames);
         if ((frames % 30) == 0) {
             HleGspFrame top, bottom;
             char title[160];
