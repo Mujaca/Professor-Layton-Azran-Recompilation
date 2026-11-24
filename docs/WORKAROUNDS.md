@@ -999,3 +999,48 @@ bleibt die Bit-/Frame-Grenzen-Behandlung des Decoders an der Sync-Grenze
 Decoder-Differenztest vergleichen; insbesondere die Tabellenauswahl vor
 `0x16BD1C`/`0x16BC1C` und den Bit-Refill `0x16C568` pro Frame.
 
+### Decoder wird pro 96-Byte-Chunk gerufen; der 64. Aufruf (nach Frame 41) liest 6,4 KiB – Befund 2026-11-24
+
+**Befund (nur Diagnose, kein Gastzustand):** Der Haenger ist der **64.** Aufruf
+des Frame-Decoders `0x0016A500`, und zwar unmittelbar **nach der 41.
+`StartConversion`** (Korrelation mit `HLE_LOG=1` + `ARM_WATCH=0x0016A500`:
+24 Aufrufe vor Frame 1, danach 1 Aufruf je `StartConversion`, der 64. direkt
+danach). Bis Frame 41 stirbt der Decoder also nicht an einem fehlenden Pfad.
+
+**Neue Belege:**
+
+* `[mw] 0C682378 <- ...` (`ARM_MEMWATCH=0C682378`, Schreiber `pc=0x17A6F8` =
+  `str r1,[r5]` in `fn_0017A6A0`) zeigt die Bitstrom-Zeiger je Decoderaufruf:
+  `0CABDF28`, dann in **0x60-Schritten** `0CABE0E4, 0CABE144, ... 0CABE924,
+  0CABE984, ... 0CABEE04`, Umlauf auf `0CABDF80 ... 0CABE820`, zuletzt
+  `0CABDF28` und `0CABE504`. Der Ring wird also **in 96-Byte-Chunks** an den
+  Decoder uebergeben (0x17A6A0 liest dafuer 6 Referenz-Eintraege, ein
+  16-Bit-Kopfflag `[r1]&0x8000` und ruft je nach `[r4+0x18]` (0x100/0x200/
+  0x400) einen Handler ueber `blx`; der Haenger sitzt im 0x200-Zweig,
+  Rueckkehr `lr=0x0017A788`).
+* Der Stalling-Aufruf startet bei `[obj+0] = 0x0CABE504` und steht bei
+  `r1 = 0x0CABFDFA`, d. h. er hat **0x18F6 = 6390 Byte** verbraucht, waehrend
+  alle vorherigen Chunks 0x60 Byte auseinanderlagen. `[obj+4]=0x190` (400),
+  `[obj+8]=0xF0` (240) bleiben korrekt; `[obj+0xc..0x1c]` zeigen gueltige
+  Referenzebenen (`0C8FA7C8, 0C8CD5A8, 0C8A0388, 0C873168, 0C845F48`).
+  Offenbar beginnt bei diesem Chunk ein **Intra-Frame** (Keyframe), dessen
+  Daten der Ring noch nicht bereitgestellt hat.
+* Der Ring-Schreiber ist `fn_00358958` (Struktur `0x0C680A20`, Datenpuffer
+  u. a. `0x0CAB...`, Quelle `0x0D0007C0` = vollstaendig gelesener Moflex);
+  sein Kopierpfad laeuft ueber `pc=0x358FA8` (Byte-Loop) bzw. `0x20D2CC`
+  (Byte-Kopie, im `0x0CABF000`-Bereich mit 0xFF gefuellt). Der Ringpuffer ist
+  also ein echter Produzent/Verbraucher-Ring, kein fehlender Datei-Read.
+* `HLE_PERFMAP_FILE` (12 s, 900 Host-Frames): Thread 0 95,2 M Bloecke, davon
+  `0x16E4B4`/`0x16E4A8` je 45,8 M (Huffman-Loop); Thread 2 8,7 M (u. a.
+  `0x12B9E8`/`0x12B968` = zweiter Bitstrom-Decoder, laeuft weiter); Thread 10
+  3,7 M (`0x14FF9C`/`0x14FFF0` = GSP). Die Produzenten-Threads sind also
+  **nicht** ausgehungert; es fehlt die Freigabe/Kopfreaktion auf den
+  96-Byte-Chunk des Decoders.
+
+**Naechster Schritt (praezisiert):** Im Chunk-Geber `fn_0017A6A0` und im
+Ring-Schreiber `fn_00358958` die Zaehler „geschrieben/gelesen“ und das
+Freigabe-Event beobachten (`ARM_MEMWATCHRANGE` auf die Ringstruktur
+`0x0C680A20` bzw. den Chunk-Index in `[r4+0xc]`/`[r4+8]`); pruefen, ob der
+Decoder beim Intra-Frame mehr als einen 96-Byte-Chunk anfordern muss und
+welches Event/Semaphor den Kopierer weckt. Erst danach ist eine
+Kernel-/Service-Korrektur belegbar.
