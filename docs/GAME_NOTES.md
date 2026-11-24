@@ -42,6 +42,44 @@ Interrupt. Der Draw-Builder `0x001323FC` bleibt unbetreten.
 zum No-op (size im Pad). Test: `tests/pica_selftest.c::test_gpu_mmio`
 (Registerablage, 16-Byte-Zeilen mit Gap, PPF-Trigger).
 
+## Draw-Gate: Renderziel-Registry bleibt leer (2026-11-24)
+
+**Befund (belegt, kein Recompiler-Fehler):** Der Draw-Gate `0x0027B34C`
+bricht ab, weil `[renderer+0xB4C] == 0` ist. Renderer ist das BSS-Objekt
+`0x00408808`; der Flush `0x0013657C` uebernimmt dort `[ctx+0x24]`, mit
+`ctx = [renderer+0xD6C] = renderer+0x214` (erster der beiden eingebetteten
+Render-Kontexte `+0x214`/`+0x458`).
+
+**Schreibpfade auf `ctx+0x24`:** Der Bind (`fn_0011CAC4`, Block `0x0011CB58`)
+speichert das Ergebnis des Registry-Lookups
+`fn_0027BC50(renderer+0xA0, key)` dorthin; die Unbind-Pfade
+(`fn_0026A84C` -> `0x00274070`, `fn_0011C0C0` -> `0x0011C0F0`, `0x0012D9EC`,
+`0x00134618`, `0x001BE694`) schreiben 0.
+
+**Laufzeit-Belege (natuerlicher Boot, 600 Frames):**
+* `ARM_MEMWATCH` auf `0x00408A40` (ctx0+0x24) und `0x00408C84`
+  (ctx1+0x24): 328 bzw. 404 Schreibzugriffe, **alle Wert 0**.
+* `[0x00409574] = 0x00408A1C` (ctx0 aktiv), `[0x00409354] = 0` (Gate).
+* Registry `renderer+0xA0`: `[0x00408918]` (Array) = 0, `[0x00408920]`
+  (Count u16) = 0; nach dem BSS-Nullen nur die leere Konstruktion.
+* `ARM_WATCH=0x00134900` (Comparator des Lookups): 0 Treffer – bei Count 0
+  kehrt `fn_0027BC50` ohne Vergleich zurueck.
+* Der Lookup wird mit echten Target-Ids aufgerufen (CoSim-Dump am 64. Treffer:
+  `key = 0x2D2F398D`), die Registry liefert dafuer trotzdem 0.
+
+**Co-Simulation (`tools/cosim`):** `fn_0027BC50` laeuft mit dem Dumpzustand in
+Unicorn identisch (Ausrichtung gefunden, keine Abweichung, Rueckkehr im
+Count==0-Zweig). `fn_001ED65C` (setzt `[renderer+0xD6C] = renderer+0x214`)
+laesst sich in Unicorn nicht abschliessen, weil der Folgepfad Speicher
+ausserhalb der vier moeglichen Dump-Regionen liest (VRAM/TLS); das ist eine
+Werkzeuggrenze, kein Recompiler-Beleg.
+
+**Folge:** Der Bind scheitert an fehlender Eingabe, nicht an Semantik: die
+GL-Objekt-Registry am Renderer ist im gesamten Boot leer. Sie wird von der
+Szenen-/GL-Ressourcen-Initialisierung befuellt, die in der Intro-/Y2R-
+Videophase (`docs/WORKAROUNDS.md` §6) nicht erreicht wird. Kein Workaround
+eingebaut.
+
 ## Software-Rasterizer: Performance-Stand (2026-11-24)
 
 Ziel: beide Bildschirme (400x240 oben, 320x240 unten) mit 60 fps schaffen,
