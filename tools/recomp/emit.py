@@ -212,6 +212,7 @@ class Emitter:
         self.block_labels = None   # set of local block addresses (for ldr pc)
         self.pc_targets = None     # alle Instruktionsadressen (indirekte PC-Ziele)
         self.ret_bx = set()        # bx-Adressen mit Rueckkehrziel aus dem Stack
+        self.ret_mov = set()       # `mov pc, rN` mit rN = unveraenderte lr-Kopie
         self.it_cond = {}          # id(ins) -> Bedingung aus einem IT-Block
 
     def pc_value(self, pc):
@@ -346,7 +347,10 @@ class Emitter:
             lines = ["arm_dp(c, %s, %d, %s, %s, %d, -1);" % (code, rd, rn, o2, sf)]
         if writes and rd == 15:
             src = isa.reg_num(ops[1]) if len(ops) > 1 else None
-            if code == "DP_MOV" and src == 14:
+            if code == "DP_MOV" and src is not None and src != 14 and pc in self.ret_mov:
+                # rN ist eine Kopie von lr (cli.lr_copy_returns): Rueckkehr.
+                lines.append("return;")
+            elif code == "DP_MOV" and src == 14:
                 # `mov pc, lr` ist eine Rueckkehr in den C-Aufrufer; ein
                 # arm_call_guest am Rueckkehrziel wuerde eine Gastfunktion
                 # an einer Adresse mitten in der Aufruferfunktion starten.
@@ -405,6 +409,12 @@ class Emitter:
             else:
                 lines.append("  c->r[%d] = a;" % base_reg)
         lines.append("}")
+        if load and rd == 15 and base_reg == 13 and post:
+            # `ldr pc, [sp], #imm` = Epilog-Rueckkehr (wie `pop {pc}`): das
+            # Ziel ist die Rueckkehradresse im Aufrufer, kein Sprung.
+            lines.append("c->t = c->r[15] & 1u; c->r[15] &= ~1u;")
+            lines.append("return;")
+            return lines
         if load and rd == 15:
             # Dynamischer Sprung (z. B. ldr pc,[pc,rN,lsl#2]).
             # Ziele INNERHALB der Funktion muessen per goto auf das lokale
