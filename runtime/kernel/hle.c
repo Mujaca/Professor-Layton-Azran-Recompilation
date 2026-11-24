@@ -9,6 +9,7 @@
 #include "fs_archive.h"
 #include "gpu.h"
 #include "gsp_fb.h"
+#include "frame_clock.h"
 #include "dsp_hle.h"
 #include "hid_ring.h"
 #include "y2r.h"
@@ -57,6 +58,7 @@ static ArmCpu *g_main_cpu = NULL;
  * Screen 0 = oben (400x240), Screen 1 = unten (320x240). */
 static GspFbRegs g_gsp_fb_regs[2];
 static HleGspFrame g_gsp_display[2];
+static volatile unsigned g_gsp_guest_frames = 0;
 static SRWLOCK g_gsp_fb_srw = SRWLOCK_INIT;
 static int g_gsp_fb_init_done = 0;
 
@@ -77,6 +79,10 @@ int hle_gsp_frame(int screen, HleGspFrame *out) {
     ok = out->valid;
     ReleaseSRWLockShared(&g_gsp_fb_srw);
     return ok;
+}
+
+unsigned hle_gsp_guest_frames(void) {
+    return g_gsp_guest_frames;
 }
 
 /* Uebernimmt den sichtbaren Registerstand in die Anzeige (VBlank-Latch). */
@@ -2857,6 +2863,7 @@ static void gsp_pica_irq(int id) {
  * dirty-Flag im Update-Header: Bit0; Info-Eintrag = index & 1. */
 static void gsp_vblank_fb_update(ArmCpu *c, int tid) {
     int screen;
+    int guest_updated = 0;
     if (c == NULL) return;
     gsp_fb_init();
     for (screen = 0; screen < 2; screen++) {
@@ -2867,6 +2874,7 @@ static void gsp_vblank_fb_update(ArmCpu *c, int tid) {
         if (base + 0x40u > c->mem_size) continue;
         fbu = c->mem + base;
         if ((fbu[1] & 1u) == 0u) continue;   /* nicht aktualisiert */
+        guest_updated = 1;
         idx = fbu[0] & 1u;
         /* Azahar gsp_gpu.h: FrameBufferUpdate = {u8 index, u8 dirty, u16 pad,
            FrameBufferInfo[2] (je 0x1C Byte) ab +4} -> [1] bei +0x20. */
@@ -2895,6 +2903,7 @@ static void gsp_vblank_fb_update(ArmCpu *c, int tid) {
     gsp_fb_latch_locked(0);
     gsp_fb_latch_locked(1);
     ReleaseSRWLockExclusive(&g_gsp_fb_srw);
+    if (guest_updated) g_gsp_guest_frames++;
 }
 
 
@@ -4067,9 +4076,11 @@ static void arb_unregister(int slot) {
  * PDC0/PDC1 gehen ueber die InterruptRelayQueue an das bei
  * RegisterInterruptRelayQueue registrierte Spiel-Event. */
 static DWORD WINAPI vblank_thread(LPVOID p) {
+    FrameClock clock;
     (void)p;
+    frame_clock_start(&clock);
     while (g_vblank_run) {
-        Sleep(16);
+        frame_clock_wait(&clock);
         /* Echte VBlank-Quelle: GSP uebernimmt die FrameBufferInfo aus dem
          * Shared-Memory und meldet PDC0 (oben) / PDC1 (unten) per RelayQueue
          * und Event (Azahar GPU::VBlankCallback / GSP_GPU::SignalInterrupt).
@@ -4084,6 +4095,7 @@ static DWORD WINAPI vblank_thread(LPVOID p) {
         hid_poll();
         guest_lock_leave();
     }
+    frame_clock_stop(&clock);
     return 0;
 }
 
@@ -4234,8 +4246,10 @@ static uint32_t hle_svc_dispatch(ArmCpu *c, uint32_t imm) {
     ev(1, imm, c->r[0], c->r[1]);
     svc_trace(imm, c);
     if (imm == 0x3C) {
-        printf("[svc] Break bei Block 0x%08X: r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X\n",
-               arm_last_block, c->r[0], c->r[1], c->r[2], c->r[3], c->r[14]);
+        printf("[svc] Break bei Block 0x%08X: r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X th=%u\n",
+               arm_last_block, c->r[0], c->r[1], c->r[2], c->r[3], c->r[14],
+               (uint32_t)((c->tpidruro >> 12) & 0xFu));
+        arm_trace_thread_dump((int)((c->tpidruro >> 12) & 0xFu), 16);
         if (g_log) {
             uint32_t base = 0x003D8CC0u;
             printf("      globals @0x%08X:", base);
