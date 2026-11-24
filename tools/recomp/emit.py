@@ -137,6 +137,7 @@ class Emitter:
         self.func = func_addr
         self.thumb = thumb
         self.block_labels = None   # set of local block addresses (for ldr pc)
+        self.ret_bx = set()        # bx-Adressen mit Rueckkehrziel aus dem Stack
 
     def pc_value(self, pc):
         if self.thumb:
@@ -356,6 +357,12 @@ class Emitter:
             reg = isa.reg_num(ops[0])
             if reg is None:
                 raise Unsupported(ins.op_str)
+            if ins.id == A.ARM_INS_BX and reg != 14 and pc in self.ret_bx:
+                # Rueckkehr-Idiom: Ziel wurde aus dem Stack geladen (pop/ldm).
+                # Das ist eine Rueckkehr in den C-Aufrufer; ein Dispatch ueber
+                # arm_call_guest wuerde eine Gastfunktion an einer
+                # Rueckkehradresse starten (Prolog fehlt -> SP driftet).
+                return ["return;"]
             if ins.id == A.ARM_INS_BLX or reg != 14:
                 lines = []
                 if ins.id == A.ARM_INS_BLX:

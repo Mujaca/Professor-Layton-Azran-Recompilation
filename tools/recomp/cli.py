@@ -101,6 +101,59 @@ def collect_stats(res, data):
     }
 
 
+def return_bx_in_block(blk):
+    """BX-Register, das aus dem Stack geladen wurde (Rueckkehr-Idiom).
+
+    ARM/Thumb-Epilogen laden das Rueckkehrziel oft nach rN
+    (`pop {rN}; ... bx rN`, `ldm sp!, {...}; bx rN`). Das ist eine Rueckkehr
+    in die aufrufende C-Funktion, kein indirekter Aufruf: `arm_call_guest`
+    wuerde am Rueckkehrziel eine (ggf. falsch geseedete) Gastfunktion starten
+    und deren Prolog ueberspringen. Rueckgabe-Instruktionen werden daher als
+    `return` uebersetzt.
+    """
+    import capstone.arm as A
+    out = set()
+    last = {}
+
+    def regno(r):
+        if A.ARM_REG_R0 <= r <= A.ARM_REG_R12:
+            return r - A.ARM_REG_R0
+        if r == A.ARM_REG_SP:
+            return 13
+        if r == A.ARM_REG_LR:
+            return 14
+        if r == A.ARM_REG_PC:
+            return 15
+        return None
+
+    stack_load_ids = (A.ARM_INS_POP, A.ARM_INS_LDM, A.ARM_INS_LDMIB,
+                      A.ARM_INS_LDMDA, A.ARM_INS_LDMDB)
+    for ins in blk.insns:
+        if ins.id == A.ARM_INS_BX:
+            ops = isa.split_operands(ins.op_str)
+            reg = isa.reg_num(ops[0]) if ops else None
+            if reg is not None and reg not in (14, 15) and last.get(reg) == "sp":
+                out.add(ins.address)
+            continue
+        try:
+            _, written = ins.regs_access()
+        except Exception:
+            written = ()
+        is_stack_load = ins.id in stack_load_ids
+        if is_stack_load:
+            if ins.id == A.ARM_INS_POP:
+                is_stack_load = True
+            else:
+                base = isa.split_operands(ins.op_str)[0].rstrip("!") if ins.op_str else ""
+                is_stack_load = isa.reg_num(base) == 13
+        for r in written:
+            rr = regno(r)
+            if rr is None or rr in (13, 15):
+                continue
+            last[rr] = "sp" if is_stack_load else "other"
+    return out
+
+
 def needs_fallthrough(ins):
     """True, wenn nach dieser Instruktion der naechste Block folgt."""
     import capstone
@@ -394,6 +447,7 @@ def generate(res, path, max_funcs=None, trace=False, data=None):
         out.append("  goto %s;" % em.label(_entry))
         for blk in fn.blocks:
             out.append("%s:" % em.label(blk.addr))
+            em.ret_bx = return_bx_in_block(blk)
             for ln in BLOCK_HOOKS.get(u32(blk.addr), ()):
                 out.append("  " + ln)
             if trace:

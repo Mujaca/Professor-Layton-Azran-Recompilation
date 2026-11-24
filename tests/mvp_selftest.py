@@ -198,13 +198,42 @@ CASES = [
         "regs": {},
         "expect": {"r2": 11, "r3": 22},
     },
+    {
+        # ARM-Rueckkehr ueber ein Register, das aus dem Stack geladen wurde:
+        # `pop {r3}; bx r3` ist ein Rueckkehr-Idiom (Thumb-Interworking), kein
+        # indirekter Aufruf. Frueher wurde das Ziel per arm_call_guest als neue
+        # Gastfunktion gestartet -> Prolog uebersprungen, SP driftete (+0x50).
+        "name": "bx_rN_rueckkehr_thumb",
+        "asm": """
+            mov r0, #2
+            blx 0x100200
+            add r0, r0, #1
+            bx lr
+        """,
+        "thumb_raw": {
+            0x100200: """
+                push {lr}
+                movs r0, #7
+                pop {r3}
+                bx r3
+            """,
+        },
+        "regs": {},
+        "expect": {"r0": 8, "r13": 0x8000},
+    },
 ]
 
 
 def build_case(case, idx):
+    raw = list(case.get("raw") or [])
+    if case.get("thumb_raw"):
+        ks_t = Ks(KS_ARCH_ARM, KS_MODE_THUMB | KS_MODE_LITTLE_ENDIAN)
+        for addr, text in case["thumb_raw"].items():
+            encoding, count = ks_t.asm(text, addr)
+            raw.append((addr, bytes(encoding)))
     img, ks = assemble([(isa.ARM_BASE, case["asm"])] +
                        sorted((case.get("extra") or {}).items()),
-                       thumb=case.get("thumb", False), raw=case.get("raw"))
+                       thumb=case.get("thumb", False), raw=raw)
     data = bytes(img)
     res = cli.scanmod.scan(data, [(isa.ARM_BASE, "entry", case.get("thumb", False))])
     c_path = os.path.join(OUT, "gen_%d.c" % idx)

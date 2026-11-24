@@ -121,3 +121,35 @@ ist die Semantik von `fn_00292198` (`g_os+9`) und warum `fn_001028A0` diesen
 Pfad im Port durchläuft (möglicher Recompiler-/HLE-Unterschied bei
 OS-Init/Syscall-Rückgaben, kein Spielcode-Patch).
 
+
+### Stack-Drift + frueher Finalize-Zweig: `bx rN`-Rueckkehr – behoben 2026-11-24
+
+**Befund:** `fn_0028F648` (Thumb) kehrt ueber `pop {r3}; add sp,#0x10;
+bx r3` zurueck. Der Recompiler uebersetzte `bx r3` als indirekten
+Gastaufruf (`arm_call_guest`). r3 ist die Rueckkehradresse (Thumb-Bit,
+z. B. `0x1016E1`); der Dispatcher suchte `addr & ~1` und fand in
+`tools/recomp/seeds.txt` den Eintrag `0x1016E0` – das ist aber nur die
+Rueckkehradresse von `blx 0x28F648` in `fn_001016B8`, keine Funktion (kein
+Prolog, keine Referenz im Image). Der Dispatcher startete dort
+`fn_001016E0` ohne Prolog; der Epilog (`add sp,#0x48; pop {r4,pc}`) hob SP
+um `+0x50` an und lud ein fremdes LR.
+
+**Belege:** `ARM_WATCH=1016E0` → Block bei `lr=0x0028F667`; danach
+`[sp] blk=0x00101744 lr=0x001036C4: SP 0FFEF9E0 -> 0FFEFA30`. Genau an der
+`hid:USER cmd=0x000A`-Stelle blieb der Hauptthread danach stehen.
+
+**Korrektur:** `return_bx_in_block()` (tools/recomp/cli.py) erkennt `bx rN`,
+wenn rN zuletzt durch `pop`/`ldm sp!` aus dem Stack geladen wurde; emit.py
+erzeugt dafuer `return;` statt `arm_call_guest`. Falscher Seed `001016E0`
+entfernt. Test: `tests/mvp_selftest.py::bx_rN_rueckkehr_thumb`.
+
+**Offen:** Der Fehlerpfad `fn_001028A0 -> fn_0028E410 -> fn_00119D34`
+(`g_os+9 = 1`) wird weiterhin ausgeloest. Nach dem Fix laeuft er sauber
+ueber den echten Fehlerdienst: `ConnectToPort("err:f")`, dann
+`cmd 0x0001 normal=32` mit `p0=C1AC0000 p1=E0A046DB p2=0028EDE8
+p3=FFFF8001`; `HLE_ERRCTX` nennt `site=0028EDE8`. Der Hauptthread bleibt
+danach vor `ptm:u` stehen (Frontier 4/10). Ursache ist der zu frueh
+laufende Worker-Task (Task-Dispatcher `fn_00119D48` setzt ueber `0x27CB2C`
+einen Fehlerzustand, den `fn_0028E410` als fatal liest): vermutlich weckt
+der HLE-Kernel (`WaitSynchronization`/Arbiter, `wa-kernel-signal-all`) den
+Worker zu frueh. Das ist Kernel-Arbeitsvorrat.
