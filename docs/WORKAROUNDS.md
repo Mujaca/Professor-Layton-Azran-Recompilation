@@ -60,23 +60,36 @@ die Hooks vorher ersetzt haben.
 Früher entfernt: `0x12E1E4`/`0x12E1F0` (`arm_mutex_bootstrap`) – `ARM_WATCH`
 zeigte im gesamten Boot 0 Treffer (toter Code).
 
-## 3. Textersetzungen im generierten C – `tools/workarounds/gen_patches.py` (1)
+## 3. Textersetzungen im generierten C – `tools/workarounds/gen_patches.py` (0)
 
-| Funktion | Wirkung | Ursache (Verdacht) |
-|---|---|---|
-| fn_0028EE00 | srv-Namenslänge 8 → 9 akzeptieren | Spiel schickt `strlen+1`: Recompiler (strlen) oder srv-Layout |
+**Leer** (2026-11-24). Die letzte Ersetzung – `fn_0028EE00` verglich die
+srv-Namenslänge mit `cmp r2,#8`, ersetzt durch `#9` – ist entfernt.
 
-Beleg: Mit leerem `gen_patches` fällt Frontier auf **6/10**, erste
-Divergenz `gsp::Gpu`; der Check `cmp r2,#8` in `fn_0028EE00` (0x28EE14)
-weist die Namenslänge 9 ab. `gsp::Gpu`/`dsp::DSP`/`hid:USER` sind genau
-8 Zeichen. Die Aufrufer berechnen `r2` über `fn_0028F5E8` (strlen,
-0x12F79C und 0x28E9D8); die Wortschleife nutzt `uqsub8` und ist in der
-Runtime korrekt implementiert – als nächstes muss isoliert geprüft werden,
-warum dort 9 statt 8 ankommt (Kandidat: `ldr`-/`str`-Semantik oder
-Literal-Pool in `fn_0028F5E8`).
+**Beleg, dass sie unnötig war:** `[srvname]`-Log (Diagnose, `HLE_LOG`) im
+natürlichen Boot mit unverändertem `cmp r2,#8`:
 
-Die übrigen vier Ersetzungen (fn_001187F8, fn_00100F98, fn_001ED64C,
-fn_001B9938) sind entfernt: Build ohne sie bleibt Frontier 9/10 (boss:U).
+```
+[srvname] "hid:USER" len=8 name8=524553553A646968 ... -> 17
+[srvname] "gsp::Gpu" len=8 name8=7570473A3A707367 ... -> 31
+[srvname] "fs:USER"  len=7 ...
+```
+
+`name_len` ist also exakt `strlen(name)` (nicht `strlen+1`), wie Azahar
+`sm/srv.cpp` (`kMaxPortSize = 8`, Ablehnung nur bei `name_len > 8`). Frontier
+mit `cmp #8`: **9/10 (boss:U)**, identisch zu vorher.
+
+**Ursache der alten Abweichung:** Der rekompilierte strlen `fn_0028F5E8`
+(wortweise Schleife mit `uqsub8` + `lsls`-Kaskade) liest per
+`ldr r1,[r0],#4`; der post-index-Writeback fehlte in einer früheren
+`emit.py`-Version – im alten `build/generated_all.c` (17.11.) steht nur
+`c->r[1] = arm_ld(c, a, 4, 0)` ohne `c->r[0] = a + 4`, die Schleife las
+also immer dasselbe Wort. Inzwischen erzeugt
+`tools/recomp/emit.py` den Writeback (`c->r[0] = a + 4`). Test:
+`tests/mvp_selftest.py::strlen_wortschleife` (Originalsequenz als asm,
+8-Zeichen-String im Gastpuffer, erwartet r0 = 8). Der Testharness hatte den
+Textbereich (Literal-Pool `0x01010101` bei `0x10005C`) nicht im Gastpuffer –
+deshalb lief der frühere Versuch in eine Endlosschleife; Puffer ist jetzt
+`0x140000` Byte groß, `mem_bytes` legt Bytefolgen ab.
 
 ## 4. Runtime – `rg "WORKAROUND(" runtime`
 

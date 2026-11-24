@@ -46,6 +46,9 @@ ReadPipeIfPossible` (Request `normal=3, translate=0`).
 ### Dienst-Kommandos, die das Spiel benutzt
 
 * **srv:** `1` RegisterClient, `2` EnableNotification, `5` GetServiceHandle.
+  `GetServiceHandle` erhält den Namen als 8-Byte-Feld plus `name_len` =
+  `strlen(name)` (nicht `strlen+1`); `name_len > 8` → `0xD9006405`
+  (Azahar `sm/srv.cpp`, `kMaxPortSize = 8`).
 * **APT:U:** `1` GetLockHandle, `2` Initialize, `3` Enable, `0x0D`
   ReceiveParameter, `0x0E` GlanceParameter, `0x43` InquireNotification,
   `0x4B` AppletUtility, `0x4F` SetAppCpuTimeLimit.

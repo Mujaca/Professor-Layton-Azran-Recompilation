@@ -32,7 +32,7 @@ python tests/mvp_selftest.py      # Instruktionssemantik (keystone + zig cc)
 |---|---|
 | `code_patches.json` + `apply.py` | Patches am Spielcode, prüft Originalbytes |
 | `block_hooks.json` | C-Zeilen, die der Recompiler an Blöcken/nach Aufrufen einfügt |
-| `gen_patches.py` | Textersetzungen in `build/gen_boot.c` |
+| `gen_patches.py` | Textersetzungen in `build/gen_boot.c` (derzeit leer) |
 
 ## Analyse (`tools/g3ds.py <befehl>`)
 
