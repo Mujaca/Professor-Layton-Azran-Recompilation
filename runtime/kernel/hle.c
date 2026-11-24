@@ -11,6 +11,7 @@
 #include "gsp_fb.h"
 #include "frame_clock.h"
 #include "dsp_hle.h"
+#include "host_output.h"
 #include "hid_ring.h"
 #include "y2r.h"
 
@@ -158,6 +159,14 @@ static void guest_lock_leave(void) {
     LeaveCriticalSection(&g_guest_lock);
     if (g_ystat) g_lock_free_us = host_us();
 }
+/* Nicht blockierend (DSP-Thread): 1 = Sperre erhalten. */
+static int guest_lock_try(void) {
+    if (!g_guest_lock_init || g_no_lock) return 1; /* ohne Sperre: sofort zustellen */
+    if (t_lock_owned) return 0;
+    if (!TryEnterCriticalSection(&g_guest_lock)) return 0;
+    t_lock_owned = 1;
+    return 1;
+}
 /* Wartet garantiert, bis der Lock wieder erlangt ist (kein "ohne Lock
    weiterlaufen" mehr). */
 static void guest_lock_reacquire(void) {
@@ -183,6 +192,7 @@ static void y2r_poll(void);
  * kooperativen Lock nicht dauerhaft halten. Alle 0x4000 Bloecke abgeben. */
 void hle_pump(void) {
     if ((++g_pump_count & 0x3FFFu) != 0) return;
+    if (t_lock_owned) audio_dsp_flush_events();
     hid_poll();
     y2r_poll();
     if (!g_guest_lock_init || g_no_lock) return;
@@ -215,6 +225,7 @@ static void guest_yield(void) {
     Sleep(0);
     /* Garantiert wieder in den Lock zurueck (bilanziert ueber t_lock_owned). */
     guest_lock_reacquire();
+    audio_dsp_flush_events();
     if (g_ystat) {
         g_yield_n++;
         g_yield_us += host_us() - t0;
@@ -4013,6 +4024,7 @@ static DWORD WINAPI vblank_thread(LPVOID p) {
         gsp_signal_interrupt(GSP_IRQ_PDC1);
         kernel_poll_timers();
         hid_poll();
+        audio_dsp_flush_events();
         if (g_ystat && (++g_vblank_tick % 62u) == 0u) {
             printf("[ystat] vbl=%u t=%llus yields=%llu yield_ms=%llu pumps=%llu pump_ms=%llu idle_ms=%llu\n",
                    g_vblank_tick,
@@ -4093,6 +4105,7 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
        Gast-Lock fuer den Audio-Thread, Pipe-2-Interrupts je Frame. */
     audio_dsp_init(c->mem, c->mem_size);
     audio_dsp_set_lock(guest_lock_enter, guest_lock_leave);
+    audio_dsp_set_trylock(guest_lock_try);
     audio_dsp_set_interrupt(dsp_interrupt_cb);
     audio_dsp_set_struct_addresses(dsp_audio_struct_addresses);
     audio_dsp_start();
@@ -4131,7 +4144,8 @@ void hle_report(void) {
                wall_ms ? 100.0 * (double)g_gtime_us / 1000.0 / (double)wall_ms : 0.0,
                frag, tex, lit, fb, pc, pr, sc, sr);
     }
-    if (g_log) printf("[audio] frames=%llu\n", audio_dsp_frames());
+    if (g_log) printf("[audio] frames=%llu host_dropped=%u underruns=%u\n", audio_dsp_frames(),
+                      host_audio_dropped(), host_audio_underruns());
     arm_perfmap_report();
     printf("[hle] letzte Ereignisse:\n");
     for (int i = 0; i < HLE_EV_RING; i++) {

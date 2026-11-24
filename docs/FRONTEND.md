@@ -94,7 +94,7 @@ Tastatur-Circle-Pad nur, wenn er die Deadzone verlaesst.
 ## Diagnose-CLI fuer Testlaeufe
 
 ```
-out/port.exe [romfs] [--frames N] [--shot datei.bmp] [--shot-every N]
+out/port.exe [romfs] [--frames N] [--shot datei.bmp] [--shot-every N] [--shot-from M]
              [--press taste@frame[:dauer[:x:y]],...]
 ```
 
@@ -102,7 +102,10 @@ out/port.exe [romfs] [--frames N] [--shot datei.bmp] [--shot-every N]
 * `--shot datei.bmp` schreibt beim Beenden ein BMP des zusammengesetzten
   Bildes (400x480: oben 400x240, unten 320x240 ab x=40,y=240).
   `--shot-every N` schreibt zusaetzlich alle N Host-Frames
-  `name_000600.bmp` (Szenenfolge dokumentieren).
+  `name_000600.bmp` (Szenenfolge dokumentieren); `--shot-from M` erst ab
+  Host-Frame M (Flacker-Analyse mit `--shot-every 1`).
+* `HLE_AUDIO_WAV=datei.wav` schreibt den erzeugten DSP-Ton zusaetzlich als
+  WAV (32728 Hz Stereo); `HLE_LOG` meldet am Ende `host_dropped`/`underruns`.
 * `--press` haelt eine logische Taste (`a`, `b`, `x`, `y`, `start`,
   `select`, `touch`) fuer `dauer` Host-Frames ab `frame` gedrueckt
   (Standard 10). `touch` nimmt zusaetzlich Koordinaten auf dem unteren

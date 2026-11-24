@@ -193,6 +193,16 @@ typedef struct {
     DspMixers mixers;
     void (*lock_enter)(void);
     void (*lock_leave)(void);
+    int (*lock_try)(void);
+    /* Eigene Sperre fuer den DSP-Zustand (Quellen, Mixer, state). Der
+     * Audio-Thread haelt NICHT die globale Gast-Sperre: echte DSP-Hardware
+     * laeuft parallel zur CPU. Die Gast-Sperre wird nur fuer die Meldungen
+     * an den Gast (Interrupt-Events, Struct-Adressen) gebraucht; diese
+     * werden als pending gesammelt und unter der Gast-Sperre zugestellt
+     * (audio_dsp_flush_events). Sperr-Reihenfolge: Gast-Sperre -> cs. */
+    CRITICAL_SECTION cs;
+    int cs_init;
+    volatile LONG pend_struct, pend_int_zero, pend_int_pipe2;
     void (*interrupt)(int type, int pipe);
     void (*struct_addresses)(void);
     volatile int running;
@@ -971,40 +981,67 @@ static void dsp_wakeup(DspState *d) {
            AUDIO_DSP_REGION_SIZE);
 }
 
-static void finish_pending_sleep(DspState *d) {
+/* direct != 0: Aufrufer haelt die Gast-Sperre (pipe_write), sonst wird die
+ * Meldung fuer audio_dsp_flush_events vorgemerkt. */
+static void finish_pending_sleep(DspState *d, int direct) {
     if (!d->sleep_pending) return;
     d->sleep_pending = 0;
     dsp_sleep(d);
     d->state = AUDIO_DSP_SLEEPING;
-    if (d->struct_addresses) d->struct_addresses();
+    if (direct) {
+        if (d->struct_addresses) d->struct_addresses();
+    } else {
+        InterlockedIncrement(&d->pend_struct);
+    }
 }
 
 static void audio_tick(DspState *d) {
     int on;
 
     if (d->sleep_pending) {
-        finish_pending_sleep(d);
+        finish_pending_sleep(d, 0);
         d->sleep_reply_frames = 2;
     } else if (d->sleep_reply_frames > 0 && --d->sleep_reply_frames == 0) {
-        if (d->interrupt) d->interrupt(AUDIO_DSP_INT_ZERO, 0);
+        InterlockedIncrement(&d->pend_int_zero);
     }
 
     on = d->state == AUDIO_DSP_ON && d->region[0] != NULL;
     if (on) {
         generate_frame(d);
-        if (d->interrupt) d->interrupt(AUDIO_DSP_INT_PIPE, 2);
+        InterlockedIncrement(&d->pend_int_pipe2);
     }
     d->frame_count++;
 }
 
-static void audio_thread_tick(DspState *d) {
-    if (d->lock_enter) d->lock_enter();
-    audio_tick(d);
-    if (d->lock_leave) d->lock_leave();
+static void cs_enter(DspState *d) { if (d->cs_init) EnterCriticalSection(&d->cs); }
+static void cs_leave(DspState *d) { if (d->cs_init) LeaveCriticalSection(&d->cs); }
+
+static int pending(DspState *d) {
+    return d->pend_struct | d->pend_int_zero | d->pend_int_pipe2;
 }
 
+/* Aufrufer haelt die Gast-Sperre. Reihenfolge wie im synchronen Ablauf:
+ * Struct-Adressen (Sleep-Abschluss), Interrupt Zero, Interrupt Pipe 2.
+ * Mehrere vorgemerkte Meldungen derselben Art verschmelzen wie ein
+ * bereits signalisiertes Ereignis. */
+void audio_dsp_flush_events(void) {
+    DspState *d = &g_dsp;
+    if (!pending(d)) return;
+    if (InterlockedExchange(&d->pend_struct, 0) && d->struct_addresses) d->struct_addresses();
+    if (InterlockedExchange(&d->pend_int_zero, 0) && d->interrupt) d->interrupt(AUDIO_DSP_INT_ZERO, 0);
+    if (InterlockedExchange(&d->pend_int_pipe2, 0) && d->interrupt) d->interrupt(AUDIO_DSP_INT_PIPE, 2);
+}
+
+/* Synchroner Takt (Tests): Frame unter der DSP-Sperre, danach Meldungen
+ * blockierend unter der Gast-Sperre zustellen. */
 void audio_dsp_tick(void) {
-    audio_thread_tick(&g_dsp);
+    DspState *d = &g_dsp;
+    cs_enter(d);
+    audio_tick(d);
+    cs_leave(d);
+    if (d->lock_enter) d->lock_enter();
+    audio_dsp_flush_events();
+    if (d->lock_leave) d->lock_leave();
 }
 
 static DWORD WINAPI audio_thread(LPVOID p) {
@@ -1020,9 +1057,16 @@ static DWORD WINAPI audio_thread(LPVOID p) {
             Sleep(1);
             continue;
         }
-        if (d->lock_enter) d->lock_enter();
+        cs_enter(d);
         audio_tick(d);
-        if (d->lock_leave) d->lock_leave();
+        cs_leave(d);
+        /* Meldungen nur zustellen, wenn die Gast-Sperre gerade frei ist;
+         * sonst uebernehmen das die Gast-Threads bzw. der VBlank-Thread
+         * (hle.c ruft audio_dsp_flush_events unter der Sperre). */
+        if (d->lock_try && pending(d) && d->lock_try()) {
+            audio_dsp_flush_events();
+            if (d->lock_leave) d->lock_leave();
+        }
 
         next.QuadPart += (LONGLONG)(period * (double)f.QuadPart);
         QueryPerformanceCounter(&now);
@@ -1037,7 +1081,10 @@ static DWORD WINAPI audio_thread(LPVOID p) {
 
 void audio_dsp_init(uint8_t *mem, uint32_t mem_size) {
     DspState *d = &g_dsp;
+    if (d->cs_init) DeleteCriticalSection(&d->cs);
     memset(d, 0, sizeof(*d));
+    InitializeCriticalSection(&d->cs);
+    d->cs_init = 1;
     d->mem = mem;
     d->mem_size = mem_size;
     d->verbose = getenv("HLE_AUDIO_LOG") != NULL;
@@ -1055,6 +1102,10 @@ void audio_dsp_set_lock(void (*enter)(void), void (*leave)(void)) {
     g_dsp.lock_leave = leave;
 }
 
+void audio_dsp_set_trylock(int (*try_enter)(void)) {
+    g_dsp.lock_try = try_enter;
+}
+
 void audio_dsp_set_interrupt(void (*handler)(int type, int pipe)) {
     g_dsp.interrupt = handler;
 }
@@ -1070,10 +1121,11 @@ void audio_dsp_set_host_output(int enabled) {
 void audio_dsp_pipe_write(const uint8_t *buffer, uint32_t size) {
     DspState *d = &g_dsp;
     if (buffer == NULL || size != 4) return; /* Azahar: genau 4 Byte */
+    cs_enter(d);
     if (d->verbose) printf("[audio] pipe state=%u\n", buffer[0]);
     /* Azahar DspHle::Impl::PipeWrite: eine faellige Sleep-Uebergabe sofort
      * abschliessen und die Reply-Frames zuruecksetzen. */
-    finish_pending_sleep(d);
+    finish_pending_sleep(d, 1);
     d->sleep_reply_frames = 0;
     /* Azahar DSP_DSP::WriteProcessPipe: Bytes 2/3 sind Muell und werden
      * genullt; der StateChange steht in Byte 0. */
@@ -1098,6 +1150,7 @@ void audio_dsp_pipe_write(const uint8_t *buffer, uint32_t size) {
         d->state = AUDIO_DSP_OFF;
         break;
     }
+    cs_leave(d);
 }
 
 uint16_t audio_dsp_recv_data(void) {

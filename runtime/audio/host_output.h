@@ -13,5 +13,6 @@ void host_audio_push(const int16_t *stereo, unsigned frames);
 void host_audio_close(void);
 void host_audio_set_enabled(int enabled);
 unsigned host_audio_dropped(void);
+unsigned host_audio_underruns(void);
 
 #endif

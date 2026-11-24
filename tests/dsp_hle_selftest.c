@@ -135,8 +135,14 @@ int main(void) {
     set_counter(0, 10);
     set_counter(1, 9);
     memset(region(1) + SM_SOURCE_STATUS, 0, 24 * 12);
-    /* Gast-Puffer an physikalisch 0x20000000 -> Offset 0; 1000 Stereo-Frames. */
-    for (int i = 0; i < 2000; i++) wr16(g_mem + i * 2, (unsigned)(i & 0x7FFF));
+    /* FCRAM phys 0x20000000+x liegt im Port bei virtuell 0x14000000+x
+     * (Linear-Heap), nicht bei x (dort liegt Code). */
+    check(audio_phys_to_guest(0x20000000u) == 0x14000000u, "phys_fcram_basis");
+    check(audio_phys_to_guest(0x20123456u) == 0x14123456u, "phys_fcram_offset");
+    check(audio_phys_to_guest(0x1FF50000u) == 0x1FF50000u, "phys_dsp_ram_identisch");
+    check(audio_phys_to_guest_aligned(0x20000002u) == 0x14000000u, "phys_dma_ausgerichtet");
+    /* Gast-Puffer an physikalisch 0x20000000 -> virtuell 0x14000000; 1000 Stereo-Frames. */
+    for (int i = 0; i < 2000; i++) wr16(g_mem + 0x14000000u + i * 2, (unsigned)(i & 0x7FFF));
     cfg = region(0) + SM_SOURCE_CONFIG;
     memset(cfg, 0, 192);
     wr32(cfg + CFG_DIRTY, (1u << 30) | (1u << 16));

@@ -22,11 +22,19 @@
 #define AUDIO_DSP_RAM_ADDR     0x1FF00000u
 #define AUDIO_DSP_RAM_SIZE     0x80000u
 
-/* Einheitliche Umrechnung physikalische Gastadresse -> Offset im linear
- * abgebildeten Gast-Speicher des Ports (arm_cpu.c: addr & 0x1FFFFFFF).
- * Audio-Pufferadressen sind FCRAM-physikalisch (0x20000000+x). */
+/* Physikalische Gastadresse -> virtuelle Gastadresse im Port-Speicher.
+ * Der Port bildet den Gastspeicher ueber virtuelle Adressen ab; FCRAM
+ * (phys 0x20000000+x) erscheint im Prozess als Linear-Heap 0x14000000+x
+ * (3DS-Speicherkarte, gleiche Abbildung wie gpu_pica_phys_to_guest).
+ * Frueher wurde nur auf x maskiert -> Samples kamen aus dem Codebereich.
+ * DSP-RAM (0x1FF00000) ist virtuell identisch abgebildet. */
+#define AUDIO_FCRAM_PADDR  0x20000000u
+#define AUDIO_FCRAM_SIZE   0x08000000u
+#define AUDIO_LINEAR_VADDR 0x14000000u
 static inline uint32_t audio_phys_to_guest(uint32_t phys) {
-    return phys & 0x1FFFFFFFu;
+    if (phys >= AUDIO_FCRAM_PADDR && phys - AUDIO_FCRAM_PADDR < AUDIO_FCRAM_SIZE)
+        return AUDIO_LINEAR_VADDR + (phys - AUDIO_FCRAM_PADDR);
+    return phys;
 }
 /* Wie Azahar source.cpp: DSP-DMA ignoriert die unteren zwei Adressbits
  * (GetPhysicalPointer(addr & 0xFFFFFFFC)). */
@@ -55,12 +63,18 @@ enum {
     AUDIO_DSP_INT_PIPE = 2
 };
 
-/* Speicher + Gast-Lock. mem ist der Gast-Speicher (physisch, wie arm_cpu.mem);
- * mem_size begrenzt die Regionen. Die Lock-Funktionen werden um jede
- * Frame-Verarbeitung herum aufgerufen, weil die Regionen im Gast-Speicher
- * liegen und parallel vom Spiel geschrieben werden. */
+/* Speicher + Gast-Lock. mem ist der Gast-Speicher; mem_size begrenzt die
+ * Regionen. Die Frame-Verarbeitung laeuft wie auf Hardware parallel zum
+ * Gast (eigene DSP-Sperre); die Gast-Sperre wird nur fuer die Meldungen an
+ * den Gast genommen (audio_dsp_flush_events). try_enter: nicht blockierender
+ * Versuch, 1 = Sperre erhalten (danach leave). */
 void audio_dsp_init(uint8_t *mem, uint32_t mem_size);
 void audio_dsp_set_lock(void (*enter)(void), void (*leave)(void));
+void audio_dsp_set_trylock(int (*try_enter)(void));
+
+/* Vorgemerkte DSP-Meldungen (Interrupts, Struct-Adressen) zustellen.
+ * Aufrufer MUSS die Gast-Sperre halten. Billig, wenn nichts ansteht. */
+void audio_dsp_flush_events(void);
 
 /* Interrupt-Callback: wird aus dem Audio-Thread gerufen und signalisiert das
  * bei RegisterInterruptEvents gebundene Gast-Ereignis (hle.c). */

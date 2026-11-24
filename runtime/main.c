@@ -87,7 +87,8 @@ static void save_shot(const char *path) {
 }
 
 /* --shot-every N: zusaetzlich alle N Host-Frames ein Bild
- * ("name_000600.bmp"). Reine Diagnose, kein Gastzustand. */
+ * ("name_000600.bmp"), mit --shot-from M erst ab Host-Frame M (z. B. fuer
+ * Flacker-Analysen mit --shot-every 1). Reine Diagnose, kein Gastzustand. */
 static void save_shot_numbered(const char *path, int frame) {
     char out[512];
     size_t n = strlen(path);
@@ -150,10 +151,12 @@ int main(int argc, char **argv) {
     const char *shot = NULL;
     int frames_limit = -1;
     int shot_every = 0;
+    int shot_from = 0;
     setvbuf(stdout, NULL, _IONBF, 0);
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) shot = argv[++i];
         else if (strcmp(argv[i], "--shot-every") == 0 && i + 1 < argc) shot_every = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--shot-from") == 0 && i + 1 < argc) shot_from = atoi(argv[++i]);
         else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) frames_limit = atoi(argv[++i]);
         else if (strcmp(argv[i], "--press") == 0 && i + 1 < argc) press_parse(argv[++i]);
         else romfs = argv[i];
@@ -225,7 +228,8 @@ int main(int argc, char **argv) {
 
         compose_frame();
         win_blit(g_rgb, FB_W, FB_H);
-        if (shot != NULL && shot_every > 0 && frames > 0 && (frames % shot_every) == 0)
+        if (shot != NULL && shot_every > 0 && frames > 0 && frames >= shot_from &&
+            (frames % shot_every) == 0)
             save_shot_numbered(shot, frames);
         if ((frames % 30) == 0) {
             HleGspFrame top, bottom;
