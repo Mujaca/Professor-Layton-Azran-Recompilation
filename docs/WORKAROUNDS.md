@@ -1130,24 +1130,33 @@ Laeufen (`HLE_LOG=1`, je einmal mit vorhandenem und mit geloeschtem
   "already exists" und liefert den Fehler; das anschliessende
   `OpenFile mode=3` gelingt in beiden Laeufen.
 
-**Was nach dem Film tatsaechlich passiert:** Nach der 520. `StartConversion`
-liest das Spiel die komplette `m999.moflex` erneut (neun Reads
-`0x26B10510` … `0x26BA0510`, zusammen `0x912A4` Byte, alle mit voller Laenge)
-und beginnt eine zweite Wiedergabe. Diese praesentiert aber kein Bild mehr:
+**Korrektur (2026-11-24): Es gibt keine zweite Wiedergabe.** Die fruehere
+Deutung des zweiten `m999`-Reads als "zweite Wiedergabe" ist widerlegt; der
+Y2R-/Present-Pfad ist intakt. Belege (`ARM_WATCH`, `HLE_PERFMAP_FILE`,
+isolierte Laeufe):
 
-* `fn_0031282C` (Movie-Presenter, Zustand 4/8) wird im 900-Frame-Lauf
-  1.201x betreten, der Y2R-Treiber `fn_00218660` jedoch genau **520x** – nur
-  waehrend der ersten Wiedergabe. In der zweiten Wiedergabe wird der
-  Frame-Zweig (`0x312A84..0x312BC8`) nicht mehr erreicht; die
-  Frame-Bereitschaftspruefung in `fn_00218660` (frueher Ausstieg ueber
-  `0x21868C`/`0x218698`/`0x2186AC`/`0x2186BC`) schlaegt fehl.
-* Die Decoder-Threads laufen dabei weiter (Perfmap: Thread 0 15,5 M Bloecke,
-  Huffman-Loop `0x16E4A8/B4` ~0,8 M; Thread 14 1,6 M im Bit-Reader
-  `0x270D20..0x270D78`), es entsteht also kein "Haenger", sondern eine
-  Decodierung ohne Ausgabe.
-* Im 40-s-Frontier-Lauf bleibt es bei 520 `StartConversion`; ein dritter
-  oder weiterer Zyklus beginnt nicht. Der Bildschirm bleibt schwarz
-  (`--shot`, 900 Frames: genau eine Farbe `000000`).
+* `fn_00218660` steigt **nie** frueh aus: `0x2186C0` (alle Argumente geprueft)
+  520 Treffer, `0x218700` (jeder Fruehausstieg) **0**. `[sp+4]`, `r4` und
+  `[sp+0x40]/[0x48]/[0x50]` sind also nie leer.
+* Der Presenter endet regulaer: `fn_002779F8` liefert nach dem Film Zustand 8
+  (kurz), dann 3 und **2**; `ARM_WATCH=0x312E60` zeigt `r0` = 1/5/2
+  (zuletzt 159x Zustand 2). In Zustand 2 ruft `fn_00218248` sofort `0` zurueck.
+* `Movie::play` (`0x311CE0`) und Open (`0x311D5C`) werden je genau **1x**
+  gerufen (Boot); Resume (`0x311C5C`) **0x**. Der eingebaute Selbst-Neustart
+  im Zustand-2-Pfad (`0x312684` -> `0x277A44` = `ldrsb [stream+0xa74]`) laeuft
+  nicht, weil das **Loop-Flag 0** ist: `ARM_WATCH=0x1F78D8` zeigt
+  `strb r1,[wrapper,#0xa74]` mit `r1=0`, direkt vor dem ersten Film-Read.
+  Der Aufrufer `0x35ECFC` oeffnet den Film ueber den Zweig `r3 == 0`
+  (`0x35EE88`); der andere Zweig (`0x35EE0C`) setzt `loop = 1`.
+* Der zweite `m999`-Read ist ein Buffer-Wrap desselben Demuxers (gleicher
+  Reader-Thread `th=F8F`, Block `0x33E8F8`, dieselbe Datei Handle 22,
+  sequenziell `0x26B10510..0x26BA0514`); `0x1F76D0` (Stream-Open) hat genau
+  1 Treffer, es wird kein zweiter Player/Stream angelegt.
+
+Die Decoder-Threads laufen waehrend/nach dem Film weiter (Perfmap), das ist
+normale Decodierung bis zum Stream-Ende. Im Frontier-Lauf bleibt es bei 520
+`StartConversion`, weil der Titel die Hintergrundwiedergabe noch nicht
+anfordert; der Bildschirm bleibt schwarz (`--shot`: eine Farbe `000000`).
 
 **Draw-Pfad:** `0x27B34C` und der Builder `0x1323FC` werden nie ausgefuehrt
 (Perfmap: 0 Treffer). Auch keiner der fuenf Wrapper (`fn_0011AD4C`,
@@ -1163,9 +1172,9 @@ also auch ohne die zweite Filmwiedergabe nicht zu Draws.
 (u16) bzw. die Task-ID-Liste. Ein Zusammenhang mit dem Draw-Gate ist nicht
 belegt.
 
-**Naechster Schritt:** Die Frame-Bereitschaft in der zweiten Wiedergabe
-untersuchen: Argumente von `fn_00218660` an `0x312B60..0x312B88`
-(`[sp+4]`, `s18`, Geometrie aus `[movie+4/8/0xC]`) und die Praesentations-
-Queue (`[movie+0x158]`/`[movie+0x15c]`, Ring `+0x34/+0x38/+0x3c`). Erst
-wenn dort wieder ein dekodiertes Frame anliegt, kann der Video-Quad
-gezeichnet werden. Kein Workaround eingebaut.
+**Naechster Schritt:** Beim Titel-Szenen-Start ansetzen: die Engine oeffnet
+den Film in `0x35ECFC`; erst ein Aufruf mit `r3 != 0` setzt das Loop-Flag und
+laesst den Player aus Zustand 2 neu starten (Self-Restart `0x312684` ->
+`play`). Dieser Aufruf (bzw. der Titel-Szenen-Zustand, der ihn ausloest)
+kommt im 60-s-Lauf nicht; er haengt am noch fehlenden Draw-/Szenen-Pfad
+(M3/M4), nicht am Y2R-Treiber. Kein Workaround eingebaut.
