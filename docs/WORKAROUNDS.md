@@ -961,3 +961,41 @@ als Ursache des Decoder-Stalls ausgeschlossen.
 Moflex-Paketkopf pruefen. Faellt die Kopierlaenge zu kurz aus oder laeuft der
 Praesentations-Event dem Kopierer davon, liegt die Ursache dort (Event-Kette
 `0x218xxx`/`0x3902E0`); andernfalls ist es der parallele Decoder-Differenztest.
+
+### MOFLEX-Paketlaengen geprueft: Demuxer ist korrekt – Hypothese ausgeschlossen 2026-11-24
+
+**Hypothese:** Der Decoder liest ueber ein Paketende hinaus, weil die
+Paket→Decode-Puffer-Kopie zu kurz ist oder der Demuxer eine falsche
+Paketlaenge berechnet.
+
+**Unabhaengiger Parser:** `m999.moflex` wurde mit einem eigenen Parser nach
+FFmpeg `libavformat/moflex.c` gelesen (Sync-Header `4C32`, be64-Zeitstempel,
+Blockgroesse, Deskriptoren mit `read_var_byte`, Flags, Bit-Paketkoepfe mit
+`stream_index`/`endframe`/`pkt_size = pop_int(13)+1`). Ergebnis: 663
+Videopakete, zusammen 590.740 Byte (Datei 594.596). Die ersten Pakete sind
+94-Byte-Deltas; ab dem 6-s-Sync-Block folgen grosse Frames (1498, 1108, 1440,
+…). Ein Paket bei `0x1093` ueberschreitet die 4096-Byte-Lesegrenze und wird
+im Port ueber einen Sonderpuffer (`0x0CFFEE4C`) gefuehrt.
+
+**Abgleich mit dem Port (`ARM_WATCH=3902E0`, 30-s-Lauf):** Die 64 vor dem
+Stall in die Decoder-Queue geschobenen Pakete stimmen in **Groesse und
+Reihenfolge exakt** mit dem unabhaengigen Parser ueberein (444, 96, 94 …
+1498, 1108; 0 Abweichungen, `r3-r1+1` bzw. Sonderpuffer). Die Ringadressen
+liegen lueckenlos (`+size+2`), d. h. der Demuxer schreibt die Pakete
+vollstaendig und mit der richtigen Laenge.
+
+**Neue Eingrenzung:** `ARM_WATCH=16A590` (Huffman-/Koeffizientendecoder) zeigt
+als Paketpuffer des beobachteten Decodes `0x0CABE504` – das ist das
+1108-Byte-Paket an Dateioffset `0x205F` (der zweite Frame des 6-s-Blocks,
+Payload `0x2065`). Der Bitstromzeiger laeuft in 600 Helper-Aufrufen bis
+`0x0CABF296`, also bereits ueber das Paketende `0x0CABE957` hinaus; der
+`HLE_STALLDUMP`-Stand ist `r1=0x0CABFDFA` mit Nullen ab dort. Der Decoder
+konsumiert fuer diesen Frame also deutlich mehr Bits als die (belegten)
+1108 Byte. Damit ist die Demuxer-/Kopierlaengen-Hypothese widerlegt; offen
+bleibt die Bit-/Frame-Grenzen-Behandlung des Decoders an der Sync-Grenze
+(Kandidat: Recompiler-Semantik im Codebook-/Tabellenwechsel, nicht fs/fs-Read).
+
+**Naechster Schritt:** Frames an der 6-s-Sync-Grenze (`0x1A5B`) mit dem
+Decoder-Differenztest vergleichen; insbesondere die Tabellenauswahl vor
+`0x16BD1C`/`0x16BC1C` und den Bit-Refill `0x16C568` pro Frame.
+
