@@ -194,7 +194,8 @@ MMU/Seitentabelle hat.
 ### Vertex-Pipeline
 
 * Shader-Register: `vs` 0x2B0..0x2DF (`gs` 0x280..0x2AF). `bool_uniforms`
-  0x2B0 (Bit je Uniform), `int_uniforms` 0x2B1..0x2B4,
+  0x2B0 (Bit je Uniform), `int_uniforms` 0x2B1..0x2B4, Einstiegspunkt
+  **0x2BA** `main_offset` Bits 0..15 (Programmstart, nicht pc=0),
   `uniform_setup.index`/Format 0x2C0 (Bit31 = float32), `set_value`
   0x2C1..0x2C8, `program.offset` 0x2CB + `set_word` 0x2CC..0x2D3,
   `swizzle.offset` 0x2D5 + `set_word` 0x2D6..0x2DD. Der Uniform-Index wird
@@ -254,6 +255,11 @@ Quelle: Azahar `renderer_software/sw_rasterizer.cpp`, `sw_clipper.cpp`,
   0x65 (Modus Bits0..1, x1/y1) / 0x66 (x2/y2) schneidet das Bounding-Box.
   Cull-Modus 0x40 Bits 0..1: 0/3 = alle (Dreieck wird auf CCW gedreht),
   1 = nur im Uhrzeigersinn, 2 = nur gegen den Uhrzeigersinn.
+* **Primitive Assembly:** Topologie 0x25E Bits 8..9 (0 Liste, 1 Strip,
+  2 Fan, 3 Shader). Strip/Fan halten zwei Vertices über Draws hinweg; bei
+  Strip wird jedes zweite Dreieck als `(v2,v1,v3)` ausgegeben, damit beide
+  dieselbe Windung haben. 0x25F `restart_primitive` setzt den Zustand
+  zurück, ebenso ein Topologiewechsel.
 * **TEV (6 Stufen):** Basis 0xC0, 0xC8, 0xD0, 0xD8, 0xF0, 0xF8; je Stufe
   `+0` Quellen, `+1` Modifier, `+2` Operationen, `+3` `const_color`,
   `+4` Skalierung. Quellen: 0 PrimaryColor (interpolierte Vertexfarbe),
@@ -272,14 +278,18 @@ Quelle: Azahar `renderer_software/sw_rasterizer.cpp`, `sw_clipper.cpp`,
   aufsteigende Bytes): RGBA8 `a,b,g,r` (32-Bit-Wort `0xRRGGBBAA`), RGB8
   `b,g,r`, IA8 `a,i`, RG8 `g,r`, IA4 `iiii aaaa`, I4/A4 zwei Nibbles je Byte
   (ungerader Morton-Index = oberes Nibble). ETC1 unterteilt jede Kachel in
-  vier 4x4-Subtiles (Differential-/Individual-Modus, `table_subindexes` Bits
-  0..15, `negation_flags` 16..31, flip Bit 32). Adresse = Reg*8 physisch.
+  vier 4x4-Subtiles; die Subtile ist `x/4 + 2*(y/4)` aus den rohen
+  Kachelkoordinaten (nicht aus dem Morton-Index), der Alpha-Wert von ETC1A4
+  liegt bei Shift `4*((x%4)*4 + y%4)`. Differential-/Individual-Modus,
+  `table_subindexes` Bits 0..15, `negation_flags` 16..31, flip Bit 32.
+  Adresse = Reg*8 physisch.
 * **Sampler:** `s = trunc(u * width)`, `t = trunc(v * height)`; Wrap-Modi
   0 ClampToEdge, 1 ClampToBorder (border_color), 2 Repeat, 3 MirroredRepeat,
   4 ClampToEdge2 (negative Koordinate = Repeat), 5 ClampToBorder2 (positiv
   außerhalb = Border), 6/7 wie Repeat. Erst wrappen, dann
-  `t = height - 1 - t`. Filter Bits 1 (mag) / 2 (min); linear wird um
-  `u*w - 0.5` bilinear interpoliert.
+  `t = height - 1 - t`. Der Azahar-Software-Renderer wertet Min-/Mag-Filter
+  nicht aus (`TODO: Apply the min and mag filters`), sondern liest immer den
+  nächsten Texel.
 * **Farbziel:** Output-Merger 0x100..0x107: 0x100 Bit0..1
   `fragment_operation_mode`, Bit8 `alphablend_enable`; 0x101 Gleichungen
   (RGB Bits 0..2, Alpha 8..10) und Faktoren (Src RGB 16..19, Dst RGB 20..23,
@@ -294,11 +304,11 @@ Quelle: Azahar `renderer_software/sw_rasterizer.cpp`, `sw_clipper.cpp`,
   ReverseSubtract/Min/Max, Ergebnis `(s*sf ± d*df) / 255`.
 * **Framebuffer 0x110..0x11E:** `allow_color_write` 0x113,
   `allow_depth_stencil_write` 0x115, `depth_format` 0x116 Bits 0..1
-  (D16/D24/D24S8), `color_format` 0x116 Bits 16..18 (RGBA8/RGB8/RGB5A1/
-  RGB565/RGBA4), Tiefenpuffer 0x11B, `color_buffer_address` 0x11C
-  (physisch = Wert*8), Breite 0x11D Bits 0..10, Höhe als Feld Bits 12..21
-  (= tatsächliche Höhe - 1, Zugriff `+1`), Flip Bit 24. Pixel liegen
-  8x8-Morton-gekachelt und von unten nach oben (`y' = height_raw - y`,
+  (D16/D24/D24S8), `color_format` **0x117** Bits 16..18 (RGBA8/RGB8/RGB5A1/
+  RGB565/RGBA4), `block32` 0x11B, Tiefenpuffer **0x11C**, `color_buffer_address`
+  **0x11D** (physisch = Wert*8), **0x11E** Breite Bits 0..10, Höhe als Feld
+  Bits 12..21 (= tatsächliche Höhe - 1, Zugriff `+1`), Flip Bit 24. Pixel
+  liegen 8x8-Morton-gekachelt und von unten nach oben (`y' = height_raw - y`,
   Offset = `morton(x,y') + (y' & ~7) * width * bpp`); Tiefe/Stencil nutzen
   dieselbe Kachelung mit 2/3/4 Byte je Pixel, D24/D24S8 little endian,
   Stencil im vierten Byte.

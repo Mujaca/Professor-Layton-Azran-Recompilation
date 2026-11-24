@@ -22,11 +22,13 @@ Rasterizer/Fragment (Azahar renderer_software): Clipping, Viewport 0x41/0x43/
 Texturen (Azahar texture_decode.cpp, sw_texturing.cpp): alle 14 Formate
 RGBA8/RGB8/RGB5A1/RGB565/RGBA4/IA8/RG8/I8/A8/IA4/I4/A4/ETC1/ETC1A4 mit
 8x8-Morton-Kacheln und Azahar-Kanalreihenfolge, Kachel-Morton-Test,
-Wrap-Modi 0..5 (Border-Farbe), Nearest-/Linear-Filter.
+ETC1-Subtile x/4+2*(y/4) und ETC1A4-Alpha-Shift, Wrap-Modi 0..5
+(Border-Farbe), Nearest-Sampling wie Azahar (keine Filterung).
 
 Framebuffer (Azahar sw_framebuffer.cpp, sw_rasterizer.cpp): Farbziel-
-Formate inkl. Byte-Reihenfolge, alle 16 LogicOps, Alpha-Test, Blending
-(Add/SrcAlpha/1-SrcAlpha), Depth-Test/-Write (D24S8) und Stencil-Test.
+Formate 0x117/0x11D/0x11E inkl. Byte-Reihenfolge, alle 16 LogicOps,
+Alpha-Test, Blending (Add/SrcAlpha/1-SrcAlpha), Depth-Test/-Write (D24S8),
+Stencil-Test und Schreibgrenzen des Farbziels.
 
 Fog (Azahar sw_rasterizer.cpp WriteFog): LUT-Upload 0xE6/0xE8..0xEF
 (Offset + Inkrement), fog_mode 0xE0 Bits0..2, fog_flip Bit16, fog_color

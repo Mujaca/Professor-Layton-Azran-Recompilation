@@ -87,8 +87,13 @@ fn_001B9938) sind entfernt: Build ohne sie bleibt Frontier 9/10 (boss:U).
 | – | `arm_mem_read/write` | Zugriffe außerhalb des Speichers liefern 0 statt Abbruch (`ARM_STRICT=1` bricht ab) |
 | – | fs `OpenFile`, `file_command` | Sentinel-Dateislot und Erfolg auch bei fehlgeschlagenem Open; `romfs_image.bin` mit Offset +0x1000 |
 | – | `gpu_pica_virt_to_phys` | Adressen außerhalb VRAM/Linear-Heap bleiben unverändert (der Port hat keine MMU/Seitentabelle); echtes GSP lehnt sie ab |
-| – | `p_draw_arrays` | Ohne hochgeladenes Vertex-Programm (0x2CB/0x2CC) fällt der Draw auf die alte Heuristik zurück (Position = Attribut 0, UV = Attribut 1). Mit Programm läuft der Azahar-Interpreter. |
-| – | `p_process_tri` | Rasterizer nach Azahar: Sutherland-Hodgman-Clipping (7 Ebenen + 0x47/0x48..0x4B), Viewport 0x41/0x43/0x68, Perspective-Divide, 12.4-Fixed-Point-Coverage + Top-Left-Bias, perspektivkorrekte Attribute, TEV 0x0C0..0x0FD inkl. Combiner-Buffer, Texturen 0x080..0x09F (alle 14 Formate inkl. ETC1/ETC1A4, 8x8-Morton, Wrap/Border/Filter, drei Einheiten), Fog 0xE0/0xE1/0xE6/0xE8..0xEF (LUT-Upload mit Offset-Inkrement, Flip, Index/Fraktion, vor dem Depth-Test), Output-Merger 0x100..0x107 (Alpha-Blend, LogicOp, Alpha-Test, Kanalmasken) und Farb-/Tiefenziel 0x11B..0x11E (RGBA8/RGB8/RGB565/RGB5A1/RGBA4 in Azahar-Byte-Reihenfolge, D16/D24/D24S8, Depth-/Stencil-Test, 8x8-Morton). **Noch offen:** Lighting, Mipmaps, Proctex (Einheit 3), Cube-/Shadow-/Projection-Texturtypen auf Einheit 0; ohne konfiguriertes Farbziel bleibt der lineare Port-Pfad (RGB8) als Diagnose-Ausgabe. |
+| – | `p_process_tri` | Rasterizer nach Azahar: Sutherland-Hodgman-Clipping (7 Ebenen + 0x47/0x48..0x4B), Viewport 0x41/0x43/0x68, Perspective-Divide, 12.4-Fixed-Point-Coverage + Top-Left-Bias, perspektivkorrekte Attribute, TEV 0x0C0..0x0FD inkl. Combiner-Buffer, Texturen 0x080..0x09F (alle 14 Formate inkl. ETC1/ETC1A4 mit Subtile `x/4+2*(y/4)`, 8x8-Morton, Wrap/Border, keine Filterung wie Azahar), Fog 0xE0/0xE1/0xE6/0xE8..0xEF (LUT-Upload mit Offset-Inkrement, Flip, Index/Fraktion, vor dem Depth-Test), Output-Merger 0x100..0x107 (Alpha-Blend, LogicOp, Alpha-Test, Kanalmasken) und Farb-/Tiefenziel 0x117/0x11C..0x11E (RGBA8/RGB8/RGB565/RGB5A1/RGBA4 in Azahar-Byte-Reihenfolge, D16/D24/D24S8, Depth-/Stencil-Test, 8x8-Morton, Schreibgrenzen des Farbziels). **Noch offen:** Lighting, Mipmaps, Proctex (Einheit 3), Cube-/Shadow-/Projection-Texturtypen auf Einheit 0. |
+
+Ohne Vertex-Programm (0x2CB/0x2CC) zeichnet der Port nichts mehr; der frühere
+Attribut-Fallback (Attribut 0 als Position, 1 als UV) und der Schreibpfad in
+den linearen RGB8-Host-Puffer `g_fb` ohne konfiguriertes Farbziel (0x11D) sind
+entfernt (2026-11-24). Damit gibt es keinen Pfad mehr, der ein Bild ohne
+GSP/PICA-Kommandos erzeugt.
 
 
 Entfernt 2026-11-24 (Fälschungen nach Azahar). Jeder Punkt wurde einzeln

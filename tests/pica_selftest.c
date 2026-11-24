@@ -22,8 +22,9 @@
  * HLE_PICA_RENDER=1 setzt der Runner (tools/test_pica_c.py).
  *
  * Ergaenzt (Azahar texture_decode.cpp/sw_texturing.cpp/sw_framebuffer.cpp):
- * 8x8-Morton-Texturen in allen 14 Formaten, Wrap-Modi, Nearest/Linear,
- * Farbziel-Formate, LogicOps, Alpha-/Depth-/Stencil-Test und Blending.
+ * 8x8-Morton-Texturen in allen 14 Formaten, Wrap-Modi, Nearest-Sampling,
+ * ETC1-Subtiles, Farbziel 0x117/0x11D/0x11E, LogicOps, Alpha-/Depth-/
+ * Stencil-Test und Blending.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -217,6 +218,25 @@ static void t_quad_vertices(ArmCpu *c, uint32_t vtx, float z,
     }
 }
 
+/* Standard-Vertexprogramm: attr0 -> POSITION, attr1 -> TEXCOORD0.
+   Ohne hochgeladenes Programm zeichnet Azahar nichts; alle Tests mit
+   t_emit_quad brauchen daher dieses Programm. */
+static uint32_t *t_emit_vs_basic(uint32_t *q)
+{
+    uint32_t w[3];
+    q = emit(q, 0x2B9, 2u);                /* max_input_attribute_index */
+    q = emit(q, 0x2BB, 0x210u);            /* attr0->v0, attr1->v1 */
+    q = emit(q, 0x4F, 2u);
+    q = emit(q, 0x50, 0x03020100u);        /* o0 -> POSITION */
+    q = emit(q, 0x51, 0x1F1F0D0Cu);        /* o1 -> TEXCOORD0 (12/13) */
+    q = emit(q, 0x2BD, 3u);
+    w[0] = ins_common(0x13u, 0u, 0x00u, 0u, 0u, 0u);
+    w[1] = ins_common(0x13u, 0u, 0x01u, 0u, 1u, 0u);
+    w[2] = 0x22u << 26;
+    q = emit_program(q, w, 3);
+    return emit_swizzle0(q, swz_xyzw());
+}
+
 static uint32_t *t_emit_quad(uint32_t *q, uint32_t vtx, int vw, int vh)
 {
     q = emit(q, 0x200, vtx >> 3);
@@ -229,15 +249,16 @@ static uint32_t *t_emit_quad(uint32_t *q, uint32_t vtx, int vw, int vh)
     q = emit(q, 0x207, 1u);
     q = emit(q, 0x208, (1u << 28) | (20u << 16));
     q = emit(q, 0x228, 6u);
+    q = t_emit_vs_basic(q);
     q = emit_viewport(q, vw, vh);
     return q;
 }
 
 static uint32_t *t_emit_fb(uint32_t *q, uint32_t addr, int w, int h, uint32_t fmt)
 {
-    q = emit(q, 0x116, (fmt & 7u) << 16);
-    q = emit(q, 0x11C, addr >> 3);
-    q = emit(q, 0x11D, (uint32_t)w | ((uint32_t)(h - 1) << 12));
+    q = emit(q, 0x117, (fmt & 7u) << 16);  /* color_format */
+    q = emit(q, 0x11D, addr >> 3);         /* color_buffer_address */
+    q = emit(q, 0x11E, (uint32_t)w | ((uint32_t)(h - 1) << 12));
     q = emit(q, 0x107, 0x00000F00u);
     q = emit(q, 0x102, 3u);                /* LogicOp Copy */
     q = emit(q, 0x113, 1u);                /* allow_color_write */
@@ -441,6 +462,9 @@ static void test_texture_wrap(ArmCpu *c, unsigned char *mem)
 
 static void test_texture_filter(ArmCpu *c, unsigned char *mem)
 {
+    /* Azahar sw_rasterizer.cpp wertet Min-/Mag-Filter nicht aus; es wird
+       immer der naechste Texel gelesen ("TODO: Apply the min and mag
+       filters"). Beide Filterkonfigurationen liefern daher 0. */
     int pass;
     for (pass = 0; pass < 2; pass++) {
         uint32_t *q, size, o;
@@ -460,10 +484,9 @@ static void test_texture_filter(ArmCpu *c, unsigned char *mem)
         size = (uint32_t)((unsigned char *)q - (mem + LIST));
         gpu_run_pica_list(c, LIST, size);
         o = t_fb_off(0x40000u, 3, 0, 8, 8, 4);
-        if (pass)
-            check(mem[o + 3] == 96, "Sampler-Filter linear: u=0.4375 => 96");
-        else
-            check(mem[o + 3] == 0, "Sampler-Filter nearest: u=0.4375 => 0");
+        check(mem[o + 3] == 0,
+              pass ? "Sampler-Filter linear: Azahar filtert nicht => 0"
+                   : "Sampler-Filter nearest: u=0.4375 => 0");
     }
 }
 
@@ -596,10 +619,10 @@ static void test_depth_stencil(ArmCpu *c, unsigned char *mem)
     q = emit(q, 0x116, 3u);                    /* D24S8, RGBA8 */
     q = emit(q, 0x4D, f24raw(-1.0f));           /* viewport depth range */
     q = emit(q, 0x4E, f24raw(0.0f));           /* viewport depth near */
-    q = emit(q, 0x11B, 0x44000u >> 3);
+    q = emit(q, 0x11C, 0x44000u >> 3);
     q = emit(q, 0x115, 1u);                    /* allow_depth_stencil_write */
-    q = emit(q, 0x11C, 0x40000u >> 3);
-    q = emit(q, 0x11D, 8u | (7u << 12));
+    q = emit(q, 0x11D, 0x40000u >> 3);
+    q = emit(q, 0x11E, 8u | (7u << 12));
     q = emit(q, 0x107, 0x00000F00u | (1u << 12));   /* RGBA + depth write */
     q = emit(q, 0x102, 3u);
     q = emit(q, 0x113, 1u);
@@ -621,10 +644,10 @@ static void test_depth_stencil(ArmCpu *c, unsigned char *mem)
     q = emit(q, 0x116, 3u);
     q = emit(q, 0x4D, f24raw(-1.0f));
     q = emit(q, 0x4E, f24raw(0.0f));
-    q = emit(q, 0x11B, 0x44000u >> 3);
+    q = emit(q, 0x11C, 0x44000u >> 3);
     q = emit(q, 0x115, 1u);
-    q = emit(q, 0x11C, 0x40000u >> 3);
-    q = emit(q, 0x11D, 8u | (7u << 12));
+    q = emit(q, 0x11D, 0x40000u >> 3);
+    q = emit(q, 0x11E, 8u | (7u << 12));
     q = emit(q, 0x107, 0x00000F00u | (4u << 4) | 1u | (1u << 12));
     q = emit(q, 0x102, 3u);
     q = emit(q, 0x113, 1u);
@@ -643,10 +666,10 @@ static void test_depth_stencil(ArmCpu *c, unsigned char *mem)
     q = emit(q, 0x116, 3u);
     q = emit(q, 0x4D, f24raw(-1.0f));
     q = emit(q, 0x4E, f24raw(0.0f));
-    q = emit(q, 0x11B, 0x44000u >> 3);
+    q = emit(q, 0x11C, 0x44000u >> 3);
     q = emit(q, 0x115, 1u);
-    q = emit(q, 0x11C, 0x40000u >> 3);
-    q = emit(q, 0x11D, 8u | (7u << 12));
+    q = emit(q, 0x11D, 0x40000u >> 3);
+    q = emit(q, 0x11E, 8u | (7u << 12));
     q = emit(q, 0x107, 0x00000F00u | (4u << 4) | 1u | (1u << 12));
     q = emit(q, 0x102, 3u);
     q = emit(q, 0x113, 1u);
@@ -666,10 +689,10 @@ static void test_depth_stencil(ArmCpu *c, unsigned char *mem)
     q = emit(q, 0x116, 3u);
     q = emit(q, 0x4D, f24raw(-1.0f));
     q = emit(q, 0x4E, f24raw(0.0f));
-    q = emit(q, 0x11B, 0x44000u >> 3);
+    q = emit(q, 0x11C, 0x44000u >> 3);
     q = emit(q, 0x115, 1u);
-    q = emit(q, 0x11C, 0x40000u >> 3);
-    q = emit(q, 0x11D, 8u | (7u << 12));
+    q = emit(q, 0x11D, 0x40000u >> 3);
+    q = emit(q, 0x11E, 8u | (7u << 12));
     q = emit(q, 0x107, 0x00000F00u);           /* kein Depth-Test/Write */
     q = emit(q, 0x105, 1u | (2u << 4) | (0xFFu << 8) | (1u << 16) | (0xFFu << 24));
     q = emit(q, 0x106, 0u | (0u << 4) | (1u << 8));
@@ -690,10 +713,10 @@ static void test_depth_stencil(ArmCpu *c, unsigned char *mem)
     q = emit(q, 0x116, 3u);
     q = emit(q, 0x4D, f24raw(-1.0f));
     q = emit(q, 0x4E, f24raw(0.0f));
-    q = emit(q, 0x11B, 0x44000u >> 3);
+    q = emit(q, 0x11C, 0x44000u >> 3);
     q = emit(q, 0x115, 1u);
-    q = emit(q, 0x11C, 0x40000u >> 3);
-    q = emit(q, 0x11D, 8u | (7u << 12));
+    q = emit(q, 0x11D, 0x40000u >> 3);
+    q = emit(q, 0x11E, 8u | (7u << 12));
     q = emit(q, 0x107, 0x00000F00u);
     q = emit(q, 0x105, 1u | (2u << 4) | (0xFFu << 8) | (1u << 16) | (0xFFu << 24));
     q = emit(q, 0x106, 0u | (0u << 4) | (1u << 8));
@@ -923,6 +946,401 @@ static void test_blend(ArmCpu *c, unsigned char *mem)
           "Blending Add SrcAlpha/1-SrcAlpha => (100,56,35,160)");
 }
 
+/* ============ Nachtrag: Register-/Pipeline-Abweichungen ============ */
+
+static void t_pos4(ArmCpu *c, uint32_t off, float x, float y, float z)
+{
+    float f[4];
+    f[0] = x; f[1] = y; f[2] = z; f[3] = 1.0f;
+    memcpy(c->mem + ((VTX + off) & 0x1FFFFFFFu), f, sizeof(f));
+}
+
+/* Positionsprogramm: attr0 (float4) -> v0 -> o0 -> POSITION. */
+static uint32_t *t_emit_vs_pos(uint32_t *q)
+{
+    uint32_t w[2];
+    q = emit(q, 0x2B9, 0u);
+    q = emit(q, 0x2BB, 0u);
+    q = emit(q, 0x4F, 1u);
+    q = emit(q, 0x50, 0x03020100u);
+    q = emit(q, 0x2BD, 1u);
+    w[0] = ins_common(0x13u, 0u, 0x00u, 0u, 0u, 0u);   /* mov o0,v0 */
+    w[1] = 0x22u << 26;
+    q = emit_program(q, w, 2);
+    return emit_swizzle0(q, swz_xyzw());
+}
+
+static uint32_t *t_emit_pos_setup(uint32_t *q)
+{
+    q = emit(q, 0x200, VTX >> 3);
+    q = emit(q, 0x201, 0x0Fu);             /* attr0 float4 */
+    q = emit(q, 0x202, 0u);
+    q = emit(q, 0x203, 0u);
+    q = emit(q, 0x204, 0u);
+    q = emit(q, 0x205, (1u << 28) | (16u << 16));
+    return t_emit_vs_pos(q);
+}
+
+static void test_vs_entrypoint(ArmCpu *c, unsigned char *mem)
+{
+    /* GPUREG_VSH_ENTRYPOINT 0x2BA Bits0..15: Azahar startet den Interpreter
+       bei main_offset, nicht bei pc=0. */
+    uint32_t words[3], pack[3], *q, size;
+    float pos[4];
+
+    gpu_pica_reset();
+    q = (uint32_t *)(mem + LIST);
+    q = emit(q, 0x4F, 1u);
+    q = emit(q, 0x50, 0x03020100u);
+    q = emit(q, 0x2BD, 1u);
+    q = emit(q, 0x2C0, 0u);
+    f24_pack3(1.0f, 0.0f, 0.0f, 0.0f, pack);
+    q = emit(q, 0x2C1, pack[0]); q = emit(q, 0x2C1, pack[1]); q = emit(q, 0x2C1, pack[2]);
+    f24_pack3(2.0f, 2.0f, 2.0f, 2.0f, pack);
+    q = emit(q, 0x2C1, pack[0]); q = emit(q, 0x2C1, pack[1]); q = emit(q, 0x2C1, pack[2]);
+    words[0] = ins_common(0x13u, 0u, 0x20u, 0u, 0u, 0u);   /* mov o0,c0 */
+    words[1] = ins_common(0x13u, 0u, 0x21u, 0u, 0u, 0u);   /* mov o0,c1 */
+    words[2] = 0x22u << 26;
+    q = emit_program(q, words, 3);
+    q = emit_swizzle0(q, swz_xyzw());
+    q = emit(q, 0x2BA, 1u);                /* Einstieg bei Wort 1 */
+    q = emit(q, 0x228, 1u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    gpu_pica_last_vertex(pos, NULL, NULL);
+    check(pos[0] == 2.0f && pos[1] == 2.0f && pos[2] == 2.0f && pos[3] == 2.0f,
+          "VS-Entrypoint 0x2BA=1 ueberspringt Wort 0 (c1 statt c0)");
+}
+
+static void test_vs_dphi(ArmCpu *c, unsigned char *mem)
+{
+    /* DPHI (Opcode 0x18) wie DPH: src1.w = 1.
+       c0=(1,2,3,4), v0=(5,6,7,8) => 1*5+2*6+3*7+1*8 = 46
+       (mit faelschlich 4*8 waere es 78). */
+    uint32_t words[2], pack[3], *q, size;
+    float pos[4];
+
+    gpu_pica_reset();
+    t_pos4(c, 0, 5.0f, 6.0f, 7.0f);
+    ((float *)(mem + ((VTX & 0x1FFFFFFFu))))[3] = 8.0f;
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_pos_setup(q);
+    q = emit(q, 0x2C0, 0u);
+    f24_pack3(1.0f, 2.0f, 3.0f, 4.0f, pack);
+    q = emit(q, 0x2C1, pack[0]); q = emit(q, 0x2C1, pack[1]); q = emit(q, 0x2C1, pack[2]);
+    words[0] = ins_common(0x18u, 0u, 0x20u, 0u, 0u, 0u);   /* dphi o0,c0,v0 */
+    words[1] = 0x22u << 26;
+    q = emit_program(q, words, 2);
+    q = emit_swizzle0(q, swz_xyzw());
+    q = emit(q, 0x228, 1u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    gpu_pica_last_vertex(pos, NULL, NULL);
+    check(pos[0] == 46.0f && pos[1] == 46.0f && pos[2] == 46.0f && pos[3] == 46.0f,
+          "DPHI 0x18 setzt src1.w=1 => Skalarprodukt 46");
+}
+
+static void test_cull_keep_clockwise(ArmCpu *c, unsigned char *mem)
+{
+    int pass;
+    for (pass = 0; pass < 2; pass++) {
+        uint32_t *q, size, o;
+        gpu_pica_reset();
+        memset(mem + 0x40000u, 0, 0x100);
+        if (pass) {   /* Bildschirm-SignedArea > 0 */
+            t_pos4(c, 0, -1.0f, -1.0f, 0.0f);
+            t_pos4(c, 16, 1.0f, -1.0f, 0.0f);
+            t_pos4(c, 32, -1.0f, 1.0f, 0.0f);
+        } else {      /* Bildschirm-SignedArea < 0 */
+            t_pos4(c, 0, -1.0f, -1.0f, 0.0f);
+            t_pos4(c, 16, -1.0f, 1.0f, 0.0f);
+            t_pos4(c, 32, 1.0f, -1.0f, 0.0f);
+        }
+        q = (uint32_t *)(mem + LIST);
+        q = t_emit_pos_setup(q);
+        q = emit_viewport(q, 8, 8);
+        q = emit_tev0(q, 0xEu, 0xEu, 0xFF0000FFu);
+        q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+        q = emit(q, 0x40, 1u);                 /* KeepClockWise */
+        q = emit(q, 0x228, 3u);
+        q = emit(q, 0x22E, 0u);
+        size = (uint32_t)((unsigned char *)q - (mem + LIST));
+        gpu_run_pica_list(c, LIST, size);
+        o = t_fb_off(0x40000u, 1, 5, 8, 8, 4);
+        check(pass ? (mem[o + 3] == 0 && mem[o + 2] == 0 && mem[o + 1] == 0)
+                   : (mem[o + 3] == 0xFF && mem[o + 2] == 0 && mem[o + 1] == 0),
+              pass ? "Culling KeepClockWise: SignedArea>0 wird verworfen"
+                   : "Culling KeepClockWise: SignedArea<0 wird gezeichnet");
+    }
+}
+
+static void test_triangle_strip(ArmCpu *c, unsigned char *mem)
+{
+    uint32_t *q, size, o_lo, o_hi;
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_pos4(c, 0, -1.0f, -1.0f, 0.0f);
+    t_pos4(c, 16, -1.0f, 1.0f, 0.0f);
+    t_pos4(c, 32, 1.0f, -1.0f, 0.0f);
+    t_pos4(c, 48, 1.0f, 1.0f, 0.0f);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_pos_setup(q);
+    q = emit_viewport(q, 8, 8);
+    q = emit_tev0(q, 0xEu, 0xEu, 0xFF0000FFu);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x40, 1u);                     /* KeepClockWise (A<0 wird gezeichnet) */
+    q = emit(q, 0x25E, 1u << 8);               /* Strip */
+    q = emit(q, 0x228, 4u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o_lo = t_fb_off(0x40000u, 2, 5, 8, 8, 4);
+    o_hi = t_fb_off(0x40000u, 6, 3, 8, 8, 4);
+    check(mem[o_lo + 3] == 0xFF && mem[o_hi + 3] == 0xFF,
+          "Strip: zweites Dreieck (v2,v1,v3) hat dieselbe Windung => beide sichtbar");
+
+    /* Zustand ueber Draws: erste 2 Vertices, dann die naechsten 2 ohne
+       Restart. Ohne erhaltenen Assembler-Zustand entstuende kein Dreieck. */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_pos_setup(q);
+    q = emit_viewport(q, 8, 8);
+    q = emit_tev0(q, 0xEu, 0xEu, 0xFF0000FFu);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x40, 1u);
+    q = emit(q, 0x25E, 1u << 8);
+    q = emit(q, 0x228, 2u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    q = (uint32_t *)(mem + LIST);
+    q = emit(q, 0x22A, 2u);                    /* vertex_offset */
+    q = emit(q, 0x228, 2u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    check(mem[o_lo + 3] == 0xFF && mem[o_hi + 3] == 0xFF,
+          "Strip-Zustand bleibt ueber Draws erhalten");
+
+    /* 0x25F restart_primitive verwirft den gepufferten Vertex. */
+    memset(mem + 0x40000u, 0, 0x100);
+    q = (uint32_t *)(mem + LIST);
+    q = emit(q, 0x25F, 0u);
+    q = emit(q, 0x22A, 2u);
+    q = emit(q, 0x228, 2u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    check(mem[o_lo + 3] == 0 && mem[o_hi + 3] == 0,
+          "0x25F restart_primitive: zwei Vertices ergeben kein Dreieck");
+}
+
+static void test_immediate_topology(ArmCpu *c, unsigned char *mem)
+{
+    uint32_t *q, size, o_lo, o_hi, pack[3];
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    q = (uint32_t *)(mem + LIST);
+    q = emit(q, 0x200, VTX >> 3);
+    q = emit(q, 0x201, 0x0Fu);
+    q = emit(q, 0x202, 0u);
+    q = t_emit_vs_pos(q);
+    q = emit_viewport(q, 8, 8);
+    q = emit_tev0(q, 0xEu, 0xEu, 0xFF0000FFu);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x40, 1u);
+    q = emit(q, 0x25E, 1u << 8);               /* Strip */
+    q = emit(q, 0x242, 0u);                    /* 1 Attribut je Vertex */
+    q = emit(q, 0x232, 0xFu);                  /* Immediate-Modus */
+    {
+        static const float p[4][4] = {
+            {-1.0f, -1.0f, 0.0f, 1.0f}, {-1.0f, 1.0f, 0.0f, 1.0f},
+            {1.0f, -1.0f, 0.0f, 1.0f}, {1.0f, 1.0f, 0.0f, 1.0f}
+        };
+        int i;
+        for (i = 0; i < 4; i++) {
+            f24_pack3(p[i][0], p[i][1], p[i][2], p[i][3], pack);
+            q = emit(q, 0x233, pack[0]);
+            q = emit(q, 0x233, pack[1]);
+            q = emit(q, 0x233, pack[2]);
+        }
+    }
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o_lo = t_fb_off(0x40000u, 2, 6, 8, 8, 4);
+    o_hi = t_fb_off(0x40000u, 6, 2, 8, 8, 4);
+    check(mem[o_lo + 3] == 0xFF && mem[o_hi + 3] == 0xFF,
+          "Immediate-Mode nutzt die konfigurierte Strip-Topologie");
+}
+
+static void test_etc1(ArmCpu *c, unsigned char *mem)
+{
+    /* Bekannter ETC1-Block: Individual-Modus, r1=0xF, g/b=0,
+       table_subindexes Bit6 gesetzt. ETC1-Subtile = x/4+2*(y/4),
+       Modifier-Index = 4*x+y (Azahar etc1.cpp/texture_decode.cpp). */
+    static const uint64_t block = 0xF000000000000040ull;
+    uint32_t *q, size, o;
+    int i;
+
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    memset(mem + TEX, 0, 32);
+    for (i = 0; i < 4; i++) memcpy(mem + TEX + i * 8u, &block, 8);
+    t_quad_vertices(c, VTX, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad(q, VTX, 8, 8);
+    q = t_emit_tex(q, TEX, 8, 8, 12, 0u);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit_tev0(q, 3u, 3u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 1, 5, 8, 8, 4);     /* texel (1,2) */
+    check(mem[o + 3] == 0xFF && mem[o + 2] == 8 && mem[o + 1] == 8,
+          "ETC1 bekannter Block: Texel (1,2) => (255,8,8)");
+    o = t_fb_off(0x40000u, 1, 6, 8, 8, 4);     /* texel (1,1) */
+    check(mem[o + 3] == 0xFF && mem[o + 2] == 2 && mem[o + 1] == 2,
+          "ETC1 Modifier-Index 4*x+y: Texel (1,1) => (255,2,2)");
+
+    /* ETC1A4: Alpha-Nibble bei Shift 4*((x%4)*4+(y%4)); fuer (1,2) also
+       Bits24..27 = 7 => 0x77. Ein Morton-Index wuerde hier 0 liefern. */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    memset(mem + TEX, 0, 64);
+    for (i = 0; i < 4; i++) {
+        uint64_t alpha = (uint64_t)7u << 24;   /* lokales (1,2) in jeder Subtile */
+        memcpy(mem + TEX + i * 16u, &alpha, 8);
+        memcpy(mem + TEX + i * 16u + 8u, &block, 8);
+    }
+    t_quad_vertices(c, VTX, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad(q, VTX, 8, 8);
+    q = t_emit_tex(q, TEX, 8, 8, 13, 0u);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit_tev0(q, 3u, 3u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 1, 5, 8, 8, 4);
+    check(mem[o + 3] == 0xFF && mem[o + 2] == 8 && mem[o + 1] == 8 && mem[o + 0] == 0x77,
+          "ETC1A4: Alpha-Shift 4*((x%4)*4+(y%4)) => 0x77");
+}
+
+static void test_uniform_masks(ArmCpu *c, unsigned char *mem)
+{
+    /* Azahar HandleSpecialReg liest fuer Bool-/Int-Uniforms den maskierten
+       Registerwert. Roher Schreibwert 0x100 bei Maske 0x1 darf b8 nicht
+       setzen; roher Wert 2 bei Maske 0x2 darf i0.x nicht setzen. */
+    uint32_t words[4], pack[3], *q, size;
+    float pos[4];
+
+    /* Bool: b8 = 0 => else-Zweig (c1). */
+    gpu_pica_reset();
+    q = (uint32_t *)(mem + LIST);
+    q = emit(q, 0x4F, 1u);
+    q = emit(q, 0x50, 0x03020100u);
+    q = emit(q, 0x2BD, 1u);
+    q = emit(q, 0x2C0, 0u);
+    f24_pack3(1.0f, 0.0f, 0.0f, 0.0f, pack);
+    q = emit(q, 0x2C1, pack[0]); q = emit(q, 0x2C1, pack[1]); q = emit(q, 0x2C1, pack[2]);
+    f24_pack3(2.0f, 0.0f, 0.0f, 0.0f, pack);
+    q = emit(q, 0x2C1, pack[0]); q = emit(q, 0x2C1, pack[1]); q = emit(q, 0x2C1, pack[2]);
+    words[0] = ins_flow(0x27u, 1u, 2u, 8u, 0u, 0u);       /* ifu b8 */
+    words[1] = ins_common(0x13u, 0u, 0x20u, 0u, 0u, 0u);
+    words[2] = ins_common(0x13u, 0u, 0x21u, 0u, 0u, 0u);
+    words[3] = 0x22u << 26;
+    q = emit_program(q, words, 4);
+    q = emit_swizzle0(q, swz_xyzw());
+    q = emit_h(q, 0x100u, 0x2B0u, 0x1u);   /* roh Bit8, Maske nur Byte0 */
+    q = emit(q, 0x228, 1u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    gpu_pica_last_vertex(pos, NULL, NULL);
+    check(pos[0] == 2.0f, "Bool-Uniform 0x2B0 nutzt maskierten Registerwert");
+
+    /* Int: i0.x = 0 => LOOP-Rumpf genau einmal => r0 = 1+1 = 2. */
+    gpu_pica_reset();
+    q = (uint32_t *)(mem + LIST);
+    q = emit(q, 0x4F, 1u);
+    q = emit(q, 0x50, 0x03020100u);
+    q = emit(q, 0x2BD, 1u);
+    q = emit(q, 0x2C0, 0u);
+    f24_pack3(1.0f, 1.0f, 1.0f, 1.0f, pack);
+    q = emit(q, 0x2C1, pack[0]); q = emit(q, 0x2C1, pack[1]); q = emit(q, 0x2C1, pack[2]);
+    words[0] = ins_common(0x13u, 0u, 0x20u, 0u, 0x10u, 0u);  /* mov r0,c0 */
+    words[1] = ins_flow(0x29u, 0u, 2u, 0u, 0u, 0u);          /* loop i0 */
+    words[2] = ins_common(0x00u, 0u, 0x20u, 0x10u, 0x10u, 0u); /* add r0,c0,r0 */
+    words[3] = ins_common(0x13u, 0u, 0x10u, 0u, 0u, 0u);    /* mov o0,r0 */
+    /* END als fuenftes Wort: emit_program braucht 5 Woerter. */
+    {
+        uint32_t w5[5];
+        int i;
+        for (i = 0; i < 4; i++) w5[i] = words[i];
+        w5[4] = 0x22u << 26;
+        q = emit_program(q, w5, 5);
+    }
+    q = emit_swizzle0(q, swz_xyzw());
+    q = emit_h(q, 0x00000002u, 0x2B1u, 0x2u); /* roh x=2, Maske Byte1 */
+    q = emit(q, 0x228, 1u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    gpu_pica_last_vertex(pos, NULL, NULL);
+    check(pos[0] == 2.0f, "Int-Uniform 0x2B1 nutzt maskierten Registerwert");
+}
+
+static void test_no_program(ArmCpu *c, unsigned char *mem)
+{
+    unsigned long long before;
+    uint32_t *q, size;
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_pos4(c, 0, -1.0f, -1.0f, 0.0f);
+    t_pos4(c, 16, 1.0f, -1.0f, 0.0f);
+    t_pos4(c, 32, 0.0f, 1.0f, 0.0f);
+    before = gpu_pica_draw_count();
+    q = (uint32_t *)(mem + LIST);
+    q = emit(q, 0x200, VTX >> 3);
+    q = emit(q, 0x201, 0x0Fu);
+    q = emit(q, 0x202, 0u);
+    q = emit(q, 0x203, 0u);
+    q = emit(q, 0x204, 0u);
+    q = emit(q, 0x205, (1u << 28) | (16u << 16));
+    q = emit_viewport(q, 8, 8);
+    q = emit_tev0(q, 0xEu, 0xEu, 0xFF0000FFu);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x228, 3u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    check(gpu_pica_draw_count() == before &&
+          mem[t_fb_off(0x40000u, 4, 4, 8, 8, 4) + 3] == 0,
+          "Ohne Vertex-Programm wird nichts gezeichnet (kein Attribut-Fallback)");
+}
+
+static void test_fb_clamp(ArmCpu *c, unsigned char *mem)
+{
+    uint32_t *q, size;
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0xAA, 0x3000);
+    t_quad_vertices(c, VTX, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad(q, VTX, 16, 16);           /* Viewport groesser als FB */
+    q = emit_tev0(q, 0xEu, 0xEu, 0xFF0000FFu);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);      /* Farbziel nur 8x8 */
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    check(mem[t_fb_off(0x40000u, 1, 1, 8, 8, 4) + 3] == 0xFF,
+          "Framebuffer-Clamp: Pixel innerhalb des 8x8-Ziels wird geschrieben");
+    check(mem[0x40100u] == 0xAA && mem[0x40200u] == 0xAA,
+          "Framebuffer-Clamp: kein Schreiben ausserhalb des Farbziels");
+}
+
 int main(void) {
     static unsigned char mem[0x100000];
     ArmCpu c;
@@ -962,11 +1380,14 @@ int main(void) {
     p = emit(p, 0x82, (2u << 16) | 2u);    /* 2x2 */
     p = emit(p, 0x85, TEX >> 3);
     p = emit(p, 0x8E, 1);                  /* RGB8 */
+    p = t_emit_vs_basic(p);
     p = emit_viewport(p, 400, 240);        /* 0x41/0x43/0x68 */
     p = emit_tev0(p, 3, 0, 0);             /* TEV: Farbe Texture0, Alpha Vertex */
+    p = t_emit_fb(p, FB, 400, 240, 0u);    /* RGBA8-Farbziel 0x11D..0x11E */
     p = emit(p, 0x22E, 0);                 /* Draw-Trigger (arrays) */
     size = (uint32_t)((unsigned char *)p - (mem + LIST));
 
+    memset(mem + FB, 0, 400u * 240u * 4u);
     gpu_set_fb(FB);
     gpu_set_fb_size(FB, 400, 240);
     gpu_run_pica_list(&c, LIST, size);
@@ -977,11 +1398,11 @@ int main(void) {
     check(gpu_get_fb_width() == 400 && gpu_get_fb_height() == 240,
           "Framebuffer 400x240");
 
-    cx = (FB + (120u * 400u + 200u) * 3u) & 0x1FFFFFFFu;
-    check(mem[cx + 0] == 255 && mem[cx + 1] == 0 && mem[cx + 2] == 0,
+    cx = t_fb_off(FB, 200, 120, 400, 240, 4);
+    check(mem[cx + 3] == 255 && mem[cx + 2] == 0 && mem[cx + 1] == 0 && mem[cx + 0] == 255,
           "Mitte rot (Textur ueber 0x200-Loader/Stride 16 gesampelt)");
-    px = (FB + (239u * 400u + 399u) * 3u) & 0x1FFFFFFFu;
-    check(mem[px + 0] == 0 && mem[px + 1] == 0 && mem[px + 2] == 0,
+    px = t_fb_off(FB, 399, 239, 400, 240, 4);
+    check(mem[px + 3] == 0 && mem[px + 2] == 0 && mem[px + 1] == 0 && mem[px + 0] == 0,
           "Ecke (399,239) ausserhalb des Dreiecks bleibt schwarz");
 
     /* Textur aus: Azahar liefert fuer eine deaktivierte Textureinheit
@@ -992,7 +1413,7 @@ int main(void) {
     size = (uint32_t)((unsigned char *)p - (mem + LIST));
     gpu_run_pica_list(&c, LIST, size);
     check(gpu_pica_texture_bound() == 0, "0x80=0 schaltet Textur 0 aus");
-    check(mem[cx + 0] == 0 && mem[cx + 1] == 0 && mem[cx + 2] == 0,
+    check(mem[cx + 3] == 0 && mem[cx + 2] == 0 && mem[cx + 1] == 0,
           "Mitte schwarz ohne Textur (TEV-Quelle Texture0 = 0)");
 
     /* ---- Adressumrechnung physisch -> Gast-Linearspeicher ----
@@ -1102,13 +1523,13 @@ int main(void) {
         p = emit_h(p, 0x00000006u, 0x240u, 0xFu);
         p = emit_h(p, size2 / 8u, 0x238u, 0xFu);        /* CMDBUF_SIZE0 */
         p = emit_h(p, LIST2 / 8u, 0x23Au, 0xFu);        /* CMDBUF_ADDR0 */
-        p = emit_h(p, 1u, 0x23Cu, 0xFu);                /* CMDBUF_JUMP0 */
+        p = emit_h(p, 0u, 0x23Cu, 0xFu);                /* CMDBUF_JUMP0 = 0 */
         p = emit_h(p, 0x00000BADu, 0x241u, 0xFu);       /* darf nicht laufen */
         size = (uint32_t)((unsigned char *)p - (mem + LIST));
         ops = gpu_run_pica_list(&c, LIST, size);
         check(ops == 5, "Sprung zaehlt 4 aeussere + 1 innere Schreibung");
-        check(gpu_pica_reg(0x24A) == 0x5A5A5A5Au, "Sprungliste wurde ausgefuehrt");
-        check(gpu_pica_reg(0x23C) == 0x00000000u, "Trigger wird nach dem Lauf geloescht");
+        check(gpu_pica_reg(0x24A) == 0x5A5A5A5Au, "Sprung bei Trigger-Wert 0 wird ausgefuehrt");
+        check(gpu_pica_reg(0x23C) == 0x00000000u, "Trigger-Register behaelt den Wert 0");
         check(gpu_pica_reg(0x241) == 0x00000000u,
               "Rest der alten Liste nach dem Sprung wird nicht ausgefuehrt");
     }
@@ -1371,14 +1792,16 @@ int main(void) {
         q = emit(q, 0x203, 0u);
         q = emit(q, 0x204, 0u);
         q = emit(q, 0x205, (1u << 28) | (20u << 16));
+        q = t_emit_vs_basic(q);
         q = emit_viewport(q, 400, 240);
         q = emit_tev0(q, 0xEu, 0xEu, 0xFF304050u);  /* Constant, (r,g,b,a)=50,40,30,255 */
         q = emit(q, 0x228, 3u);
+        q = t_emit_fb(q, FB, 400, 240, 0u);
         q = emit(q, 0x22E, 0u);
         size2 = (uint32_t)((unsigned char *)q - (mem + LIST));
         gpu_run_pica_list(&c, LIST, size2);
-        cx = (FB + (120u * 400u + 200u) * 3u) & 0x1FFFFFFFu;
-        check(mem[cx + 0] == 0x50 && mem[cx + 1] == 0x40 && mem[cx + 2] == 0x30,
+        cx = t_fb_off(FB, 200, 120, 400, 240, 4);
+        check(mem[cx + 3] == 0x50 && mem[cx + 2] == 0x40 && mem[cx + 1] == 0x30,
               "TEV Constant/Replace schreibt (0x50,0x40,0x30)");
     }
 
@@ -1425,16 +1848,17 @@ int main(void) {
         q = emit(q, 0x228, 3u);
         q = emit_viewport(q, 400, 240);
         q = emit_tev0(q, 0u, 0u, 0u);          /* PrimaryColor, Replace */
+        q = t_emit_fb(q, FB, 400, 240, 0u);
         q = emit(q, 0x22E, 0u);
         size2 = (uint32_t)((unsigned char *)q - (mem + LIST));
         gpu_run_pica_list(&c, LIST, size2);
-        cx = (FB + (120u * 400u + 200u) * 3u) & 0x1FFFFFFFu;
-        check(abs((int)mem[cx + 0] - 63) <= 2 &&
-              abs((int)mem[cx + 1] - 64) <= 2 &&
-              abs((int)mem[cx + 2] - 128) <= 2,
+        cx = t_fb_off(FB, 200, 120, 400, 240, 4);
+        check(abs((int)mem[cx + 3] - 63) <= 2 &&
+              abs((int)mem[cx + 2] - 64) <= 2 &&
+              abs((int)mem[cx + 1] - 128) <= 2,
               "interpolierte Vertexfarbe in der Dreiecksmitte ~(63,64,128)");
-        px = (FB + (239u * 400u + 399u) * 3u) & 0x1FFFFFFFu;
-        check(mem[px + 0] == 0 && mem[px + 1] == 0 && mem[px + 2] == 0,
+        px = t_fb_off(FB, 399, 239, 400, 240, 4);
+        check(mem[px + 3] == 0 && mem[px + 2] == 0 && mem[px + 1] == 0,
               "Ecke (399,239) bleibt ausserhalb (kein Vollflaeche-Fuellen)");
     }
 
@@ -1456,13 +1880,14 @@ int main(void) {
         q = emit(q, 0x203, 0u);
         q = emit(q, 0x204, 0u);
         q = emit(q, 0x205, (1u << 28) | (20u << 16));
+        q = t_emit_vs_basic(q);
         q = emit_viewport(q, 400, 240);
         q = emit_tev0(q, 0xEu, 0xEu, 0x10203040u);
         q = emit(q, 0x228, 3u);
         /* Farbziel: RGBA8, Adresse 0x40000, 400x240, Schreibmaske RGBA. */
-        q = emit(q, 0x116, 0u);                /* color_format RGBA8 */
-        q = emit(q, 0x11C, 0x40000u >> 3);
-        q = emit(q, 0x11D, 400u | ((240u - 1u) << 12));
+        q = emit(q, 0x117, 0u);                /* color_format RGBA8 */
+        q = emit(q, 0x11D, 0x40000u >> 3);     /* color_buffer_address */
+        q = emit(q, 0x11E, 400u | ((240u - 1u) << 12));
         q = emit(q, 0x107, 0x00000F00u);       /* red..alpha enable */
         q = emit(q, 0x102, 3u);                /* LogicOp Copy */
         q = emit(q, 0x113, 1u);                /* allow_color_write */
@@ -1475,7 +1900,7 @@ int main(void) {
         /* Azahar EncodeRGBA8: bytes = a,b,g,r (Wort 0xRRGGBBAA). */
         check(mem[off2 + 3] == 0x40 && mem[off2 + 2] == 0x30 &&
               mem[off2 + 1] == 0x20 && mem[off2 + 0] == 0x10,
-              "Farbziel 0x11C/0x11D: RGBA8 a,b,g,r + Morton-Pixel korrekt");
+              "Farbziel 0x11D/0x11E: RGBA8 a,b,g,r + Morton-Pixel korrekt");
     }
 
     test_textures(&c, mem);
@@ -1489,6 +1914,15 @@ int main(void) {
     test_texture_type_and_tc2(&c, mem);
     test_fog(&c, mem);
     test_blend(&c, mem);
+    test_vs_entrypoint(&c, mem);
+    test_vs_dphi(&c, mem);
+    test_cull_keep_clockwise(&c, mem);
+    test_triangle_strip(&c, mem);
+    test_immediate_topology(&c, mem);
+    test_etc1(&c, mem);
+    test_uniform_masks(&c, mem);
+    test_no_program(&c, mem);
+    test_fb_clamp(&c, mem);
 
     printf("ERGEBNIS: %s\n", fails == 0 ? "OK" : "FEHLER");
     return fails == 0 ? 0 : 1;

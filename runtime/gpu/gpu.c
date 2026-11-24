@@ -10,7 +10,8 @@
  * 0x04F..0x056 (POSITION, COLOR, TEXCOORD0..2).
  * Fragment-Pipeline: Sutherland-Hodgman-Clipping, 12.4-Coverage, TEV
  * 0x0C0..0x0FD, Texturen 0x080..0x09F (alle 14 Formate, 8x8-Morton,
- * Wrap/Border/Filter; nur Einheit 0 beachtet den Typ, TEXCOORD2 = 22/23),
+ * Wrap/Border; keine Filterung wie Azahar, ETC1-Subtiles nach rohen
+ * Kachelkoordinaten; nur Einheit 0 beachtet den Typ, TEXCOORD2 = 22/23),
  * Output-Merger 0x100..0x107 (Blending, LogicOp, Alpha-Test) und
  * Farb-/Tiefenziel 0x110..0x11E (Kanalmasken, RGBA8/RGB8/
  * RGB5A1/RGB565/RGBA4, Depth-Test/Write, Stencil, D16/D24/D24S8) sowie
@@ -50,40 +51,9 @@ void gpu_set_fb_size(uint32_t addr, int w, int h) {
 int gpu_get_fb_width(void) { return g_fb_w; }
 int gpu_get_fb_height(void) { return g_fb_h; }
 
-static void put_px(ArmCpu *c, int x, int y, uint32_t rgb)
-{
-    if (x < 0 || y < 0 || x >= g_fb_w || y >= g_fb_h) return;
-    uint32_t off = (g_fb & 0x1FFFFFFFu) + (uint32_t)(y * g_fb_w + x) * 3u;
-    if (off + 3u > c->mem_size) return;
-    arm_mem_write(c, off + 0u, 1, (rgb >> 0) & 0xFFu);
-    arm_mem_write(c, off + 1u, 1, (rgb >> 8) & 0xFFu);
-    arm_mem_write(c, off + 2u, 1, (rgb >> 16) & 0xFFu);
-}
-
-
-
-static void put_px_blend(ArmCpu *c, int x, int y, uint32_t rgb, uint32_t a)
-{
-    uint32_t off;
-    if (x < 0 || y < 0 || x >= g_fb_w || y >= g_fb_h) return;
-    if (a == 0u) return;
-    off = (g_fb & 0x1FFFFFFFu) + (uint32_t)(y * g_fb_w + x) * 3u;
-    if (off + 3u > c->mem_size) return;
-    if (a >= 255u) {
-        put_px(c, x, y, rgb & 0xFFFFFFu);
-        return;
-    }
-    {
-        uint32_t ia = 255u - (a > 255u ? 255u : a);
-        uint32_t dr = c->mem[off + 0u], dg = c->mem[off + 1u], db = c->mem[off + 2u];
-        uint32_t sr = rgb & 0xFFu, sg = (rgb >> 8) & 0xFFu, sb = (rgb >> 16) & 0xFFu;
-        c->mem[off + 0u] = (uint8_t)((sr * a + dr * ia) / 255u);
-        c->mem[off + 1u] = (uint8_t)((sg * a + dg * ia) / 255u);
-        c->mem[off + 2u] = (uint8_t)((sb * a + db * ia) / 255u);
-    }
-}
-
-
+/* Ohne konfiguriertes Farbziel (0x11D) und ohne Vertex-Programm wird nichts
+ * gezeichnet; es gibt keinen Host-Puffer-/Attribut-Fallback mehr (Azahar
+ * rendert ausschliesslich ueber PICA-Register). */
 
 /* ================= echte PICA200-Kommandoliste =================
  * Format (Azahar pica_core.cpp, ProcessCmdList/WriteInternalReg): Strom aus
@@ -169,36 +139,9 @@ void gpu_pica_reset(void)
     p_vs_reset_draw_state();
 }
 
-void gpu_pica_bind_texture(uint32_t addr, int w, int h, int fmt)
-{
-    if (w <= 0 || h <= 0) return;
-    p_regs[0x80] |= 1u;                       /* main_config.texture0_enable */
-    p_regs[0x81] = 0u;                        /* border_color */
-    p_regs[0x82] = (((uint32_t)w & 0x7FFu) << 16) |
-                   ((uint32_t)h & 0x7FFu);    /* width / height */
-    p_regs[0x83] = 0u;                        /* clamp, 2D */
-    p_regs[0x85] = (addr >> 3) & 0x0FFFFFFFu; /* address / 8 */
-    p_regs[0x8E] = (uint32_t)fmt & 0xFu;      /* 1 = RGB8 */
-}
-
 int gpu_pica_texture_bound(void)
 {
     return (p_regs[0x80] & 1u) && (p_regs[0x82] & 0x07FF07FFu) != 0u;
-}
-
-/* UV-Rechteck fuer das Vollbild-Quad (z. B. 400x240-Unterbereich eines
-   512x256-Sprite-Atlas). Default 0..1. */
-static float p_uv[4] = {0.0f, 0.0f, 1.0f, 1.0f};
-void gpu_pica_set_uv(float u0, float v0, float u1, float v1)
-{
-    p_uv[0] = u0; p_uv[1] = v0; p_uv[2] = u1; p_uv[3] = v1;
-}
-void gpu_pica_get_uv(float *u0, float *v0, float *u1, float *v1)
-{
-    if (u0) *u0 = p_uv[0];
-    if (v0) *v0 = p_uv[1];
-    if (u1) *u1 = p_uv[2];
-    if (v1) *v1 = p_uv[3];
 }
 
 static uint32_t p_read32(ArmCpu *c, uint32_t off)
@@ -459,10 +402,14 @@ static void p_etc1_texel(uint64_t t, unsigned x, unsigned y, unsigned char out[3
     out[2] = (unsigned char)(b < 0 ? 0 : (b > 255 ? 255 : b));
 }
 
-/* Ein Texel einer 8x8-Kachel dekodieren; mo = p_morton_interleave(fx, fy). */
-static void p_decode_texel(const uint8_t *tile, uint32_t fmt, uint32_t mo,
+/* Ein Texel einer 8x8-Kachel dekodieren. x,y sind die rohen Koordinaten
+ * innerhalb der Kachel; nur die linearen Formate adressieren ueber den
+ * Morton-Index, ETC1/ETC1A4 benutzen x/4+2*(y/4) als Subtile
+ * (Azahar texture_decode.cpp LookupTexelInTile). */
+static void p_decode_texel(const uint8_t *tile, uint32_t fmt, uint32_t x, uint32_t y,
                            unsigned char out[4])
 {
+    uint32_t mo = p_morton_interleave(x & 7u, y & 7u);
     out[0] = out[1] = out[2] = 0;
     out[3] = 255;
     switch (fmt) {
@@ -544,15 +491,15 @@ static void p_decode_texel(const uint8_t *tile, uint32_t fmt, uint32_t mo,
     case 12: case 13: {                                /* ETC1 / ETC1A4 */
         unsigned has_alpha = (fmt == 13u);
         unsigned ssz = has_alpha ? 16u : 8u;
-        unsigned fx = mo & 7u;
-        unsigned fy = mo >> 3;
+        unsigned fx = x & 7u;
+        unsigned fy = y & 7u;
         const uint8_t *s = tile + (fx / 4u + 2u * (fy / 4u)) * ssz;
         unsigned char rgb[3];
         if (has_alpha) {
             uint64_t pa = 0;
             unsigned k;
             for (k = 0; k < 8u; k++) pa |= (uint64_t)s[k] << (8u * k);
-            out[3] = (unsigned char)p_c4to8((unsigned)((pa >> (4u * (fx * 4u + fy))) & 0xFu));
+            out[3] = (unsigned char)p_c4to8((unsigned)((pa >> (4u * ((fx % 4u) * 4u + (fy % 4u)))) & 0xFu));
             s += 8;
         }
         {
@@ -626,7 +573,7 @@ static int p_lookup_texel(ArmCpu *c, uint32_t unit, int x, int y,
         + (uint32_t)(x / 8) * ts;
     if (off + ts > c->mem_size) return 0;
     p_decode_texel(c->mem + off, fmt,
-                   p_morton_interleave((uint32_t)(x & 7), (uint32_t)(y & 7)), out);
+                   (uint32_t)(x & 7), (uint32_t)(y & 7), out);
     return 1;
 }
 
@@ -666,8 +613,9 @@ static int p_texel_wrapped(ArmCpu *c, uint32_t unit, int s, int t,
 }
 
 /* Sample einer Textureinheit 0..2 (Azahar sw_rasterizer.cpp TextureColor).
- * Filter: Hardware waehlt mag/min ueber die LOD; ohne Ableitungen wird
- * linear verwendet, sobald einer der beiden Filter linear ist. */
+ * Der Azahar-Software-Renderer wertet die Min-/Mag-Filter nicht aus
+ * ("TODO: Apply the min and mag filters"); es wird immer der naechste
+ * Texel gelesen. */
 static void p_sample_tex(ArmCpu *c, uint32_t unit, float u, float v,
                          unsigned char out[4])
 {
@@ -676,40 +624,14 @@ static void p_sample_tex(ArmCpu *c, uint32_t unit, float u, float v,
     uint32_t size = p_regs[base + 1u];
     int w = (int)((size >> 16) & 0x7FFu);
     int h = (int)(size & 0x7FFu);
-    int linear;
 
     out[0] = out[1] = out[2] = out[3] = 0;
     if (!(p_regs[0x80] & (1u << unit))) return;   /* Azahar: {0,0,0,0} */
     if (unit == 0u && ((cfg >> 28) & 7u) == 5u) return;   /* Azahar: nur Einheit 0 beachtet den Typ */
     if ((p_regs[base + 4u] & 0x0FFFFFFFu) == 0u) { out[3] = 255; return; }
     if (w <= 0 || h <= 0) return;
-
-    linear = (int)(((cfg >> 1) & 1u) | ((cfg >> 2) & 1u));
-    if (!linear) {
-        if (!p_texel_wrapped(c, unit, (int)(u * (float)w), (int)(v * (float)h), out))
-            out[0] = out[1] = out[2] = out[3] = 0;
-        return;
-    }
-    {
-        float fs = u * (float)w - 0.5f;
-        float ft = v * (float)h - 0.5f;
-        int s0 = (int)floorf(fs);
-        int t0 = (int)floorf(ft);
-        float a = fs - (float)s0;
-        float b = ft - (float)t0;
-        unsigned char p00[4], p10[4], p01[4], p11[4];
-        int i;
-        p_texel_wrapped(c, unit, s0, t0, p00);
-        p_texel_wrapped(c, unit, s0 + 1, t0, p10);
-        p_texel_wrapped(c, unit, s0, t0 + 1, p01);
-        p_texel_wrapped(c, unit, s0 + 1, t0 + 1, p11);
-        for (i = 0; i < 4; i++) {
-            float top = (float)p00[i] * (1.0f - a) + (float)p10[i] * a;
-            float bot = (float)p01[i] * (1.0f - a) + (float)p11[i] * a;
-            float val = top * (1.0f - b) + bot * b;
-            out[i] = (unsigned char)(val < 0.0f ? 0.0f : (val > 255.0f ? 255.0f : roundf(val)));
-        }
-    }
+    if (!p_texel_wrapped(c, unit, (int)(u * (float)w), (int)(v * (float)h), out))
+        out[0] = out[1] = out[2] = out[3] = 0;
 }
 
 /* ================= TEV (Fragment-Combiner) =================
@@ -720,6 +642,21 @@ static void p_sample_tex(ArmCpu *c, uint32_t unit, float u, float v,
  */
 typedef struct { unsigned char c[4]; } PicaColor;
 typedef struct { float pos[4]; float color[4]; float uv[3][2]; } PicaVertex;
+
+/* Primitive Assembly (Azahar pica/primitive_assembly.cpp): zwei gepufferte
+ * Vertices; bei Strip wird jedes zweite Dreieck als (v2,v1,v3) ausgegeben.
+ * Der Zustand bleibt ueber Draws erhalten, bis 0x25F (Restart) oder ein
+ * Wechsel der Topologie 0x25E ihn zuruecksetzt. */
+static PicaVertex g_prim_buf[2];
+static int g_prim_index;
+static int g_prim_strip_ready;
+static int g_prim_topology;      /* 0 Liste, 1 Strip, 2 Fan, 3 Shader */
+
+static void p_prim_reset(void)
+{
+    g_prim_index = 0;
+    g_prim_strip_ready = 0;
+}
 
 /* ================= Fog (Azahar sw_rasterizer.cpp WriteFog) =================
  * 0xE0 Bits0..2 fog_mode (0 None, 5 Fog, 7 Gas), Bit16 fog_flip; 0xE1
@@ -987,17 +924,17 @@ static PicaColor p_tev(const PicaColor tex[4], const PicaColor *primary)
 }
 
 /* ================= Farbziel (Framebuffer 0x110..0x11E) =================
- * Azahar sw_framebuffer.cpp: Adresse 0x11C * 8 physisch, Breite 0x11D
- * Bits 0..10, Hoehe (Feld) Bits 12..21 = tatsaechliche Hoehe - 1,
+ * Azahar sw_framebuffer.cpp: Adresse 0x11D * 8 physisch, Breite/Hoehe 0x11E
+ * Bits 0..10 bzw. 12..21 = tatsaechliche Hoehe - 1,
  * Kachelung 8x8 Morton, Zeilen von unten nach oben. */
 static int p_fb_configured(void)
 {
-    return (p_regs[0x11C] & 0x0FFFFFFFu) != 0u;
+    return (p_regs[0x11D] & 0x0FFFFFFFu) != 0u;
 }
 
 static int p_fb_bytes_per_px(void)
 {
-    switch ((p_regs[0x116] >> 16) & 7u) {
+    switch ((p_regs[0x117] >> 16) & 7u) {
     case 1: return 3;                 /* RGB8 */
     case 2: case 3: case 4: return 2; /* RGB5A1 / RGB565 / RGBA4 */
     default: return 4;                /* RGBA8 */
@@ -1015,8 +952,8 @@ static uint32_t p_morton_offset(uint32_t x, uint32_t y, uint32_t bpp)
 
 static uint32_t p_fb_pixel_offset(uint32_t x, uint32_t y)
 {
-    uint32_t width = p_regs[0x11D] & 0x7FFu;
-    uint32_t hraw = (p_regs[0x11D] >> 12) & 0x3FFu;
+    uint32_t width = p_regs[0x11E] & 0x7FFu;
+    uint32_t hraw = (p_regs[0x11E] >> 12) & 0x3FFu;
     uint32_t bpp = (uint32_t)p_fb_bytes_per_px();
     if (width == 0u) width = (uint32_t)g_fb_w;
     y = hraw - y;                      /* Azahar: framebuffer.height - y */
@@ -1025,9 +962,9 @@ static uint32_t p_fb_pixel_offset(uint32_t x, uint32_t y)
 
 static void p_fb_read(ArmCpu *c, uint32_t x, uint32_t y, unsigned char out[4])
 {
-    uint32_t addr = gpu_pica_phys_to_guest((p_regs[0x11C] & 0x0FFFFFFFu) * 8u);
+    uint32_t addr = gpu_pica_phys_to_guest((p_regs[0x11D] & 0x0FFFFFFFu) * 8u);
     uint32_t off = addr + p_fb_pixel_offset(x, y);
-    uint32_t fmt = (p_regs[0x116] >> 16) & 7u;
+    uint32_t fmt = (p_regs[0x117] >> 16) & 7u;
     out[0] = out[1] = out[2] = out[3] = 0;
     switch (fmt) {
     case 1: /* RGB8: b,g,r (Azahar DecodeRGB8) */
@@ -1074,9 +1011,9 @@ static void p_fb_read(ArmCpu *c, uint32_t x, uint32_t y, unsigned char out[4])
 
 static void p_fb_write(ArmCpu *c, uint32_t x, uint32_t y, const unsigned char in[4])
 {
-    uint32_t addr = gpu_pica_phys_to_guest((p_regs[0x11C] & 0x0FFFFFFFu) * 8u);
+    uint32_t addr = gpu_pica_phys_to_guest((p_regs[0x11D] & 0x0FFFFFFFu) * 8u);
     uint32_t off = addr + p_fb_pixel_offset(x, y);
-    uint32_t fmt = (p_regs[0x116] >> 16) & 7u;
+    uint32_t fmt = (p_regs[0x117] >> 16) & 7u;
     unsigned r = in[0], g = in[1], b = in[2], a = in[3];
     switch (fmt) {
     case 1: /* RGB8: b,g,r */
@@ -1111,7 +1048,7 @@ static void p_fb_write(ArmCpu *c, uint32_t x, uint32_t y, const unsigned char in
     }
 }
 
-/* ================= Tiefe/Stencil (0x11B, 0x115/0x116) =================
+/* ================= Tiefe/Stencil (0x11C, 0x115/0x116) =================
  * Azahar sw_framebuffer.cpp GetDepth/SetDepth/GetStencil/SetStencil: gleiche
  * Kachelung wie das Farbziel, Bytes je Pixel nach Format (D16=2, D24=3,
  * D24S8=4), Werte little endian, Stencil im vierten Byte. */
@@ -1130,8 +1067,8 @@ static uint32_t p_depth_bits(void) { return (p_depth_fmt() == 0u) ? 16u : 24u; }
 
 static uint32_t p_depth_pixel_offset(uint32_t x, uint32_t y)
 {
-    uint32_t width = p_regs[0x11D] & 0x7FFu;
-    uint32_t hraw = (p_regs[0x11D] >> 12) & 0x3FFu;
+    uint32_t width = p_regs[0x11E] & 0x7FFu;
+    uint32_t hraw = (p_regs[0x11E] >> 12) & 0x3FFu;
     uint32_t bpp = p_depth_bpp();
     if (width == 0u) width = (uint32_t)g_fb_w;
     y = hraw - y;
@@ -1140,7 +1077,7 @@ static uint32_t p_depth_pixel_offset(uint32_t x, uint32_t y)
 
 static int p_depth_addr(ArmCpu *c, uint32_t x, uint32_t y, uint32_t *out)
 {
-    uint32_t reg = p_regs[0x11B] & 0x0FFFFFFFu;
+    uint32_t reg = p_regs[0x11C] & 0x0FFFFFFFu;
     uint32_t off;
     if (reg == 0u) return 0;
     off = gpu_pica_phys_to_guest(reg * 8u) + p_depth_pixel_offset(x, y);
@@ -1404,9 +1341,12 @@ static void p_process_tri(ArmCpu *c, const PicaVertex *v0, const PicaVertex *v1,
 
     if (cull == 0u || cull == 3u) {
         if (!reversed && area <= 0) { p_process_tri(c, v0, v2, v1, 1); return; }
-    } else if (cull == 1u) {         /* KeepClockWise */
-        if (!reversed) { p_process_tri(c, v0, v2, v1, 1); return; }
-    } else {                         /* KeepCounterClockWise */
+    } else {
+        if (!reversed && cull == 1u) {   /* KeepClockWise */
+            p_process_tri(c, v0, v2, v1, 1);
+            return;
+        }
+        /* Azahar sw_rasterizer.cpp: cull away triangles with SignedArea <= 0. */
         if (area <= 0) return;
     }
 
@@ -1455,6 +1395,13 @@ static void p_process_tri(ArmCpu *c, const PicaVertex *v0, const PicaVertex *v1,
 
                 if (sc_mode == 1) {      /* Exclude */
                     if (px >= sx1 && px < sx2 && py >= sy1 && py < sy2) continue;
+                }
+                /* Keine Schreibzugriffe ausserhalb des konfigurierten
+                 * Farbziels (Azahar zeichnet nur in den Framebuffer). */
+                if (p_fb_configured()) {
+                    uint32_t fw = p_regs[0x11E] & 0x7FFu;
+                    uint32_t fh = ((p_regs[0x11E] >> 12) & 0x3FFu) + 1u;
+                    if ((uint32_t)(px >> 4) >= fw || (uint32_t)(py >> 4) >= fh) continue;
                 }
 
                 w0 = bias0 + p_signed_area(x[1], y[1], x[2], y[2], px, py);
@@ -1546,12 +1493,6 @@ static void p_process_tri(ArmCpu *c, const PicaVertex *v0, const PicaVertex *v1,
                     result[3] = (mask & (1u << 11)) ? bl[3] : dest[3];
                     if ((p_regs[0x113] & 0xFu) != 0u)
                         p_fb_write(c, (uint32_t)(px >> 4), (uint32_t)(py >> 4), result);
-                } else {
-                    put_px_blend(c, px >> 4, py >> 4,
-                                 ((uint32_t)tev_out.c[0]) |
-                                 (((uint32_t)tev_out.c[1]) << 8) |
-                                 (((uint32_t)tev_out.c[2]) << 16),
-                                 (uint32_t)tev_out.c[3]);
                 }
             }
         }
@@ -1707,7 +1648,7 @@ static void p_vs_execute(VsUnit *u)
     VsCall calls[4];
     VsLoop loops[4];
     int ifn = 0, ifh = 0, cn = 0, ch = 0, ln = 0, lh = 0;
-    uint32_t pc = 0;
+    uint32_t pc = p_regs[0x2BA] & 0xFFFFu;   /* GPUREG_VSH_ENTRYPOINT */
     unsigned steps = 0;
     int stop = 0;
 
@@ -1721,7 +1662,7 @@ static void p_vs_execute(VsUnit *u)
         op = instr >> 26;
 
         if (op <= 0x1Fu || (op & ~1u) == 0x2Eu) {
-            int inv = (op >= 0x18u && op <= 0x1Bu);
+            int inv = (op >= 0x1Au && op <= 0x1Bu);
             uint32_t desc = instr & 0x7Fu;
             uint32_t s1r = inv ? ((instr >> 14) & 0x1Fu) : ((instr >> 12) & 0x7Fu);
             uint32_t s2r = inv ? ((instr >> 7) & 0x7Fu) : ((instr >> 7) & 0x1Fu);
@@ -1784,10 +1725,11 @@ static void p_vs_execute(VsUnit *u)
                 break;
             case 0x01u:
             case 0x02u:
-            case 0x03u: {
+            case 0x03u:
+            case 0x18u: {              /* DP3 / DP4 / DPH / DPHI */
                 int nc = (op == 0x01u) ? 3 : 4;
                 float dot = 0.0f;
-                if (op == 0x03u) s1[3] = 1.0f;
+                if (op == 0x03u || op == 0x18u) s1[3] = 1.0f;
                 for (i = 0; i < nc; i++) dot += p_vs_mul(s1[i], s2[i]);
                 for (i = 0; i < 4; i++)
                     if ((sw >> (3 - i)) & 1u) dst[i] = dot;
@@ -2035,20 +1977,9 @@ static void p_vs_process(const float attrs[16][4], PicaVertex *v)
     }
 }
 
-static void p_vertex_from_attrs(const float attrs[16][4], PicaVertex *v, int use_shader)
+static void p_vertex_from_attrs(const float attrs[16][4], PicaVertex *v)
 {
-    if (use_shader) {
-        p_vs_process(attrs, v);
-    } else {
-        memcpy(v->pos, attrs[0], 4 * sizeof(float));
-        v->uv[0][0] = attrs[1][0];
-        v->uv[0][1] = attrs[1][1];
-        v->uv[1][0] = attrs[1][0];
-        v->uv[1][1] = attrs[1][1];
-        v->uv[2][0] = attrs[1][0];
-        v->uv[2][1] = attrs[1][1];
-        v->color[0] = v->color[1] = v->color[2] = v->color[3] = 1.0f;
-    }
+    p_vs_process(attrs, v);
     g_vs_last_vertex = *v;
     g_vs_have_last = 1;
 }
@@ -2059,6 +1990,31 @@ static void p_emit_tri(ArmCpu *c, const PicaVertex *a, const PicaVertex *b,
     /* Clip -> Viewport -> Rasterisierung + TEV + Farbziel (Azahar
        sw_rasterizer.cpp). Keine NDC-Heuristik mehr. */
     p_raster_tri(c, a, b, d);
+}
+
+/* Vertex in die Primitive Assembly geben (Azahar primitive_assembly.cpp). */
+static void p_prim_submit(ArmCpu *c, const PicaVertex *v)
+{
+    switch (g_prim_topology) {
+    case 1: case 2:                                   /* Strip / Fan */
+        if (g_prim_strip_ready)
+            p_emit_tri(c, &g_prim_buf[0], &g_prim_buf[1], v);
+        g_prim_buf[g_prim_index] = *v;
+        g_prim_strip_ready |= (g_prim_index == 1);
+        if (g_prim_topology == 1)
+            g_prim_index = !g_prim_index;
+        else
+            g_prim_index = 1;
+        break;
+    default:                                          /* List / Shader */
+        if (g_prim_index < 2) {
+            g_prim_buf[g_prim_index++] = *v;
+        } else {
+            g_prim_index = 0;
+            p_emit_tri(c, &g_prim_buf[0], &g_prim_buf[1], v);
+        }
+        break;
+    }
 }
 
 static uint32_t p_read8m(ArmCpu *c, uint32_t addr)
@@ -2090,19 +2046,14 @@ static float g_vs_imm_attr[16][4];
 static unsigned g_vs_imm_cur;
 static uint32_t g_vs_imm_pack[4];
 static unsigned g_vs_imm_pack_n;
-static PicaVertex g_imm_tri[3];
-static unsigned g_imm_n;
 
 static void p_vs_draw_immediate(ArmCpu *c)
 {
     PicaVertex v;
-    p_vertex_from_attrs(g_vs_imm_attr, &v, g_vs_code_words > 0);
-    g_imm_tri[g_imm_n++] = v;
+    if (g_vs_code_words == 0u) return;   /* ohne Programm wird nichts gezeichnet */
+    p_vertex_from_attrs(g_vs_imm_attr, &v);
+    p_prim_submit(c, &v);
     g_vs_imm_cur = 0;
-    if (g_imm_n >= 3) {
-        p_emit_tri(c, &g_imm_tri[0], &g_imm_tri[1], &g_imm_tri[2]);
-        g_imm_n = 0;
-    }
 }
 
 static int p_draw_arrays(ArmCpu *c, int indexed)
@@ -2111,14 +2062,12 @@ static int p_draw_arrays(ArmCpu *c, int indexed)
     static unsigned draws = 0;
     uint32_t nv = p_regs[0x228];
     uint32_t voff = p_regs[0x22a];
-    int topo;
-    PicaVertex tri[3];
-    unsigned tri_n = 0;
     uint32_t i;
     int use_shader = (g_vs_code_words > 0);
 
     if (plog < 0) { const char *e = getenv("HLE_PICA_LOG"); plog = (e && *e) ? atoi(e) : 0; }
     if (nv == 0) return 0;
+    if (!use_shader) return 0;          /* Azahar: kein Draw ohne Vertex-Programm */
     if (nv > 0x10000u) nv = 0x10000u;
     g_pica_draws++;
     if (plog > 0 && draws < (unsigned)plog) {
@@ -2141,26 +2090,13 @@ static int p_draw_arrays(ArmCpu *c, int indexed)
         fflush(stdout);
     }
 
-    topo = (int)((p_regs[0x25E] >> 8) & 3u);
-    if (topo == 3) topo = 0;            /* Shader-Topologie: als Liste */
     for (i = 0; i < nv; i++) {
         uint32_t vert = indexed ? p_index_vertex(c, i) : (i + voff);
         float attrs[16][4];
+        PicaVertex v;
         p_load_attrs(c, vert, attrs);
-        p_vertex_from_attrs(attrs, &tri[tri_n++], use_shader);
-        if (tri_n == 3u) {
-            p_emit_tri(c, &tri[0], &tri[1], &tri[2]);
-            if (topo == 1) {          /* Strip */
-                tri[0] = tri[1];
-                tri[1] = tri[2];
-                tri_n = 2;
-            } else if (topo == 2) {   /* Fan */
-                tri[1] = tri[2];
-                tri_n = 2;
-            } else {
-                tri_n = 0;
-            }
-        }
+        p_vertex_from_attrs(attrs, &v);
+        p_prim_submit(c, &v);
     }
     draws++;
     return 1;
@@ -2237,9 +2173,11 @@ static void p_vs_reg_write(ArmCpu *c, uint32_t id, uint32_t value)
 {
     if (id == 0x2B0u) {
         unsigned i;
-        for (i = 0; i < 16u; i++) g_vs_bool[i] = (unsigned char)((value >> i) & 1u);
+        uint32_t reg = p_regs[id];       /* Azahar: maskierter Registerwert */
+        for (i = 0; i < 16u; i++) g_vs_bool[i] = (unsigned char)((reg >> i) & 1u);
     } else if (id >= 0x2B1u && id <= 0x2B4u) {
-        memcpy(g_vs_int[id - 0x2B1u], &value, 4);
+        uint32_t reg = p_regs[id];       /* Azahar: maskierter Registerwert */
+        memcpy(g_vs_int[id - 0x2B1u], &reg, 4);
     } else if (id >= 0x2C1u && id <= 0x2C8u) {
         p_vs_uniform_push(value);
     } else if (id >= 0x2CCu && id <= 0x2D3u) {
@@ -2268,7 +2206,8 @@ static void p_vs_reset_draw_state(void)
 {
     g_vs_imm_pack_n = 0;
     g_vs_imm_cur = 0;
-    g_imm_n = 0;
+    g_prim_topology = 0;              /* PipelineRegs::TriangleTopology::List */
+    p_prim_reset();
     g_vs_have_last = 0;
 }
 
@@ -2333,12 +2272,17 @@ static void p_write_reg(ArmCpu *c, uint32_t id, uint32_t value, uint32_t mask,
         p_draw_arrays(c, 0);
     } else if (id == 0x22Fu) {
         p_draw_arrays(c, 1);
+    } else if (id == 0x25Eu) {      /* triangle_topology (special) */
+        g_prim_topology = (int)((p_regs[0x25E] >> 8) & 3u);
+        p_prim_reset();             /* Azahar: Reconfigure() setzt zurueck */
+    } else if (id == 0x25Fu) {      /* restart_primitive (special) */
+        p_prim_reset();
     } else if (id == 0x23Cu || id == 0x23Du) {
         uint32_t ch = id - 0x23Cu;
-        uint32_t trigger = p_regs[id];
         uint32_t paddr, sz;
-        p_regs[id] = 0;             /* Azahar: trigger wird nach dem Lauf geloescht */
-        if (trigger == 0u) return;
+        /* Azahar HandleSpecialReg: jeder Schreibzugriff startet die Liste,
+         * unabhaengig vom geschriebenen Wert (auch 0); der Trigger bleibt
+         * im Register stehen. */
         paddr = (p_regs[0x23Au + ch] & 0x0FFFFFFFu) * 8u;
         sz = (p_regs[0x238u + ch] & 0x000FFFFFu) * 8u;
         if (paddr == 0u || sz == 0u

@@ -38,13 +38,8 @@ float gpu_pica_vs_uniform(int index, int comp);
 int gpu_pica_vs_active(void);
 int gpu_pica_last_vertex(float *pos, float *color, float *uv);
 
-/* Texturzustand fuer Textureinheit 0 aus dem Engine-Texturobjekt setzen.
-   Register: 0x80 main_config (bit0 enable), 0x82 height[0..10]/width[16..26],
-   0x85 Adresse/8, 0x8E Format (1 = RGB8). */
-void gpu_pica_bind_texture(uint32_t addr, int w, int h, int fmt);
+/* Texturzustand fuer Textureinheit 0 aus dem Engine-Texturobjekt setzen. */
 int gpu_pica_texture_bound(void);
-void gpu_pica_set_uv(float u0, float v0, float u1, float v1);
-void gpu_pica_get_uv(float *u0, float *v0, float *u1, float *v1);
 
 /* Zaehler fuer abgeschlossene PICA-Kommandolisten (Engine-Submits) und
    tatsaechlich ausgefuehrte Draws. Der Screenshot wartet darauf, statt
