@@ -1,9 +1,13 @@
-"""Baut und startet tests/pica_selftest.c (PICA-Registermap).
+"""Baut und startet tests/pica_selftest.c (PICA-Registermap + Kommandoliste).
 
   python tools\\test_pica_c.py
 
 Prueft 0x200-Basis, 0x201-Formate, 0x203-Loader-Stride, 0x228/0x22F-Draw,
-0x80-Textur-Enable und das Textursampling ohne Gast-Code.
+0x80-Textur-Enable und das Textursampling ohne Gast-Code. Zusaetzlich die
+Azahar-Semantik des Kommandostroms: Header-Maske, Consecutive-Writes
+(group=0/1), 8-Byte-Ausrichtung, 0x010-Finalize (P3D/Autostop),
+Befehlspuffer-Sprung 0x238/0x23A/0x23C und die Abbildung physischer
+PICA-Adressen auf den Gast-Linearspeicher.
 """
 import os
 import subprocess

@@ -88,6 +88,7 @@ fn_001B9938) sind entfernt: Build ohne sie bleibt Frontier 9/10 (boss:U).
 | – | srv `GetServiceHandle`, `generic_command` | unbekannte Dienste/Kommandos liefern Erfolg |
 | – | fs `OpenFile`, `file_command` | Sentinel-Dateislot und Erfolg auch bei fehlgeschlagenem Open; `romfs_image.bin` mit Offset +0x1000 |
 | – | `SleepThread` | Schlafzeit auf 50 ms gedeckelt |
+| – | `gpu_pica_virt_to_phys` | Adressen außerhalb VRAM/Linear-Heap bleiben unverändert (der Port hat keine MMU/Seitentabelle); echtes GSP lehnt sie ab |
 | – | cfg `GetConfig` | unbekannte Blöcke liefern Erfolg mit Nullen (Azahar: Fehler) |
 
 Diese Liste stammt aus dem Review der Nachtarbeit (2026-11-24) gegen Azahar.
@@ -99,6 +100,12 @@ VBlank (Host-Takt 16 ms) über die InterruptRelayQueue an das registrierte
 Event; P3D/PPF/PSC0/PSC1/DMA werden von den GX-Kommandos ausgelöst
 (`gsp_process_cmdqueue`). Beleg: Frontier 4 → 9 Dienste (Divergenz boss:U)
 mit identischen 23 Patches.
+
+Seit dem PICA-Parser-Paket meldet der Kommandostrom P3D selbst: Register
+`0x010` (Finalize) vergleicht `irq_request` mit `irq_compare` und signalisiert
+über `gpu_pica_set_irq_handler` das GSP-Relay; `0x23C/0x23D` lösen
+Kanal-Sprünge aus. `gsp_process_cmdqueue` sendet P3D nur noch bei ungültiger
+Liste (Azahar `GPU::SubmitCmdList`), nicht mehr pauschal nach jeder Liste.
 
 Seit dem Kernel-Sync-Paket sind auch `wa-wait-handle0` und
 `wa-thread-exit-unsignaled` entfernt. `hle_svc` fuehrt Mutex, Semaphore,

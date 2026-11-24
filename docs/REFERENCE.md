@@ -140,25 +140,52 @@ Assets: 3 × Level-5-`ARC0` (`lt6_*.fa`), 566 × BCSTM, 34 × MOFLEX. Texturen
 ## PICA200 (Kommandostrom)
 
 Paare `(value, header)`. Header: `id` Bits 0..15, `mask` Bits 16..19, `extra`
-Bits 20..27, `group` Bit 31. Nach Gruppen-Records mit `extra > 0` folgt bei
-ungerader Länge ein Pad-Wort (8-Byte-Ausrichtung).
+Bits 20..27, `group` Bit 31. Jeder Record beginnt 8-Byte-ausgerichtet; nach
+einem Record mit ungerader Wortzahl folgt ein Pad-Wort. `extra > 0`:
+`group=1` schreibt die Extra-Woerter nach `id+1..id+extra` (sequentielle
+Register), `group=0` schreibt `id` selbst `extra`-mal (Shader-/LUT-Upload).
+Die Maske wird byteweise angewandt (`Azahar ExpandBitsToBytes`, z. B. `0x5`
+= Bytes 0 und 2). Quelle: `pica_core.cpp` `ProcessCmdList`/`WriteInternalReg`.
 
 | Register | Bedeutung |
 |---|---|
+| `0x010` | `irq_request` (Finalize): bei Byte-Treffer gegen `irq_compare` (`0x020`) P3D-Interrupt; `irq_autostop` (`0x034`, Default 1) beendet die Liste. GSP-Defaults: `irq_compare=0x12345678`, `irq_mask=0xFFFFFFF0`, `irq_autostop=1`. |
 | `0x080` | Texture-Config, Bit 0 = texture0 enable |
 | `0x082` / `0x085` / `0x08E` | Tex0 Größe (h Bits 0..10, w 16..26) / Adresse>>3 / Format |
-| `0x200` | Attribut-Puffer-Basis (`addr >> 3`) |
+| `0x200` | Attribut-Puffer-Basis (physische Adresse = `(reg>>1)*16`) |
 | `0x201`/`0x202` | Attributformate; `0x202` Bits 28..31 = Attributanzahl-1 |
 | `0x203 + 3*l` | Loader `l`: Offset, Komponenten, Stride (Bits 16..23) |
 | `0x227`–`0x22A` | Index-Puffer, `num_vertices`, Vertex-Offset |
 | `0x22E` / `0x22F` | Draw arrays / Draw elements |
-| `0x238`–`0x23D` | Kommandopuffer-Kanäle (Größe/Adresse/Jump) |
+| `0x238`/`0x23A`/`0x23C` | Kanal 0: CMDBUF_SIZE (Bytes/8, Bits 0..19) / CMDBUF_ADDR (physisch, /8) / CMDBUF_JUMP (Trigger) |
+| `0x239`/`0x23B`/`0x23D` | Kanal 1: dieselben Felder |
 | `0x2C0`–`0x2FF` | Vertex-Shader (Uniforms, Programm, Swizzle) |
 | `0x0C0`–`0x0FF` | TEV-Stufen |
 
+Ein Schreibzugriff auf `0x23C`/`0x23D` startet die Liste des Kanals und
+**ersetzt** die laufende Liste (Azahar `cmd_list.Reset`): der Rest der alten
+Liste wird nicht mehr ausgeführt. Ungültige Adresse/Größe meldet P3D.
+
+### PICA-Adressen
+
+PICA-Register (Textur `0x085`, Vertex-Basis `0x200`, CMDBUF_ADDR, im
+Kommandostrom geschriebene Pufferadressen) enthalten **physische** Adressen.
+Der Port bildet sie auf seinen linearen Gast-Speicher ab
+(`runtime/gpu/gpu.c` `gpu_pica_phys_to_guest`, Azahar `memory.h`):
+
+| physisch | Gast-linear |
+|---|---|
+| `0x18000000`–`0x185FFFFF` (VRAM) | `0x1F000000`–`0x1F5FFFFF` |
+| `0x20000000`–`0x27FFFFFF` (FCRAM) | `0x14000000`–`0x1BFFFFFF` (Linear-Heap) |
+
+GSP-Submits liefern dagegen Virtualadressen; `GPU::Execute` wandelt sie vor
+dem Eintrag in die Kommandopuffer-Register um (`gpu_pica_virt_to_phys`).
+Bereiche außerhalb dieser Fenster bleiben unverändert, weil der Port keine
+MMU/Seitentabelle hat.
+
 Das Titelbild ist ein 3D-Render (`title.xc`): korrekte Darstellung braucht
 einen **Vertex-Shader-Interpreter/Übersetzer** und **TEV**.
-`runtime/gpu.c` hat beides noch nicht.
+`runtime/gpu/gpu.c` hat beides noch nicht.
 
 ## Quellen
 

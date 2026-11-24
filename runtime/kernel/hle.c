@@ -16,6 +16,7 @@ static uint32_t g_gsp_irq_handle;
 static uint32_t g_apt_param_ev = 0;
 static void dispatch_ipc(uint32_t handle);
 static int gsp_process_cmdqueue(ArmCpu *c);
+static void gsp_pica_irq(int id);
 #include "arm_trace.h"
 
 void arm_call_guest_pub(ArmCpu *c, uint32_t addr);   /* gen_boot.c */
@@ -1870,6 +1871,13 @@ static void gsp_signal_interrupt(int id) {
     if (evh != NULL) evh->signaled = 1;
 }
 
+/* PICA-Kommandostrom meldet P3D beim Finalize-Register 0x010 (Azahar
+ * PicaCore::HandleSpecialReg(irq_request) -> signal_interrupt(P3D)). */
+static void gsp_pica_irq(int id) {
+    (void)id;
+    gsp_signal_interrupt(GSP_IRQ_P3D);
+}
+
 
 /* GSP wendet beim VBlank die vom Spiel im Shared-Memory gesetzte
  * FrameBufferInfo an (3dbrew "Framebuffer Info", Azahar
@@ -2295,16 +2303,23 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
             }
             case 0x01: { /* ProcessCommandList */
                 uint32_t addr = w[1], size = w[2];
+                /* GSP reicht eine Virtualadresse; PICA-Register halten wie
+                   auf echter Hardware physische Adressen (Azahar
+                   GPU::Execute -> VirtualToPhysicalAddress). */
+                uint32_t paddr = gpu_pica_virt_to_phys(addr);
                 if (addr != 0u && size != 0u &&
-                    (uint64_t)(addr & 0x1FFFFFFFu) + size <= c->mem_size) {
-                    int nops = gpu_run_pica_list(c, addr, size);
+                    (uint64_t)gpu_pica_phys_to_guest(paddr) + size <= c->mem_size) {
+                    unsigned long long d0 = gpu_pica_draw_count();
+                    int nops = gpu_run_pica_list(c, paddr, size);
                     qops += nops;
-                    printf("[gspq] ProcessCommandList list=%08X size=%X ops=%d\n",
-                           addr, size, nops);
+                    /* Frontier-M3: Liste mit Draws ([gpu] list ... draws=N). */
+                    printf("[gpu] list addr=%08X paddr=%08X size=%X ops=%d draws=%llu\n",
+                           addr, paddr, size, nops, gpu_pica_draw_count() - d0);
                 } else {
+                    /* Azahar GPU::SubmitCmdList: ungueltige Liste -> P3D. */
                     printf("[gspq] ProcessCommandList ungueltig %08X/%X\n", addr, size);
+                    gsp_signal_interrupt(GSP_IRQ_P3D);
                 }
-                gsp_signal_interrupt(GSP_IRQ_P3D);
                 break;
             }
             case 0x02: /* MemoryFill */
@@ -2836,6 +2851,8 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     }
     setup_config_mem(c);
     arm_pump_hook = hle_pump;
+    gpu_pica_reset();
+    gpu_pica_set_irq_handler(gsp_pica_irq);
     g_vblank_run = 1;
     CreateThread(NULL, 0, vblank_thread, NULL, 0, NULL);
 

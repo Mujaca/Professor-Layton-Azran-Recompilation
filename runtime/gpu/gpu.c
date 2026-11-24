@@ -77,20 +77,78 @@ static void put_px_blend(ArmCpu *c, int x, int y, uint32_t rgb, uint32_t a)
 
 
 /* ================= echte PICA200-Kommandoliste =================
- * Format (Azahar/Citra pica_core.cpp): Strom aus Paaren
+ * Format (Azahar pica_core.cpp, ProcessCmdList/WriteInternalReg): Strom aus
+ * Paaren
  *     value, header
  * header: bits 0..15 cmd_id (RegsInternal-Index), bits 16..19 parameter_mask,
  *         bits 20..27 extra_data_length, bit 31 group_commands.
- * Bei extra_data_length > 0 folgen weitere value-Woerter; group=1 schreibt
- * cmd_id+1..cmd_id+n, group=0 schreibt cmd_id n-mal.
- * Draw-Trigger: 0x22E (arrays) / 0x22F (indexed), Kommandopuffer 0x23C/0x23D.
+ * Jeder Record beginnt 8-Byte-ausgerichtet; nach einem Record mit ungerader
+ * Wortzahl folgt ein Pad-Wort. Bei extra_data_length > 0 folgen weitere
+ * value-Woerter: group=1 schreibt cmd_id+1..cmd_id+n (sequentielle Register),
+ * group=0 schreibt cmd_id n-mal (Programm-/LUT-Upload).
+ * Trigger: 0x22E/0x22F Draw, 0x010 Finalize (P3D-IRQ, irq_autostop),
+ *          0x23C/0x23D startet Kanal 0/1 des Kommandopuffers (0x238-0x23D).
+ * Schreiben wird byteweise entsprechend parameter_mask angewandt
+ * (Azahar ExpandBitsToBytes).
  */
 #define PICA_NREGS 0x300
-static uint32_t p_regs[PICA_NREGS];
+
+/* Physische Adressen der PICA (Azahar memory.h): VRAM liegt physisch bei
+ * 0x18000000 und im Gast-Adressraum bei 0x1F000000; FCRAM physisch bei
+ * 0x20000000, im Port lineare Fortsetzung des Linear-Heaps ab 0x14000000. */
+#define PICA_VRAM_PADDR   0x18000000u
+#define PICA_VRAM_VADDR   0x1F000000u
+#define PICA_VRAM_SIZE    0x00600000u
+#define PICA_FCRAM_PADDR  0x20000000u
+#define PICA_LINEAR_VADDR 0x14000000u
+#define PICA_LINEAR_SIZE  0x08000000u
+
+/* Von GSP gesetzt; 0x010 Finalize meldet P3D (Azahar
+ * PicaCore::SetInterruptHandler / HandleSpecialReg(irq_request)). */
+static void (*p_irq_handler)(int id) = NULL;
+
+/* Defaults wie Azahar PicaCore::InitializeRegs (von GSP gesetzt). */
+static uint32_t p_regs[PICA_NREGS] = {
+    [0x010] = 0x00000000u,  /* irq_request */
+    [0x020] = 0x12345678u,  /* irq_compare */
+    [0x030] = 0xFFFFFFF0u,  /* irq_mask */
+    [0x034] = 0x00000001u,  /* irq_autostop */
+};
+
+uint32_t gpu_pica_phys_to_guest(uint32_t paddr)
+{
+    if (paddr >= PICA_VRAM_PADDR && paddr < PICA_VRAM_PADDR + PICA_VRAM_SIZE)
+        return PICA_VRAM_VADDR + (paddr - PICA_VRAM_PADDR);
+    if (paddr >= PICA_FCRAM_PADDR && paddr < PICA_FCRAM_PADDR + PICA_LINEAR_SIZE)
+        return PICA_LINEAR_VADDR + (paddr - PICA_FCRAM_PADDR);
+    return paddr;
+}
+
+uint32_t gpu_pica_virt_to_phys(uint32_t vaddr)
+{
+    if (vaddr >= PICA_VRAM_VADDR && vaddr < PICA_VRAM_VADDR + PICA_VRAM_SIZE)
+        return PICA_VRAM_PADDR + (vaddr - PICA_VRAM_VADDR);
+    if (vaddr >= PICA_LINEAR_VADDR && vaddr < PICA_LINEAR_VADDR + PICA_LINEAR_SIZE)
+        return PICA_FCRAM_PADDR + (vaddr - PICA_LINEAR_VADDR);
+    return vaddr;
+}
+
+void gpu_pica_set_irq_handler(void (*fn)(int id))
+{
+    p_irq_handler = fn;
+}
+
+uint32_t gpu_pica_reg(uint32_t id)
+{
+    return (id < PICA_NREGS) ? p_regs[id] : 0u;
+}
 
 void gpu_pica_reset(void)
 {
     memset(p_regs, 0, sizeof(p_regs));
+    p_regs[0x020] = 0x12345678u;
+    p_regs[0x030] = 0xFFFFFFF0u;
+    p_regs[0x034] = 0x00000001u;
 }
 
 void gpu_pica_bind_texture(uint32_t addr, int w, int h, int fmt)
@@ -142,15 +200,13 @@ static float p_attr_comp(ArmCpu *c, uint32_t addr, int fmt)
     { int8_t b = 0; if (o + 1u <= c->mem_size) b = (int8_t)c->mem[o]; return (float)b; }
 }
 
-static void p_write_reg(ArmCpu *c, uint32_t id, uint32_t value, uint32_t mask,
-                        int depth, int *ops);
-
 /* Liest die Vertex-Attribute fuer Vertex v und schreibt sie nach out[attr][0..3]. */
 static void p_load_attrs(ArmCpu *c, uint32_t vert, float out[16][4])
 {
     int fmt[16], ncomp[16];
     uint32_t src[16], stride[16];
-    uint32_t base = ((p_regs[0x200] >> 1) & 0x0FFFFFFFu) * 16u;
+    /* 0x200: base_address (bits 1..28) * 16 = physische Adresse. */
+    uint32_t base = gpu_pica_phys_to_guest(((p_regs[0x200] >> 1) & 0x0FFFFFFFu) * 16u);
     uint32_t maxattr = (p_regs[0x202] >> 28) & 0xFu;
     for (int i = 0; i < 16; i++) { fmt[i] = 3; ncomp[i] = 0; src[i] = 0; stride[i] = 0; }
     for (int i = 0; i < 8; i++) {
@@ -198,7 +254,8 @@ static uint32_t p_texel(ArmCpu *c, float u, float v, int *ok)
 {
     uint32_t cfg = p_regs[0x82];
     uint32_t fmt = p_regs[0x8E] & 0xFu;
-    uint32_t addr = (p_regs[0x85] & 0x0FFFFFFFu) * 8u;
+    /* 0x85: Adresse >> 3; PICA-Adressen sind physisch. */
+    uint32_t addr = gpu_pica_phys_to_guest((p_regs[0x85] & 0x0FFFFFFFu) * 8u);
     int w = (int)((cfg >> 16) & 0x7FFu);
     int h = (int)(cfg & 0x7FFu);
     /* Enable steht in main_config (0x80) Bit 0, nicht in 0x81. */
@@ -353,55 +410,117 @@ static int p_draw_arrays(ArmCpu *c, int indexed)
     return 1;
 }
 
-static void p_write_reg(ArmCpu *c, uint32_t id, uint32_t value, uint32_t mask,
-                        int depth, int *ops)
+/* Laufzustand einer Kommandoliste. Ein Sprung ueber 0x23C/0x23D ersetzt in
+ * Azahar die aktuelle Liste (cmd_list.Reset), der Rest der alten Liste wird
+ * also nicht mehr ausgefuehrt. */
+typedef struct {
+    int ops;                 /* verarbeitete Register-Schreibungen */
+    int stop;                /* 0x010 Finalize mit irq_autostop */
+    uint32_t jump_addr;      /* physische Adresse des Ziel-Kanals */
+    uint32_t jump_size;
+} PicaCtx;
+
+static int p_any_byte_match(uint32_t a, uint32_t b)
 {
-    if (id >= PICA_NREGS) return;
-    {
-        uint32_t old = p_regs[id];
-        for (int b = 0; b < 4; b++)
-            if (mask & (1u << b))
-                old = (old & ~(0xFFu << (b * 8))) | (value & (0xFFu << (b * 8)));
-        p_regs[id] = old;
-    }
-    if (id == 0x22Eu) { *ops += p_draw_arrays(c, 0); }
-    else if (id == 0x22Fu) { *ops += p_draw_arrays(c, 1); }
-    else if ((id == 0x23Cu || id == 0x23Du) && depth < 4) {
-        uint32_t ch = id - 0x23Cu;
-        uint32_t a = p_regs[0x23Au + ch] * 8u;
-        uint32_t sz = p_regs[0x238u + ch] * 8u;
-        if (a && sz) {
-            extern int gpu_run_pica_list(ArmCpu *c, uint32_t addr, uint32_t size);
-            *ops += gpu_run_pica_list(c, a, sz);
+    return ((a & 0xFFu) == (b & 0xFFu)) ||
+           (((a >> 8) & 0xFFu) == ((b >> 8) & 0xFFu)) ||
+           (((a >> 16) & 0xFFu) == ((b >> 16) & 0xFFu)) ||
+           (((a >> 24) & 0xFFu) == ((b >> 24) & 0xFFu));
+}
+
+static void p_write_reg(ArmCpu *c, uint32_t id, uint32_t value, uint32_t mask,
+                        PicaCtx *ctx)
+{
+    uint32_t old;
+    if (id >= PICA_NREGS) return;   /* Azahar: OOB-Schreibzugriffe sind No-ops */
+    old = p_regs[id];
+    for (int b = 0; b < 4; b++)
+        if (mask & (1u << b))
+            old = (old & ~(0xFFu << (b * 8))) | (value & (0xFFu << (b * 8)));
+    p_regs[id] = old;
+    ctx->ops++;
+
+    if (id == 0x010u) {             /* Finalize / irq_request */
+        /* Azahar: every_byte_match(irq_request, irq_compare) -> P3D; bei
+           irq_autostop endet die Liste hier. */
+        if (p_any_byte_match(p_regs[0x010], p_regs[0x020])) {
+            if (p_irq_handler) p_irq_handler(5);
+            if (p_regs[0x034] & 1u) ctx->stop = 1;
         }
+    } else if (id == 0x22Eu) {
+        p_draw_arrays(c, 0);
+    } else if (id == 0x22Fu) {
+        p_draw_arrays(c, 1);
+    } else if (id == 0x23Cu || id == 0x23Du) {
+        uint32_t ch = id - 0x23Cu;
+        uint32_t trigger = p_regs[id];
+        uint32_t paddr, sz;
+        p_regs[id] = 0;             /* Azahar: trigger wird nach dem Lauf geloescht */
+        if (trigger == 0u) return;
+        paddr = (p_regs[0x23Au + ch] & 0x0FFFFFFFu) * 8u;
+        sz = (p_regs[0x238u + ch] & 0x000FFFFFu) * 8u;
+        if (paddr == 0u || sz == 0u
+                || (uint64_t)gpu_pica_phys_to_guest(paddr) + sz > c->mem_size) {
+            /* Azahar GPU::SubmitCmdList: ungueltige Liste meldet P3D. */
+            if (p_irq_handler) p_irq_handler(5);
+            return;
+        }
+        ctx->jump_addr = paddr;
+        ctx->jump_size = sz;
+    }
+}
+
+static void p_run_list(ArmCpu *c, uint32_t addr, uint32_t size, PicaCtx *ctx,
+                       int depth)
+{
+    uint32_t a = addr & 0xFFFFFFFFu;   /* bereits Gast-Linearspeicher */
+    uint32_t words = size / 4u;
+    uint32_t i = 0;
+
+    if (depth > 8 || words < 2u) return;   /* Schutz gegen Trigger-Rekursion */
+    while (i + 1u < words) {
+        uint32_t value, hdr, id, mask, extra, group;
+        if ((i & 1u) != 0u) i++;          /* 8-Byte-Ausrichtung (Pad-Wort) */
+        if (i + 1u >= words) break;
+        value = p_read32(c, a + i * 4u);
+        hdr = p_read32(c, a + (i + 1u) * 4u);
+        i += 2u;
+        id = hdr & 0xFFFFu;
+        mask = (hdr >> 16) & 0xFu;
+        extra = (hdr >> 20) & 0xFFu;
+        group = (hdr >> 31) & 1u;
+
+        p_write_reg(c, id, value, mask, ctx);
+        if (ctx->stop || ctx->jump_addr) break;
+
+        for (uint32_t k = 0; k < extra; k++) {
+            uint32_t ev, eid;
+            if (i >= words) break;
+            ev = p_read32(c, a + i * 4u);
+            eid = group ? (id + 1u + k) : id;
+            i++;
+            p_write_reg(c, eid, ev, mask, ctx);
+            if (ctx->stop || ctx->jump_addr) break;
+            /* Nach einem ungeraden Record folgt ein Pad-Wort; das erledigt
+               die Ausrichtung am Schleifenkopf. */
+        }
+    }
+
+    if (ctx->jump_addr) {
+        uint32_t ja = ctx->jump_addr;
+        uint32_t js = ctx->jump_size;
+        ctx->jump_addr = 0;
+        ctx->jump_size = 0;
+        p_run_list(c, gpu_pica_phys_to_guest(ja), js, ctx, depth + 1);
     }
 }
 
 int gpu_run_pica_list(ArmCpu *c, uint32_t addr, uint32_t size)
 {
-    uint32_t a = addr & 0x1FFFFFFFu;
-    uint32_t words = size / 4u;
-    uint32_t i = 0;
-    int ops = 0;
-    /* PICA-Kommandos sind 8-Byte-ausgerichtet: nach einem Record mit
-       Extra-Woertern folgt bei ungerader Wortzahl ein Pad-Wort. */
-    while (i + 1u < words) {
-        uint32_t value = p_read32(c, a + i * 4u);
-        uint32_t hdr = p_read32(c, a + (i + 1u) * 4u);
-        uint32_t id = hdr & 0xFFFFu;
-        uint32_t mask = (hdr >> 16) & 0xFu;
-        uint32_t extra = (hdr >> 20) & 0xFFu;
-        uint32_t group = (hdr >> 31) & 1u;
-        i += 2u;
-        p_write_reg(c, id, value, mask, 0, &ops);
-        for (uint32_t k = 0; k < extra; k++) {
-             uint32_t ev = p_read32(c, a + i * 4u);
-            uint32_t eid = group ? (id + 1u + k) : id;
-            p_write_reg(c, eid, ev, mask, 0, &ops);
-            i++;
-        }
-        if (extra != 0u && (i & 1u) != 0u) i++;  /* Pad-Wort */
-    }
+    PicaCtx ctx;
+
+    memset(&ctx, 0, sizeof(ctx));
+    p_run_list(c, gpu_pica_phys_to_guest(addr), size, &ctx, 0);
     g_pica_lists++;
-    return ops;
+    return ctx.ops;
 }
