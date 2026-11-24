@@ -2843,11 +2843,13 @@ static void gsp_signal_interrupt(int id) {
     if (evh != NULL) evh->signaled = 1;
 }
 
-/* PICA-Kommandostrom meldet P3D beim Finalize-Register 0x010 (Azahar
- * PicaCore::HandleSpecialReg(irq_request) -> signal_interrupt(P3D)). */
+/* GPU-Hardware-Interrupts (PSC0/PSC1 aus MemoryFill, PPF aus
+ * DisplayTransfer/TextureCopy, P3D aus dem Kommandostrom) kommen mit der
+ * GSP-Interrupt-ID aus runtime/gpu (Azahar GPU::SetInterruptHandler ->
+ * GSP_GPU::SignalInterrupt). */
 static void gsp_pica_irq(int id) {
-    (void)id;
-    gsp_signal_interrupt(GSP_IRQ_P3D);
+    if (id < 0 || id > GSP_IRQ_DMA) return;
+    gsp_signal_interrupt(id);
 }
 
 
@@ -2925,275 +2927,9 @@ static void pica_pair_put(ArmCpu *c, uint32_t a, uint32_t n, uint32_t value,
 
 
 
-/* --- Pixelformate und Speichertransfers (Azahar renderer_software/
- * sw_blitter.cpp, video_core/utils.h) --- */
-typedef struct { uint8_t r, g, b, a; } GspColor;
-
-static int gsp_bpp(uint32_t fmt) {
-    switch (fmt & 7u) {
-        case 0: return 4;                 /* RGBA8 */
-        case 1: return 3;                 /* RGB8  */
-        case 2: case 3: case 4: return 2; /* RGB565, RGB5A1, RGBA4 */
-        default: return 0;
-    }
-}
-
-static uint8_t gsp_5to8(uint32_t v) { return (uint8_t)((v << 3) | (v >> 2)); }
-static uint8_t gsp_6to8(uint32_t v) { return (uint8_t)((v << 2) | (v >> 4)); }
-static uint8_t gsp_4to8(uint32_t v) { return (uint8_t)((v << 4) | v); }
-
-static GspColor gsp_decode_pixel(uint32_t fmt, const uint8_t *p) {
-    GspColor col = {0, 0, 0, 0};
-    switch (fmt & 7u) {
-        case 0: /* RGBA8 */
-            col.r = p[3]; col.g = p[2]; col.b = p[1]; col.a = p[0];
-            break;
-        case 1: /* BGR8 */
-            col.r = p[2]; col.g = p[1]; col.b = p[0]; col.a = 255;
-            break;
-        case 2: { /* RGB565 */
-            uint32_t v; memcpy(&v, p, 2);
-            col.r = gsp_5to8((v >> 11) & 0x1Fu);
-            col.g = gsp_6to8((v >> 5) & 0x3Fu);
-            col.b = gsp_5to8(v & 0x1Fu); col.a = 255;
-            break;
-        }
-        case 3: { /* RGB5A1 */
-            uint32_t v; memcpy(&v, p, 2);
-            col.r = gsp_5to8((v >> 11) & 0x1Fu);
-            col.g = gsp_5to8((v >> 6) & 0x1Fu);
-            col.b = gsp_5to8((v >> 1) & 0x1Fu);
-            col.a = (uint8_t)((v & 1u) * 255u);
-            break;
-        }
-        case 4: { /* RGBA4 */
-            uint32_t v; memcpy(&v, p, 2);
-            col.r = gsp_4to8((v >> 12) & 0xFu);
-            col.g = gsp_4to8((v >> 8) & 0xFu);
-            col.b = gsp_4to8((v >> 4) & 0xFu);
-            col.a = gsp_4to8(v & 0xFu);
-            break;
-        }
-        default: break;
-    }
-    return col;
-}
-
-static void gsp_encode_pixel(uint32_t fmt, uint8_t *p, GspColor col) {
-    switch (fmt & 7u) {
-        case 0:
-            p[3] = col.r; p[2] = col.g; p[1] = col.b; p[0] = col.a;
-            break;
-        case 1:
-            p[2] = col.r; p[1] = col.g; p[0] = col.b;
-            break;
-        case 2: {
-            uint32_t v = ((uint32_t)(col.r >> 3) << 11) |
-                         ((uint32_t)(col.g >> 2) << 5) | (col.b >> 3);
-            memcpy(p, &v, 2);
-            break;
-        }
-        case 3: {
-            uint32_t v = ((uint32_t)(col.r >> 3) << 11) |
-                         ((uint32_t)(col.g >> 3) << 6) |
-                         ((uint32_t)(col.b >> 3) << 1) | (col.a >> 7);
-            memcpy(p, &v, 2);
-            break;
-        }
-        case 4: {
-            uint32_t v = ((uint32_t)(col.r >> 4) << 12) |
-                         ((uint32_t)(col.g >> 4) << 8) |
-                         ((uint32_t)(col.b >> 4) << 4) | (col.a >> 4);
-            memcpy(p, &v, 2);
-            break;
-        }
-        default: break;
-    }
-}
-
-/* 8x8-Morton-Offset (Z-Order) wie Azahar VideoCore::GetMortonOffset. */
-static uint32_t gsp_morton_offset(uint32_t x, uint32_t y, uint32_t bpp) {
-    static const uint32_t xlut[8] = {0x00, 0x01, 0x04, 0x05, 0x10, 0x11, 0x14, 0x15};
-    static const uint32_t ylut[8] = {0x00, 0x02, 0x08, 0x0A, 0x20, 0x22, 0x28, 0x2A};
-    uint32_t i = xlut[x & 7u] + ylut[y & 7u];
-    return (i + (x & ~7u) * 8u) * bpp;
-}
-
-/* Command 0x02: MemoryFill. control = Control0 | (Control1 << 16), Bits
- * 0 Trigger, 8 = 24 Bit, 9 = 32 Bit (Azahar MemoryFillConfig). */
-static void gsp_gx_memory_fill(ArmCpu *c, const uint32_t *w) {
-    const uint32_t start1 = w[1], value1 = w[2], end1 = w[3];
-    const uint32_t start2 = w[4], value2 = w[5], end2 = w[6];
-    const uint32_t ctl_a = w[7] & 0xFFFFu, ctl_b = (w[7] >> 16) & 0xFFFFu;
-    const int both = (start1 != 0u) && (start2 != 0u);
-    int i;
-    for (i = 0; i < 2; i++) {
-        uint32_t start = i ? start2 : start1;
-        uint32_t value = i ? value2 : value1;
-        uint32_t end = i ? end2 : end1;
-        uint32_t control = i ? ctl_b : ctl_a;
-        uint32_t so, eo, off;
-        if (start == 0u) continue;
-        if ((control & 1u) == 0u) continue;   /* Trigger nicht gesetzt */
-        so = start & 0x1FFFFFFFu;
-        eo = end & 0x1FFFFFFFu;
-        if (so >= eo || eo > c->mem_size) {
-            printf("[gspq] MemoryFill ungueltig: %08X..%08X\n", start, end);
-            continue;
-        }
-        if (control & 0x200u) {
-            for (off = so; off + 4u <= eo; off += 4u) memcpy(c->mem + off, &value, 4);
-        } else if (control & 0x100u) {
-            for (off = so; off + 3u <= eo; off += 3u) {
-                c->mem[off] = (uint8_t)(value & 0xFFu);
-                c->mem[off + 1] = (uint8_t)((value >> 8) & 0xFFu);
-                c->mem[off + 2] = (uint8_t)((value >> 16) & 0xFFu);
-            }
-        } else {
-            uint16_t v16 = (uint16_t)(value & 0xFFFFu);
-            for (off = so; off + 2u <= eo; off += 2u) memcpy(c->mem + off, &v16, 2);
-        }
-    }
-    /* PSC0 fuer Puffer 0; sind beide Puffer gesetzt, meldet nur Puffer 1
-     * PSC0 (Azahar GPU::Execute / gpu.cpp). Puffer 1 allein meldet PSC1. */
-    if (both || start1 != 0u) {
-        gsp_signal_interrupt(GSP_IRQ_PSC0);
-    } else if (start2 != 0u) {
-        gsp_signal_interrupt(GSP_IRQ_PSC1);
-    }
-}
-/* Command 0x03: DisplayTransfer (Azahar SwBlitter::DisplayTransfer):
- * Pixelformat-Konvertierung und Umsetzung zwischen linearer und gekachelter
- * (8x8-Morton) Anordnung. Flags: Bit0 flip, Bit1 input_linear,
- * Bit2 crop_input_lines, Bit5 dont_swizzle, Bits8..10 input_format,
- * Bits12..14 output_format, Bits24..25 scaling. */
-static void gsp_gx_display_transfer(ArmCpu *c, const uint32_t *w) {
-    const uint32_t in_va = w[1], out_va = w[2];
-    const uint32_t in_size = w[3], out_size = w[4], flags = w[5];
-    const uint32_t in_w = in_size & 0xFFFFu, in_h = (in_size >> 16) & 0xFFFFu;
-    const uint32_t out_w = out_size & 0xFFFFu, out_h = (out_size >> 16) & 0xFFFFu;
-    const uint32_t in_fmt = (flags >> 8) & 7u, out_fmt = (flags >> 12) & 7u;
-    const int flip = (flags & 1u) != 0u;
-    const int in_linear = (flags & 2u) != 0u;
-    const int crop = (flags & 4u) != 0u;
-    const int dont_swizzle = (flags & 0x20u) != 0u;
-    const uint32_t scaling = (flags >> 24) & 3u;
-    const int in_bpp = gsp_bpp(in_fmt), out_bpp = gsp_bpp(out_fmt);
-    uint32_t src, dst, hs, vs, ow, oh, y, x;
-
-    if (in_w == 0u || in_h == 0u || out_w == 0u || out_h == 0u) return;
-    if (in_bpp == 0 || out_bpp == 0) {
-        printf("[gspq] DisplayTransfer Format %u/%u ungueltig\n", in_fmt, out_fmt);
-        return;
-    }
-    if (scaling > 2u || (in_linear && scaling != 0u)) {
-        printf("[gspq] DisplayTransfer Scaling %u ungueltig (linear=%d)\n", scaling, in_linear);
-        return;
-    }
-
-    src = in_va & 0x1FFFFFFFu;
-    dst = out_va & 0x1FFFFFFFu;
-    if (flip && crop)
-        dst += (in_w - out_w) * (out_h - 1u) * (uint32_t)out_bpp;
-    if ((uint64_t)src + (uint64_t)in_w * in_h * (uint32_t)in_bpp > c->mem_size ||
-        (uint64_t)dst + (uint64_t)out_w * out_h * (uint32_t)out_bpp > c->mem_size) {
-        printf("[gspq] DisplayTransfer ausserhalb: %08X -> %08X\n", in_va, out_va);
-        return;
-    }
-
-    hs = scaling != 0u ? 1u : 0u;
-    vs = scaling == 2u ? 1u : 0u;
-    ow = out_w >> hs;
-    oh = out_h >> vs;
-    if (ow == 0u || oh == 0u) return;
-
-    for (y = 0; y < oh; y++) {
-        for (x = 0; x < ow; x++) {
-            const uint32_t ix = x << hs, iy = y << vs;
-            const uint32_t oy = flip ? (oh - y - 1u) : y;
-            uint32_t so, dof;
-            GspColor col;
-
-            if (in_linear) {
-                if (!dont_swizzle) {
-                    so = (ix + iy * in_w) * (uint32_t)in_bpp;
-                    dof = gsp_morton_offset(x, oy, (uint32_t)out_bpp) +
-                          (oy & ~7u) * ow * (uint32_t)out_bpp;
-                } else {
-                    so = (ix + iy * in_w) * (uint32_t)in_bpp;
-                    dof = (x + oy * ow) * (uint32_t)out_bpp;
-                }
-            } else {
-                if (!dont_swizzle) {
-                    so = gsp_morton_offset(ix, iy, (uint32_t)in_bpp) +
-                         (iy & ~7u) * in_w * (uint32_t)in_bpp;
-                    dof = (x + oy * ow) * (uint32_t)out_bpp;
-                } else {
-                    so = gsp_morton_offset(ix, iy, (uint32_t)in_bpp) +
-                         (iy & ~7u) * in_w * (uint32_t)in_bpp;
-                    dof = gsp_morton_offset(x, oy, (uint32_t)out_bpp) +
-                          (oy & ~7u) * ow * (uint32_t)out_bpp;
-                }
-            }
-            if ((uint64_t)src + so + (uint32_t)in_bpp > c->mem_size ||
-                (uint64_t)dst + dof + (uint32_t)out_bpp > c->mem_size)
-                continue;
-
-            col = gsp_decode_pixel(in_fmt, c->mem + src + so);
-            if (scaling == 1u) {
-                GspColor p1 = gsp_decode_pixel(in_fmt, c->mem + src + so + (uint32_t)in_bpp);
-                col.r = (uint8_t)((col.r + p1.r) / 2u);
-                col.g = (uint8_t)((col.g + p1.g) / 2u);
-                col.b = (uint8_t)((col.b + p1.b) / 2u);
-                col.a = (uint8_t)((col.a + p1.a) / 2u);
-            } else if (scaling == 2u) {
-                const uint32_t b = (uint32_t)in_bpp;
-                GspColor p1 = gsp_decode_pixel(in_fmt, c->mem + src + so + b);
-                GspColor p2 = gsp_decode_pixel(in_fmt, c->mem + src + so + 2u * b);
-                GspColor p3 = gsp_decode_pixel(in_fmt, c->mem + src + so + 3u * b);
-                col.r = (uint8_t)((col.r + p1.r + p2.r + p3.r) / 4u);
-                col.g = (uint8_t)((col.g + p1.g + p2.g + p3.g) / 4u);
-                col.b = (uint8_t)((col.b + p1.b + p2.b + p3.b) / 4u);
-                col.a = (uint8_t)((col.a + p1.a + p2.a + p3.a) / 4u);
-            }
-            gsp_encode_pixel(out_fmt, c->mem + dst + dof, col);
-        }
-    }
-}
-
-/* Command 0x04: TextureCopy (Azahar SwBlitter::TextureCopy): kopiert
- * 16-Byte-Zeilen mit optionalem Quell-/Ziel-Gap. */
-static void gsp_gx_texture_copy(ArmCpu *c, const uint32_t *w) {
-    uint32_t src = w[1] & 0x1FFFFFFFu;
-    uint32_t dst = w[2] & 0x1FFFFFFFu;
-    uint32_t size = w[3] & ~0xFu;   /* untere 4 Bit ignoriert */
-    uint32_t in_gap = ((w[4] >> 16) & 0xFFFFu) * 16u;
-    uint32_t out_gap = ((w[5] >> 16) & 0xFFFFu) * 16u;
-    uint32_t in_width = (in_gap == 0u) ? size : (w[4] & 0xFFFFu) * 16u;
-    uint32_t out_width = (out_gap == 0u) ? size : (w[5] & 0xFFFFu) * 16u;
-    uint32_t rem = size, ri, ro;
-    uint64_t need_in, need_out;
-
-    if (size == 0u || in_width == 0u || out_width == 0u) return;
-    need_in = (uint64_t)(size / in_width) * (in_width + in_gap);
-    need_out = (uint64_t)(size / out_width) * (out_width + out_gap);
-    if ((uint64_t)src + need_in > c->mem_size || (uint64_t)dst + need_out > c->mem_size) {
-        printf("[gspq] TextureCopy ausserhalb: %08X -> %08X (%X)\n", w[1], w[2], w[3]);
-        return;
-    }
-
-    ri = in_width;
-    ro = out_width;
-    while (rem > 0u) {
-        uint32_t n = ri < ro ? ri : ro;
-        if (n > rem) n = rem;
-        memmove(c->mem + dst, c->mem + src, n);
-        src += n; dst += n;
-        ri -= n; ro -= n; rem -= n;
-        if (ri == 0u) { ri = in_width; src += in_gap; }
-        if (ro == 0u) { ro = out_width; dst += out_gap; }
-    }
-}
+/* Farb-/Speichertransfers (DisplayTransfer, TextureCopy, MemoryFill) und
+ * das GPU-MMIO-Registerfeld liegen in runtime/gpu/gpu.c (Azahar
+ * SwBlitter/GPU::ReadReg/WriteReg). */
 
 /* Verarbeitet den GX-Kommandopuffer des Threads mit GPU-Recht
  * (Azahar GSP_GPU::TriggerCmdReqQueue). Header: Index u8, Anzahl u8,
@@ -3274,15 +3010,13 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
                 break;
             }
             case 0x02: /* MemoryFill */
-                gsp_gx_memory_fill(c, w);
+                gpu_gsp_memory_fill_cmd(c, w);
                 break;
             case 0x03: /* DisplayTransfer */
-                gsp_gx_display_transfer(c, w);
-                gsp_signal_interrupt(GSP_IRQ_PPF);
+                gpu_gsp_display_transfer_cmd(c, w);
                 break;
             case 0x04: /* TextureCopy */
-                gsp_gx_texture_copy(c, w);
-                gsp_signal_interrupt(GSP_IRQ_PPF);
+                gpu_gsp_texture_copy_cmd(c, w);
                 break;
             case 0x05: /* FlushCacheRegions: kein CPU-Cache im Port */
                 printf("[gspq] FlushCacheRegions %08X/%X %08X/%X %08X/%X\n",
@@ -3294,13 +3028,37 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
                 break;
         }
 
-        if (stop_cmd || failed) {
-            newhdr = gsp_rd32(c, base) & 0xFF00FFFFu;
-            newhdr |= (failed ? 0x80u : 1u) << 16;
-            gsp_wr32(c, base, newhdr);
+        /* Azahar GSP_GPU::TriggerCmdReqQueue: ein fehlgeschlagenes Kommando
+         * legt seinen Result-Code in unk[0] (Header+4) ab und setzt
+         * STATUS_CMD_FAILED (0x80); das Stop-Bit des Kommandos setzt
+         * STATUS_STOPPED (0x1) und hat danach Vorrang. */
+        if (failed) {
+            gsp_wr32(c, base + 4u, 0xE0C02BF4u);   /* ResultUnknownGxCommand */
+            hdr = gsp_rd32(c, base) & 0xFF00FFFFu;
+            gsp_wr32(c, base, hdr | (0x80u << 16));
+        }
+        if (stop_cmd) {
+            hdr = gsp_rd32(c, base) & 0xFF00FFFFu;
+            gsp_wr32(c, base, hdr | (1u << 16));
         }
     }
     return qops;
+}
+
+/* Request-StaticBuffer aus dem Translate-Teil: Deskriptor
+ * (0x2 | id<<10 | size<<14, Gastadresse). Azahar gsp_gpu.cpp liest den
+ * Puffer per rp.PopStaticBuffer(); die Groesse stammt aus dem Deskriptor
+ * (der size-Parameter der Kommandos wird von echter Hardware ignoriert). */
+static uint32_t gsp_req_buf_flags(const Ipc *r, const uint32_t *p, int id) {
+    int off = r->normal + id * 2;
+    if (r->translate < id * 2 + 2) return 0u;
+    return p[off];
+}
+
+static uint32_t gsp_req_buf_addr(const Ipc *r, const uint32_t *p, int id) {
+    int off = r->normal + id * 2;
+    if (r->translate < id * 2 + 2) return 0u;
+    return p[off + 1];
 }
 
 static void gsp_command(Ipc *r, uint32_t *p) {
@@ -3308,25 +3066,105 @@ static void gsp_command(Ipc *r, uint32_t *p) {
      * NICHT die alte Citra-Nummerierung. */
     switch (r->cmd) {
         case 0x0001: case 0x0002: case 0x0003: { /* WriteHWRegs* */
-            if (g_log) printf("[gsp] WriteHWRegs cmd=0x%04X addr=0x%X size=%u\n",
-                              r->cmd, p[0], p[1]);
+            /* Azahar GSP::WriteHWRegs/WriteHWRegsWithMask/WriteHWRegRepeat:
+               reg_addr = p[0], size = p[1] (von Hardware ignoriert, es gilt
+               die StaticBuffer-Groesse), Daten als erster Translate-Puffer,
+               Maske als zweiter. Geschrieben wird ueber das GPU-Registerfeld
+               (runtime/gpu/gpu.c), Trigger-Bits starten die Operation. */
+            uint32_t addr = (r->normal >= 1) ? p[0] : 0u;
+            uint32_t size = gsp_req_buf_flags(r, p, 0) >> 14;
+            uint32_t src = gsp_req_buf_addr(r, p, 0);
+            uint32_t result = 0;
+            uint32_t i;
+
+            if (g_gsp_right_thread < 0) {
+                result = 0xD8202A06u;               /* NoGpuRight */
+            } else if ((addr & 3u) != 0u || addr >= 0x420000u) {
+                result = 0xE0E02A01u;               /* OutOfRangeOrMisaligned */
+            } else if (size > 0x80u) {
+                result = 0xE0E02BECu;               /* InvalidSize */
+            } else if ((size & 3u) != 0u) {
+                result = 0xE0E02BF2u;               /* MisalignedSize */
+            } else if (size != 0u &&
+                       (src == 0u || g_cpu == NULL ||
+                        (uint64_t)(src & 0x1FFFFFFFu) + size > g_cpu->mem_size)) {
+                result = 0xE0E02BF5u;               /* InvalidBuffer */
+            }
+
+            if (g_log) {
+                uint32_t v0 = 0u, m0 = 0xFFFFFFFFu;
+                if (result == 0u && size >= 4u) {
+                    memcpy(&v0, g_cpu->mem + ((src + 0u) & 0x1FFFFFFFu), 4);
+                    if (r->cmd == 0x0002) {
+                        uint32_t ma = gsp_req_buf_addr(r, p, 1);
+                        uint32_t ms = gsp_req_buf_flags(r, p, 1) >> 14;
+                        if (ma != 0u && ms >= 4u)
+                            memcpy(&m0, g_cpu->mem + ((ma + 0u) & 0x1FFFFFFFu), 4);
+                    }
+                }
+                printf("[gsp] WriteHWRegs cmd=0x%04X addr=0x%X size=%u value=0x%08X mask=0x%08X res=0x%08X\n",
+                       r->cmd, addr, size, v0, m0, result);
+            }
+
+            if (result == 0u && g_cpu != NULL) {
+                for (i = 0u; i + 4u <= size; i += 4u) {
+                    uint32_t val = 0u;
+                    memcpy(&val, g_cpu->mem + ((src + i) & 0x1FFFFFFFu), 4);
+                    if (r->cmd == 0x0003) {
+                        /* WriteHWRegRepeat (Azahar): jeder Wert geht an
+                         * dieselbe Registeradresse. */
+                        gpu_gsp_write_reg(g_cpu, 0x1EB00000u + addr, val);
+                    } else {
+                        uint32_t mask = 0xFFFFFFFFu;
+                        if (r->cmd == 0x0002) {
+                            uint32_t ma = gsp_req_buf_addr(r, p, 1);
+                            uint32_t ms = gsp_req_buf_flags(r, p, 1) >> 14;
+                            mask = 0u;
+                            if (ma != 0u && ms >= i + 4u)
+                                memcpy(&mask, g_cpu->mem + ((ma + i) & 0x1FFFFFFFu), 4);
+                        }
+                        gpu_gsp_write_reg_masked(g_cpu, 0x1EB00000u + addr + i,
+                                                 val, mask);
+                    }
+                }
+            }
             ipc_begin(r, r->cmd, 1, 0);
-            ipc_put(r, 0);
+            ipc_put(r, result);
             break;
         }
-        case 0x0004: { /* ReadHWRegs: Result + StaticBuffer-Echo */
+        case 0x0004: { /* ReadHWRegs: Result + StaticBuffer */
             /* Azahar (gsp_gpu.cpp): MakeBuilder(1,2), Push(result),
-               PushStaticBuffer(buffer, 0). */
-            uint32_t dsc_flags = (r->translate >= 2) ? p[r->normal] : 2u;
-            uint32_t dsc_addr = (r->translate >= 2) ? p[r->normal + 1] : 0u;
-            uint32_t size = (r->normal >= 2) ? p[1] : 0u;
-            if (dsc_addr != 0u && size != 0u && g_cpu != NULL) {
-                uint32_t off = dsc_addr & 0x1FFFFFFFu;
-                if ((size > 0x80u ? 0x80u : size) + off <= g_cpu->mem_size)
-                    memset(g_cpu->mem + off, 0, size > 0x80u ? 0x80u : size);
+               PushStaticBuffer(buffer, 0). Zieladresse ist der Static-Buffer-
+               Bereich des Kommandopuffers (Kernel-Translation). */
+            uint32_t addr = (r->normal >= 1) ? p[0] : 0u;
+            uint32_t in_size = (r->normal >= 2) ? p[1] : 0u;
+            uint32_t size = in_size > 0x80u ? 0x80u : in_size;
+            uint32_t dsc_addr = ipc_resp_static_buffer_addr(r->buf, 0);
+            uint32_t dsc_flags;
+            uint32_t result = 0;
+            uint32_t i;
+
+            if (dsc_addr == 0u && r->translate >= 2 &&
+                p[r->normal + 1] != 0u) {
+                dsc_addr = p[r->normal + 1];
+            }
+            dsc_flags = 0x2u | ((size & 0x3FFFFu) << 14);
+            if (g_gsp_right_thread < 0) {
+                result = 0xD8202A06u;
+            } else if ((addr & 3u) != 0u || addr >= 0x420000u) {
+                result = 0xE0E02A01u;
+            } else if ((size & 3u) != 0u) {
+                result = 0xE0E02BF2u;
+            }
+            if (result == 0u && dsc_addr >= 0x08000000u && g_cpu != NULL &&
+                (uint64_t)(dsc_addr & 0x1FFFFFFFu) + size <= g_cpu->mem_size) {
+                for (i = 0u; i < size; i += 4u) {
+                    uint32_t v = gpu_gsp_read_reg(g_cpu, 0x1EB00000u + addr + i);
+                    memcpy(g_cpu->mem + ((dsc_addr + i) & 0x1FFFFFFFu), &v, 4);
+                }
             }
             ipc_begin(r, 0x0004, 1, 2);
-            put_result(r);
+            ipc_put(r, result);
             ipc_put(r, dsc_flags);
             ipc_put(r, dsc_addr);
             break;

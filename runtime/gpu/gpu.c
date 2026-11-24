@@ -3919,3 +3919,498 @@ int gpu_run_pica_list(ArmCpu *c, uint32_t addr, uint32_t size)
     }
     return ctx.ops;
 }
+
+
+
+/* ================= Speichertransfers (GSP/PICA) ========================= */
+/* --- Pixelformate und Speichertransfers (Azahar renderer_software/
+ * sw_blitter.cpp, video_core/utils.h) --- */
+typedef struct { uint8_t r, g, b, a; } GpuColor;
+
+static int p_bpp(uint32_t fmt) {
+    switch (fmt & 7u) {
+        case 0: return 4;                 /* RGBA8 */
+        case 1: return 3;                 /* RGB8  */
+        case 2: case 3: case 4: return 2; /* RGB565, RGB5A1, RGBA4 */
+        default: return 0;
+    }
+}
+
+static uint8_t p_5to8(uint32_t v) { return (uint8_t)((v << 3) | (v >> 2)); }
+static uint8_t p_6to8(uint32_t v) { return (uint8_t)((v << 2) | (v >> 4)); }
+static uint8_t p_4to8(uint32_t v) { return (uint8_t)((v << 4) | v); }
+
+static GpuColor p_decode_pixel(uint32_t fmt, const uint8_t *p) {
+    GpuColor col = {0, 0, 0, 0};
+    switch (fmt & 7u) {
+        case 0: /* RGBA8 */
+            col.r = p[3]; col.g = p[2]; col.b = p[1]; col.a = p[0];
+            break;
+        case 1: /* BGR8 */
+            col.r = p[2]; col.g = p[1]; col.b = p[0]; col.a = 255;
+            break;
+        case 2: { /* RGB565 */
+            uint32_t v; memcpy(&v, p, 2);
+            col.r = p_5to8((v >> 11) & 0x1Fu);
+            col.g = p_6to8((v >> 5) & 0x3Fu);
+            col.b = p_5to8(v & 0x1Fu); col.a = 255;
+            break;
+        }
+        case 3: { /* RGB5A1 */
+            uint32_t v; memcpy(&v, p, 2);
+            col.r = p_5to8((v >> 11) & 0x1Fu);
+            col.g = p_5to8((v >> 6) & 0x1Fu);
+            col.b = p_5to8((v >> 1) & 0x1Fu);
+            col.a = (uint8_t)((v & 1u) * 255u);
+            break;
+        }
+        case 4: { /* RGBA4 */
+            uint32_t v; memcpy(&v, p, 2);
+            col.r = p_4to8((v >> 12) & 0xFu);
+            col.g = p_4to8((v >> 8) & 0xFu);
+            col.b = p_4to8((v >> 4) & 0xFu);
+            col.a = p_4to8(v & 0xFu);
+            break;
+        }
+        default: break;
+    }
+    return col;
+}
+
+static void p_encode_pixel(uint32_t fmt, uint8_t *p, GpuColor col) {
+    switch (fmt & 7u) {
+        case 0:
+            p[3] = col.r; p[2] = col.g; p[1] = col.b; p[0] = col.a;
+            break;
+        case 1:
+            p[2] = col.r; p[1] = col.g; p[0] = col.b;
+            break;
+        case 2: {
+            uint32_t v = ((uint32_t)(col.r >> 3) << 11) |
+                         ((uint32_t)(col.g >> 2) << 5) | (col.b >> 3);
+            memcpy(p, &v, 2);
+            break;
+        }
+        case 3: {
+            uint32_t v = ((uint32_t)(col.r >> 3) << 11) |
+                         ((uint32_t)(col.g >> 3) << 6) |
+                         ((uint32_t)(col.b >> 3) << 1) | (col.a >> 7);
+            memcpy(p, &v, 2);
+            break;
+        }
+        case 4: {
+            uint32_t v = ((uint32_t)(col.r >> 4) << 12) |
+                         ((uint32_t)(col.g >> 4) << 8) |
+                         ((uint32_t)(col.b >> 4) << 4) | (col.a >> 4);
+            memcpy(p, &v, 2);
+            break;
+        }
+        default: break;
+    }
+}
+
+/* 8x8-Morton-Offset (Z-Order) wie Azahar VideoCore::GetMortonOffset. */
+
+/* DisplayTransfer (Azahar SwBlitter::DisplayTransfer):
+ * Pixelformat-Konvertierung und Umsetzung zwischen linearer und gekachelter
+ * (8x8-Morton) Anordnung. Flags: Bit0 flip, Bit1 input_linear,
+ * Bit2 crop_input_lines, Bit5 dont_swizzle, Bits8..10 input_format,
+ * Bits12..14 output_format, Bits24..25 scaling. */
+/* Azahar SwBlitter::DisplayTransfer. Adressen sind bereits Gast-Linear-
+ * Adressen (GSP/PICA-Transfers arbeiten mit physischen Adressen). */
+static void p_display_transfer_run(ArmCpu *c, uint32_t in_va, uint32_t out_va,
+                                   uint32_t in_size, uint32_t out_size, uint32_t flags) {
+    const uint32_t in_w = in_size & 0xFFFFu, in_h = (in_size >> 16) & 0xFFFFu;
+    const uint32_t out_w = out_size & 0xFFFFu, out_h = (out_size >> 16) & 0xFFFFu;
+    const uint32_t in_fmt = (flags >> 8) & 7u, out_fmt = (flags >> 12) & 7u;
+    const int flip = (flags & 1u) != 0u;
+    const int in_linear = (flags & 2u) != 0u;
+    const int crop = (flags & 4u) != 0u;
+    const int dont_swizzle = (flags & 0x20u) != 0u;
+    const uint32_t scaling = (flags >> 24) & 3u;
+    const int in_bpp = p_bpp(in_fmt), out_bpp = p_bpp(out_fmt);
+    uint32_t src, dst, hs, vs, ow, oh, y, x;
+
+    if (in_w == 0u || in_h == 0u || out_w == 0u || out_h == 0u) return;
+    if (in_bpp == 0 || out_bpp == 0) {
+        printf("[gspq] DisplayTransfer Format %u/%u ungueltig\n", in_fmt, out_fmt);
+        return;
+    }
+    if (scaling > 2u || (in_linear && scaling != 0u)) {
+        printf("[gspq] DisplayTransfer Scaling %u ungueltig (linear=%d)\n", scaling, in_linear);
+        return;
+    }
+
+    src = in_va & 0x1FFFFFFFu;
+    dst = out_va & 0x1FFFFFFFu;
+    if (flip && crop)
+        dst += (in_w - out_w) * (out_h - 1u) * (uint32_t)out_bpp;
+    if ((uint64_t)src + (uint64_t)in_w * in_h * (uint32_t)in_bpp > c->mem_size ||
+        (uint64_t)dst + (uint64_t)out_w * out_h * (uint32_t)out_bpp > c->mem_size) {
+        printf("[gspq] DisplayTransfer ausserhalb: %08X -> %08X\n", in_va, out_va);
+        return;
+    }
+
+    hs = scaling != 0u ? 1u : 0u;
+    vs = scaling == 2u ? 1u : 0u;
+    ow = out_w >> hs;
+    oh = out_h >> vs;
+    if (ow == 0u || oh == 0u) return;
+
+    for (y = 0; y < oh; y++) {
+        for (x = 0; x < ow; x++) {
+            const uint32_t ix = x << hs, iy = y << vs;
+            const uint32_t oy = flip ? (oh - y - 1u) : y;
+            uint32_t so, dof;
+            GpuColor col;
+
+            if (in_linear) {
+                if (!dont_swizzle) {
+                    so = (ix + iy * in_w) * (uint32_t)in_bpp;
+                    dof = p_morton_offset(x, oy, (uint32_t)out_bpp) +
+                          (oy & ~7u) * ow * (uint32_t)out_bpp;
+                } else {
+                    so = (ix + iy * in_w) * (uint32_t)in_bpp;
+                    dof = (x + oy * ow) * (uint32_t)out_bpp;
+                }
+            } else {
+                if (!dont_swizzle) {
+                    so = p_morton_offset(ix, iy, (uint32_t)in_bpp) +
+                         (iy & ~7u) * in_w * (uint32_t)in_bpp;
+                    dof = (x + oy * ow) * (uint32_t)out_bpp;
+                } else {
+                    so = p_morton_offset(ix, iy, (uint32_t)in_bpp) +
+                         (iy & ~7u) * in_w * (uint32_t)in_bpp;
+                    dof = p_morton_offset(x, oy, (uint32_t)out_bpp) +
+                          (oy & ~7u) * ow * (uint32_t)out_bpp;
+                }
+            }
+            if ((uint64_t)src + so + (uint32_t)in_bpp > c->mem_size ||
+                (uint64_t)dst + dof + (uint32_t)out_bpp > c->mem_size)
+                continue;
+
+            col = p_decode_pixel(in_fmt, c->mem + src + so);
+            if (scaling == 1u) {
+                GpuColor p1 = p_decode_pixel(in_fmt, c->mem + src + so + (uint32_t)in_bpp);
+                col.r = (uint8_t)((col.r + p1.r) / 2u);
+                col.g = (uint8_t)((col.g + p1.g) / 2u);
+                col.b = (uint8_t)((col.b + p1.b) / 2u);
+                col.a = (uint8_t)((col.a + p1.a) / 2u);
+            } else if (scaling == 2u) {
+                const uint32_t b = (uint32_t)in_bpp;
+                GpuColor p1 = p_decode_pixel(in_fmt, c->mem + src + so + b);
+                GpuColor p2 = p_decode_pixel(in_fmt, c->mem + src + so + 2u * b);
+                GpuColor p3 = p_decode_pixel(in_fmt, c->mem + src + so + 3u * b);
+                col.r = (uint8_t)((col.r + p1.r + p2.r + p3.r) / 4u);
+                col.g = (uint8_t)((col.g + p1.g + p2.g + p3.g) / 4u);
+                col.b = (uint8_t)((col.b + p1.b + p2.b + p3.b) / 4u);
+                col.a = (uint8_t)((col.a + p1.a + p2.a + p3.a) / 4u);
+            }
+            p_encode_pixel(out_fmt, c->mem + dst + dof, col);
+        }
+    }
+}
+
+/* Command 0x04: TextureCopy (Azahar SwBlitter::TextureCopy): kopiert
+ * 16-Byte-Zeilen mit optionalem Quell-/Ziel-Gap. */
+static void p_texture_copy_run(ArmCpu *c, uint32_t src, uint32_t dst, uint32_t size,
+                               uint32_t in_w_raw, uint32_t in_gap_raw,
+                               uint32_t out_w_raw, uint32_t out_gap_raw) {
+    uint32_t rem = size & ~0xFu;
+    uint32_t in_gap = in_gap_raw * 16u;
+    uint32_t out_gap = out_gap_raw * 16u;
+    /* Null-Gap heisst zusammenhaengend; dann ist die Breite die Gesamtgroesse
+       (Azahar SwBlitter::TextureCopy). */
+    uint32_t in_width = (in_gap == 0u) ? rem : in_w_raw * 16u;
+    uint32_t out_width = (out_gap == 0u) ? rem : out_w_raw * 16u;
+    uint32_t ri, ro;
+    uint64_t need_in, need_out;
+
+    src &= 0x1FFFFFFFu;
+    dst &= 0x1FFFFFFFu;
+    if (rem == 0u || in_width == 0u || out_width == 0u) return;
+    need_in = (uint64_t)(rem / in_width) * (in_width + in_gap);
+    need_out = (uint64_t)(rem / out_width) * (out_width + out_gap);
+    if ((uint64_t)src + need_in > c->mem_size || (uint64_t)dst + need_out > c->mem_size) {
+        printf("[gspq] TextureCopy ausserhalb: %08X -> %08X (%X)\n", src, dst, rem);
+        return;
+    }
+
+    ri = in_width;
+    ro = out_width;
+    while (rem > 0u) {
+        uint32_t n = ri < ro ? ri : ro;
+        if (n > rem) n = rem;
+        memmove(c->mem + dst, c->mem + src, n);
+        src += n; dst += n;
+        ri -= n; ro -= n; rem -= n;
+        if (ri == 0u) { ri = in_width; src += in_gap; }
+        if (ro == 0u) { ro = out_width; dst += out_gap; }
+    }
+}
+
+/* ================= GPU-MMIO-Registerfeld (GSP 0x0001..0x0004) =============
+ *
+ * Azahar VideoCore::GPU::ReadReg/WriteReg (video_core/gpu.cpp). Der
+ * GSP-Client erreicht die GPU ueber die Basis 0x1EB00000 (REGS_BEGIN in
+ * hle/service/gsp/gsp_gpu.cpp); die Adressen der Schreibbefehle sind
+ * Offsets davon. Drei Bereiche:
+ *
+ *   0x1EF00000..0x1EF00FFF  externe PICA-Register (Regs vor `internal`):
+ *                           MemoryFill 0x010..0x02F, Framebuffer 0x400..0x5FF,
+ *                           DisplayTransfer/TextureCopy 0xC00..0xC2F
+ *   0x1EF01000..0x1EF01BFF  interne PICA-Register (IDs 0x000..0x2FF,
+ *                           dieselben, die Kommandolisten schreiben)
+ *   0x1ED02000..0x1ED02A3F  LCD (RegsLcd: ColorFill/Backlight)
+ *
+ * Schreiben speichern den Wert; Trigger-Bits starten die Operation und
+ * werden danach zurueckgesetzt (GPU::WriteReg -> MemoryFill/MemoryTransfer):
+ *   0x01C control.trigger  -> MemoryFill 0, danach PSC0
+ *   0x02C control.trigger  -> MemoryFill 1, danach PSC1
+ *   0xC18 transfer.trigger -> DisplayTransfer/TextureCopy, danach PPF
+ *   0x123C/0x123D          -> Kommandoliste von Kanal 0/1 (SubmitCmdList)
+ * Fertig-Bit: MemoryFill control Bit1 wird nach Abschluss gesetzt.
+ */
+#define GPU_MMIO_VADDR   0x1EF00000u
+#define GPU_MMIO_LCD     0x1ED02000u
+#define GPU_MMIO_LCD_W   0x2A4u    /* RegsLcd::NumIds() */
+#define GPU_MMIO_EXT_W   0x400u    /* 0x1EF00000..0x1EF00FFF */
+
+static uint32_t p_ext_regs[GPU_MMIO_EXT_W];
+static uint32_t p_lcd_regs[GPU_MMIO_LCD_W];
+static int p_mmio_init_done;
+
+/* Azahar PicaCore::InitializeRegs: Framebuffer-Defaults von nn::gx
+ * (nur fuer Registerleser; die Anzeige kommt aus der GSP-FrameBufferInfo). */
+static void p_mmio_init(void)
+{
+    if (p_mmio_init_done) return;
+    p_mmio_init_done = 1;
+    p_ext_regs[0x117] = 240u | (400u << 16);   /* fb0 width/height */
+    p_ext_regs[0x11A] = 0x181E6000u;
+    p_ext_regs[0x11B] = 0x1822C800u;
+    p_ext_regs[0x11C] = 1u;                    /* RGB8 */
+    p_ext_regs[0x124] = 3u * 240u;             /* stride */
+    p_ext_regs[0x125] = 0x18273000u;
+    p_ext_regs[0x126] = 0x182B9800u;
+    p_ext_regs[0x157] = 240u | (320u << 16);   /* fb1 width/height */
+    p_ext_regs[0x15A] = 0x1848F000u;
+    p_ext_regs[0x15B] = 0x184C7800u;
+    p_ext_regs[0x15C] = 1u;
+    p_ext_regs[0x164] = 3u * 240u;
+}
+
+static uint32_t p_merge(uint32_t old, uint32_t value, uint32_t mask)
+{
+    return (old & ~mask) | (value & mask);
+}
+
+
+/* Azahar SwBlitter::MemoryFill (sw_blitter.cpp): 16/24/32 Bit Wert fuellen.
+ * start/end sind bereits Gast-Linearadressen. */
+static void p_mem_fill(ArmCpu *c, uint32_t start, uint32_t end,
+                       uint32_t value, uint32_t control)
+{
+    /* Der Port legt Gastadressen unter (addr & 0x1FFFFFFF) im Hostpuffer ab
+       (wie arm_mem_read/write und p_read32). */
+    uint64_t so = start & 0x1FFFFFFFu, eo = end & 0x1FFFFFFFu, off;
+
+    if (start == 0u || so >= eo || eo > c->mem_size) return;
+    if (control & 0x200u) {
+        for (off = so; off + 4u <= eo; off += 4u)
+            memcpy(c->mem + off, &value, 4);
+    } else if (control & 0x100u) {
+        for (off = so; off + 3u <= eo; off += 3u) {
+            c->mem[off] = (uint8_t)(value & 0xFFu);
+            c->mem[off + 1u] = (uint8_t)((value >> 8) & 0xFFu);
+            c->mem[off + 2u] = (uint8_t)((value >> 16) & 0xFFu);
+        }
+    } else {
+        uint16_t v16 = (uint16_t)(value & 0xFFFFu);
+        for (off = so; off + 2u <= eo; off += 2u)
+            memcpy(c->mem + off, &v16, 2);
+    }
+}
+
+/* MemoryFill aus den Registern. Azahar GPU::MemoryFill: nur bei
+ * control.trigger; Interrupt nur wenn die Startadresse != 0 ist; danach
+ * trigger=0 und finished=1 -- auch wenn der Bereich ungueltig ist. */
+static void p_ext_memory_fill(ArmCpu *c, int index, int intr_index)
+{
+    uint32_t *f = &p_ext_regs[4u + (uint32_t)index * 4u];
+    uint32_t start = f[0] * 8u, end = f[1] * 8u;
+    uint32_t value = f[2], control = f[3];
+
+    if ((control & 1u) == 0u) return;
+    p_mem_fill(c, gpu_pica_phys_to_guest(start), gpu_pica_phys_to_guest(end),
+               value, control);
+    f[3] = (control & ~1u) | 2u;
+    if (start != 0u && intr_index >= 0 && p_irq_handler)
+        p_irq_handler(intr_index);      /* PSC0/PSC1 */
+}
+
+/* Azahar GPU::MemoryTransfer: Trigger pruefen, Transfer ausfuehren,
+ * Trigger loeschen, PPF melden. */
+static void p_ext_transfer(ArmCpu *c)
+{
+    uint32_t in_p, out_p, flags;
+
+    if ((p_ext_regs[0x306] & 1u) == 0u) return;
+    in_p = p_ext_regs[0x300] * 8u;
+    out_p = p_ext_regs[0x301] * 8u;
+    flags = p_ext_regs[0x304];
+    if (flags & 8u) {                   /* is_texture_copy */
+        p_texture_copy_run(c, gpu_pica_phys_to_guest(in_p),
+                           gpu_pica_phys_to_guest(out_p), p_ext_regs[0x307],
+                           p_ext_regs[0x308] & 0xFFFFu,
+                           (p_ext_regs[0x308] >> 16) & 0xFFFFu,
+                           p_ext_regs[0x309] & 0xFFFFu,
+                           (p_ext_regs[0x309] >> 16) & 0xFFFFu);
+    } else {
+        p_display_transfer_run(c, gpu_pica_phys_to_guest(in_p),
+                               gpu_pica_phys_to_guest(out_p),
+                               p_ext_regs[0x303], p_ext_regs[0x302], flags);
+    }
+    p_ext_regs[0x306] &= ~1u;
+    if (p_irq_handler) p_irq_handler(4);   /* PPF */
+}
+
+/* Azahar GPU::SubmitCmdList ueber die Register (Trigger 0x23C/0x23D). */
+static void p_ext_submit_cmdlist(ArmCpu *c, uint32_t ch)
+{
+    uint32_t paddr = (p_regs[0x23Au + ch] & 0x0FFFFFFFu) * 8u;
+    uint32_t size = (p_regs[0x238u + ch] & 0x000FFFFFu) * 8u;
+
+    if (paddr == 0u ||
+        (uint64_t)gpu_pica_phys_to_guest(paddr) + size > c->mem_size) {
+        if (p_irq_handler) p_irq_handler(5);   /* ungueltige Liste -> P3D */
+        return;
+    }
+    gpu_run_pica_list(c, paddr, size);
+}
+
+
+/* Liest ein GPU-Register (Azahar VideoCore::GPU::ReadReg). */
+uint32_t gpu_gsp_read_reg(ArmCpu *c, uint32_t addr)
+{
+    uint32_t page = addr & 0xFFFFF000u;
+    (void)c;
+    p_mmio_init();
+    if (page == GPU_MMIO_LCD) {
+        uint32_t i = (addr - GPU_MMIO_LCD) / 4u;
+        return (i < GPU_MMIO_LCD_W) ? p_lcd_regs[i] : 0u;
+    }
+    if (page == GPU_MMIO_VADDR) {
+        uint32_t i = (addr - GPU_MMIO_VADDR) / 4u;
+        return (i < GPU_MMIO_EXT_W) ? p_ext_regs[i] : 0u;
+    }
+    if (page == GPU_MMIO_VADDR + 0x1000u) {
+        uint32_t i = (addr - (GPU_MMIO_VADDR + 0x1000u)) / 4u;
+        return (i < PICA_NREGS) ? p_regs[i] : 0u;
+    }
+    return 0u;
+}
+
+/* Schreibt ein GPU-Register mit Bytemaske (Azahar GPU::WriteReg bzw.
+ * GSP::WriteHWRegsWithMask: reg = (reg & ~mask) | (value & mask)). */
+void gpu_gsp_write_reg_masked(ArmCpu *c, uint32_t addr, uint32_t value,
+                              uint32_t mask)
+{
+    uint32_t page = addr & 0xFFFFF000u;
+
+    p_mmio_init();
+    if (page == GPU_MMIO_LCD) {
+        uint32_t i = (addr - GPU_MMIO_LCD) / 4u;
+        if (i < GPU_MMIO_LCD_W)
+            p_lcd_regs[i] = p_merge(p_lcd_regs[i], value, mask);
+        return;
+    }
+    if (page == GPU_MMIO_VADDR) {
+        uint32_t i = (addr - GPU_MMIO_VADDR) / 4u;
+        if (i >= GPU_MMIO_EXT_W) return;
+        p_ext_regs[i] = p_merge(p_ext_regs[i], value, mask);
+        if (i == 0x07u) p_ext_memory_fill(c, 0, 0);
+        else if (i == 0x0Bu) p_ext_memory_fill(c, 1, 1);
+        else if (i == 0x306u) p_ext_transfer(c);
+        return;
+    }
+    if (page == GPU_MMIO_VADDR + 0x1000u) {
+        uint32_t i = (addr - (GPU_MMIO_VADDR + 0x1000u)) / 4u;
+        if (i >= PICA_NREGS) return;
+        p_regs[i] = p_merge(p_regs[i], value, mask);
+        /* GPU::WriteReg behandelt nur den Kommandopuffer-Trigger als
+         * Aktion; Draws/Finalize bleiben Kommandolisten vorbehalten. */
+        if (i == 0x23Cu) p_ext_submit_cmdlist(c, 0);
+        else if (i == 0x23Du) p_ext_submit_cmdlist(c, 1);
+        return;
+    }
+    /* Andere Seiten: Azahar UNREACHABLE, im Port ignorieren. */
+}
+
+void gpu_gsp_write_reg(ArmCpu *c, uint32_t addr, uint32_t value)
+{
+    gpu_gsp_write_reg_masked(c, addr, value, 0xFFFFFFFFu);
+}
+
+/* GX-Kommando 0x02 (Azahar GPU::Execute CommandId::MemoryFill): schreibt die
+ * MemoryFill-Register und startet beide Fuellungen. Sind beide Puffer
+ * gesetzt, meldet Puffer 0 keinen Interrupt und Puffer 1 PSC0. */
+void gpu_gsp_memory_fill_cmd(ArmCpu *c, const uint32_t *w)
+{
+    uint32_t start1 = w[1], value1 = w[2], end1 = w[3];
+    uint32_t start2 = w[4], value2 = w[5], end2 = w[6];
+    uint32_t ctl1 = w[7] & 0xFFFFu, ctl2 = (w[7] >> 16) & 0xFFFFu;
+    int both = (start1 != 0u) && (start2 != 0u);
+
+    p_mmio_init();
+    if (start1 != 0u) {
+        uint32_t ps = gpu_pica_virt_to_phys(start1);
+        p_ext_regs[0x04] = ps >> 3;
+        p_ext_regs[0x05] = (ps + (end1 - start1)) >> 3;
+        p_ext_regs[0x06] = value1;
+        p_ext_regs[0x07] = ctl1;
+        p_ext_memory_fill(c, 0, both ? -1 : 0);
+    }
+    if (start2 != 0u) {
+        uint32_t ps = gpu_pica_virt_to_phys(start2);
+        p_ext_regs[0x08] = ps >> 3;
+        p_ext_regs[0x09] = (ps + (end2 - start2)) >> 3;
+        p_ext_regs[0x0A] = value2;
+        p_ext_regs[0x0B] = ctl2;
+        p_ext_memory_fill(c, 1, both ? 0 : 1);
+    }
+}
+
+/* GX-Kommandos 0x03/0x04 (DisplayTransfer/TextureCopy): Register wie
+ * GPU::Execute fuellen, dann denselben Trigger-Pfad wie MMIO-Schreiben. */
+void gpu_gsp_display_transfer_cmd(ArmCpu *c, const uint32_t *w)
+{
+    uint32_t in_p = gpu_pica_virt_to_phys(w[1]);
+    uint32_t out_p = gpu_pica_virt_to_phys(w[2]);
+
+    p_mmio_init();
+    p_ext_regs[0x300] = in_p >> 3;
+    p_ext_regs[0x301] = out_p >> 3;
+    p_ext_regs[0x303] = w[3];              /* input_size */
+    p_ext_regs[0x302] = w[4];              /* output_size */
+    p_ext_regs[0x304] = w[5];              /* flags */
+    p_ext_regs[0x306] = 1u;                /* trigger */
+    p_ext_transfer(c);
+}
+
+void gpu_gsp_texture_copy_cmd(ArmCpu *c, const uint32_t *w)
+{
+    uint32_t in_p = gpu_pica_virt_to_phys(w[1]);
+    uint32_t out_p = gpu_pica_virt_to_phys(w[2]);
+
+    p_mmio_init();
+    p_ext_regs[0x300] = in_p >> 3;
+    p_ext_regs[0x301] = out_p >> 3;
+    p_ext_regs[0x307] = w[3];              /* texture_copy.size */
+    p_ext_regs[0x308] = w[4];              /* input width/gap */
+    p_ext_regs[0x309] = w[5];              /* output width/gap */
+    p_ext_regs[0x304] = w[6];              /* flags (Bit3 = texture copy) */
+    p_ext_regs[0x306] = 1u;
+    p_ext_transfer(c);
+}
+

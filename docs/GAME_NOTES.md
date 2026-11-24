@@ -1,5 +1,27 @@
 # GAME_NOTES – kurze Projektnotizen
 
+## M3: keine Draws – Draw-Builder wird nie aufgerufen (2026-11-24)
+
+**Befund:** Im natürlichen Boot schickt das Spiel 415 PICA-Listen in 40 s
+(beide Bildschirme im Wechsel, u. a. `0x2286E820`, `0x228B5820`), aber keine
+enthält `0x22E`/`0x22F`. Die Listen sind reine Zustandssets: Rasterizer
+`0x040..0x06E`, Uniforms `0x290/0x291` (VS) und `0x2C0/0x2C1` (GS),
+Attributformate `0x201..0x226` = 0, Default-Attribute `0x232..0x235` für
+Index 0..11, Topologie `0x25E`, Farbziel `0x110..0x11E`, danach
+`0x010 = 0x12345678` (Finalize/P3D). Ein Draw-Template mit
+`0x000F022F` steht als Literalpool in `0x001325A0..0x001325A8`; der es
+schreibende Builder beginnt bei `0x001323FC` und wird im Boot **nie**
+ausgeführt (`g3ds.py guest-watch --pc 0x1323FC`: 0 Treffer; kein statisches
+`bl`/Zeiger auf die Adresse – Aufruf über ein Objekt/Vtable).
+
+**Folge:** M3 ist GPU-seitig nicht erreichbar; das Spiel erzeugt noch keine
+Zeichenbefehle. Die GPU liefert auch keinen Zustand, auf den die Listen
+warten: Das Spiel liest keine GPU-Register (`ReadHWRegs` kommt nicht vor),
+und MemoryFill/DisplayTransfer werden nur zurückgesetzt
+(`0x40001C/0x40002C` Maske 0xFF, `0x400C18` Maske 0xFF00), nie mit echten
+Daten ausgelöst. Offen ist damit die Objekt-/Szenenquelle (Asset-/Thread-
+Strang), nicht der PICA-Parser.
+
 ## Software-Rasterizer: Performance-Stand (2026-11-24)
 
 Ziel: beide Bildschirme (400x240 oben, 320x240 unten) mit 60 fps schaffen,

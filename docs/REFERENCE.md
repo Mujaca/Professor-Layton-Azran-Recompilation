@@ -1079,6 +1079,49 @@ einen **Vertex-Shader-Interpreter/Übersetzer** und **TEV**.
 * VNEG/VABS sind Bitoperationen (Vorzeichen invertieren/loeschen) und
   unterliegen weder FTZ noch der NaN-Kanonisierung.
 
+### GSP/GPU-Register (MMIO, verifiziert gegen Azahar 2026-11-24)
+
+* **Adressbasis:** `gsp::Gpu`-Clients schreiben/lesen GPU-Register mit
+  Offsets ab `REGS_BEGIN = 0x1EB00000` (`gsp_gpu.cpp`). Gueltig ist
+  `addr < 0x420000` und wortausgerichtet; die Puffergroesse kommt aus dem
+  StaticBuffer-Deskriptor (max. `0x80`, der `size`-Parameter der Kommandos
+  wird von Hardware ignoriert). Fehler: `0xE0E02A01`
+  OutOfRangeOrMisaligned, `0xE0E02BEC` InvalidSize, `0xE0E02BF2`
+  MisalignedSize, `0xD8202A06` NoGpuRight, `0xE0E02BF5` InvalidBuffer.
+* **Bereiche** (`VideoCore::GPU::ReadReg/WriteReg`, `VADDR_GPU`):
+  `0x1EF00000..0x1EF00FFF` externe PICA-Register (MemoryFill
+  `0x010..0x02F`, Framebuffer-Konfiguration `0x400..0x5FF`,
+  DisplayTransfer/TextureCopy `0xC00..0xC2F`), `0x1EF01000..0x1EF01BFF`
+  interne PICA-Register (IDs `0x000..0x2FF`, dieselben wie in
+  Kommandolisten), `0x1ED02000..` LCD (ColorFill `0x204`/`0xA04`,
+  Backlight `0x240`/`0xA40`).
+* **Schreiben:** Wert wird gespeichert; `WriteHWRegsWithMask` rechnet
+  `reg = (reg & ~mask) | (value & mask)`. `WriteHWRegRepeat` schreibt jedes
+  Datenwort auf dieselbe Registeradresse.
+* **Trigger** (nach der Operation zurueckgesetzt):
+  * `0x01C`/`0x02C` `control.bit0` -> MemoryFill 0/1; danach `bit1`
+    (finished) = 1 und PSC0/PSC1. Interrupt nur, wenn die Startadresse != 0
+    ist. Bei GX-Kommando 2 mit **beiden** Puffern meldet Puffer 0 keinen
+    Interrupt, Puffer 1 PSC0.
+  * `0xC18` `trigger.bit0` -> DisplayTransfer (Flags Bit3 = TextureCopy),
+    danach PPF.
+  * `0x123C`/`0x123D` -> Kommandoliste Kanal 0/1 (`SubmitCmdList`);
+    ungueltige Liste -> P3D.
+* **Kommandopuffer-Header** (`gsp_command.h`, `TriggerCmdReqQueue`):
+  `index:8`, `number_commands:8`, `status:8`, `should_stop:8`; Kommandos je
+  `0x20` Byte ab `+0x20`, Index laeuft modulo 15. `status=0x1` STOPPED,
+  `0x80` CMD_FAILED; das Fehler-Result steht in `unk[0]` (Header+4). Ein
+  fehlgeschlagenes Kommando setzt 0x80, das Stop-Bit des Kommandos
+  anschliessend 0x1 (Vorrang).
+* **Interrupt-IDs:** PSC0=0, PSC1=1, PDC0=2, PDC1=3, PPF=4, P3D=5, DMA=6.
+  PDC0/PDC1 werden ab `number_interrupts >= 0x20` nicht mehr eingereiht,
+  sondern als `missed_PDC0/1` gezaehlt; andere Interrupts setzen ab `0x34`
+  `error_code = 0x1`.
+* PICA-Finalize (`0x010`): P3D, wenn `irq_request` ein gemeinsames Byte mit
+  `irq_compare` hat (Byte-Vergleich); `irq_autostop` (Default 1) beendet die
+  Liste. GSP setzt die Defaults `irq_compare=0x12345678`,
+  `irq_mask=0xFFFFFFF0`, `irq_autostop=1`.
+
 ## Quellen
 * https://www.3dbrew.org/wiki/IPC, /RomFS, /GSP_Shared_Memory, /GPU/Internal_Registers
 * libctru: `source/services/{apt,gsp,srv,fs}.c`, `source/ndsp/ndsp.c`

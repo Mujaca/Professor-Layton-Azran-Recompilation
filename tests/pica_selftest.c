@@ -73,6 +73,82 @@ static uint32_t *emit(uint32_t *p, uint32_t id, uint32_t val) {
 static int irq_count = 0;
 static void test_irq(int id) { if (id == 5) irq_count++; }
 
+/* GSP-MMIO-Registerfeld: sammelt alle GSP-Interrupt-IDs. */
+static int mmio_irq_count = 0;
+static int mmio_irq_last = -1;
+static void mmio_irq(int id) { mmio_irq_count++; mmio_irq_last = id; }
+
+/* Azahar VideoCore::GPU::ReadReg/WriteReg + MemoryFill/MemoryTransfer.
+ * Adressen sind die der GSP-Clients (REGS_BEGIN = 0x1EB00000). */
+static void test_gpu_mmio(ArmCpu *c, uint8_t *mem) {
+    const uint32_t REG = 0x1EB00000u;
+    uint32_t v;
+    uint16_t w0, w1;
+
+    gpu_pica_reset();
+    gpu_pica_set_irq_handler(mmio_irq);
+    mmio_irq_count = 0;
+    mmio_irq_last = -1;
+
+    /* Interne PICA-Register, die das Spiel per WriteHWRegs setzt. */
+    gpu_gsp_write_reg(c, REG + 0x401080u, 0x12345678u);   /* irq_compare */
+    gpu_gsp_write_reg(c, REG + 0x4010C0u, 0xFFFFFFF0u);   /* irq_mask */
+    gpu_gsp_write_reg(c, REG + 0x4010D0u, 1u);            /* irq_autostop */
+    check(gpu_pica_reg(0x020) == 0x12345678u &&
+          gpu_pica_reg(0x030) == 0xFFFFFFF0u &&
+          gpu_pica_reg(0x034) == 1u,
+          "MMIO 0x401080/C0/D0 -> PICA 0x020/0x030/0x034");
+    check(gpu_gsp_read_reg(c, REG + 0x401080u) == 0x12345678u,
+          "ReadHWRegs liest das gespeicherte Register");
+
+    gpu_gsp_write_reg_masked(c, REG + 0x401080u, 0xAABBCCDDu, 0x0000FF00u);
+    check(gpu_gsp_read_reg(c, REG + 0x401080u) == 0x1234CC78u,
+          "WriteHWRegsWithMask aendert nur maskierte Bytes");
+
+    /* MemoryFill 0 (0x1EF00010..0x1C): 16-Bit-Wert, Trigger, finished, PSC0 */
+    gpu_gsp_write_reg(c, REG + 0x400010u, 0x00080000u >> 3);
+    gpu_gsp_write_reg(c, REG + 0x400014u, 0x00080008u >> 3);
+    gpu_gsp_write_reg(c, REG + 0x400018u, 0x0000BEEFu);
+    mmio_irq_count = 0;
+    gpu_gsp_write_reg(c, REG + 0x40001Cu, 1u);
+    v = gpu_gsp_read_reg(c, REG + 0x40001Cu);
+    check((v & 1u) == 0u && (v & 2u) != 0u,
+          "MemoryFill: trigger geloescht, finished gesetzt");
+    memcpy(&w0, mem + 0x80000, 2);
+    memcpy(&w1, mem + 0x80006, 2);
+    check(w0 == 0xBEEFu && w1 == 0xBEEFu,
+          "MemoryFill schreibt den 16-Bit-Wert in den Bereich");
+    check(mmio_irq_count == 1 && mmio_irq_last == 0,
+          "MemoryFill 0 meldet PSC0");
+
+    /* DisplayTransfer-Trigger ohne Groesse: PPF wird trotzdem gemeldet. */
+    mmio_irq_count = 0;
+    gpu_gsp_write_reg(c, REG + 0x400C18u, 1u);
+    v = gpu_gsp_read_reg(c, REG + 0x400C18u);
+    check((v & 1u) == 0u, "Transfer-Trigger wird nach der Operation geloescht");
+    check(mmio_irq_count == 1 && mmio_irq_last == 4,
+          "DisplayTransfer meldet PPF");
+
+    /* GX-Kommando 2 mit beiden Puffern: nur Puffer 1 meldet PSC0. */
+    {
+        uint32_t w[8];
+        memset(w, 0, sizeof(w));
+        w[0] = 0x02u;
+        w[1] = 0x00081000u; w[2] = 0x11223344u; w[3] = 0x00081010u;
+        w[4] = 0x00081020u; w[5] = 0x55667788u; w[6] = 0x00081030u;
+        w[7] = (1u | 0x200u) | ((1u | 0x200u) << 16);  /* Trigger + 32 Bit */
+        mmio_irq_count = 0;
+        gpu_gsp_memory_fill_cmd(c, w);
+        check(mmio_irq_count == 1 && mmio_irq_last == 0,
+              "GX MemoryFill (beide Puffer) meldet nur PSC0");
+        memcpy(&v, mem + 0x81000, 4);
+        check(v == 0x11223344u, "GX MemoryFill 0 schreibt 32-Bit-Wert");
+        memcpy(&v, mem + 0x81028, 4);
+        check(v == 0x55667788u, "GX MemoryFill 1 schreibt 32-Bit-Wert");
+    }
+}
+
+
 static void set_vertex(ArmCpu *c, uint32_t off, float x, float y, float z,
                        float u, float v) {
     float f[5];
@@ -3872,6 +3948,7 @@ int main(void) {
     test_gs_winding(&c, mem);
     test_gs_output_bank(&c, mem);
     test_gs_immediate(&c, mem);
+    test_gpu_mmio(&c, mem);
 
     printf("ERGEBNIS: %s\n", fails == 0 ? "OK" : "FEHLER");
     {
