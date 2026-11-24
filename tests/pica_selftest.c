@@ -1484,6 +1484,29 @@ static void t_light_vertices(ArmCpu *c, uint32_t vtx, float z,
     }
 }
 
+/* Wie t_light_vertices, aber Vertex 0 nutzt q0 und alle anderen q1.
+   Fuer den FlipQuaternionIfOpposite-Test (Azahar AddTriangle). */
+static void t_light_vertices_q2(ArmCpu *c, uint32_t vtx, float z,
+                                float tc0_w, const float view[3],
+                                const float q0[4], const float q1[4])
+{
+    static const float xy[6][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, -1}, {1, 1}, {-1, 1}};
+    int i;
+    for (i = 0; i < 6; i++) {
+        float f[13];
+        const float *qq = (i == 0) ? q0 : q1;
+        f[0] = xy[i][0];
+        f[1] = xy[i][1];
+        f[2] = z;
+        f[3] = 0.5f;
+        f[4] = 0.5f;
+        f[5] = tc0_w;
+        f[6] = view[0]; f[7] = view[1]; f[8] = view[2];
+        f[9] = qq[0]; f[10] = qq[1]; f[11] = qq[2]; f[12] = qq[3];
+        memcpy(c->mem + ((vtx + (uint32_t)i * 52u) & 0x1FFFFFFFu), f, sizeof(f));
+    }
+}
+
 static uint32_t *t_emit_quad_light(uint32_t *q, uint32_t vtx, int vw, int vh)
 {
     q = emit(q, 0x200, vtx >> 3);
@@ -1744,6 +1767,384 @@ static void test_lighting(ArmCpu *c, unsigned char *mem)
     o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
     check(mem[o + 3] <= 1 && mem[o + 2] == 0 && mem[o + 1] == 0 && mem[o + 0] == 0xFF,
           "Lighting: Bump-Map ohne Renorm => Diffus ~0");
+}
+
+/* Review-Tests zum Lighting/PICA-Paket. Erwartungen unabhaengig aus Azahar
+ * abgeleitet: sw_lighting.cpp get_lut_value (Abs-Zweig, Spot, D0/D1,
+ * Reflect RGB, Clamp, global_ambient), sw_clipper.cpp
+ * FlipQuaternionIfOpposite / ConvertCubeCoord, regs_lighting.h BumpMode. */
+static void test_lighting_review(ArmCpu *c, unsigned char *mem)
+{
+    static const float view_z[3] = {0.0f, 0.0f, 1.0f};
+    static const float view_nz[3] = {0.0f, 0.0f, -1.0f};
+    static const float quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    /* -(Rotation 60 Grad um x) = (-sin30,0,0,-cos30): dot mit Identitaet < 0,
+       beschreibt aber dieselbe Rotation wie (sin30,0,0,cos30). */
+    static const float quat_opp[4] = {-0.5f, 0.0f, 0.0f, -0.8660254f};
+    uint32_t *q, size, o;
+    uint32_t base = 0x01010100u;
+
+    /* --- G) Abs-LUT-Eingang LN = -1: ohne two_sided max(result,0)=0
+       (Index 0), mit two_sided |result|=1 (Index 255). LUT 0/255
+       unterscheiden sich, damit der Abs-Zweig eindeutig belegt ist. --- */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_light_vertices(c, VTX, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, view_z, quat);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x1C2, 0u);
+    q = emit(q, 0x1C3, 0u);                     /* Config0 */
+    q = emit(q, 0x1C4, 0x01000100u);            /* Spot/Dist aus, D0 an */
+    q = emit(q, 0x1D9, 0u);
+    q = emit(q, 0x1D1, 3u);                     /* D0-Eingang LN */
+    q = emit(q, 0x140, 255u << 20);             /* specular_0 rot */
+    q = emit(q, 0x145, f16raw(-1.0f));          /* Licht nach -z: LN = -1 */
+    q = emit(q, 0x149, 1u);                     /* directional, kein two_sided */
+    q = emit(q, 0x1C5, (0u << 8) | 0u);
+    q = emit(q, 0x1C8, 0u);                     /* LUT[0][0] = 0 */
+    q = emit(q, 0x1C5, (0u << 8) | 255u);
+    q = emit(q, 0x1C8, 4095u);                  /* LUT[0][255] = 1.0 */
+    q = emit_tev0(q, 2u, 2u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    check(mem[o + 0] == 0xFF && mem[o + 1] == 0 && mem[o + 2] == 0 && mem[o + 3] == 0,
+          "Lighting-Abs: LN=-1 ohne two_sided => max(0,-1)=0 => Index 0 => schwarz");
+
+    /* gleiche Lage mit two_sided_diffuse (lcfg Bit1): fabs(-1)=1 => rot */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x1C2, 0u);
+    q = emit(q, 0x1C3, 0u);
+    q = emit(q, 0x1C4, 0x01000100u);
+    q = emit(q, 0x1D9, 0u);
+    q = emit(q, 0x1D1, 3u);
+    q = emit(q, 0x140, 255u << 20);
+    q = emit(q, 0x145, f16raw(-1.0f));
+    q = emit(q, 0x149, 3u);                     /* directional + two_sided */
+    q = emit(q, 0x1C5, (0u << 8) | 0u);
+    q = emit(q, 0x1C8, 0u);
+    q = emit(q, 0x1C5, (0u << 8) | 255u);
+    q = emit(q, 0x1C8, 4095u);
+    q = emit_tev0(q, 2u, 2u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    check(mem[o + 0] == 0xFF && mem[o + 1] == 0 && mem[o + 2] == 0 && mem[o + 3] == 0xFF,
+          "Lighting-Abs: LN=-1 mit two_sided => fabs => Index 255 => rot");
+
+    /* --- H) Abs-LUT-Eingang NH: Licht (0,sqrt3/2,1/2), View -z =>
+       half=(0,sqrt3/2,-1/2), normiert NH=-1/2. Ohne two_sided => 0,
+       mit two_sided => 1/2 (Index 127/128 je nach f16-Rundung). --- */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_light_vertices(c, VTX, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, view_nz, quat);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x1C2, 0u);
+    q = emit(q, 0x1C3, 0u);
+    q = emit(q, 0x1C4, 0x01000100u);
+    q = emit(q, 0x1D9, 0u);
+    q = emit(q, 0x1D1, 0u);                     /* D0-Eingang NH */
+    q = emit(q, 0x140, 255u << 20);
+    q = emit(q, 0x144, (uint32_t)f16raw(0.8660254f) << 16);
+    q = emit(q, 0x145, f16raw(0.5f));
+    q = emit(q, 0x149, 1u);                     /* kein two_sided */
+    q = emit(q, 0x1C5, (0u << 8) | 127u);
+    q = emit(q, 0x1C8, 4095u);
+    q = emit(q, 0x1C5, (0u << 8) | 128u);
+    q = emit(q, 0x1C8, 4095u);
+    q = emit_tev0(q, 2u, 2u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    check(mem[o + 0] == 0xFF && mem[o + 1] == 0 && mem[o + 2] == 0 && mem[o + 3] == 0,
+          "Lighting-Abs: NH=-1/2 ohne two_sided => max(0,...)=0 => schwarz");
+
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x1C2, 0u);
+    q = emit(q, 0x1C3, 0u);
+    q = emit(q, 0x1C4, 0x01000100u);
+    q = emit(q, 0x1D9, 0u);
+    q = emit(q, 0x1D1, 0u);
+    q = emit(q, 0x140, 255u << 20);
+    q = emit(q, 0x144, (uint32_t)f16raw(0.8660254f) << 16);
+    q = emit(q, 0x145, f16raw(0.5f));
+    q = emit(q, 0x149, 3u);                     /* two_sided */
+    q = emit(q, 0x1C5, (0u << 8) | 127u);
+    q = emit(q, 0x1C8, 4095u);
+    q = emit(q, 0x1C5, (0u << 8) | 128u);
+    q = emit(q, 0x1C8, 4095u);
+    q = emit_tev0(q, 2u, 2u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    check(mem[o + 0] == 0xFF && mem[o + 1] == 0 && mem[o + 2] == 0 && mem[o + 3] == 0xFF,
+          "Lighting-Abs: NH=-1/2 mit two_sided => fabs => rot");
+
+    /* --- I) Quaternion-Flip: v0 = Identitaet, v1/v2 = -Rotation(60 Grad um
+       x). Ohne Flip interpoliert das Dreieck gegen die Gegenorientierung
+       (Normale kippt nach -z, dot<0 => schwarz); mit Flip ergibt sich bei
+       Pixel (3,0) ~26 Grad um x => dot ~0.897 => rot ~228. --- */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_light_vertices_q2(c, VTX, 0.0f, 1.0f, view_z, quat, quat_opp);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x1C2, 0u);
+    q = emit(q, 0x1C3, 0u);
+    q = emit(q, 0x1C4, base);
+    q = emit(q, 0x1D9, 0u);
+    q = emit(q, 0x142, 255u << 20);             /* Diffus rot */
+    q = emit(q, 0x145, f16raw(1.0f));           /* Licht +z */
+    q = emit(q, 0x149, 1u);
+    q = emit_tev0(q, 1u, 1u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 3, 0, 8, 8, 4);
+    check(mem[o + 3] >= 220 && mem[o + 3] <= 235 &&
+          mem[o + 2] == 0 && mem[o + 1] == 0 && mem[o + 0] == 0xFF,
+          "Lighting: FlipQuaternionIfOpposite => Interpolation um x => Diffus ~228");
+
+    /* --- J) bump_mode 3: wie Azahar unbekannt, Normal/Tangente bleiben 0
+       (nur LOG_ERROR) => kein Diffus, obwohl Bump-Textur und Licht an sind. */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    memset(mem + TEX, 0, 0x100);
+    {
+        unsigned char bump[4] = {128, 128, 128, 0};
+        t_tex_encode(mem + TEX, 0, (unsigned)t_morton(4, 3), bump);
+    }
+    t_light_vertices(c, VTX, 0.0f, 0.5f, 0.5f, 0.5f, 0.5f, 1.0f, view_z, quat);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x80, 1u);
+    q = emit(q, 0x82, (8u << 16) | 8u);
+    q = emit(q, 0x84, 0u);
+    q = emit(q, 0x85, TEX >> 3);
+    q = emit(q, 0x8E, 0u);
+    q = emit(q, 0x1C2, 0u);
+    q = emit(q, 0x1C3, 3u << 28);               /* bump_mode 3 (unbekannt) */
+    q = emit(q, 0x1C4, base);
+    q = emit(q, 0x1D9, 0u);
+    q = emit(q, 0x142, 255u << 20);
+    q = emit(q, 0x145, f16raw(1.0f));
+    q = emit(q, 0x149, 1u);
+    q = emit_tev0(q, 1u, 1u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    check(mem[o + 0] == 0xFF && mem[o + 1] == 0 && mem[o + 2] == 0 && mem[o + 3] == 0,
+          "Lighting: bump_mode 3 => Normal/Tangente 0 => kein Diffus");
+
+    /* --- K) Mehrfach-Licht: zwei direktionale Lichter, Diffus rot + gruen
+       => Primary (255,255,0). --- */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_light_vertices(c, VTX, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, view_z, quat);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x1C2, 1u);                     /* max_light_index = 1 */
+    q = emit(q, 0x1C3, 0u);
+    q = emit(q, 0x1C4, 0x03030300u);            /* Spot/Dist/D0/D1 fuer 0+1 aus */
+    q = emit(q, 0x1D9, 1u << 4);                /* Slot0 -> Licht0, Slot1 -> Licht1 */
+    q = emit(q, 0x142, 255u << 20);             /* Licht0 Diffus rot */
+    q = emit(q, 0x145, f16raw(1.0f));
+    q = emit(q, 0x149, 1u);
+    q = emit(q, 0x152, 255u << 10);             /* Licht1 Diffus gruen */
+    q = emit(q, 0x155, f16raw(1.0f));
+    q = emit(q, 0x159, 1u);
+    q = emit_tev0(q, 1u, 1u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    check(mem[o + 0] == 0xFF && mem[o + 1] == 0 && mem[o + 2] == 0xFF &&
+          mem[o + 3] == 0xFF,
+          "Lighting: zwei Lichter rot+gruen => Primary (255,255,0)");
+
+    /* --- L) Spot-Daempfung: Spot-Richtung +z, Licht +z => SP=1 (Index 255).
+       Spot-LUT Typ 8 Wert 2048/4095 => Faktor 0.5 => Diffus 127. --- */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_light_vertices(c, VTX, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, view_z, quat);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x1C2, 0u);
+    q = emit(q, 0x1C3, 0u);
+    q = emit(q, 0x1C4, 0x03010000u);            /* Spot an, Dist/D0/D1 aus */
+    q = emit(q, 0x1D9, 0u);
+    q = emit(q, 0x1D1, 4u << 8);                /* Spot-Eingang SP */
+    q = emit(q, 0x142, 255u << 20);
+    q = emit(q, 0x145, f16raw(1.0f));
+    q = emit(q, 0x146, 0u);                     /* spot x/y = 0 */
+    q = emit(q, 0x147, 2047u);                  /* spot z = +1 */
+    q = emit(q, 0x149, 1u);
+    q = emit(q, 0x1C5, (8u << 8) | 255u);       /* SpotlightAttenuation Licht 0 */
+    q = emit(q, 0x1C8, 2048u);                  /* 2048/4095 = 0.5 */
+    q = emit_tev0(q, 1u, 1u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    check(mem[o + 3] == 127 && mem[o + 2] == 0 && mem[o + 1] == 0 && mem[o + 0] == 0xFF,
+          "Lighting: Spot-LUT 0.5 (SP=1) => Diffus 127");
+
+    /* --- M) D0/D1-Specular: Config2 (Distribution0 und 1). D0=LUT 1.0
+       auf specular_0 (rot), D1=LUT 0.5 auf specular_1 (blau), Reflect
+       Red = 1.0 => Secondary (255,0,127). --- */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_light_vertices(c, VTX, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, view_z, quat);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x1C2, 0u);
+    q = emit(q, 0x1C3, 2u << 4);                /* Config2 */
+    q = emit(q, 0x1C4, 0x01000100u);            /* Spot/Dist aus, D0/D1/RR an */
+    q = emit(q, 0x1D9, 0u);
+    q = emit(q, 0x1D1, 3u | (1u << 4));         /* D0=LN, D1=VH */
+    q = emit(q, 0x140, 255u << 20);             /* specular_0 rot */
+    q = emit(q, 0x141, 255u);                   /* specular_1 blau */
+    q = emit(q, 0x145, f16raw(1.0f));
+    q = emit(q, 0x149, 1u);
+    q = emit(q, 0x1C5, (0u << 8) | 255u);
+    q = emit(q, 0x1C8, 4095u);                  /* D0 = 1.0 */
+    q = emit(q, 0x1C5, (1u << 8) | 255u);
+    q = emit(q, 0x1C8, 2048u);                  /* D1 = 0.5 */
+    q = emit(q, 0x1C5, (6u << 8) | 255u);
+    q = emit(q, 0x1C8, 4095u);                  /* ReflectRed = 1.0 */
+    q = emit_tev0(q, 2u, 2u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    check(mem[o + 3] == 0xFF && mem[o + 2] == 0 && mem[o + 1] == 127 &&
+          mem[o + 0] == 0xFF,
+          "Lighting: D0 rot 1.0 + D1 blau 0.5 + ReflectRed => (255,0,127)");
+
+    /* --- N) Reflect RGB: Config4, D1 = 1.0, ReflectRed/Green/Blue aus
+       LUT-Typ 6/5/4 = 1.0 / 0.5 / 0.25 => Secondary (255,127,63). --- */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_light_vertices(c, VTX, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, view_z, quat);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x1C2, 0u);
+    q = emit(q, 0x1C3, 4u << 4);                /* Config4 */
+    q = emit(q, 0x1C4, base);                   /* D0 aus, D1/RR/RG/RB an */
+    q = emit(q, 0x1D9, 0u);
+    q = emit(q, 0x1D1, (3u << 16) | (1u << 20));/* RB=LN, RG=VH, RR=NH */
+    q = emit(q, 0x141, (255u << 20) | (255u << 10) | 255u);  /* specular_1 weiss */
+    q = emit(q, 0x145, f16raw(1.0f));
+    q = emit(q, 0x149, 1u);
+    q = emit(q, 0x1C5, (1u << 8) | 255u);
+    q = emit(q, 0x1C8, 4095u);                  /* D1 = 1.0 */
+    q = emit(q, 0x1C5, (6u << 8) | 255u);
+    q = emit(q, 0x1C8, 4095u);                  /* ReflectRed = 1.0 */
+    q = emit(q, 0x1C5, (5u << 8) | 255u);
+    q = emit(q, 0x1C8, 2048u);                  /* ReflectGreen = 0.5 */
+    q = emit(q, 0x1C5, (4u << 8) | 255u);
+    q = emit(q, 0x1C8, 1024u);                  /* ReflectBlue = 0.25 */
+    q = emit_tev0(q, 2u, 2u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    check(mem[o + 3] == 255 && mem[o + 2] == 127 && mem[o + 1] == 63 &&
+          mem[o + 0] == 0xFF,
+          "Lighting: Reflect RGB 1.0/0.5/0.25 => Secondary (255,127,63)");
+
+    /* --- O) Clamp-Highlights (config0 Bit27): Licht +x, Normale +z =>
+       dot=0. D0-LUT (NH=0.7071) liefert 1.0; ohne Clamp rot, mit Clamp 0. --- */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_light_vertices(c, VTX, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, view_z, quat);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x1C2, 0u);
+    q = emit(q, 0x1C3, 1u << 27);               /* clamp_highlights */
+    q = emit(q, 0x1C4, 0x01000100u);
+    q = emit(q, 0x1D9, 0u);
+    q = emit(q, 0x1D1, 0u);                     /* D0 = NH */
+    q = emit(q, 0x140, 255u << 20);
+    q = emit(q, 0x144, f16raw(1.0f));           /* Licht +x */
+    q = emit(q, 0x149, 1u);
+    q = emit(q, 0x1C5, (0u << 8) | 181u);
+    q = emit(q, 0x1C8, 4095u);                  /* NH=0.7071 => 1.0 */
+    q = emit_tev0(q, 2u, 2u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    check(mem[o + 0] == 0xFF && mem[o + 1] == 0 && mem[o + 2] == 0 && mem[o + 3] == 0,
+          "Lighting: clamp_highlights bei dot=0 => Specular 0");
+
+    /* gleiche Lage ohne Clamp => Specular rot */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x1C2, 0u);
+    q = emit(q, 0x1C3, 0u);
+    q = emit(q, 0x1C4, 0x01000100u);
+    q = emit(q, 0x1D9, 0u);
+    q = emit(q, 0x1D1, 0u);
+    q = emit(q, 0x140, 255u << 20);
+    q = emit(q, 0x144, f16raw(1.0f));
+    q = emit(q, 0x149, 1u);
+    q = emit(q, 0x1C5, (0u << 8) | 181u);
+    q = emit(q, 0x1C8, 4095u);
+    q = emit_tev0(q, 2u, 2u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    check(mem[o + 0] == 0xFF && mem[o + 1] == 0 && mem[o + 2] == 0 && mem[o + 3] == 0xFF,
+          "Lighting: ohne clamp_highlights bleibt das Specular rot");
+
+    /* --- P) Globales Ambient 0x1C0: gruen, Licht ohne Diffus/Ambient =>
+       Primary (0,255,0). --- */
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    t_light_vertices(c, VTX, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, view_z, quat);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad_light(q, VTX, 8, 8);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit(q, 0x1C0, 255u << 10);             /* global_ambient gruen */
+    q = emit(q, 0x1C2, 0u);
+    q = emit(q, 0x1C3, 0u);
+    q = emit(q, 0x1C4, 0x03030300u);
+    q = emit(q, 0x1D9, 0u);
+    q = emit(q, 0x145, f16raw(1.0f));
+    q = emit(q, 0x149, 1u);
+    q = emit_tev0(q, 1u, 1u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 4, 4, 8, 8, 4);
+    check(mem[o + 0] == 0xFF && mem[o + 1] == 0 && mem[o + 2] == 0xFF &&
+          mem[o + 3] == 0,
+          "Lighting: global_ambient gruen => Primary (0,255,0)");
 }
 
 static void test_texture_projection_cube(ArmCpu *c, unsigned char *mem)
@@ -2491,6 +2892,7 @@ int main(void) {
     test_no_program(&c, mem);
     test_fb_clamp(&c, mem);
     test_lighting(&c, mem);
+    test_lighting_review(&c, mem);
     test_texture_projection_cube(&c, mem);
 
     printf("ERGEBNIS: %s\n", fails == 0 ? "OK" : "FEHLER");

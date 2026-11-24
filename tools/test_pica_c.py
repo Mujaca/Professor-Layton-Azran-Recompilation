@@ -47,6 +47,10 @@ Lichtquellen (f16-Position, f20-Distanzdaempfung, fix1.1.11-Spot,
 10-Bit-Farben), LUT-Upload 0x1C5/0x1C8..0x1CF (Typ/Index + Inkrement),
 Distanz-LUT, Fresnel-Alpha, two_sided_diffuse, Clamp und Bump-Mapping
 (NormalMap mit/ohne Renorm) sowie Einspeisung als TEV-Quelle 1/2.
+Review-Checks: Abs-Zweig nur bei two_sided fabs (sonst max(0,...)) fuer
+negative NH/LN, FlipQuaternionIfOpposite vor Clipping, bump_mode 3
+(Normal/Tangente 0), Mehrfach-Licht, Spot-Daempfung, D0/D1-Specular,
+Reflect RGB, Clamp-Highlights und globales Ambient.
 """
 import os
 import subprocess

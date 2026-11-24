@@ -331,7 +331,8 @@ Quelle: Azahar `renderer_software/sw_rasterizer.cpp`, `sw_clipper.cpp`,
   Typ. `Projection2D` teilt u/v durch `tc0_w` (Semantik 16, TEXCOORD0_W).
   `Cube`/`ShadowCube` wählen die dominante Achse von (u,v,tc0_w), Face-Adresse
   `address*8` mit Bits0..21 aus `0x86..0x8A` (übrige Bits von 0x85),
-  `u'=x/z*0.5+0.5`, `v'=y/z*0.5+0.5`. `Shadow2D` teilt bei
+  `u'=x/z*0.5+0.5`, `v'=y/z*0.5+0.5` (Division ohne Sonderfall; z==0
+  ergibt inf/NaN wie in Azahar `ConvertCubeCoord`). `Shadow2D` teilt bei
   `0x8B` Bit0 = 0 (perspektivisch) u/v durch tc0_w; Shadow-Tiefe ist
   `|tc0_w|` (Cube: `|z|`). Danach je Texel
   `z_int = min(shadow_z,1)*0xFFFFFF - (bias<<1)` (bias = 0x8B Bits1..23) und
@@ -356,7 +357,13 @@ Quelle: Azahar `renderer_software/sw_rasterizer.cpp`, `sw_clipper.cpp`,
   (0 1x, 1 2x, 2 4x, 3 8x, 6 0.25x, 7 0.5x), `0x1D9` Light-Enable
   (3 Bit je Slot). 24 LUTs à 256 Einträge: Bits0..11 `value`/4095,
   Bits12..22 `difference`/2047, Bit23 negatives Vorzeichen. Ohne Abs-Modus
-  ist der Index signed (result*128), sonst unsigned (result*256).
+  ist der Index signed (result*128), sonst unsigned (result*256). Im
+  Abs-Modus wird nur bei gesetztem `two_sided_diffuse` (LightSrc.config
+  Bit1) der Betrag genommen, sonst auf 0 geklemmt (`max(result,0)`).
+  Bump-Modus 3 ist undefiniert: Normal und Tangente bleiben 0 (Azahar
+  `LOG_ERROR`). Entgegengesetzte Vertex-Quaternionen werden vor Clipping
+  und Interpolation an Vertex 0 angeglichen (`FlipQuaternionIfOpposite`:
+  Skalarprodukt < 0 ⇒ alle vier Komponenten negieren).
   Ergebnis (Diffus+Global-Ambient, Specular) wird 0..1 geklemmt und als
   Primary/Secondary-Fragment den TEV-Quellen 1/2 zugeführt.
 * **Farbziel:** Output-Merger 0x100..0x107: 0x100 Bit0..1
