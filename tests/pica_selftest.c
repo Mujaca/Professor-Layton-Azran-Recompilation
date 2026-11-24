@@ -3551,8 +3551,158 @@ static void test_special_regs(ArmCpu *c, unsigned char *mem)
     }
 }
 
-int main(void) {
+/* ================= Scissor-Test (0x065/0x066/0x067) =================
+ * Azahar sw_rasterizer.cpp: 0x065 Modus (0 aus, 1 Exclude, 3 Include),
+ * 0x066 x1/y1, 0x067 x2/y2 (jeweils inklusive). Include schneidet das
+ * Bounding-Box des Dreiecks auf das Rechteck, Exclude laesst nur Pixel
+ * ausserhalb durch. Die Rasterizer-y-Achse liegt wie der Framebuffer
+ * von unten (Anzeige-y = Hoehe-1-raster-y). */
+static void test_scissor_rect(ArmCpu *c, unsigned char *mem)
+{
+    static const struct {
+        uint32_t mode;
+        int inside, outside_x, outside_y_hi, outside_y_lo;
+        const char *name;
+    } cases[] = {
+        {3u, 1, 0, 0, 0, "Include"},
+        {1u, 0, 1, 1, 1, "Exclude"},
+        {0u, 1, 1, 1, 1, "Disabled"},
+    };
+    int i;
+    for (i = 0; i < 3; i++) {
+        uint32_t *q, size;
+        uint32_t o;
+        int red;
+        gpu_pica_reset();
+        memset(mem + 0x40000u, 0, 16u * 16u * 4u);
+        t_quad_vertices(c, VTX, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f);
+        q = (uint32_t *)(mem + LIST);
+        q = t_emit_quad(q, VTX, 16, 16);
+        q = t_emit_fb(q, 0x40000u, 16, 16, 0u);
+        q = emit_tev0(q, 0xEu, 0xEu, 0xFF0000FFu);   /* rot, alpha 255 */
+        q = emit(q, 0x65, cases[i].mode & 3u);
+        q = emit(q, 0x66, 4u | (4u << 16));          /* x1=4, y1=4 */
+        q = emit(q, 0x67, 7u | (7u << 16));          /* x2=7, y2=7 inkl. */
+        q = emit(q, 0x22E, 0u);
+        size = (uint32_t)((unsigned char *)q - (mem + LIST));
+        gpu_run_pica_list(c, LIST, size);
 
+        /* Raster (5,5) liegt im Rechteck; die Anzeige liest dieselbe
+           Pixelposition (Framebuffer-y ist bereits von unten gespiegelt). */
+        o = t_fb_off(0x40000u, 5, 5, 16, 16, 4);
+        red = (mem[o + 3] == 0xFF);
+        {
+            char msg[96];
+            sprintf(msg, "Scissor %s: Pixel im Rechteck %s",
+                    cases[i].name, cases[i].inside ? "geschrieben" : "ausgeschlossen");
+            check(red == cases[i].inside, msg);
+        }
+        /* x=2 liegt links vom Rechteck. */
+        o = t_fb_off(0x40000u, 2, 5, 16, 16, 4);
+        red = (mem[o + 3] == 0xFF);
+        check(red == cases[i].outside_x,
+              i == 0 ? "Scissor Include: links ausserhalb bleibt schwarz"
+                     : "Scissor: links ausserhalb wird geschrieben");
+        /* y=13 liegt oberhalb y2=7, y=2 unterhalb y1=4. */
+        o = t_fb_off(0x40000u, 5, 13, 16, 16, 4);
+        red = (mem[o + 3] == 0xFF);
+        check(red == cases[i].outside_y_hi,
+              i == 0 ? "Scissor Include: oberhalb y2 bleibt schwarz"
+                     : "Scissor: oberhalb y2 wird geschrieben");
+        o = t_fb_off(0x40000u, 5, 2, 16, 16, 4);
+        red = (mem[o + 3] == 0xFF);
+        check(red == cases[i].outside_y_lo,
+              i == 0 ? "Scissor Include: unterhalb y1 bleibt schwarz"
+                     : "Scissor: unterhalb y1 wird geschrieben");
+    }
+}
+
+/* ========== Attribut-Loader/Indexpuffer: VRAM-Basis + FCRAM-Offset ==========
+ * 0x200 ist eine physische Basis, 0x203-Datenoffset bzw. 0x227-Indexpuffer-
+ * offset werden vor der Umrechnung addiert. Im Spiel liegt die Basis im
+ * VRAM-Fenster (0x18000000), der Offset schiebt die Daten in den FCRAM
+ * (0x20000000). Der Port muss deshalb die *Summe* abbilden, nicht Basis und
+ * Offset getrennt (sonst landet der Offset im falschen Fenster).
+ * Test mit eigenem Speicher bis 0x14001FFF (FCRAM -> Linear-Heap). */
+static void test_loader_vram_base_fcram_offset(void)
+{
+    const size_t big = 0x14002000u;
+    unsigned char *bm = (unsigned char *)malloc(big);
+    ArmCpu bc;
+    uint32_t *q, size, w[2];
+    float pos[4];
+    float vv[3][3] = {{-1.0f, -1.0f, 0.0f}, {1.0f, -1.0f, 0.0f}, {0.0f, 1.0f, 0.0f}};
+    uint16_t idx[3] = {2, 0, 1};
+    int vi;
+
+    if (bm == NULL) {
+        check(0, "VRAM-Basis/FCRAM-Offset: Speicher fuer Test fehlt");
+        return;
+    }
+    arm_cpu_init(&bc, bm, (uint32_t)big);
+    gpu_pica_reset();
+
+    /* Vertexdaten: physikalisch 0x18000000 + 0x08000040 = 0x20000040,
+       d. h. Gast 0x14000040. */
+    for (vi = 0; vi < 3; vi++)
+        memcpy(bm + 0x14000040u + (size_t)vi * 16u, vv[vi], sizeof(vv[vi]));
+    memcpy(bm + 0x14000140u, idx, sizeof(idx));   /* Indexpuffer 0x20000140 */
+
+    q = (uint32_t *)(bm + LIST);
+    q = emit(q, 0x4F, 1u);
+    q = emit(q, 0x50, 0x03020100u);       /* o0 -> POSITION */
+    q = emit(q, 0x2BD, 1u);               /* output_mask: o0 */
+    q = emit(q, 0x2B9, 0u);
+    q = emit(q, 0x2BB, 0u);
+    q = emit(q, 0x200, 0x03000000u);      /* (reg>>1)*16 = 0x18000000 (VRAM) */
+    q = emit(q, 0x201, 0x0Bu);            /* Attribut 0: float3 */
+    q = emit(q, 0x202, 0u);               /* max_attribute_index 0 */
+    q = emit(q, 0x203, 0x08000040u);      /* + Offset -> FCRAM 0x20000040 */
+    q = emit(q, 0x204, 0u);               /* Komponente 0 = Attribut 0 */
+    q = emit(q, 0x205, (1u << 28) | (16u << 16));
+    w[0] = ins_common(0x13u, 0u, 0x00u, 0u, 0u, 0u);   /* mov o0, v0 */
+    w[1] = 0x22u << 26;                                 /* END */
+    q = emit_program(q, w, 2);
+    q = emit_swizzle0(q, swz_xyzw());
+    q = emit(q, 0x228, 3u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (bm + LIST));
+    gpu_run_pica_list(&bc, LIST, size);
+    gpu_pica_last_vertex(pos, NULL, NULL);
+    check(pos[0] == 0.0f && pos[1] == 1.0f && pos[2] == 0.0f,
+          "Loader: Basis VRAM 0x18000000 + Offset 0x08000040 -> FCRAM 0x20000040");
+
+    /* Derselbe Mechanismus fuer den Indexpuffer 0x227 (u16). */
+    gpu_pica_reset();
+    q = (uint32_t *)(bm + LIST);
+    q = emit(q, 0x4F, 1u);
+    q = emit(q, 0x50, 0x03020100u);
+    q = emit(q, 0x2BD, 1u);
+    q = emit(q, 0x2B9, 0u);
+    q = emit(q, 0x2BB, 0u);
+    q = emit(q, 0x200, 0x03000000u);
+    q = emit(q, 0x201, 0x0Bu);
+    q = emit(q, 0x202, 0u);
+    q = emit(q, 0x203, 0x08000040u);
+    q = emit(q, 0x204, 0u);
+    q = emit(q, 0x205, (1u << 28) | (16u << 16));
+    w[0] = ins_common(0x13u, 0u, 0x00u, 0u, 0u, 0u);
+    w[1] = 0x22u << 26;
+    q = emit_program(q, w, 2);
+    q = emit_swizzle0(q, swz_xyzw());
+    q = emit(q, 0x227, 0x08000140u | (1u << 31));   /* u16, FCRAM 0x20000140 */
+    q = emit(q, 0x228, 3u);
+    q = emit(q, 0x22F, 0u);
+    size = (uint32_t)((unsigned char *)q - (bm + LIST));
+    gpu_run_pica_list(&bc, LIST, size);
+    gpu_pica_last_vertex(pos, NULL, NULL);
+    check(pos[0] == 1.0f && pos[1] == -1.0f && pos[2] == 0.0f,
+          "Indexpuffer: Basis VRAM + Offset 0x08000140 -> FCRAM 0x20000140");
+
+    free(bm);
+}
+
+int main(void) {
     static unsigned char mem[0x100000];
     ArmCpu c;
     uint32_t *p;
@@ -4154,6 +4304,8 @@ int main(void) {
     test_gs_immediate(&c, mem);
     test_gpu_mmio(&c, mem);
     test_special_regs(&c, mem);
+    test_scissor_rect(&c, mem);
+    test_loader_vram_base_fcram_offset();
 
     printf("ERGEBNIS: %s\n", fails == 0 ? "OK" : "FEHLER");
     {

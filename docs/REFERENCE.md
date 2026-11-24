@@ -778,8 +778,11 @@ Assets: 3 × Level-5-`ARC0` (`lt6_*.fa`), 566 × BCSTM, 34 × MOFLEX. Texturen
 * Ein FrameBufferUpdate-Slot (0x40 Byte, GSP-Shared-Memory
   `+0x200 + (2*thread + screen)*0x40`) enthält `index` (Byte 0, `&1` wählt
   den Eintrag), `is_dirty` (Byte 1, Bit0) und zwei FrameBufferInfo-Einträge
-  ab `+0x08`/`+0x28`. GSP übernimmt einen Eintrag nur bei `is_dirty` (und
-  löscht das Flag) oder wenn ein Buffer-Swap erzwungen wird.
+  ab `+0x04`/`+0x20` (Azahar `FrameBufferUpdate`:
+  `u8 index; u8 is_dirty; u16 pad; FrameBufferInfo framebuffer_info[2];
+  u32 pad`, 0x40 Byte).
+  GSP übernimmt einen Eintrag nur bei `is_dirty` (und löscht das Flag) oder
+  wenn ein Buffer-Swap erzwungen wird.
 * `gsp::Gpu SetBufferSwap` (IPC 0x0005) und der VBlank-Pfad schreiben die
   GPU-Framebuffer-Register (Azahar `GPU::SetBufferSwap`,
   `video_core/gpu.cpp`): `address_left1`/`address_left2` werden nach

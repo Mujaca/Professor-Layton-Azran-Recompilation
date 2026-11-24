@@ -3671,24 +3671,44 @@ static void p_vs_draw_immediate(ArmCpu *c)
 static int p_draw_arrays(ArmCpu *c, int indexed)
 {
     static int plog = -1;
+    static int tlog = -1;
     static unsigned draws = 0;
+    static uint32_t tgt_addr = 0xFFFFFFFFu, tgt_w = 0, tgt_h = 0, tgt_fmt = 0xFFu;
     uint32_t nv = p_regs[0x228];
     uint32_t voff = p_regs[0x22a];
     uint32_t i;
     int use_shader = (g_vs.code_words > 0);
 
     if (plog < 0) { const char *e = getenv("HLE_PICA_LOG"); plog = (e && *e) ? atoi(e) : 0; }
+    if (tlog < 0) { const char *e = getenv("HLE_PICA_TARGET"); tlog = (e && *e) ? atoi(e) : 0; }
     if (nv == 0) return 0;
     if (!use_shader) return 0;          /* Azahar: kein Draw ohne Vertex-Programm */
     if (nv > 0x10000u) nv = 0x10000u;
     g_pica_draws++;
+    /* Diagnose (HLE_PICA_TARGET): jede Aenderung des PICA-Farbziels einmal
+       melden. Zeigt, in welche Framebuffer das Spiel tatsaechlich rendert. */
+    if (tlog > 0) {
+        uint32_t a = (p_regs[0x11D] & 0x0FFFFFFFu) * 8u;
+        uint32_t w = p_regs[0x11E] & 0x7FFu;
+        uint32_t h = ((p_regs[0x11E] >> 12) & 0x3FFu) + 1u;
+        uint32_t f = (p_regs[0x117] >> 16) & 7u;
+        if (a != tgt_addr || w != tgt_w || h != tgt_h || f != tgt_fmt) {
+            printf("[pica] target phys=%08X %ux%u fmt=%u draw#%u\n", a, w, h, f, draws);
+            fflush(stdout);
+            tgt_addr = a; tgt_w = w; tgt_h = h; tgt_fmt = f;
+        }
+    }
     p_texcache_draw_start();
     if (plog > 0 && draws < (unsigned)plog) {
         uint32_t base = ((p_regs[0x200] >> 1) & 0x0FFFFFFFu) * 16u;
         printf("[pica] draw#%u nv=%u voff=%u base=%08X attr0=%08X attr1=%08X attr2=%08X "
-               "idx=%d tex0=%08X fmt=%08X vs=%d\n", draws, nv, voff, base,
+               "idx=%d tex0=%08X fmt=%08X vs=%d fb=%08X/%ux%u cfmt=%u\n", draws, nv, voff, base,
                p_regs[0x200], p_regs[0x201], p_regs[0x202], indexed,
-               p_regs[0x81], p_regs[0x8e], use_shader);
+               p_regs[0x81], p_regs[0x8e], use_shader,
+               (p_regs[0x11D] & 0x0FFFFFFFu) * 8u,
+               p_regs[0x11E] & 0x7FFu,
+               ((p_regs[0x11E] >> 12) & 0x3FFu) + 1u,
+               (p_regs[0x117] >> 16) & 7u);
         printf("[pica] loaders %08X %08X %08X / %08X %08X %08X\n",
                p_regs[0x203], p_regs[0x204], p_regs[0x205],
                p_regs[0x206], p_regs[0x207], p_regs[0x208]);
@@ -4458,6 +4478,13 @@ static void p_ext_memory_fill(ArmCpu *c, int index, int intr_index)
 
 /* Azahar GPU::MemoryTransfer: Trigger pruefen, Transfer ausfuehren,
  * Trigger loeschen, PPF melden. */
+static int p_gspq_log(void)
+{
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("HLE_GSPQ_LOG"); v = (e && *e) ? atoi(e) : 0; }
+    return v;
+}
+
 static void p_ext_transfer(ArmCpu *c)
 {
     uint32_t in_p, out_p, flags;
@@ -4466,6 +4493,10 @@ static void p_ext_transfer(ArmCpu *c)
     in_p = p_ext_regs[0x300] * 8u;
     out_p = p_ext_regs[0x301] * 8u;
     flags = p_ext_regs[0x304];
+    if (p_gspq_log())
+        printf("[gpu] transfer in=%08X out=%08X flags=%08X sz=%08X/%08X tc=%u\n",
+               in_p, out_p, flags, p_ext_regs[0x303], p_ext_regs[0x302],
+               (flags >> 3) & 1u);
     if (flags & 8u) {                   /* is_texture_copy */
         /* Azahar regs_external.h DisplayTransferConfig: flags@0x304,
            trigger@0x306, texture_copy.size@0x308, input_size@0x309,
@@ -4612,6 +4643,9 @@ void gpu_gsp_memory_fill_cmd(ArmCpu *c, const uint32_t *w)
     int both = (start1 != 0u) && (start2 != 0u);
 
     p_mmio_init();
+    if (p_gspq_log())
+        printf("[gpu] memfill s1=%08X e1=%08X v1=%08X c1=%X s2=%08X e2=%08X v2=%08X c2=%X\n",
+               start1, end1, value1, ctl1, start2, end2, value2, ctl2);
     if (start1 != 0u) {
         uint32_t ps = gpu_pica_virt_to_phys(start1);
         p_ext_regs[0x04] = ps >> 3;

@@ -1379,3 +1379,46 @@ Drei weitere Fehler verhinderten nach dem Film jedes Bild:
 
 **Ergebnis:** M3 = ja (Draws), M4 = ja: `reports/port_intro_frame300.png`
 (Intro-Film, oberer Bildschirm), `reports/port_frame1800.png`.
+
+### Unterscreen schwarz: das Spiel rendert dort schwarzen Inhalt – Befund 2026-11-24
+
+**Auftragsannahme („der Port zeigt Bildschirm 1 nicht an") ist widerlegt.** Die
+Anzeige und der PICA-/GSP-Pfad fuer den Unterscreen funktionieren; der Inhalt
+ist in der aktuellen Szene nach dem Intro RGB-schwarz.
+
+**Belege** (natuerlicher Boot, `--frames 1800`, Diagnose nur lesend):
+
+* GSP meldet jeden Frame beide Screens: `SetBufferSwap screen=0 fb=0x1F300000`
+  (bzw. `0x1F346500`) und `screen=1 fb=0x1F000000` (bzw. `0x1F038400`),
+  stride `0x2D0`, fmt `0x301` (RGB8). Beide Puffer sind im Shot korrekt
+  gelatcht.
+* `HLE_PICA_TARGET=1`: Das Spiel rendert abwechselnd mit Farbziel
+  `phys=0x182A2300` und `240x400` (oben) bzw. `240x320` (unten), Format RGBA8.
+  Es gibt also echte Unterscreen-Draws.
+* `HLE_GSPQ_LOG=1`: Je Frame sechs `DisplayTransfer`s aus demselben
+  Offscreen-Ziel, u. a. `0x182A2300 -> 0x18000000` und `-> 0x18038400`
+  (Unterscreen, 240x320, flags `0x1001` = flip + RGB8-Ausgabe) sowie
+  `-> 0x18300000`/`0x18346500` (Oben, 240x400). Die Semantik entspricht
+  Azahar `SwBlitter::DisplayTransfer` (tiled RGBA8 -> lineares RGB8, Flip).
+* `HLE_VRAM_DUMP`: Nach 1800 Frames sind die Unterscreen-Puffer
+  `0x1F000000..0x1F070800` komplett 0, der obere Puffer dagegen gefuellt.
+  Die Quelle des Unterscreen-Transfers (`0x1F2A2300`, 240x320) ist in allen
+  102 geprueften Transfers eines 600-Frame-Laufs RGB-schwarz (Alpha teils
+  `0xFF`, also deckend schwarz). Damit ist der schwarze Unterscreen
+  **Spielinhalt dieser Szene**, kein Fehler von GSP/PICA oder der Anzeige.
+* Die Azahar-Referenzbilder (`reports/azahar_topscreen.png` /
+  `azahar_bottomscreen.png`) zeigen den **Titelbildschirm** (weisse UI unten).
+  Der 1800-Frame-Port-Lauf steht noch in der dunklen Folgeszene nach dem Intro;
+  ein Pixelvergleich ist daher nicht sinnvoll (Korrelation ~0,0). Der
+  Farbvergleich/Orientierungsabgleich gehoert zu M5.
+
+**Tests ergaenzt** (`tests/pica_selftest.c`, beide gruen):
+* `test_scissor_rect`: Modus 0/1/3 mit Rechteck `x1/y1=4`, `x2/y2=7`;
+  Include schreibt nur innerhalb, Exclude nur ausserhalb, Disabled schneidet
+  nicht (Azahar `sw_rasterizer.cpp`).
+* `test_loader_vram_base_fcram_offset`: 0x200-Basis `0x18000000` (VRAM) plus
+  Loader-Offset `0x08000040` bzw. Indexpuffer-Offset `0x08000140` landet
+  korrekt bei FCRAM `0x20000040`/`0x20000140` (Gast `0x14000040`/`0x14000140`).
+  Ohne die gemeinsame Umrechnung der Summe schlaegt der Test fehl.
+
+Kein Workaround eingebaut; `tools/workarounds/` bleibt leer.

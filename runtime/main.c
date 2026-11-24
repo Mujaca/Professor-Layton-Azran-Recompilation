@@ -246,6 +246,19 @@ int main(int argc, char **argv) {
     }
     frame_clock_stop(&clock);
     if (shot != NULL && frames_limit < 0) save_shot(shot);
+    {
+        /* Diagnose (HLE_VRAM_DUMP=<pfad>): VRAM roh ausgeben, um
+           Farbziel-/Transferziele unabhaengig pruefen zu koennen. */
+        const char *vd = getenv("HLE_VRAM_DUMP");
+        if (vd != NULL && *vd != 0) {
+            FILE *f = fopen(vd, "wb");
+            if (f != NULL) {
+                fwrite(g_mem + 0x1F000000u, 1, 0x600000u, f);
+                fclose(f);
+                printf("VRAM-Dump: %s (0x600000 Byte)\n", vd);
+            }
+        }
+    }
     win_close();
     hle_report();
     return 0;
