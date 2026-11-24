@@ -85,12 +85,30 @@ fn_001B9938) sind entfernt: Build ohne sie bleibt Frontier 9/10 (boss:U).
 | – | `dispatch_ipc` | leitet Kommandos nach Form statt nach Handle um (APT/cfg/fs) |
 | – | generierter Code | unbekannte Aufrufziele = No-op (geloggt in `out/missing_calls.txt`) |
 | – | `arm_mem_read/write` | Zugriffe außerhalb des Speichers liefern 0 statt Abbruch (`ARM_STRICT=1` bricht ab) |
-| – | Y2R `GetTransferEndEvent`, DSP `GetSemaphoreEventHandle` | Events vorab signalisiert; Y2R `IsFinished*` immer wahr (Azahar: unsignalisiert, Signal bei echter Fertigmeldung) |
-| – | DSP `ReadPipeIfPossible` | schreibt abwechselnd 1/0 in den Gastpuffer statt echter Pipe-Daten |
-| – | srv `GetServiceHandle`, `generic_command` | unbekannte Dienste/Kommandos liefern Erfolg |
 | – | fs `OpenFile`, `file_command` | Sentinel-Dateislot und Erfolg auch bei fehlgeschlagenem Open; `romfs_image.bin` mit Offset +0x1000 |
-| – | `SleepThread` | Schlafzeit auf 50 ms gedeckelt |
-| – | cfg `GetConfig` | unbekannte Blöcke liefern Erfolg mit Nullen (Azahar: Fehler) |
+
+Entfernt 2026-11-24 (Fälschungen nach Azahar). Jeder Punkt wurde einzeln
+gebaut und mit `tools/frontier.py` gemessen; der Stand blieb **9/10
+(`boss:U`)**, die DSP-Pipe liefert jetzt aber die echten Struktur-Adressen
+(30 `ConvertProcessAddress`-Aufrufe wie in der Referenz).
+
+| Früher | Jetzt | Beleg |
+|---|---|---|
+| Y2R `GetTransferEndEvent` vorab signalisiert, `IsFinished*` immer wahr | ein `completion_event` (OneShot) ohne Vorab-Signal; `StartConversion` plant die Fertigmeldung (MinY2RDelay ≈ 186 µs), `IsFinished*` spiegeln `is_busy_conversion` | `cam/y2r_u.cpp`; im Boot nur bis `GetTransferEndEvent` erreicht |
+| DSP `GetSemaphoreEventHandle` vorab signalisiert | OneShot-Event ohne Vorab-Signal | `dsp/dsp_dsp.cpp` |
+| DSP `ReadPipeIfPossible` schreibt 1/0 | echte Pipe-Puffer; `WriteProcessPipe(Audio, Init)` liefert die 15 DSP-Struktur-Adressen, `ReadPipe`/`ReadPipeIfPossible`/`GetPipeReadableSize` lesen daraus | `audio_core/hle/hle.cpp` PipeRead/PipeWrite/`AudioPipeWriteStructAddresses` |
+| srv `GetServiceHandle` unbekannt = Erfolg | `name_len > 8` → `0xD9006405`, unbekannter Name → `0xD0406401`; alle im Boot gefragten Namen sind bekannt | `sm/srv.cpp`, `sm/sm.cpp` |
+| `generic_command` still = Erfolg | loggt jedes unbekannte Kommando mit Parametern; Antwort weiter Result 0 (Azahar `ReportUnimplementedFunction`) | `service.cpp` |
+| cfg unbekannte Blöcke = Nullen | `0xD9010004` (NotFound/Config/WrongArgument) | `cfg/cfg.cpp` GetConfigBlockPointer |
+| `SleepThread` 50-ms-Deckel | volle Schlafzeit, `ns <= 0` = Yield | `kernel/svc.cpp` |
+| `DuplicateHandle` kopierte nur den Namen | Alias-Slot/Refcount auf dasselbe Objekt; Pseudo-Handles `0xFFFF8000/1` sind echte Slots | `kernel/handle_table.cpp` |
+| APT `GetLockHandle`/`Initialize` neue Objekte | liefern dasselbe Lock/Notification-/Parameter-Event | `apt/applet_manager.cpp` |
+
+Offen (dokumentierte Abweichung): srv-`GetServiceHandle` mit `flags`-Bit0 == 0
+müsste in Azahar auf eine spätere Registrierung warten; der Port hat keinen
+Dienst-Registrierungsdienst und meldet sofort den Fehler. Ein zweiter
+`APT:Initialize`-Aufruf liefert in Azahar `AlreadyExists`, hier erneut Erfolg
+mit denselben Objekten. Beide Pfade kommen im Boot bisher nicht vor.
 
 Diese Liste stammt aus dem Review der Nachtarbeit (2026-11-24) gegen Azahar.
 
@@ -203,8 +221,8 @@ wartete auf ein eigenes Event (Handle 35, `svcCreateEvent` direkt nach
 RegisterInterruptEvents` an den DSP gebunden hat. Der Port hat keinen
 Audio-/DSP-Kern, der Pipe-Interrupts liefert; Azahar signalisiert diese im
 HLE-Audio (`DspHle`) beim Pipe-Processing. **Inzwischen behoben** durch die
-Interrupt-Registrierung in `runtime/kernel/hle.c` (siehe unten); offen ist
-der Inhalt der DSP-Pipes.
+Interrupt-Registrierung und die echten Pipe-Puffer in `runtime/kernel/hle.c`
+(siehe unten).
 
 ### FS-Session fehlte wegen bedingtem `bx` ohne Fallthrough – behoben 2026-11-24
 
@@ -234,9 +252,10 @@ Frontier 3/10 -> 9/10 (Divergenz `boss:U`).
 Pipe-Ereignisse (Azahar `DSP_DSP::SignalInterrupt`). Vorher blieb der
 Hauptthread direkt nach `SetSemaphore` auf seinem eigenen Event (Handle 35,
 `HLE_KLOG`) stehen; jetzt laufen `ReadPipeIfPossible`/`ConvertProcessAddress`
-weiter. Naechster echter Blocker ist der **Inhalt** der DSP-Pipes:
-`ReadPipe`/`ReadPipeIfPossible` liefern weiterhin Attrappen (§4); das Spiel
-laeuft danach in einen Fehlerpfad, `boss:U` wird noch nicht geoeffnet.
+weiter. **Pipe-Inhalt (2026-11-24):** `WriteProcessPipe(Audio, Init)` liefert
+jetzt die 15 DSP-Struktur-Adressen, die das Spiel zu 30
+`ConvertProcessAddress`-Aufrufen verarbeitet (wie `reports/azahar_trace.txt`);
+`ReadPipe`/`ReadPipeIfPossible` lesen echte Puffer. `boss:U` bleibt offen.
 
 
 ### Arbiter korrekt, Boot stoppt am Gast-RomFS-Lookup (2026-11-24)

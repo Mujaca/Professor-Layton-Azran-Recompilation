@@ -36,6 +36,13 @@ Azahar `MakeBuilder(normal, translate)`. `ipc_finish()` leitet den
 Header-Wert aus den tatsächlich geschriebenen Wörtern ab, damit Header und
 Nutzlast nicht auseinanderlaufen.
 
+Antwort-StaticBuffer: Die Zieladresse steht **nicht** in den
+Translate-Parametern des Requests, sondern im Static-Buffer-Bereich hinter dem
+Kommandopuffer (`cmd_buf[0x40 + 2*id]` Deskriptor, `+1` Adresse; Azahar
+`kernel/hle_ipc.cpp`, `COMMAND_BUFFER_LENGTH = 0x100/4`). Die Antwort schreibt
+dorthin und setzt die Adresse in ihren Deskriptor. Beispiel: `dsp::DSP
+ReadPipeIfPossible` (Request `normal=3, translate=0`).
+
 ### Dienst-Kommandos, die das Spiel benutzt
 
 * **srv:** `1` RegisterClient, `2` EnableNotification, `5` GetServiceHandle.
