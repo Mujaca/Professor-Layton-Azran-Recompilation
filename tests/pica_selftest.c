@@ -30,6 +30,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "arm_cpu.h"
 #include "gpu.h"
@@ -1869,6 +1873,44 @@ static uint32_t *t_emit_quad_light(uint32_t *q, uint32_t vtx, int vw, int vh)
     return emit_viewport(q, vw, vh);
 }
 
+static void test_texcache_etc1(ArmCpu *c, unsigned char *mem)
+{
+    static const uint64_t block_red = 0xF000000000000040ull;
+    static const uint64_t block_zero = 0x0000000000000040ull;
+    uint32_t *q, size, o;
+    int i;
+
+    gpu_pica_reset();
+    memset(mem + 0x40000u, 0, 0x100);
+    memset(mem + TEX, 0, 64);
+    for (i = 0; i < 4; i++) {
+        uint64_t alpha = (uint64_t)7u << 24;
+        memcpy(mem + TEX + i * 16u, &alpha, 8);
+        memcpy(mem + TEX + i * 16u + 8u, &block_red, 8);
+    }
+    t_quad_vertices(c, VTX, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f);
+    q = (uint32_t *)(mem + LIST);
+    q = t_emit_quad(q, VTX, 8, 8);
+    q = t_emit_tex(q, TEX, 8, 8, 13, 0u);
+    q = t_emit_fb(q, 0x40000u, 8, 8, 0u);
+    q = emit_tev0(q, 3u, 3u, 0u);
+    q = emit(q, 0x22E, 0u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 1, 5, 8, 8, 4);
+    check(mem[o + 3] == 0xFF && mem[o + 2] == 8 && mem[o + 1] == 8,
+          "Textur-Cache: ETC1A4 erster Draw rot (r1=0xF)");
+
+    /* Quellkachel im Gastspielspeicher aendern (wie ein Upload): der
+       Kachel-Cache muss die Dekodierung verwerfen. r1 0xF -> 0, also
+       erwartet (8,8,8) statt (255,8,8) bei sonst gleichem Block. */
+    for (i = 0; i < 4; i++) memcpy(mem + TEX + i * 16u + 8u, &block_zero, 8);
+    gpu_run_pica_list(c, LIST, size);
+    o = t_fb_off(0x40000u, 1, 5, 8, 8, 4);
+    check(mem[o + 3] == 8 && mem[o + 2] == 8 && mem[o + 1] == 8 && mem[o + 0] == 0x77,
+          "Textur-Cache: geaenderte Quellkachel wird neu dekodiert");
+}
+
 static void test_lighting(ArmCpu *c, unsigned char *mem)
 {
     static const float view[3] = {0.0f, 0.0f, 1.0f};
@@ -3061,6 +3103,174 @@ static void test_gs_immediate(ArmCpu *c, unsigned char *mem)
     }
 }
 
+/* =============== Performance-Benchmark (Diagnose, PICA_BENCH=1) ===============
+ * 2000 texturierte Dreiecke (40x25 Quads) ueber den ganzen oberen Screen
+ * (400x240) in einer PICA-Kommandoliste, ein Draw ueber 6000 Vertices.
+ * Drei Varianten mit identischem Gitter:
+ *   tex        Textur + TEV, Lighting aus, kein Depth-Test (2D-UI-Pfad)
+ *   tex+light  zusaetzlich Fragment-Lighting mit einer diffusen Lichtquelle
+ *   tex+depth  zusaetzlich D16-Depth-Test (LessThan) mit Depth-Write
+ * Gemessen wird die Wanduhrzeit pro vollstaendiger Liste (25% Warmlauf).
+ * Der Benchmark veraendert keinen Gastzustand und laeuft nur mit PICA_BENCH=1;
+ * ohne die Variable ist die Ausgabe von tools/test_pica_c.py unveraendert. */
+
+#define BENCH_MEM_SIZE 0x400000u
+#define BENCH_FB       0x00040000u
+#define BENCH_TEX      0x000A0000u
+#define BENCH_VTX      0x000E0000u
+#define BENCH_DEPTH    0x00100000u
+#define BENCH_LIST     0x000FE000u
+#define BENCH_QUADS_X  40
+#define BENCH_QUADS_Y  25
+#define BENCH_TRIS     (BENCH_QUADS_X * BENCH_QUADS_Y * 2)
+#define BENCH_VERTS    (BENCH_TRIS * 3)
+
+static double bench_now_ms(void)
+{
+#ifdef _WIN32
+    LARGE_INTEGER f, c;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c);
+    return (double)c.QuadPart * 1000.0 / (double)f.QuadPart;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1.0e6;
+#endif
+}
+
+/* Gitter erzeugen: 6 Vertices je Quad (Position float3, UV float2, Stride 20). */
+static void bench_vertices(unsigned char *mem)
+{
+    int cx, cy, k;
+    for (cy = 0; cy < BENCH_QUADS_Y; cy++) {
+        for (cx = 0; cx < BENCH_QUADS_X; cx++) {
+            uint32_t q = (uint32_t)(cy * BENCH_QUADS_X + cx);
+            float x0 = -1.0f + 2.0f * (float)cx / (float)BENCH_QUADS_X;
+            float x1 = -1.0f + 2.0f * (float)(cx + 1) / (float)BENCH_QUADS_X;
+            float y0 = -1.0f + 2.0f * (float)cy / (float)BENCH_QUADS_Y;
+            float y1 = -1.0f + 2.0f * (float)(cy + 1) / (float)BENCH_QUADS_Y;
+            float u0 = (float)cx / (float)BENCH_QUADS_X;
+            float u1 = (float)(cx + 1) / (float)BENCH_QUADS_X;
+            float v0 = (float)cy / (float)BENCH_QUADS_Y;
+            float v1 = (float)(cy + 1) / (float)BENCH_QUADS_Y;
+            float xy[6][2] = {{x0, y0}, {x1, y0}, {x1, y1},
+                              {x0, y0}, {x1, y1}, {x0, y1}};
+            for (k = 0; k < 6; k++) {
+                float f[5];
+                uint32_t off = BENCH_VTX + (q * 6u + (uint32_t)k) * 20u;
+                f[0] = xy[k][0];
+                f[1] = xy[k][1];
+                f[2] = 0.0f;
+                f[3] = (xy[k][0] == x0) ? u0 : u1;
+                f[4] = (xy[k][1] == y0) ? v0 : v1;
+                memcpy(mem + off, f, sizeof(f));
+            }
+        }
+    }
+}
+
+static uint32_t bench_build_list(unsigned char *mem, int lighting, int depth,
+                                int texture, int fmt)
+{
+    uint32_t *q = (uint32_t *)(mem + BENCH_LIST);
+    uint32_t *end;
+
+    q = emit(q, 0x200, BENCH_VTX >> 3);
+    q = emit(q, 0x201, 0x7B);              /* attr0 float3, attr1 float2 */
+    q = emit(q, 0x202, 1u << 28);
+    q = emit(q, 0x203, 0u);
+    q = emit(q, 0x204, 0x210u);
+    q = emit(q, 0x205, (3u << 28) | (20u << 16));
+    q = emit(q, 0x206, 12u);
+    q = emit(q, 0x207, 1u);
+    q = emit(q, 0x208, (1u << 28) | (20u << 16));
+    q = emit(q, 0x228, (uint32_t)BENCH_VERTS);
+    q = t_emit_vs_basic(q);
+    q = emit_viewport(q, 400, 240);
+    if (texture) {
+        q = t_emit_tex(q, BENCH_TEX, 256, 256, fmt, 0x00001100u);  /* Repeat */
+        q = emit_tev0(q, 3, 3, 0);         /* Farbe+Alpha aus Textur 0 */
+    } else {
+        q = emit(q, 0x80, 0u);             /* Textur 0 aus */
+        q = emit_tev0(q, 0, 0, 0);         /* Farbe+Alpha = Vertexfarbe */
+    }
+    q = t_emit_fb(q, BENCH_FB, 400, 240, 0u);
+    if (lighting) {
+        q = emit(q, 0x1C6, 0u);            /* lighting.disable = 0 */
+        q = emit(q, 0x142, 0x000003FFu);   /* Licht 0 diffusiv rot */
+        q = emit(q, 0x1C2, 0u);            /* max_light_index */
+        q = emit(q, 0x1D9, 1u);            /* Licht 0 an */
+    } else {
+        q = emit(q, 0x1C6, 1u);            /* Lighting aus */
+    }
+    if (depth) {
+        q = emit(q, 0x116, 0u);            /* D16 */
+        q = emit(q, 0x11C, BENCH_DEPTH >> 3);
+        q = emit(q, 0x107, 0x00001F40u);   /* test LessThan, Maske, write */
+    }
+    q = emit(q, 0x22E, 0u);                /* Draw arrays */
+    end = q;
+    return (uint32_t)((unsigned char *)end - (mem + BENCH_LIST));
+}
+
+static void bench_one(unsigned char *mem, int lighting, int depth, int texture,
+                      int fmt, const char *name)
+{
+    ArmCpu c;
+    uint32_t size = bench_build_list(mem, lighting, depth, texture, fmt);
+    double ms, best = 0.0;
+    int i, frames = 8, warm = 2;
+    uint32_t px = 400u * 240u;
+
+    memset(&c, 0, sizeof(c));
+    arm_cpu_init(&c, mem, BENCH_MEM_SIZE);
+    gpu_pica_reset();
+    memset(mem + BENCH_FB, 0, px * 4u);
+    if (depth) {
+        memset(mem + BENCH_DEPTH, 0xFF, px * 2u);
+    }
+    for (i = 0; i < warm + frames; i++) {
+        double a, b;
+        if (depth && i == warm) memset(mem + BENCH_DEPTH, 0xFF, px * 2u);
+        a = bench_now_ms();
+        gpu_run_pica_list(&c, BENCH_LIST, size);
+        b = bench_now_ms();
+        if (i == warm) best = b - a;
+        else if (i > warm && b - a < best) best = b - a;
+    }
+    ms = best;
+    printf("BENCH %-10s tris=%d px=%u  %.3f ms/frame  (%5.1f fps)  draws=%llu\n",
+           name, BENCH_TRIS, px, ms, ms > 0.0 ? 1000.0 / ms : 0.0,
+           gpu_pica_draw_count());
+}
+
+static int pica_bench(void)
+{
+    unsigned char *mem = (unsigned char *)malloc(BENCH_MEM_SIZE);
+    int i;
+    uint32_t *t;
+
+    if (!mem) {
+        printf("BENCH: kein Speicher\n");
+        return 1;
+    }
+    memset(mem, 0, BENCH_MEM_SIZE);
+    bench_vertices(mem);
+    /* 256x256-RGBA8-Textur mit einem Muster (alle Kacheln belegt). */
+    t = (uint32_t *)(mem + BENCH_TEX);
+    for (i = 0; i < 256 * 256; i++)
+        t[i] = 0xFF000000u | ((uint32_t)(i * 2654435761u) >> 8);
+    printf("BENCH PICA-Rasterizer: %d Dreiecke, 400x240\n", BENCH_TRIS);
+    bench_one(mem, 0, 0, 1, 0, "tex");
+    bench_one(mem, 0, 0, 0, 0, "solid");
+    bench_one(mem, 1, 0, 1, 0, "tex+light");
+    bench_one(mem, 0, 0, 1, 13, "etc1a4");
+    bench_one(mem, 0, 1, 1, 0, "tex+depth");
+    free(mem);
+    return 0;
+}
+
 int main(void) {
 
     static unsigned char mem[0x100000];
@@ -3648,6 +3858,7 @@ int main(void) {
     test_triangle_strip(&c, mem);
     test_immediate_topology(&c, mem);
     test_etc1(&c, mem);
+    test_texcache_etc1(&c, mem);
     test_uniform_masks(&c, mem);
     test_no_program(&c, mem);
     test_fb_clamp(&c, mem);
@@ -3663,5 +3874,11 @@ int main(void) {
     test_gs_immediate(&c, mem);
 
     printf("ERGEBNIS: %s\n", fails == 0 ? "OK" : "FEHLER");
+    {
+        const char *b = getenv("PICA_BENCH");
+        if (b && *b && *b != '0') {
+            if (pica_bench() != 0) fails++;
+        }
+    }
     return fails == 0 ? 0 : 1;
 }

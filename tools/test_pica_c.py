@@ -100,6 +100,8 @@ def main():
         return 1
     env = dict(os.environ)
     env['HLE_PICA_RENDER'] = '1'
+    if '--bench' in sys.argv:
+        env['PICA_BENCH'] = '1'
     r = subprocess.run([EXE], capture_output=True, text=True, env=env)
     print(r.stdout, end='')
     if r.stderr:

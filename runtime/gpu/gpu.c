@@ -899,6 +899,133 @@ static int p_wrap_coord(uint32_t mode, int val, int size)
     }
 }
 
+/* ---- Decodier-Cache fuer Texturkacheln ----------------------------------
+   Der Port legt die 64 Texel einer 8x8-Kachel einmal als RGBA8 ab. Gueltig
+   bleibt eine Kachel nur, solange eine Kopie ihrer Quellbytes mit dem
+   Gastspielspeicher uebereinstimmt (memcmp). Jede Speicheraenderung - GSP-
+   Upload, DisplayTransfer oder CPU-Schreibzugriff - macht sie damit ohne
+   Hash-Kollisionsrisiko ungueltig. Zu grosse Texturen und fehlender Speicher
+   fallen auf die direkte Dekodierung zurueck. */
+#define P_TEXCACHE_MAX (4u * 1024u * 1024u)
+
+typedef struct {
+    uint32_t addr, fmt, ts;
+    int w, h, tiles;
+    unsigned char *rgba;
+    unsigned char *ok;
+    unsigned char *src;
+    int cap_tiles;
+    size_t cap_src;
+    int last;
+    int ready;
+} PTexCache;
+
+static PTexCache g_texcache[3];
+
+/* Puffer fuer tiles Kacheln der Groesse ts bereitstellen (nur vergroessern). */
+static int p_texcache_alloc(PTexCache *tc, int tiles, uint32_t ts)
+{
+    unsigned char *p;
+    if (tc->cap_tiles < tiles) {
+        p = (unsigned char *)realloc(tc->rgba, (size_t)tiles * 256u);
+        if (!p) return 0;
+        tc->rgba = p;
+        p = (unsigned char *)realloc(tc->ok, (size_t)tiles);
+        if (!p) return 0;
+        tc->ok = p;
+        memset(tc->ok + tc->cap_tiles, 0, (size_t)(tiles - tc->cap_tiles));
+        tc->cap_tiles = tiles;
+    }
+    if (tc->cap_src < (size_t)tiles * ts) {
+        p = (unsigned char *)realloc(tc->src, (size_t)tiles * ts);
+        if (!p) return 0;
+        tc->src = p;
+        tc->cap_src = (size_t)tiles * ts;
+    }
+    return 1;
+}
+
+/* Cache fuer (addr,fmt,w,h) bereitstellen; 0 = direkt dekodieren. */
+static int p_texcache_prepare(PTexCache *tc, uint32_t addr, uint32_t fmt,
+                              int w, int h)
+{
+    uint32_t ts = p_tex_tile_size(fmt);
+    int tiles;
+
+    if (w <= 0 || h <= 0 || ts == 0u || (w & 7) || (h & 7)) return 0;
+    tiles = (w / 8) * (h / 8);
+    if ((size_t)tiles * 256u + (size_t)tiles * ts + (size_t)tiles > P_TEXCACHE_MAX)
+        return 0;
+    if (tc->addr == addr && tc->fmt == fmt && tc->w == w && tc->h == h
+            && tc->cap_tiles >= tiles && tc->cap_src >= (size_t)tiles * ts)
+        return 1;
+    if (!p_texcache_alloc(tc, tiles, ts)) return 0;
+    /* Nur ein Format-/Kachelgroessenwechsel entwertet die Dekodierung; eine
+       andere Adresse wird je Kachel per memcmp geprueft. */
+    if (tc->fmt != fmt || tc->ts != ts)
+        memset(tc->ok, 0, (size_t)tc->cap_tiles);
+    tc->addr = addr;
+    tc->fmt = fmt;
+    tc->ts = ts;
+    tc->w = w;
+    tc->h = h;
+    tc->tiles = tiles;
+    tc->last = -1;
+    return 1;
+}
+
+/* Ein Texel aus dem Kachel-Cache; 0 = ausserhalb des Gastspielspeichers. */
+static int p_texcache_texel(ArmCpu *c, PTexCache *tc, uint32_t base, int x, int y,
+                            unsigned char out[4])
+{
+    int ti = (y / 8) * (tc->w / 8) + (x / 8);
+    uint32_t off = base + (uint32_t)ti * tc->ts;
+    unsigned char *dst;
+
+    if (off + tc->ts > c->mem_size) return 0;
+    /* Nur beim Kachelwechsel gegen die Quelle pruefen; innerhalb einer Kachel
+       kann der Gastspielspeicher waehrend eines Draws nicht wechseln, und je
+       Draw setzt p_texcache_draw_start() `last` zurueck. */
+    if (ti != tc->last) {
+        if (!tc->ok[ti]
+                || memcmp(tc->src + (size_t)ti * tc->ts, c->mem + off, tc->ts) != 0) {
+            int k;
+            memcpy(tc->src + (size_t)ti * tc->ts, c->mem + off, tc->ts);
+            dst = tc->rgba + (size_t)ti * 256u;
+            for (k = 0; k < 64; k++)
+                p_decode_texel(c->mem + off, tc->fmt, (uint32_t)(k & 7),
+                               (uint32_t)(k >> 3), dst + (size_t)k * 4u);
+            tc->ok[ti] = 1;
+        }
+        tc->last = ti;
+    }
+    dst = tc->rgba + (size_t)ti * 256u
+        + ((size_t)(y & 7) * 8u + (size_t)(x & 7)) * 4u;
+    memcpy(out, dst, 4);
+    return 1;
+}
+
+/* Je Draw die Kachel-Kurzpruefung neu validieren: der Gastspielspeicher kann
+   sich zwischen zwei Draws geaendert haben (Upload, DisplayTransfer, CPU). */
+static void p_texcache_draw_start(void)
+{
+    int i;
+    for (i = 0; i < 3; i++) {
+        PTexCache *tc = &g_texcache[i];
+        uint32_t base_reg = p_tex_base((uint32_t)i);
+        uint32_t addr = (p_regs[base_reg + 4u] & 0x0FFFFFFFu) * 8u;
+        uint32_t size = p_regs[base_reg + 1u];
+        uint32_t fmt = p_regs[p_tex_fmt_reg((uint32_t)i)] & 0xFu;
+        int w = (int)((size >> 16) & 0x7FFu);
+        int h = (int)(size & 0x7FFu);
+        tc->last = -1;
+        /* Nur Formate mit teurer Dekodierung (ETC1/ETC1A4) cachen; bei 8-Bit-
+           Formaten ist die direkte Dekodierung genauso schnell. */
+        tc->ready = (fmt == 12u || fmt == 13u)
+            && (addr != 0u) && p_texcache_prepare(tc, addr, fmt, w, h);
+    }
+}
+
 /* Texel einer Einheit an (x,y) ohne Wrap (Koordinaten bereits im Bild).
    texaddr ist die physische Basisadresse des Texturbildes (Azahar
    FullTextureConfig/memory.GetPhysicalPointer). */
@@ -910,11 +1037,17 @@ static int p_lookup_texel(ArmCpu *c, uint32_t unit, uint32_t texaddr, int x, int
     int w = (int)((size >> 16) & 0x7FFu);
     int h = (int)(size & 0x7FFu);
     uint32_t ts = p_tex_tile_size(fmt);
-    uint32_t off;
+    uint32_t base, off;
 
     if (w <= 0 || h <= 0 || ts == 0u) return 0;
     if (x < 0 || y < 0 || x >= w || y >= h) return 0;
-    off = gpu_pica_phys_to_guest(texaddr)
+    base = gpu_pica_phys_to_guest(texaddr);
+    if (unit < 3u) {
+        PTexCache *tc = &g_texcache[unit];
+        if (tc->ready && tc->addr == texaddr && tc->fmt == fmt)
+            return p_texcache_texel(c, tc, base, x, y, out);
+    }
+    off = base
         + (uint32_t)(y / 8) * ts * (uint32_t)(w / 8)
         + (uint32_t)(x / 8) * ts;
     if (off + ts > c->mem_size) return 0;
@@ -1794,6 +1927,17 @@ static PicaColor p_tev(const PicaColor tex[4], const PicaColor *primary,
         unsigned char cout[3];
         unsigned char aout;
 
+        /* Stufe, die Previous unveraendert durchreicht (Replace ohne Modifier,
+           Skalierung 1x, kein Combiner-Buffer-Schreibzugriff), hat keinen
+           Effekt. In Stufe 0 ersetzt die Hardware Previous durch Quelle 3,
+           dort gilt die Abkuerzung nicht. */
+        if (s != 0u && cop == 0u && aop == 0u && cm1 == 0u && am1 == 0u
+                && cs1 == 0xFu && as1 == 0xFu
+                && (scl & 3u) == 0u && ((scl >> 16) & 3u) == 0u
+                && !(buf_in & ((1u << (8u + s)) | (1u << (12u + s))))) {
+            continue;
+        }
+
         if (s == 0) {
             if (cs1 == 0xFu) cs1 = cs3;
             if (cs2 == 0xFu) cs2 = cs3;
@@ -2176,6 +2320,16 @@ static int p_depth_stencil_test(ArmCpu *c, uint32_t x, uint32_t y, float depth)
 }
 
 
+/* Rein lesender Depth-Vergleich fuer den fruehen Abbruch. Es wird nichts
+   geschrieben, damit Alpha-Test- und Stencil-Reihenfolge unberuehrt bleiben. */
+static int p_depth_prepass_ok(ArmCpu *c, uint32_t x, uint32_t y, float depth)
+{
+    uint32_t dm = p_regs[0x107];
+    uint32_t bits = p_depth_bits();
+    uint32_t z = (uint32_t)(depth * (float)((1u << bits) - 1u));
+    return p_compare((dm >> 4) & 7u, z, p_depth_get(c, x, y));
+}
+
 /* ================= Clipping (Azahar sw_rasterizer.cpp AddTriangle) ================= */
 static float p_dot4(const float a[4], const float b[4])
 {
@@ -2291,6 +2445,12 @@ static void p_process_tri(ArmCpu *c, const PicaVertex *v0, const PicaVertex *v1,
         int bias0, bias1, bias2;
         float invw[3];
         int py, px;
+        int fb_on, lighting_on, fast_copy, early_z, tc0w_needed, tex_type0;
+        int tex_on[3];
+        int proctex_on, proctex_ci;
+        uint32_t fb_w, fb_h, om, mask, dm;
+        unsigned u;
+        int e0, e1, e2, d0, d1, d2;
 
         if (sc_mode == 3) {              /* Include */
             if (min_x < sx1) min_x = sx1;
@@ -2310,8 +2470,45 @@ static void p_process_tri(ArmCpu *c, const PicaVertex *v0, const PicaVertex *v1,
         invw[1] = v1->pos[3];
         invw[2] = v2->pos[3];
 
+        /* Zustand einmal je Dreieck statt je Pixel aus den Registern lesen.
+           Die Abfragen sind reine Lesezugriffe und aendern das Ergebnis der
+           Rasterisierung nicht. */
+        fb_on = p_fb_configured();
+        lighting_on = !(p_regs[0x1C6] & 1u);
+        fb_w = p_regs[0x11E] & 0x7FFu;
+        fb_h = ((p_regs[0x11E] >> 12) & 0x3FFu) + 1u;
+        om = p_regs[0x100];
+        mask = p_regs[0x107];
+        dm = p_regs[0x107];
+        fast_copy = !(om & (1u << 8))
+            && ((p_regs[0x102] & 0xFu) == 3u)
+            && ((mask & 0xF00u) == 0xF00u)
+            && ((p_regs[0x113] & 0xFu) != 0u);
+        tex_type0 = (int)((p_regs[0x83] >> 28) & 7u);
+        for (u = 0; u < 3u; u++)
+            tex_on[u] = (int)((p_regs[0x80] >> u) & 1u);
+        proctex_on = (int)((p_regs[0x80] >> 10) & 1u);
+        proctex_ci = (int)((p_regs[0x80] >> 8) & 3u);
+        if (proctex_ci > 2) proctex_ci = 2;    /* Azahar hat nur uv[0..2] */
+        /* tc0_w wird nur von den Texturtypen 1..4 (Einheit 0) gelesen. */
+        tc0w_needed = tex_on[0] && tex_type0 >= 1 && tex_type0 <= 4;
+        /* Frueher, rein lesender Depth-Abbruch vor Textur/TEV. Stencil
+           schreibt bei Fehlschlag und bleibt deshalb beim regulaeren Pfad
+           (Reihenfolge wie Azahar). */
+        early_z = fb_on && (dm & 1u) && !((p_regs[0x105] & 1u) && (p_depth_fmt() == 3u));
+
+        /* Kantenfunktionen inkrementell: p_signed_area(x1,y1,x2,y2,px,py)
+           aendert sich je 16er-Schritt in x um -16*(y2-y1). Ganzzahlig exakt,
+           also identisch zur Neuberechnung. */
+        d0 = -(16 * (y[2] - y[1]));
+        d1 = -(16 * (y[0] - y[2]));
+        d2 = -(16 * (y[1] - y[0]));
+
         for (py = min_y + 8; py < max_y; py += 16) {
-            for (px = min_x + 8; px < max_x; px += 16) {
+            e0 = bias0 + p_signed_area(x[1], y[1], x[2], y[2], min_x + 8, py);
+            e1 = bias1 + p_signed_area(x[2], y[2], x[0], y[0], min_x + 8, py);
+            e2 = bias2 + p_signed_area(x[0], y[0], x[1], y[1], min_x + 8, py);
+            for (px = min_x + 8; px < max_x; px += 16, e0 += d0, e1 += d1, e2 += d2) {
                 int w0, w1, w2, wsum;
                 float bw0, bw1, bw2, iw, depth, tc0_w;
                 float prim[4], tuv[3][2], quat[4], view[3];
@@ -2326,36 +2523,58 @@ static void p_process_tri(ArmCpu *c, const PicaVertex *v0, const PicaVertex *v1,
                 }
                 /* Keine Schreibzugriffe ausserhalb des konfigurierten
                  * Farbziels (Azahar zeichnet nur in den Framebuffer). */
-                if (p_fb_configured()) {
-                    uint32_t fw = p_regs[0x11E] & 0x7FFu;
-                    uint32_t fh = ((p_regs[0x11E] >> 12) & 0x3FFu) + 1u;
-                    if ((uint32_t)(px >> 4) >= fw || (uint32_t)(py >> 4) >= fh) continue;
+                if (fb_on) {
+                    if ((uint32_t)(px >> 4) >= fb_w || (uint32_t)(py >> 4) >= fb_h) continue;
                 }
 
-                w0 = bias0 + p_signed_area(x[1], y[1], x[2], y[2], px, py);
-                w1 = bias1 + p_signed_area(x[2], y[2], x[0], y[0], px, py);
-                w2 = bias2 + p_signed_area(x[0], y[0], x[1], y[1], px, py);
+                w0 = e0; w1 = e1; w2 = e2;
                 if (w0 < 0 || w1 < 0 || w2 < 0) continue;
                 wsum = w0 + w1 + w2;
                 if (wsum == 0) continue;
                 bw0 = (float)w0; bw1 = (float)w1; bw2 = (float)w2;
                 iw = 1.0f / (invw[0] * bw0 + invw[1] * bw1 + invw[2] * bw2);
 
+                /* Tiefe: Azahar screenpos.z interpoliert, dann Range/Offset
+                 * (0x4D/0x4E) und optional W-Buffer (0x6D). Der Wert haengt
+                 * nur von den Baryzentren ab und wird deshalb vor Textur/TEV
+                 * berechnet; der fruehe Abbruch liest nur. */
+                depth = (v0->pos[2] * bw0 + v1->pos[2] * bw1 + v2->pos[2] * bw2) /
+                        (float)wsum;
+                depth = depth * p_f24_to_float(p_regs[0x4D]) + p_f24_to_float(p_regs[0x4E]);
+                if ((p_regs[0x6D] & 1u) == 0u)      /* DepthBuffering::WBuffering */
+                    depth *= iw * (float)wsum;
+                if (depth < 0.0f) depth = 0.0f;
+                if (depth > 1.0f) depth = 1.0f;
+                if (early_z && !p_depth_prepass_ok(c, (uint32_t)(px >> 4),
+                                                   (uint32_t)(py >> 4), depth))
+                    continue;
+
                 for (i = 0; i < 4; i++)
                     prim[i] = (v0->color[i] * bw0 + v1->color[i] * bw1 + v2->color[i] * bw2) * iw;
+
                 for (i = 0; i < 3; i++) {
+                    /* Koordinaten nur interpolieren, wenn die Einheit sampelt
+                       oder die prozedurale Textur sie als Quelle waehlt. */
+                    if (!tex_on[i] && !(proctex_on && proctex_ci == i)) {
+                        tuv[i][0] = tuv[i][1] = 0.0f;
+                        continue;
+                    }
                     tuv[i][0] = (v0->uv[i][0] * bw0 + v1->uv[i][0] * bw1 +
                                  v2->uv[i][0] * bw2) * iw;
                     tuv[i][1] = (v0->uv[i][1] * bw0 + v1->uv[i][1] * bw1 +
                                  v2->uv[i][1] * bw2) * iw;
                 }
-                tc0_w = (v0->tc0_w * bw0 + v1->tc0_w * bw1 + v2->tc0_w * bw2) * iw;
-                for (i = 0; i < 4; i++)
-                    quat[i] = (v0->quat[i] * bw0 + v1->quat[i] * bw1 +
-                               v2->quat[i] * bw2) * iw;
-                for (i = 0; i < 3; i++)
-                    view[i] = (v0->view[i] * bw0 + v1->view[i] * bw1 +
-                               v2->view[i] * bw2) * iw;
+                tc0_w = tc0w_needed
+                    ? (v0->tc0_w * bw0 + v1->tc0_w * bw1 + v2->tc0_w * bw2) * iw
+                    : 0.0f;
+                if (lighting_on) {
+                    for (i = 0; i < 4; i++)
+                        quat[i] = (v0->quat[i] * bw0 + v1->quat[i] * bw1 +
+                                   v2->quat[i] * bw2) * iw;
+                    for (i = 0; i < 3; i++)
+                        view[i] = (v0->view[i] * bw0 + v1->view[i] * bw1 +
+                                   v2->view[i] * bw2) * iw;
+                }
 
                 for (i = 0; i < 4; i++) {
                     float f = prim[i];
@@ -2366,17 +2585,17 @@ static void p_process_tri(ArmCpu *c, const PicaVertex *v0, const PicaVertex *v1,
                 for (i = 0; i < 4; i++)
                     tex_col[i].c[0] = tex_col[i].c[1] = tex_col[i].c[2] = tex_col[i].c[3] = 0;
                 for (unit = 0; unit < 3u; unit++) {
-                    int ci = (unit == 2u && ((p_regs[0x80] >> 13) & 1u)) ? 1 : (int)unit;
+                    int ci;
+                    if (!tex_on[unit]) continue;   /* deaktivierte Einheit liefert 0 */
+                    ci = (unit == 2u && ((p_regs[0x80] >> 13) & 1u)) ? 1 : (int)unit;
                     p_sample_tex(c, unit, tuv[ci][0], tuv[ci][1], tc0_w, texbuf);
                     for (i = 0; i < 4; i++) tex_col[unit].c[i] = texbuf[i];
                 }
                 /* Prozedurale Textur (Einheit 3, Azahar sw_rasterizer.cpp
                    TextureColor): eigene Koordinatenwahl
                    main_config.texture3_coordinates (Bits8..9). */
-                if (p_regs[0x80] & (1u << 10)) {
-                    uint32_t ci = (p_regs[0x80] >> 8) & 3u;
-                    if (ci > 2u) ci = 2u;   /* Azahar hat nur uv[0..2] */
-                    p_sample_proctex(tuv[ci][0], tuv[ci][1], texbuf);
+                if (proctex_on) {
+                    p_sample_proctex(tuv[proctex_ci][0], tuv[proctex_ci][1], texbuf);
                     for (i = 0; i < 4; i++) tex_col[3].c[i] = texbuf[i];
                 }
 
@@ -2384,7 +2603,7 @@ static void p_process_tri(ArmCpu *c, const PicaVertex *v0, const PicaVertex *v1,
                    0x1C6 Bit0 (lighting.disable) = 0. */
                 for (i = 0; i < 4; i++)
                     pfc.c[i] = sfc.c[i] = 0;
-                if (!(p_regs[0x1C6] & 1u))
+                if (lighting_on)
                     p_compute_fragments(tex_col, quat, view, &pfc, &sfc);
 
                 tev_out = p_tev(tex_col, &primary, &pfc, &sfc);
@@ -2396,26 +2615,19 @@ static void p_process_tri(ArmCpu *c, const PicaVertex *v0, const PicaVertex *v1,
                     if (!p_compare(fn, tev_out.c[3], ref)) continue;
                 }
 
-                /* Tiefe: Azahar screenpos.z interpoliert, dann Range/Offset
-                 * (0x4D/0x4E) und optional W-Buffer (0x6D). */
-                depth = (v0->pos[2] * bw0 + v1->pos[2] * bw1 + v2->pos[2] * bw2) /
-                        (float)wsum;
-                depth = depth * p_f24_to_float(p_regs[0x4D]) + p_f24_to_float(p_regs[0x4E]);
-                if ((p_regs[0x6D] & 1u) == 0u)      /* DepthBuffering::WBuffering */
-                    depth *= iw * (float)wsum;
-                if (depth < 0.0f) depth = 0.0f;
-                if (depth > 1.0f) depth = 1.0f;
                 p_apply_fog(depth, &tev_out);
-                if (p_fb_configured() && !p_depth_stencil_test(c, (uint32_t)(px >> 4),
-                                                               (uint32_t)(py >> 4), depth))
+                if (fb_on && !p_depth_stencil_test(c, (uint32_t)(px >> 4),
+                                                   (uint32_t)(py >> 4), depth))
                     continue;
 
-                if (p_fb_configured()) {
+                if (fast_copy) {
+                    /* LogicOp Copy ohne Blending, volle Kanalmaske: das Ziel
+                       wird nicht gelesen, Ergebnis ist das TEV-Fragment. */
+                    p_fb_write(c, (uint32_t)(px >> 4), (uint32_t)(py >> 4), tev_out.c);
+                } else if (fb_on) {
                     unsigned char dest[4];
                     unsigned char result[4];
                     unsigned char bl[4];
-                    uint32_t om = p_regs[0x100];
-                    uint32_t mask = p_regs[0x107];
                     int k;
                     p_fb_read(c, (uint32_t)(px >> 4), (uint32_t)(py >> 4), dest);
                     if (om & (1u << 8)) {           /* alphablend_enable */
@@ -3243,6 +3455,7 @@ static void p_vs_draw_immediate(ArmCpu *c)
 {
     float outs[16][4];
     if (g_vs.code_words == 0u) return;   /* ohne Programm wird nichts gezeichnet */
+    p_texcache_draw_start();
     p_vs_process(c, g_vs_imm_attr, outs);
     if (g_gp_imm_reset) {
         p_gs_pipeline_reconfigure();
@@ -3274,6 +3487,7 @@ static int p_draw_arrays(ArmCpu *c, int indexed)
     if (!use_shader) return 0;          /* Azahar: kein Draw ohne Vertex-Programm */
     if (nv > 0x10000u) nv = 0x10000u;
     g_pica_draws++;
+    p_texcache_draw_start();
     if (plog > 0 && draws < (unsigned)plog) {
         uint32_t base = ((p_regs[0x200] >> 1) & 0x0FFFFFFFu) * 16u;
         printf("[pica] draw#%u nv=%u voff=%u base=%08X attr0=%08X attr1=%08X attr2=%08X "

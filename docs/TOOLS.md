@@ -126,7 +126,9 @@ Gast-Thread auf stderr, um Haenger ohne IPC zu lokalisieren).
 
 `tools/xfsatool/` (Level-5-ARC0/XPCK), `tools/list_xpck.py`,
 `tools/scan_xpck.py`, `tools/scan_pvb.py`, `tools/fa_index.py`,
-`tools/imgc_check.py`, Test `tools/test_imgc_c.py`, PICA-Test `tools/test_pica_c.py`.
+`tools/imgc_check.py`, Test `tools/test_imgc_c.py`, PICA-Test `tools/test_pica_c.py`
+(`--bench` misst zusaetzlich den Software-Rasterizer: 2000 texturierte
+Dreiecke auf 400x240, siehe `docs/GAME_NOTES.md`).
 
 ## Referenz
 
