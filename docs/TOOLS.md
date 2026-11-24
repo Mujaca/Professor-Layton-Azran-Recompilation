@@ -75,6 +75,7 @@ Selbsttest: `python tools/selftest_tools.py`.
 | `python tests/hid_ring_test.py` | HID-Ring-Verhalten: Index-Umlauf (8/8/8/32), Tastenbits, Circle-Pad-Richtungsbits, `delta_additions`/`delta_removals`, Ereignis-Signalisierung, Touch ohne/mit Druck, Accelerometer-Ruhelage |
 | `python tests/framebuffer_test.py` | Bildausgabe/FrameBufferInfo mit synthetischen Puffern |
 | `python tests/y2r_test.py` | YUV→RGB-Konverter mit synthetischen Bildern |
+| `python tests/fs_archive_test.py` | fs-Archive (SaveData/Ext/Shared/System): Host-Layout, Result-Codes, Datei-/Verzeichnisoperationen, Directory-Eintraege |
 
 Diese Tests brauchen nur `zig cc` und laufen in Sekunden; sie gehoeren
 absichtlich nicht zum Commit-Gate.

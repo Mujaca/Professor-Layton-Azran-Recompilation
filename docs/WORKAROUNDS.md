@@ -168,6 +168,25 @@ Dienst-Registrierungsdienst und meldet sofort den Fehler. Ein zweiter
 `APT:Initialize`-Aufruf liefert in Azahar `AlreadyExists`, hier erneut Erfolg
 mit denselben Objekten. Beide Pfade kommen im Boot bisher nicht vor.
 
+**fs-Archive (2026-11-24):** `runtime/kernel/fs_archive.c` bildet SaveData
+(0x4), ExtSaveData (0x6), SharedExtSaveData (0x7) und SystemSaveData (0x8) auf
+`out/savedata/{savedata,extsavedata,sharedextsavedata,systemsavedata}/...` ab.
+Kommandos, Result-Codes und das 0x228-Byte-Directory-Entry-Layout folgen Azahar
+(`fs_user.cpp`, `archive_*.cpp`, `disk_archive.cpp`, `path_parser.cpp`);
+Directory-Objekte sind echte Kernel-Handles mit eigenem Stream. Zwei bewusste
+Host-Abweichungen:
+
+* SaveData nutzt `program_id = 0`, weil der Port `fs:REG`/das Codeset-
+  Program-ID nicht abbildet (Azahar-`ClientSlot::program_id` ist ohne
+  Registrierung ebenfalls 0). Azahar liefert fuer ein fehlendes SaveData
+  `NotFormatted` (0xC8A04554); der Port ebenso, das Spiel formatiert selbst.
+* SharedExtSaveData ist auf echter Hardware ein bereits vorhandenes
+  Systemarchiv, das das Spiel nicht anlegt. Fehlt das Host-Verzeichnis, legt
+  der Port es beim ersten `OpenArchive` an (nur Verzeichnis + Metadaten, kein
+  Gastzustand). Ohne diese Provisionierung bricht der natuerliche Boot mit
+  `NotFormatted` ab (belegt: Frontier 6/10 vor der Provisionierung).
+
+
 Diese Liste stammt aus dem Review der Nachtarbeit (2026-11-24) gegen Azahar.
 
 `wa-kernel-signal-all` ist **entfernt**: `vblank_thread` flutet keine Handles

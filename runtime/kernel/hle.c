@@ -6,6 +6,7 @@
  *   bits 16-31 : command_id
  */
 #include "hle.h"
+#include "fs_archive.h"
 #include "gpu.h"
 #include "gsp_fb.h"
 #include "dsp_hle.h"
@@ -275,6 +276,7 @@ typedef struct {
     int used;
     int service;     /* ServiceId */
     int file;        /* Index in g_files oder -1 */
+    int dir;         /* Directory-Stream (fs_archive.c) oder -1 */
     int alias;       /* >0: Slot verweist auf dieses kanonische Objekt */
     int refs;        /* kanonisch: lebende Handle-Slots (Azahar HandleTable) */
     volatile int signaled;   /* Event/Timer/Thread: Signalzustand */
@@ -390,6 +392,7 @@ static int alloc_handle(int service, const char *name) {
             g_handles[i].used = 1;
             g_handles[i].service = service;
             g_handles[i].file = -1;
+            g_handles[i].dir = -1;
             g_handles[i].alias = 0;
             g_handles[i].refs = 1;
             snprintf(g_handles[i].name, sizeof(g_handles[i].name), "%s", name ? name : "?");
@@ -455,6 +458,7 @@ static void close_handle_slot(uint32_t h) {
         int canon = s->alias;
         memset(s, 0, sizeof(*s));
         s->file = -1;
+        s->dir = -1;
         if (canon > 0 && canon < MAX_HANDLES && g_handles[canon].used &&
             g_handles[canon].refs > 1)
             g_handles[canon].refs--;
@@ -478,6 +482,7 @@ static void close_handle_slot(uint32_t h) {
             }
             memset(s, 0, sizeof(*s));
             s->file = -1;
+            s->dir = -1;
             return;
         }
     }
@@ -486,8 +491,13 @@ static void close_handle_slot(uint32_t h) {
         g_files[s->file].used = 0;
         g_files[s->file].fp = NULL;
     }
+    if (s->dir >= 0) {
+        fs_archive_dir_close(s->dir);
+        s->dir = -1;
+    }
     memset(s, 0, sizeof(*s));
     s->file = -1;
+    s->dir = -1;
 }
 
 /* Typisierte Kernel-Objekte fuer HLE-Dienste (Azahar legt sie ebenfalls als
@@ -1405,19 +1415,63 @@ static int open_guest_file(const char *guest_path, FileSlot **slot_out) {
     return 0;
 }
 
+/* Pfadpuffer in fs:USER-Requests. Das SDK dieses Spiels legt FS_Path in den
+ * Translate-Bereich (zwei Woerter {flags, adresse}); Azahar liest dieselben
+ * Bytes ueber PopStaticBuffer. Fallback: StaticBuffer-Deskriptor bei 0x40. */
+static uint32_t fs_req_buffer_addr(uint32_t *p, int normal, int translate, int index) {
+    int off = normal + index * 2 + 1;
+    if (index * 2 + 1 < translate) {
+        uint32_t a = p[off];
+        if (a >= 0x00100000u && a < 0x20000000u) return a;
+    }
+    {
+        uint32_t a = p[0x10 + index * 2];
+        if (a >= 0x00100000u && a < 0x20000000u) return a;
+    }
+    return 0;
+}
+
+static int fs_req_path(uint32_t *p, int normal, int translate, int index, uint32_t type,
+                       uint32_t size, uint8_t *out, size_t cap) {
+    uint32_t addr = fs_req_buffer_addr(p, normal, translate, index);
+    if (addr == 0) {
+        if (cap) out[0] = 0;
+        return 0;
+    }
+    return fs_archive_decode_path(g_cur_mem, type, size, addr, out, cap);
+}
+
+static int fs_open_host_file(const char *host, const char *label, FileSlot **slot_out) {
+    FILE *fp = fopen(host, "r+b");
+    long sz;
+    if (fp == NULL) fp = fopen(host, "rb");
+    if (fp == NULL) return 0;
+    fseek(fp, 0, SEEK_END);
+    sz = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (!g_files[i].used) {
+            g_files[i].used = 1;
+            snprintf(g_files[i].path, sizeof(g_files[i].path), "%s", label);
+            g_files[i].fp = fp;
+            g_files[i].size = (uint32_t)sz;
+            *slot_out = &g_files[i];
+            return 1;
+        }
+    }
+    fclose(fp);
+    return 0;
+}
+
+static void fs_reply_result(Ipc *r, uint32_t cmd, uint32_t res) {
+    ipc_begin(r, cmd, 1, 0);
+    ipc_put(r, res);
+}
+
 static void fs_command(Ipc *r, uint32_t *p) {
     if (getenv("HLE_FS_PATHS")) {
         printf("[fscmd] cmd=0x%04X n=%d t=%d", r->cmd, r->normal, r->translate);
-        for (int i = 0; i < r->normal && i < 8; i++) printf(" p%d=%08X", i, p[i]);
-        for (int q = 0; q + 1 < r->translate; q += 2) {
-            uint32_t fl = p[r->normal + q];
-            uint32_t ad = p[r->normal + q + 1];
-            printf(" | b%d fl=%08X a=%08X:", q / 2, fl, ad);
-            if (ad >= 0x08000000u && ad < 0x20000000u) {
-                const uint8_t *bb = g_cur_mem + (ad & 0x1FFFFFFFu);
-                for (int k = 0; k < 20; k++) printf(" %02X", bb[k]);
-            }
-        }
+        for (int i = 0; i < r->normal && i < 10; i++) printf(" p%d=%08X", i, p[i]);
         printf("\n");
     }
     switch (r->cmd) {
@@ -1426,229 +1480,365 @@ static void fs_command(Ipc *r, uint32_t *p) {
             ipc_put(r, 0);
             break;
         }
-        case 0x0802: case 0x0803: { /* OpenFile / OpenFileDirectly */
-            char path[256];
+        case 0x0802: { /* OpenFile */
+            uint64_t archive = (uint64_t)p[1] | ((uint64_t)p[2] << 32);
+            uint32_t type = p[3], size = p[4], mode = p[5], attrs = p[6];
+            uint8_t raw[FS_ARCHIVE_PATH_MAX];
+            char path[FS_ARCHIVE_PATH_MAX];
+            char host[FS_ARCHIVE_PATH_MAX];
+            FileSlot *slot = NULL;
+            uint32_t h = 0;
+            uint32_t res = FS_RESULT_INVALID_PATH;
+            int len = fs_req_path(p, r->normal, r->translate, 0, type, size, raw, sizeof(raw));
+
             path[0] = 0;
-            /* Translate-Bereich: pro Puffer {size_flags, adresse}, Groesse = flags >> 4. */
-            uint32_t ftype, fsize;
-            if (r->cmd == 0x0802) {
-                ftype = (r->normal >= 5) ? p[3] : 3;
-                fsize = (r->normal >= 5) ? p[4] : 0;
-            } else {
-                ftype = (r->normal >= 6) ? p[4] : 3;
-                fsize = (r->normal >= 6) ? p[5] : 0;
-            }
-            uint32_t addr = 0, len = 0;
-            if (r->normal >= 5 && r->translate >= 2) {
-                int idx = (r->cmd == 0x0803 && r->translate >= 4) ? 2 : 0;
-                uint32_t flags = p[r->normal + idx];
-                addr = p[r->normal + idx + 1];
-                len = flags >> 4;
+            if (len > 0 && (type == 3 || type == 4)) snprintf(path, sizeof(path), "%s", raw);
+            if (archive != 0 && path[0]) {
+                res = fs_archive_open_file(archive, path, mode, attrs, host, sizeof(host));
+                if (res == FS_RESULT_SUCCESS) {
+                    if (fs_open_host_file(host, host, &slot)) {
+                        h = (uint32_t)alloc_handle(SVC_FILE, "file");
+                        if (h && h < MAX_HANDLES) g_handles[h].file = (int)(slot - g_files);
+                    } else {
+                        res = FS_RESULT_FILE_NOT_FOUND;
+                    }
+                }
+            } else if (archive == 0) {
+                if (path[0] && open_guest_file(path, &slot)) {
+                    res = FS_RESULT_SUCCESS;
+                    h = (uint32_t)alloc_handle(SVC_FILE, "file");
+                    if (h && h < MAX_HANDLES) g_handles[h].file = (int)(slot - g_files);
+                }
             }
             if (g_log) {
-                printf("[fsdbg-raw] cmd=%04X p:", r->cmd);
-                for (int i = 0; i < r->normal && i < 10; i++) printf(" %08X", p[i]);
-                printf("\n");
-                printf("[fsdbg] cmd=%04X n=%d t=%d type=%u size=%u addr=%08X len=%u",
-                       r->cmd, r->normal, r->translate, ftype, fsize, addr, len);
-                if (addr) {
-                    const uint8_t *dbg = g_cur_mem + (addr & 0x1FFFFFFFu);
-                    printf(" bytes:");
-                    for (int i = 0; i < 32; i++) printf(" %02X", dbg[i]);
-                }
-                /* Alle Translate-Paare mitschreiben, um den echten Pfadpuffer zu finden. */
-                for (int q = 0; q + 1 < r->translate; q += 2) {
-                    uint32_t f2 = p[r->normal + q];
-                    uint32_t a2 = p[r->normal + q + 1];
-                    printf(" | t%d flags=%08X addr=%08X:", q / 2, f2, a2);
-                    if (a2 >= 0x08000000u && a2 < 0x20000000u) {
-                        const uint8_t *b2 = g_cur_mem + (a2 & 0x1FFFFFFFu);
-                        for (int k = 0; k < 24; k++) printf(" %02X", b2[k]);
-                    }
-                }
-                printf("\n");
+                printf("[fs] OpenFile \"%s\" archive=%llu result=%08X handle=%u\n",
+                       path, (unsigned long long)archive, res, h);
             }
-            /* Pfadpuffer liegen auch im .data-Bereich (z. B. 0x3CF74A),
-               nicht nur im Heap ab 0x08000000. */
-            if (addr >= 0x00100000u && addr < 0x20000000u) {
-                const uint8_t *src = g_cur_mem + (addr & 0x1FFFFFFFu);
-                uint32_t limit = len ? len : fsize;
-                if (limit > 250 || limit < 2) limit = 250;
-                int n = 0;
-                /* Robuste Erkennung: Wchar, wenn das zweite Byte 0 ist. */
-                if (src[1] == 0) {
-                    for (uint32_t i = 0; i + 1 < limit && n < 250; i += 2) {
-                        if (src[i] == 0) break;
-                        path[n++] = (char)src[i];
-                    }
-                } else {
-                    for (uint32_t i = 0; i < limit && n < 250; i++) {
-                        if (src[i] == 0) break;
-                        path[n++] = (char)src[i];
-                    }
-                }
-                path[n] = 0;
-            }
-            if (getenv("HLE_FS_PATHS")) {
-                printf("[fspath] n=%d t=%d ftype=%u fsize=%u",
-                       r->normal, r->translate, p[4], p[5]);
-                for (int q = 0; q + 1 < r->translate; q += 2) {
-                    uint32_t fl = p[r->normal + q];
-                    uint32_t ad = p[r->normal + q + 1];
-                    printf(" | b%d fl=%08X a=%08X:", q / 2, fl, ad);
-                    if (ad >= 0x08000000u && ad < 0x20000000u) {
-                        const uint8_t *bb = g_cur_mem + (ad & 0x1FFFFFFFu);
-                        for (int k = 0; k < 24; k++) printf(" %02X", bb[k]);
-                    }
-                }
-                printf("\n");
-            }
+            ipc_begin(r, 0x0802, 1, 2);
+            ipc_put(r, res);
+            ipc_put_handle(r, h);
+            break;
+        }
+        case 0x0803: { /* OpenFileDirectly */
+            uint32_t aid = p[1];
+            uint32_t atype = p[2], asize = p[3], ftype = p[4], fsize = p[5];
+            uint32_t mode = p[6], attrs = p[7];
+            uint8_t araw[FS_ARCHIVE_PATH_MAX];
+            uint8_t fraw[FS_ARCHIVE_PATH_MAX];
+            char fpath[FS_ARCHIVE_PATH_MAX];
+            char host[FS_ARCHIVE_PATH_MAX];
             FileSlot *slot = NULL;
-            int opened = 0;
-            /* SelfNCCH (Archive-ID 3): das Spiel oeffnet sein eigenes RomFS
-               direkt. Wir liefern das extrahierte Image (IVFC-Header + Daten). */
-            if (r->cmd == 0x0803 && r->normal >= 2 && p[1] == 3) {
-                FILE *img = fopen("out/romfs_image.bin", "rb");
-                if (img != NULL) {
-                    fseek(img, 0, SEEK_END);
-                    long isz = ftell(img);
-                    fseek(img, 0, SEEK_SET);
-                    for (int i = 0; i < MAX_FILES; i++) {
-                        if (!g_files[i].used) {
-                            g_files[i].used = 1;
-                            g_files[i].fp = img;
-                            g_files[i].size = (uint32_t)isz;
-                            snprintf(g_files[i].path, sizeof(g_files[i].path),
-                                     "out/romfs_image.bin");
-                            slot = &g_files[i];
-                            opened = 1;
-                            if (g_log) printf("[fs] SelfNCCH-Image geoeffnet (%ld Byte)\n", isz);
-                            break;
-                        }
-                    }
-                    if (!opened) fclose(img);
-                }
-            }
-            if (!opened && path[0]) opened = open_guest_file(path, &slot);
-            if (!opened) {
-                /* Kein/leerer Pfad: als Archiv-Wurzel (Sentinel) bedienen. */
-                for (int i = 0; i < MAX_FILES; i++) {
-                    if (!g_files[i].used) {
-                        g_files[i].used = 1;
-                        g_files[i].fp = NULL;
-                        g_files[i].size = (path[0] == 0) ? 0u : 0x400u;
-                        snprintf(g_files[i].path, sizeof(g_files[i].path), "out/savedata/save_%d.sav", i);
-                        slot = &g_files[i];
-                        opened = 1;
-                        if (g_log) printf("[fs] Sentinel-Slot %d (path=\"%s\" size=%u)\n",
-                                         i, path, g_files[i].size);
-                        break;
-                    }
-                }
-            }
             uint32_t h = 0;
-            if (opened) {
+            uint32_t res = FS_RESULT_INVALID_PATH;
+            int alen = fs_req_path(p, r->normal, r->translate, 0, atype, asize, araw, sizeof(araw));
+            int flen = fs_req_path(p, r->normal, r->translate, 1, ftype, fsize, fraw, sizeof(fraw));
+
+            fpath[0] = 0;
+            if (aid == 3) {
+                uint32_t kind = 0;
+                if (flen >= 4) memcpy(&kind, fraw, 4);
+                if (kind == 0 || kind == 5) {
+                    if (fs_open_host_file("out/romfs_image.bin", "out/romfs_image.bin", &slot))
+                        res = FS_RESULT_SUCCESS;
+                } else if (kind == 2) {
+                    char nm[9];
+                    memcpy(nm, fraw + 4, 8);
+                    nm[8] = 0;
+                    snprintf(host, sizeof(host), "out/exefs/%s.bin", nm);
+                    if (fs_open_host_file(host, host, &slot)) res = FS_RESULT_SUCCESS;
+                }
+            } else {
+                int64_t ah = fs_archive_open(aid, araw, (uint32_t)(alen > 0 ? alen : 0),
+                                             fs_archive_program_id(), &res);
+                if (ah > 0) {
+                    if (flen > 0 && (ftype == 3 || ftype == 4))
+                        snprintf(fpath, sizeof(fpath), "%s", fraw);
+                    res = fs_archive_open_file((uint64_t)ah, fpath, mode, attrs, host, sizeof(host));
+                    fs_archive_close((uint64_t)ah);
+                    if (res == FS_RESULT_SUCCESS && !fs_open_host_file(host, host, &slot))
+                        res = FS_RESULT_FILE_NOT_FOUND;
+                }
+            }
+            if (res == FS_RESULT_SUCCESS && slot != NULL) {
                 h = (uint32_t)alloc_handle(SVC_FILE, "file");
                 if (h && h < MAX_HANDLES) g_handles[h].file = (int)(slot - g_files);
             }
             if (g_log) {
-                printf("[fs] dump:");
-                for (int i = 0; i < 24; i++) printf(" %08X", p[i]);
-                printf("\n     ascii:");
-                for (int i = 0; i < 96; i++) {
-                    uint8_t ch = ((const uint8_t *)p)[i];
-                    printf("%c", (ch >= 0x20 && ch < 0x7F) ? ch : '.');
-                }
-                printf("\n");
-                if (g_log) {
-                    for (int k = r->normal; k + 1 < r->normal + r->translate; k += 2) {
-                        uint32_t a2 = p[k + 1];
-                        if (a2 >= 0x08000000u && a2 < 0x20000000u) {
-                            printf("[fs] mem 0x%08X:", a2);
-                            for (int b = 0; b < 20; b++) {
-                                printf(" %02X", g_cur_mem[(a2 & 0x1FFFFFFFu) + b]);
-                            }
-                            printf("\n");
-                        }
-                    }
-                }
-                if (addr >= 0x08000000u && addr < 0x20000000u) {
-                    printf("[fs] buf@0x%08X len=%u bytes:", addr, len);
-                    for (uint32_t i = 0; i < (len < 16 ? len : 16); i++) {
-                        printf(" %02X", g_cur_mem[(addr & 0x1FFFFFFFu) + i]);
-                    }
-                    printf("\n");
-                }
-                printf("[fs] %s \"%s\" -> %s (handle %u, %u KiB)\n",
-                       r->cmd == 0x0802 ? "OpenFile" : "OpenFileDirectly", path,
-                       opened ? "ok" : "FEHLER", h, opened ? slot->size / 1024 : 0);
+                printf("[fs] OpenFileDirectly id=%u result=%08X handle=%u\n", aid, res, h);
             }
-            /* Azahar (fs_user.cpp): MakeBuilder(1,2)
-               Push(file_res.Code()), PushMoveObjects(file). */
-            ipc_begin(r, r->cmd, 1, 2);
-            ipc_put(r, 0);          /* ResultSuccess */
-            ipc_put_handle(r, h);   /* MoveHandle(file) */
+            ipc_begin(r, 0x0803, 1, 2);
+            ipc_put(r, res);
+            ipc_put_handle(r, h);
             break;
         }
-        case 0x0861: case 0x0862: { /* InitializeWithSdkVersion / SetPriority: Result */
+        case 0x0804: { /* DeleteFile */
+            uint64_t a = (uint64_t)p[1] | ((uint64_t)p[2] << 32);
+            uint8_t raw[FS_ARCHIVE_PATH_MAX];
+            char path[FS_ARCHIVE_PATH_MAX];
+            int len = fs_req_path(p, r->normal, r->translate, 0, p[3], p[4], raw, sizeof(raw));
+            uint32_t res = FS_RESULT_INVALID_PATH;
+            path[0] = 0;
+            if (len > 0 && (p[3] == 3 || p[3] == 4)) snprintf(path, sizeof(path), "%s", raw);
+            if (path[0]) res = fs_archive_delete_file(a, path);
+            if (g_log) printf("[fs] DeleteFile \"%s\" -> %08X\n", path, res);
+            fs_reply_result(r, 0x0804, res);
+            break;
+        }
+        case 0x0805: { /* RenameFile */
+            uint64_t src = (uint64_t)p[1] | ((uint64_t)p[2] << 32);
+            uint64_t dst = (uint64_t)p[5] | ((uint64_t)p[6] << 32);
+            uint8_t sraw[FS_ARCHIVE_PATH_MAX], draw[FS_ARCHIVE_PATH_MAX];
+            char sp[FS_ARCHIVE_PATH_MAX], dp[FS_ARCHIVE_PATH_MAX];
+            uint32_t res = FS_RESULT_INVALID_PATH;
+            int slen = fs_req_path(p, r->normal, r->translate, 0, p[3], p[4], sraw, sizeof(sraw));
+            int dlen = fs_req_path(p, r->normal, r->translate, 1, p[7], p[8], draw, sizeof(draw));
+            sp[0] = dp[0] = 0;
+            if (slen > 0 && (p[3] == 3 || p[3] == 4)) snprintf(sp, sizeof(sp), "%s", sraw);
+            if (dlen > 0 && (p[7] == 3 || p[7] == 4)) snprintf(dp, sizeof(dp), "%s", draw);
+            if (sp[0] && dp[0]) res = fs_archive_rename_file(src, sp, dst, dp);
+            if (g_log) printf("[fs] RenameFile \"%s\" -> \"%s\" : %08X\n", sp, dp, res);
+            fs_reply_result(r, 0x0805, res);
+            break;
+        }
+        case 0x0806: case 0x0807: { /* DeleteDirectory */
+            uint64_t a = (uint64_t)p[1] | ((uint64_t)p[2] << 32);
+            uint8_t raw[FS_ARCHIVE_PATH_MAX];
+            char path[FS_ARCHIVE_PATH_MAX];
+            int len = fs_req_path(p, r->normal, r->translate, 0, p[3], p[4], raw, sizeof(raw));
+            uint32_t res = FS_RESULT_INVALID_PATH;
+            path[0] = 0;
+            if (len > 0 && (p[3] == 3 || p[3] == 4)) snprintf(path, sizeof(path), "%s", raw);
+            if (path[0]) res = fs_archive_delete_directory(a, path, r->cmd == 0x0807);
+            if (g_log) printf("[fs] DeleteDirectory \"%s\" rec=%d -> %08X\n", path,
+                              r->cmd == 0x0807, res);
+            fs_reply_result(r, r->cmd, res);
+            break;
+        }
+        case 0x0808: { /* CreateFile */
+            uint64_t a = (uint64_t)p[1] | ((uint64_t)p[2] << 32);
+            uint64_t fsize = (uint64_t)p[6] | ((uint64_t)p[7] << 32);
+            uint8_t raw[FS_ARCHIVE_PATH_MAX];
+            char path[FS_ARCHIVE_PATH_MAX];
+            int len = fs_req_path(p, r->normal, r->translate, 0, p[3], p[4], raw, sizeof(raw));
+            uint32_t res = FS_RESULT_INVALID_PATH;
+            path[0] = 0;
+            if (len > 0 && (p[3] == 3 || p[3] == 4)) snprintf(path, sizeof(path), "%s", raw);
+            if (path[0]) res = fs_archive_create_file(a, path, fsize, p[5]);
+            if (g_log) printf("[fs] CreateFile \"%s\" size=%llu -> %08X\n", path,
+                              (unsigned long long)fsize, res);
+            fs_reply_result(r, 0x0808, res);
+            break;
+        }
+        case 0x0809: { /* CreateDirectory */
+            uint64_t a = (uint64_t)p[1] | ((uint64_t)p[2] << 32);
+            uint8_t raw[FS_ARCHIVE_PATH_MAX];
+            char path[FS_ARCHIVE_PATH_MAX];
+            int len = fs_req_path(p, r->normal, r->translate, 0, p[3], p[4], raw, sizeof(raw));
+            uint32_t res = FS_RESULT_INVALID_PATH;
+            path[0] = 0;
+            if (len > 0 && (p[3] == 3 || p[3] == 4)) snprintf(path, sizeof(path), "%s", raw);
+            if (path[0]) res = fs_archive_create_directory(a, path, p[5]);
+            if (g_log) printf("[fs] CreateDirectory \"%s\" -> %08X\n", path, res);
+            fs_reply_result(r, 0x0809, res);
+            break;
+        }
+        case 0x080A: { /* RenameDirectory */
+            uint64_t src = (uint64_t)p[1] | ((uint64_t)p[2] << 32);
+            uint64_t dst = (uint64_t)p[5] | ((uint64_t)p[6] << 32);
+            uint8_t sraw[FS_ARCHIVE_PATH_MAX], draw[FS_ARCHIVE_PATH_MAX];
+            char sp[FS_ARCHIVE_PATH_MAX], dp[FS_ARCHIVE_PATH_MAX];
+            uint32_t res = FS_RESULT_INVALID_PATH;
+            int slen = fs_req_path(p, r->normal, r->translate, 0, p[3], p[4], sraw, sizeof(sraw));
+            int dlen = fs_req_path(p, r->normal, r->translate, 1, p[7], p[8], draw, sizeof(draw));
+            sp[0] = dp[0] = 0;
+            if (slen > 0 && (p[3] == 3 || p[3] == 4)) snprintf(sp, sizeof(sp), "%s", sraw);
+            if (dlen > 0 && (p[7] == 3 || p[7] == 4)) snprintf(dp, sizeof(dp), "%s", draw);
+            if (sp[0] && dp[0]) res = fs_archive_rename_file(src, sp, dst, dp);
+            if (g_log) printf("[fs] RenameDirectory \"%s\" -> \"%s\" : %08X\n", sp, dp, res);
+            fs_reply_result(r, 0x080A, res);
+            break;
+        }
+        case 0x080B: { /* OpenDirectory */
+            uint64_t a = (uint64_t)p[0] | ((uint64_t)p[1] << 32);
+            uint8_t raw[FS_ARCHIVE_PATH_MAX];
+            char path[FS_ARCHIVE_PATH_MAX];
+            char host[FS_ARCHIVE_PATH_MAX];
+            uint32_t h = 0;
+            uint32_t res;
+            int slot = -1;
+            int len = fs_req_path(p, r->normal, r->translate, 0, p[2], p[3], raw, sizeof(raw));
+            path[0] = 0;
+            if (len > 0 && (p[2] == 3 || p[2] == 4)) snprintf(path, sizeof(path), "%s", raw);
+            res = path[0] ? fs_archive_open_directory(a, path, host, sizeof(host))
+                          : FS_RESULT_INVALID_PATH;
+            if (res == FS_RESULT_SUCCESS) slot = fs_archive_dir_open(host, &res);
+            if (slot >= 0) {
+                h = (uint32_t)alloc_handle(SVC_FILE, "dir");
+                if (h && h < MAX_HANDLES) {
+                    g_handles[h].dir = slot;
+                    g_handles[h].file = -1;
+                }
+                res = FS_RESULT_SUCCESS;
+            }
+            if (g_log) printf("[fs] OpenDirectory \"%s\" -> %08X handle=%u\n", path, res, h);
+            ipc_begin(r, 0x080B, 1, 2);
+            ipc_put(r, res);
+            ipc_put_handle(r, h);
+            break;
+        }
+        case 0x080C: { /* OpenArchive */
+            uint32_t id = p[0];
+            uint8_t raw[FS_ARCHIVE_PATH_MAX];
+            uint32_t res = FS_RESULT_SUCCESS;
+            int64_t ah;
+            int len = fs_req_path(p, r->normal, r->translate, 0, p[1], p[2], raw, sizeof(raw));
+            ah = fs_archive_open(id, raw, (uint32_t)(len > 0 ? len : 0), fs_archive_program_id(),
+                                 &res);
+            if (g_log) {
+                printf("[fs] OpenArchive id=0x%08X type=%u size=%u len=%d -> %08X handle=%lld\n",
+                       id, p[1], p[2], len, res, (long long)ah);
+            }
+            ipc_begin(r, 0x080C, 3, 0);
+            ipc_put(r, res);
+            ipc_put(r, ah > 0 ? (uint32_t)(uint64_t)ah : 0u);
+            ipc_put(r, ah > 0 ? (uint32_t)((uint64_t)ah >> 32) : 0u);
+            break;
+        }
+        case 0x080D: { /* ControlArchive */
+            uint64_t a = (uint64_t)p[0] | ((uint64_t)p[1] << 32);
+            uint32_t res = fs_archive_control(a, p[2], p[3], p[4]);
+            if (g_log) printf("[fs] ControlArchive h=%llu action=%u -> %08X\n",
+                              (unsigned long long)a, p[2], res);
+            fs_reply_result(r, 0x080D, res);
+            break;
+        }
+        case 0x080E: { /* CloseArchive */
+            uint64_t a = (uint64_t)p[0] | ((uint64_t)p[1] << 32);
+            uint32_t res = fs_archive_close(a);
+            if (g_log) printf("[fs] CloseArchive h=%llu -> %08X\n", (unsigned long long)a, res);
+            fs_reply_result(r, 0x080E, res);
+            break;
+        }
+        case 0x080F: { /* FormatThisUserSaveData */
+            FsFormatInfo info;
+            info.total_size = p[0] * 512u;
+            info.number_directories = p[1];
+            info.number_files = p[2];
+            info.duplicate_data = (uint8_t)p[5];
+            if (g_log) printf("[fs] FormatThisUserSaveData\n");
+            fs_reply_result(r, 0x080F,
+                            fs_archive_format(4, NULL, 0, fs_archive_program_id(), &info));
+            break;
+        }
+        case 0x0812: { /* GetFreeBytes */
+            uint64_t a = (uint64_t)p[0] | ((uint64_t)p[1] << 32);
+            char root[FS_ARCHIVE_PATH_MAX];
+            uint32_t res = fs_archive_root(a, root, sizeof(root)) ? FS_RESULT_SUCCESS
+                                                                  : FS_RESULT_INVALID_ARCHIVE_HANDLE;
+            ipc_begin(r, 0x0812, 3, 0);
+            ipc_put(r, res);
+            ipc_put(r, res == FS_RESULT_SUCCESS ? 0x40000000u : 0u);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x0813: case 0x0821: {
+            ipc_begin(r, r->cmd, 2, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x0817: case 0x0818: {
+            ipc_begin(r, r->cmd, 2, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 1);
+            break;
+        }
+        case 0x0814: {
+            ipc_begin(r, 0x0814, 5, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 512);
+            ipc_put(r, 0x8000);
+            ipc_put(r, 0x100000);
+            ipc_put(r, 0x080000);
+            break;
+        }
+        case 0x0831: case 0x0851: { /* CreateSharedExtSaveData / CreateExtSaveData */
+            uint32_t media = p[0] & 0xFFu;
+            uint8_t bin[12];
+            FsFormatInfo info;
+            uint32_t res;
+            memcpy(bin + 0, &p[0], 4);
+            memcpy(bin + 4, &p[1], 4);
+            memcpy(bin + 8, &p[2], 4);
+            info.number_directories = p[4];
+            info.number_files = p[5];
+            info.total_size = p[6];
+            info.duplicate_data = 0;
+            if (g_log) printf("[fs] CreateExtSaveData cmd=%04X low=%08X high=%08X media=%u\n",
+                              r->cmd, p[1], p[2], media);
+            res = fs_archive_create_ext(r->cmd == 0x0831 ? 7u : 6u, bin, sizeof(bin), &info,
+                                        fs_archive_program_id());
+            ipc_begin(r, r->cmd, 1, 2);
+            ipc_put(r, res);
+            ipc_put(r, (r->translate >= 2) ? p[r->normal] : 0u);
+            ipc_put(r, (r->translate >= 2) ? p[r->normal + 1] : 0u);
+            break;
+        }
+        case 0x0845: { /* GetFormatInfo */
+            FsFormatInfo info;
+            uint8_t raw[FS_ARCHIVE_PATH_MAX];
+            uint32_t res;
+            int len = fs_req_path(p, r->normal, r->translate, 0, p[1], p[2], raw, sizeof(raw));
+            memset(&info, 0, sizeof(info));
+            res = fs_archive_get_format_info(p[0], raw, (uint32_t)(len > 0 ? len : 0),
+                                             fs_archive_program_id(), &info);
+            if (g_log) printf("[fs] GetFormatInfo id=%u -> %08X\n", p[0], res);
+            ipc_begin(r, 0x0845, 5, 0);
+            ipc_put(r, res);
+            ipc_put(r, res == FS_RESULT_SUCCESS ? info.total_size : 0u);
+            ipc_put(r, res == FS_RESULT_SUCCESS ? info.number_directories : 0u);
+            ipc_put(r, res == FS_RESULT_SUCCESS ? info.number_files : 0u);
+            ipc_put(r, res == FS_RESULT_SUCCESS ? (uint32_t)info.duplicate_data : 0u);
+            break;
+        }
+        case 0x084C: { /* FormatSaveData */
+            FsFormatInfo info;
+            uint8_t raw[FS_ARCHIVE_PATH_MAX];
+            uint32_t res;
+            int len = fs_req_path(p, r->normal, r->translate, 0, p[1], p[2], raw, sizeof(raw));
+            (void) len;
+            info.total_size = p[3] * 512u;
+            info.number_directories = p[4];
+            info.number_files = p[5];
+            info.duplicate_data = (uint8_t)p[8];
+            if (p[0] != 4 || p[1] != 1) {
+                res = FS_RESULT_INVALID_PATH;
+            } else {
+                res = fs_archive_format(4, NULL, 0, fs_archive_program_id(), &info);
+            }
+            if (g_log) printf("[fs] FormatSaveData id=%u type=%u -> %08X\n", p[0], p[1], res);
+            fs_reply_result(r, 0x084C, res);
+            break;
+        }
+        case 0x0856: { /* CreateSystemSaveData */
+            FsFormatInfo info;
+            info.total_size = p[2];
+            info.number_directories = p[4];
+            info.number_files = p[5];
+            info.duplicate_data = (uint8_t)p[8];
+            if (g_log) printf("[fs] CreateSystemSaveData high=%08X low=%08X\n", p[0], p[1]);
+            fs_reply_result(r, 0x0856, fs_archive_create_system(p[0], p[1], &info));
+            break;
+        }
+        case 0x0861: case 0x0862: {
             ipc_begin(r, r->cmd, 1, 0);
             put_result(r);
             break;
         }
-        case 0x0863: { /* GetPriority: Result + Priority */
+        case 0x0863: {
             ipc_begin(r, 0x0863, 2, 0);
             put_result(r);
-            ipc_put(r, 0);          /* priority (noch nicht gesetzt) */
-            break;
-        }
-        case 0x080C: { /* OpenArchive: Result + u64 ArchiveHandle */
-            char path[256];
-            find_path(p, path, sizeof(path));
-            uint32_t h = (uint32_t)alloc_handle(SVC_FS_USER, "archive");
-            if (g_log) printf("[fs] OpenArchive id=0x%08X type=%u size=%u path=\"%s\" -> handle %u\n",
-                              p[0], p[1], p[2], path, h);
-            /* Azahar: MakeBuilder(3,0), Push(result), PushRaw<u64>(handle). */
-            ipc_begin(r, 0x080C, 3, 0);
-            put_result(r);
-            ipc_put(r, h);          /* handle low  */
-            ipc_put(r, 0);          /* handle high */
-            break;
-        }
-        case 0x0808: { /* CreateFile -> MakeBuilder(1,0) */
-            char cpath[256];
-            find_path(p, cpath, sizeof(cpath));
-            ipc_begin(r, 0x0808, 1, 0);
             ipc_put(r, 0);
-            if (g_log) printf("[fs] CreateFile \"%s\" -> ok\n", cpath);
-            break;
-        }
-        case 0x080D: { /* ControlArchive */
-            ipc_begin(r, 0x080D, 1, 0);
-            ipc_put(r, 0);
-            break;
-        }
-        case 0x080E: { /* CloseArchive */
-            ipc_begin(r, 0x080E, 1, 0);
-            ipc_put(r, 0);
-            break;
-        }
-        case 0x0812: { /* GetFreeBytes */
-            ipc_begin(r, 0x0812, 3, 0);
-            ipc_put(r, 0);
-            ipc_put(r, 0x10000000u);
-            ipc_put(r, 0);
-            break;
-        }
-        case 0x0813: case 0x0821: { /* GetCardType / CardSlotIsInserted: Result + bool */
-            ipc_begin(r, r->cmd, 2, 0);
-            put_result(r);
-            ipc_put(r, 0);
-            break;
-        }
-        case 0x0817: case 0x0818: { /* IsSdmcDetected / IsSdmcWriteable: Result + bool */
-            ipc_begin(r, r->cmd, 2, 0);
-            put_result(r);
-            ipc_put(r, 1);          /* virtuelle SD vorhanden/schreibbar */
             break;
         }
         default:
@@ -1676,6 +1866,39 @@ static uint32_t ipc_out_buffer(uint32_t *p, int normal, int translate) {
 
 static void file_command(Ipc *r, uint32_t *p) {
     Handle *h = get_handle(g_cur_handle);
+    if (h != NULL && h->dir >= 0) {
+        /* Directory-Objekt (Azahar service/fs/directory.cpp): 0x0801 Read,
+         * 0x0802 Close.  Der Puffer ist ein MappedBuffer im Translate-Teil. */
+        switch (r->cmd) {
+            case 0x0801: {
+                uint32_t count = p[0];
+                uint32_t addr = (r->translate >= 2) ? p[r->normal + 1] : 0u;
+                uint32_t got = 0;
+                uint32_t res;
+                res = fs_archive_dir_read(h->dir,
+                                          addr ? g_cur_mem + (addr & 0x1FFFFFFFu) : NULL,
+                                          count, &got);
+                if (g_log) printf("[fs] DirRead count=%u -> %08X got=%u\n", count, res, got);
+                ipc_begin(r, 0x0801, 2, 2);
+                ipc_put(r, res);
+                ipc_put(r, got);
+                ipc_put(r, (r->translate >= 2) ? p[r->normal] : 0u);
+                ipc_put(r, (r->translate >= 2) ? p[r->normal + 1] : 0u);
+                break;
+            }
+            case 0x0802: {
+                fs_archive_dir_close(h->dir);
+                h->dir = -1;
+                ipc_begin(r, 0x0802, 1, 0);
+                ipc_put(r, 0);
+                break;
+            }
+            default:
+                generic_command(r, SVC_FILE);
+                break;
+        }
+        return;
+    }
     if (h == NULL || h->file < 0) {
         /* Richtige Reply-Form auch ohne Datei, sonst wertet die SDK
            "0 Bytes gelesen" als Fehler (F96047A2). */
@@ -3406,7 +3629,15 @@ static void dispatch_ipc(uint32_t handle) {
     /* 0x08xx IMMER nach Kommandoform routen: das Spiel schickt Datei-
        Kommandos auch auf Handles, die wir anders vergeben haben. */
     if ((cmd & 0xFF00u) == 0x0800u) {
-        if (cmd == 0x080Cu || cmd == 0x080Du || cmd == 0x080Eu || cmd == 0x0812u)
+        int handle_is_fs = (service == SVC_FS_USER || service == SVC_FS_LDR);
+        int handle_is_file = (h != NULL && h->file >= 0);
+        int handle_is_dir = (h != NULL && h->dir >= 0);
+        if (handle_is_dir || handle_is_file) {
+            service = SVC_FILE;
+        } else if (handle_is_fs) {
+            /* Echte fs:USER-Session: 0x0802/0x0803/0x0808 sind hier
+             * OpenFile/OpenFileDirectly/CreateFile, nicht Datei-Kommandos. */
+        } else if (cmd == 0x080Cu || cmd == 0x080Du || cmd == 0x080Eu || cmd == 0x0812u)
             service = SVC_FS_USER;
         /* 0x0803 ist mehrdeutig: als fs:USER-Kommando ist es
            OpenFileDirectly (8 Parameter + 2 Puffer), als Datei-
@@ -3624,6 +3855,7 @@ static DWORD WINAPI vblank_thread(LPVOID p) {
 
 void hle_init(ArmCpu *c, const char *romfs_dir) {
     ensure_savedata();
+    fs_archive_init("out/savedata");
     g_cpu = c;
     g_main_cpu = c;
     snprintf(g_romfs, sizeof(g_romfs), "%s", romfs_dir ? romfs_dir : "out/romfs");

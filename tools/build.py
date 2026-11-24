@@ -28,6 +28,7 @@ SOURCES = [
     "cpu/arm_cpu.c",
     "cpu/arm_trace.c",
     "kernel/hle.c",
+    "kernel/fs_archive.c",
     "gpu/gpu.c",
     "gpu/imgc.c",
     "audio/audio_codec.c",
