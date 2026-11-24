@@ -1178,3 +1178,42 @@ laesst den Player aus Zustand 2 neu starten (Self-Restart `0x312684` ->
 `play`). Dieser Aufruf (bzw. der Titel-Szenen-Zustand, der ihn ausloest)
 kommt im 60-s-Lauf nicht; er haengt am noch fehlenden Draw-/Szenen-Pfad
 (M3/M4), nicht am Y2R-Treiber. Kein Workaround eingebaut.
+
+### Filmtonspur: DSP-Quellen spielen die BCSTM vollstaendig ab – Hypothese widerlegt 2026-11-24
+
+**Auftragshypothese** („der Stream-Thread wartet auf freie DSP-Puffer, das
+HLE-DSP meldet nichts als abgespielt“) ist **widerlegt**. Belege aus einem
+25-s-Lauf mit `HLE_LOG=1 HLE_AUDIO_LOG=1` (Laeufe `scratch/diag_audio2.log`,
+`scratch/diag_state2c.log`):
+
+* **Datei vollstaendig gelesen:** `MOV_999.dspadpcm.bcstm` ist `0x4F4A0`
+  Byte. Der Port liest `0x40`/`0x140` ab `0x379F19C0` (BCSTM-Kopf, 0x220)
+  und danach 14x `0x4000` + `0x3280` ab `0x379F1BE0`; der letzte Read endet
+  bei `0x37A40E60`, also exakt am Dateiende. Alle Reads liefern `done == len`.
+* **Ton vollstaendig abgespielt:** Quellen 0 und 1 (ADPCM, mono) bekommen
+  Puffer-IDs 1…20 (`18x 14336` + `11258` Samples). `dequeue` schreitet fort,
+  `buffer_position` laeuft mit, nach dem letzten Puffer meldet der DSP den
+  Underrun (`enabled=0`, `buffer_update=1`, `last_buffer_id=20`), das Spiel
+  setzt selbst `enable=0` (dirty `0x20010000`). Die Statusfelder
+  `is_enabled`/`current_buffer_id_dirty`/`current_buffer_id`/
+  `last_buffer_id`/`buffer_position` aus `source.cpp` funktionieren also.
+* **Reihenfolge:** `ARM_WATCH=0x312684` (Zustand-2-Pfad des Movie-Players,
+  Loop-Check) trifft erstmals **vor** dem Audio-Underrun (Logzeile 4259 vs.
+  4799). Der Film ist bereits in Zustand 2 (fertig), waehrend die Tonspur
+  noch laeuft; der Szenenwechsel kann nicht auf das Tonende warten.
+
+**Was den Szenenwechsel stattdessen aufhaelt (belegt, nicht behoben):** Der
+Movie-Task bleibt im Task-Runner `fn_0012B3EC` haengen. Er ruft weiterhin
+`fn_00380D34 -> fn_00312E98` (Movie-Update) auf; der Presenter `fn_00218248`
+kehrt in Zustand 2 sofort mit 0 zurueck (`HLE_STALLDUMP`, Thread 0:
+`0x00218270/0x00218280`), und der Stream-Thread schreibt den Moflex-Ring
+weiter (zweiter Dateidurchlauf, bekannt). Nach dem Film folgen
+**keine** neuen `fs OpenFile`/Archiv-Ladevorgaenge (kein Titelressourcen-
+Start), und `fn_0035ECF0` mit `loop=1` (Neustart des Films fuer den Titel)
+kommt nie. Der Asset-Loader-Thread (TLS 14) fuehrt vorher noch 39
+Dekompressions-Aufrufe (`fn_00270B14`) aus und steht danach idle im
+Futex des Task-Runners. Naechster Schritt: den Aufraeumpfad des Movie-Tasks
+suchen (wer ruft die vtable-Methode `0x380D1C`, den Destruktor) und die
+Bedingung, unter der der Intro-Scene-Task den Titel-Scene-Task startet.
+Kein Workaround eingebaut; `HLE_AUDIO_LOG` wurde nur um Quellen-/Puffer-
+Diagnosezeilen erweitert (reine Diagnose, kein Gastzustand).

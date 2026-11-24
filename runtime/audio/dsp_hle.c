@@ -349,6 +349,10 @@ static int source_dequeue(DspState *d, DspSource *s) {
 
     if (s->cur_len != 0) return 0;
     if (!queue_pop(s, &b)) return 0;
+    if (d->verbose)
+        printf("[audio] dequeue addr=%08X len=%u id=%u fmt=%u q=%d loop=%d\n",
+               b.physical_address, b.length, b.buffer_id, b.format,
+               s->queue_len, b.is_looping);
 
     if (b.adpcm_dirty) {
         s->adpcm_yn1 = b.adpcm_yn[0];
@@ -429,6 +433,9 @@ static void source_generate_frame(DspState *d, DspSource *s) {
     memset(s->frame, 0, sizeof(s->frame));
     if (s->cur_len == 0) {
         if (source_dequeue(d, s)) return;
+        if (d->verbose && (s->enabled || s->current_buffer_id != 0))
+            printf("[audio] underrun src_buf=%u last=%u\n",
+                   s->current_buffer_id, s->last_buffer_id);
         s->enabled = 0;
         s->buffer_update = 1;
         s->last_buffer_id = s->current_buffer_id;
@@ -467,11 +474,13 @@ static void source_generate_frame(DspState *d, DspSource *s) {
 }
 
 static void source_parse_config(DspState *d, DspSource *s, uint8_t *cfg,
-                                const uint8_t *coeff) {
+                                const uint8_t *coeff, int idx) {
     uint32_t dirty = rd32(cfg + CFG_DIRTY);
     uint32_t play_position;
 
     if (dirty == 0) return;
+    if (d->verbose)
+        printf("[audio] src=%d dirty=%08X\n", idx, dirty);
 
     if (dirty & (1u << 29)) {
         source_reset(s);
@@ -482,6 +491,9 @@ static void source_parse_config(DspState *d, DspSource *s, uint8_t *cfg,
     }
     if (dirty & (1u << 16)) {
         s->enabled = cfg[CFG_ENABLE] != 0;
+        if (d->verbose)
+            printf("[audio] src=%d enable=%d sync=%u\n", idx, s->enabled,
+                   rd16(cfg + CFG_SYNC_COUNT));
     }
     if (dirty & (1u << 28)) {
         s->sync_count = rd16(cfg + CFG_SYNC_COUNT);
@@ -604,6 +616,10 @@ static void source_parse_config(DspState *d, DspSource *s, uint8_t *cfg,
             b.play_position = play_position;
             b.has_played = 0;
             queue_push(s, &b);
+            if (d->verbose)
+                printf("[audio] src=%d embedded addr=%08X len=%u id=%u fmt=%u loop=%d\n",
+                       idx, b.physical_address, b.length, b.buffer_id, b.format,
+                       b.is_looping);
         }
     }
 
@@ -630,6 +646,10 @@ static void source_parse_config(DspState *d, DspSource *s, uint8_t *cfg,
                     b.play_position = 0;
                     b.has_played = 0;
                     queue_push(s, &b);
+                    if (d->verbose)
+                        printf("[audio] src=%d queued[%d] addr=%08X len=%u id=%u fmt=%u loop=%d\n",
+                               idx, i, b.physical_address, b.length, b.buffer_id,
+                               b.format, b.is_looping);
                 }
             }
         }
@@ -678,8 +698,8 @@ static void source_write_status(DspSource *s, uint8_t *st) {
 }
 
 static void source_tick(DspState *d, DspSource *s, uint8_t *cfg, uint8_t *status,
-                        const uint8_t *coeff) {
-    source_parse_config(d, s, cfg, coeff);
+                        const uint8_t *coeff, int idx) {
+    source_parse_config(d, s, cfg, coeff, idx);
     if (s->enabled) source_generate_frame(d, s);
     source_write_status(s, status);
 }
@@ -879,12 +899,22 @@ static void generate_frame(DspState *d) {
                rd16(d->region[1] + SM_FRAME_COUNTER),
                rd32(read + SM_DSP_CONFIG + DSPCFG_DIRTY), dirty, enabled);
     }
+    if (d->verbose && (d->frame_count % 500u) == 0u) {
+        for (int i = 0; i < AUDIO_DSP_NUM_SOURCES; i++) {
+            DspSource *s = &d->sources[i];
+            if (!s->enabled && s->queue_len == 0 && s->current_buffer_id == 0)
+                continue;
+            printf("[audio] t=%llu src=%d en=%d q=%d id=%u last=%u pos=%u\n",
+                   d->frame_count, i, s->enabled, s->queue_len, s->current_buffer_id,
+                   s->last_buffer_id, s->current_sample_number);
+        }
+    }
 
     memset(intermediate, 0, sizeof(intermediate));
     for (int i = 0; i < AUDIO_DSP_NUM_SOURCES; i++) {
         DspSource *s = &d->sources[i];
         source_tick(d, s, src_cfg(d, read, i), src_status(write, i),
-                    coeff_ptr(read, i));
+                    coeff_ptr(read, i), i);
         for (int mix = 0; mix < 3; mix++)
             source_mix_into(s, intermediate[mix], mix);
     }
