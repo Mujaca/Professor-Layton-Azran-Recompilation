@@ -102,8 +102,12 @@ def decode_function(data, fn, visited):
                 tgt = direct_target(ins)
                 if tgt is not None and tgt not in seen:
                     todo.append(tgt)
-                cond = ins.id in (A.ARM_INS_CBZ, A.ARM_INS_CBNZ)
-                if (cond or (ins.id == A.ARM_INS_B and ins.cc != A.ARM_CC_AL)) and nxt not in seen:
+                # Bedingt ausgefuehrte Terminatoren (bxeq lr, popeq {pc},
+                # ldrne pc, bne, cbz ...) haben immer einen Fallthrough; sonst
+                # fehlt der Folgeblock und die Funktion endet vorzeitig.
+                cond = (ins.id in (A.ARM_INS_CBZ, A.ARM_INS_CBNZ)
+                        or ins.cc != A.ARM_CC_AL)
+                if cond and nxt not in seen:
                     todo.append(nxt)
                 break
             cur = nxt

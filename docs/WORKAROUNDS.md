@@ -41,10 +41,12 @@ EUR-Werte (Sprache EN, Land GB, Modell Old3DS plausibel: der Zeiger auf
 (`0x12B60C` wählt `table[sprache]`); der Patch änderte also ausschließlich
 den JP-Eintrag, nie den von EUR verwendeten Index 2.
 
-Offen: `tools/fix_romfs_cycles.py` und `tools/rebuild_romfs_hash.py`
-verändern weiterhin das RomFS-Image, das der Port ausliefert. Auch das ist
-ein Workaround und sollte als nächstes durch korrekte IVFC-/Hash-Semantik
-oder ein unverändertes Image ersetzt werden.
+`tools/fix_romfs_cycles.py` und `tools/rebuild_romfs_hash.py` waren
+Workarounds am Image und sind entfernt (2026-11-24); der Port liest jetzt
+`out/romfs_image.bin`, wie es aus der ROM extrahiert wird. `tools/romfs_image.py`
+setzt zwar noch die IVFC-Größen, die Engine liest diese Bytes aber nicht:
+Alle Lesezugriffe beginnen per `+0x1000` beim Level-3-Header (siehe §6,
+RomFS-Mount), sodass die IVFC-Bytes nur toter Ballast im Image sind.
 
 ## 2. Block-Hooks im Recompiler – `tools/workarounds/block_hooks.json` (0)
 
@@ -83,15 +85,34 @@ fn_001B9938) sind entfernt: Build ohne sie bleibt Frontier 9/10 (boss:U).
 | – | `dispatch_ipc` | leitet Kommandos nach Form statt nach Handle um (APT/cfg/fs) |
 | – | generierter Code | unbekannte Aufrufziele = No-op (geloggt in `out/missing_calls.txt`) |
 | – | `arm_mem_read/write` | Zugriffe außerhalb des Speichers liefern 0 statt Abbruch (`ARM_STRICT=1` bricht ab) |
-| – | Y2R `GetTransferEndEvent`, DSP `GetSemaphoreEventHandle` | Events vorab signalisiert; Y2R `IsFinished*` immer wahr (Azahar: unsignalisiert, Signal bei echter Fertigmeldung) |
-| – | DSP `ReadPipeIfPossible` | schreibt abwechselnd 1/0 in den Gastpuffer statt echter Pipe-Daten |
-| – | srv `GetServiceHandle`, `generic_command` | unbekannte Dienste/Kommandos liefern Erfolg |
 | – | fs `OpenFile`, `file_command` | Sentinel-Dateislot und Erfolg auch bei fehlgeschlagenem Open; `romfs_image.bin` mit Offset +0x1000 |
-| – | `SleepThread` | Schlafzeit auf 50 ms gedeckelt |
 | – | `gpu_pica_virt_to_phys` | Adressen außerhalb VRAM/Linear-Heap bleiben unverändert (der Port hat keine MMU/Seitentabelle); echtes GSP lehnt sie ab |
 | – | `p_draw_arrays` | Ohne hochgeladenes Vertex-Programm (0x2CB/0x2CC) fällt der Draw auf die alte Heuristik zurück (Position = Attribut 0, UV = Attribut 1). Mit Programm läuft der Azahar-Interpreter. |
 | – | `p_process_tri` | Rasterizer nach Azahar: Sutherland-Hodgman-Clipping (7 Ebenen + 0x47/0x48..0x4B), Viewport 0x41/0x43/0x68, Perspective-Divide, 12.4-Fixed-Point-Coverage + Top-Left-Bias, perspektivkorrekte Attribute, TEV 0x0C0..0x0FD inkl. Combiner-Buffer, Texturen 0x080..0x09F (alle 14 Formate inkl. ETC1/ETC1A4, 8x8-Morton, Wrap/Border/Filter, drei Einheiten), Fog 0xE0/0xE1/0xE6/0xE8..0xEF (LUT-Upload mit Offset-Inkrement, Flip, Index/Fraktion, vor dem Depth-Test), Output-Merger 0x100..0x107 (Alpha-Blend, LogicOp, Alpha-Test, Kanalmasken) und Farb-/Tiefenziel 0x11B..0x11E (RGBA8/RGB8/RGB565/RGB5A1/RGBA4 in Azahar-Byte-Reihenfolge, D16/D24/D24S8, Depth-/Stencil-Test, 8x8-Morton). **Noch offen:** Lighting, Mipmaps, Proctex (Einheit 3), Cube-/Shadow-/Projection-Texturtypen auf Einheit 0; ohne konfiguriertes Farbziel bleibt der lineare Port-Pfad (RGB8) als Diagnose-Ausgabe. |
-| – | cfg `GetConfig` | unbekannte Blöcke liefern Erfolg mit Nullen (Azahar: Fehler) |
+
+
+Entfernt 2026-11-24 (Fälschungen nach Azahar). Jeder Punkt wurde einzeln
+gebaut und mit `tools/frontier.py` gemessen; der Stand blieb **9/10
+(`boss:U`)**, die DSP-Pipe liefert jetzt aber die echten Struktur-Adressen
+(30 `ConvertProcessAddress`-Aufrufe wie in der Referenz).
+
+| Früher | Jetzt | Beleg |
+|---|---|---|
+| Y2R `GetTransferEndEvent` vorab signalisiert, `IsFinished*` immer wahr | ein `completion_event` (OneShot) ohne Vorab-Signal; `StartConversion` plant die Fertigmeldung (MinY2RDelay ≈ 186 µs), `IsFinished*` spiegeln `is_busy_conversion` | `cam/y2r_u.cpp`; im Boot nur bis `GetTransferEndEvent` erreicht |
+| DSP `GetSemaphoreEventHandle` vorab signalisiert | OneShot-Event ohne Vorab-Signal | `dsp/dsp_dsp.cpp` |
+| DSP `ReadPipeIfPossible` schreibt 1/0 | echte Pipe-Puffer; `WriteProcessPipe(Audio, Init)` liefert die 15 DSP-Struktur-Adressen, `ReadPipe`/`ReadPipeIfPossible`/`GetPipeReadableSize` lesen daraus | `audio_core/hle/hle.cpp` PipeRead/PipeWrite/`AudioPipeWriteStructAddresses` |
+| srv `GetServiceHandle` unbekannt = Erfolg | `name_len > 8` → `0xD9006405`, unbekannter Name → `0xD0406401`; alle im Boot gefragten Namen sind bekannt | `sm/srv.cpp`, `sm/sm.cpp` |
+| `generic_command` still = Erfolg | loggt jedes unbekannte Kommando mit Parametern; Antwort weiter Result 0 (Azahar `ReportUnimplementedFunction`) | `service.cpp` |
+| cfg unbekannte Blöcke = Nullen | `0xD9010004` (NotFound/Config/WrongArgument) | `cfg/cfg.cpp` GetConfigBlockPointer |
+| `SleepThread` 50-ms-Deckel | volle Schlafzeit, `ns <= 0` = Yield | `kernel/svc.cpp` |
+| `DuplicateHandle` kopierte nur den Namen | Alias-Slot/Refcount auf dasselbe Objekt; Pseudo-Handles `0xFFFF8000/1` sind echte Slots | `kernel/handle_table.cpp` |
+| APT `GetLockHandle`/`Initialize` neue Objekte | liefern dasselbe Lock/Notification-/Parameter-Event | `apt/applet_manager.cpp` |
+
+Offen (dokumentierte Abweichung): srv-`GetServiceHandle` mit `flags`-Bit0 == 0
+müsste in Azahar auf eine spätere Registrierung warten; der Port hat keinen
+Dienst-Registrierungsdienst und meldet sofort den Fehler. Ein zweiter
+`APT:Initialize`-Aufruf liefert in Azahar `AlreadyExists`, hier erneut Erfolg
+mit denselben Objekten. Beide Pfade kommen im Boot bisher nicht vor.
 
 Diese Liste stammt aus dem Review der Nachtarbeit (2026-11-24) gegen Azahar.
 
@@ -198,20 +219,54 @@ wenn rN zuletzt durch `pop`/`ldm sp!` aus dem Stack geladen wurde; emit.py
 erzeugt dafuer `return;` statt `arm_call_guest`. Falscher Seed `001016E0`
 entfernt. Test: `tests/mvp_selftest.py::bx_rN_rueckkehr_thumb`.
 
-**Offen (Stand Kernel-Sync-Paket):** Der Fehlerpfad
-`fn_001028A0 -> fn_0028E410 -> fn_00119D34` (`g_os+9 = 1`) wird weiterhin
-ausgeloest; `err:f` meldet `E0A046DA/DB` (Modul FS, Summary InvalidState,
-Desc 0x2DA/0x2DB) mit `site=00212FD0`. Das ist der bekannte
-RomFS-/Pfadparser-Pfad (Code-Patches um 0x212F3C/0x399244), **nicht** mehr
-der Kernel: `services` ist inzwischen 9/10 (Divergenz `boss:U`).
+**Offen (Stand Kernel-Sync-Paket, durch den letzten Abschnitt ueberholt):**
+Der Fehlerpfad `fn_001028A0 -> fn_0028E410 -> fn_00119D34` (`g_os+9 = 1`)
+wird weiterhin ausgeloest; `err:f` meldet `E0A046DA/DB`. Der letzte Abschnitt
+zeigt: nicht der RomFS-/Hash-Parser, sondern die nie initialisierte
+FS-Session loest den Abbruch aus.
 
-Der Hauptthread bleibt nach `dsp::DSP cmd 0x0007 (SetSemaphore)` stehen: er
-wartet auf ein eigenes Event (Handle 35, `svcCreateEvent` direkt nach
+Der Hauptthread blieb nach `dsp::DSP cmd 0x0007 (SetSemaphore)` stehen: er
+wartete auf ein eigenes Event (Handle 35, `svcCreateEvent` direkt nach
 `dsp cmd 0x0011 LoadComponent`), das er zuvor per `dsp cmd 0x0015
 RegisterInterruptEvents` an den DSP gebunden hat. Der Port hat keinen
 Audio-/DSP-Kern, der Pipe-Interrupts liefert; Azahar signalisiert diese im
-HLE-Audio (`DspHle`) beim Pipe-Processing. Naechster Arbeitsvorrat ist
-daher DSP-Interrupt-Zustellung, nicht Kernel-Synchronisation.
+HLE-Audio (`DspHle`) beim Pipe-Processing. **Inzwischen behoben** durch die
+Interrupt-Registrierung und die echten Pipe-Puffer in `runtime/kernel/hle.c`
+(siehe unten).
+
+### FS-Session fehlte wegen bedingtem `bx` ohne Fallthrough – behoben 2026-11-24
+
+**Befund:** Der RomFS-Mount scheiterte an der nie initialisierten FS-Session
+(`fn_0028EDCC` liest `[0x3D8D8C] == 0`, `err:f E0A046DB`). Die Ursache war
+**nicht** ein fehlender Aufruf von `fsInit`, sondern ein Recompiler-Fehler:
+
+* `fsInit` beginnt bei `0x291C64` (Guard `[0x3D8D8C] != 0 -> bxne lr`, danach
+  `srvGetServiceHandle("fs:USER")`). `ARM_WATCH=291C64` zeigte: der Block
+  wurde betreten (lr=`0x100DE8`), aber `0x28F730`/`0x28EE00` liefen nie.
+* Im generierten C bestand `fn_00291C64` nur aus dem Guard und endete mit
+  `return;`. `bxne lr` (0x291C70) ist aber **bedingt**: bei Z=0 muss die
+  Ausfuehrung bei `0x291C74` weiterlaufen.
+* `tools/recomp/scan.py::decode_function` legte den Fallthrough-Block nur
+  fuer `b<cond>`/`CBZ`/`CBNZ` an. `bx<cond>`, `pop<cond> {pc}` usw. beendeten
+  die Funktion; `0x291C74` existierte nur als falscher Prolog-Seed.
+
+**Korrektur:** Jeder bedingt ausgefuehrte Terminator (`ins.cc != ARM_CC_AL`)
+legt den Folgeblock an. Test: `tests/mvp_selftest.py::bx_cond_fallthrough`.
+Folge: `srvname "fs:USER" -> 13`, RomFS-Mount ohne `err:f`,
+Frontier 3/10 -> 9/10 (Divergenz `boss:U`).
+
+### DSP: RegisterInterruptEvents und Semaphore (2026-11-24)
+
+`dsp cmd 0x0015 RegisterInterruptEvents` merkt sich das Ereignis je
+(InterruptType, Pipe); `cmd 0x0007 SetSemaphore` signalisiert danach die
+Pipe-Ereignisse (Azahar `DSP_DSP::SignalInterrupt`). Vorher blieb der
+Hauptthread direkt nach `SetSemaphore` auf seinem eigenen Event (Handle 35,
+`HLE_KLOG`) stehen; jetzt laufen `ReadPipeIfPossible`/`ConvertProcessAddress`
+weiter. **Pipe-Inhalt (2026-11-24):** `WriteProcessPipe(Audio, Init)` liefert
+jetzt die 15 DSP-Struktur-Adressen, die das Spiel zu 30
+`ConvertProcessAddress`-Aufrufen verarbeitet (wie `reports/azahar_trace.txt`);
+`ReadPipe`/`ReadPipeIfPossible` lesen echte Puffer. `boss:U` bleibt offen.
+
 
 ### Arbiter korrekt, Boot stoppt am Gast-RomFS-Lookup (2026-11-24)
 
@@ -222,6 +277,39 @@ Signal 1), das Parameter-Event wird signalisiert. Folge: Frontier 9 -> 3
 (`hid:USER`). Die 9 waren nur scheinbar: Der Gast-RomFS-Lookup schlaegt fehl
 (err:f `cmd 0x0001`, `E0A046DB`), danach legt das Spiel absichtlich einen
 Endlos-Halt ein (`LightEvent_Wait` auf ein Event auf dem Stack). Der alte
-Arbiter liess diesen Halt per Timeout 0 sofort zurueckkehren. Naechste
-Ursache: Lookup in `fn_00212E3C` (Vergleich bei 0x212F3C, Namensvergleich
-`fn_0021077C`) bzw. das RomFS-Image (`tools/fix_romfs_cycles.py`).
+Arbiter liess diesen Halt per Timeout 0 sofort zurueckkehren.
+
+### RomFS-Mount gelingt – Ursache ist die fehlende FS-Session (2026-11-24)
+
+**Korrigierter Befund:** Nicht der Hash-Lookup scheitert. `fn_0027DE14`
+(RomFS-Mount) liest Level-3-Header und alle vier Tabellen erfolgreich
+(`[file] Read off=0x0/0x28/0x4C/0x160/0xAF4`, jeweils volle Laenge), prueft
+`len == 0x28` und die Tabellensummen und initialisiert danach seine Struktur.
+`fn_00212CD0`/`fn_00212E3C` (Verzeichnis-/Datei-Lookup) werden **nie
+betreten** (`ARM_WATCH=212CD0/212E3C`: 0 Treffer); der Hash-Pfad ist also
+nicht die Ursache des Halts.
+
+**Wo der Fehler entsteht:** Im Erfolgspfad ruft der Mount bei `0x27E198`
+`fn_001250F0 -> fn_0028EDCC`. Das ist der libctru-FS-Session-Zugriff: er
+liest `[g_3D8D8C]` und ruft bei 0 `fn_0028F45C` mit `E0A046DB` auf (err:f).
+`g_3D8D8C` wird ausschliesslich vom Konstruktor `fn_00381918` aus
+`[0x39A0CC]` gesetzt; beide sind 0. `fn_00291C74` (das eigentliche
+`fsInit`: `srvGetServiceHandle("fs:USER")` ueber `0x28EE00`, danach
+`fn_00107A78` -> `[0x3D8D98+0x10]`) hat **keinen statischen Aufrufer und wird
+im Boot nie ausgefuehrt** (`ARM_WATCH=291C74`: 0 Treffer).
+
+**Beleg aus der Referenz:** Azahar oeffnet `fs:USER` per
+`srv GetServiceHandle` bei `1.309988`, direkt nach der APT-Initialisierung
+(`reports/azahar_trace.txt:340`). Im Port-Log fehlt dieser Request komplett;
+die ersten `fs:USER`-Kommandos gehen mit Handle 0 hinaus und werden nur
+deshalb beantwortet, weil `dispatch_ipc` nach Kommandoform routet
+(Workaround §4). Auf echter Hardware muss die FS-Session vor dem Mount
+existieren.
+
+**Naechster Arbeitsvorrat:** ~~Herausfinden, warum der Boot die FS-Session-
+Initialisierung (`fn_00291C74` bzw. deren Aufrufer) ueberspringt~~ –
+**erledigt**: nicht der Aufrufer fehlte, sondern der Fallthrough nach dem
+bedingten `bxne lr` in `fn_00291C64` (siehe oben, „FS-Session fehlte wegen
+bedingtem `bx`“). `tools/fix_romfs_cycles.py` und
+`tools/rebuild_romfs_hash.py` waren dafuer nachweislich nicht noetig und
+sind entfernt.

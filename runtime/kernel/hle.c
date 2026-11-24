@@ -14,6 +14,12 @@ uint32_t g_hle_gsp_export;
 /* Interrupt-Event, das der Client bei RegisterInterruptRelayQueue uebergibt. */
 static uint32_t g_gsp_irq_handle;
 static uint32_t g_apt_param_ev = 0;
+/* Azahar AppletManager haelt lock(), notification_event und parameter_event
+ * als Mitglieder: GetLockHandle/Initialize liefern bei jedem Aufruf dieselben
+ * Kernel-Objekte (applet_manager.cpp). */
+static uint32_t g_apt_lock_handle = 0;
+static uint32_t g_apt_notif_handle = 0;
+static int g_apt_initialized = 0;
 static void dispatch_ipc(uint32_t handle);
 static int gsp_process_cmdqueue(ArmCpu *c);
 static void gsp_pica_irq(int id);
@@ -231,13 +237,16 @@ typedef enum {
     HK_EVENT,
     HK_TIMER,
     HK_THREAD,
-    HK_ARBITER
+    HK_ARBITER,
+    HK_PROCESS
 } HandleKind;
 
 typedef struct {
     int used;
     int service;     /* ServiceId */
     int file;        /* Index in g_files oder -1 */
+    int alias;       /* >0: Slot verweist auf dieses kanonische Objekt */
+    int refs;        /* kanonisch: lebende Handle-Slots (Azahar HandleTable) */
     volatile int signaled;   /* Event/Timer/Thread: Signalzustand */
     int kind;                /* HandleKind */
     uint32_t owner;          /* Mutex: Thread-Id des Besitzers */
@@ -350,6 +359,8 @@ static int alloc_handle(int service, const char *name) {
             g_handles[i].used = 1;
             g_handles[i].service = service;
             g_handles[i].file = -1;
+            g_handles[i].alias = 0;
+            g_handles[i].refs = 1;
             snprintf(g_handles[i].name, sizeof(g_handles[i].name), "%s", name ? name : "?");
             if (getenv("HLE_HDL_LOG")) printf("[hdl] %d = %s\n", i, g_handles[i].name);
             return i;
@@ -358,9 +369,94 @@ static int alloc_handle(int service, const char *name) {
     return 0;
 }
 
+/* Pseudo-Handles des Kernels (Azahar kernel/handle_table.h):
+ * 0xFFFF8000 = aktueller Thread, 0xFFFF8001 = aktueller Prozess. Sie werden
+ * als permanente Slots abgebildet, damit DuplicateHandle sie teilen kann. */
+static uint32_t g_pseudo_thread = 0;
+static uint32_t g_pseudo_process = 0;
+
 static Handle *get_handle(uint32_t h) {
+    if (h == 0xFFFF8000u || h == 0xFFFF8001u) {
+        uint32_t *slot = (h == 0xFFFF8000u) ? &g_pseudo_thread : &g_pseudo_process;
+        if (*slot == 0) {
+            *slot = (uint32_t)alloc_handle(SVC_OTHER,
+                                           (h == 0xFFFF8000u) ? "cur-thread" : "cur-proc");
+            if (*slot == 0) return NULL;
+            g_handles[*slot].kind = (h == 0xFFFF8000u) ? HK_THREAD : HK_PROCESS;
+            g_handles[*slot].signaled = 1;
+        }
+        return &g_handles[*slot];
+    }
     if (h == 0 || h >= (uint32_t)MAX_HANDLES) return NULL;
-    return g_handles[h].used ? &g_handles[h] : NULL;
+    if (!g_handles[h].used) return NULL;
+    /* DuplicateHandle legt in Azahar (kernel/handle_table.cpp Duplicate) einen
+       zweiten Slot auf dasselbe Kernel-Objekt. Der Alias forwardet deshalb
+       auf den kanonischen Slot. */
+    if (g_handles[h].alias != 0) {
+        uint32_t canon = (uint32_t)g_handles[h].alias;
+        if (canon >= (uint32_t)MAX_HANDLES || !g_handles[canon].used) return NULL;
+        return &g_handles[canon];
+    }
+    return &g_handles[h];
+}
+
+/* Kanonischen Slot eines Handle-Werts liefern (ohne Alias-Aufloesung). */
+static int canonical_slot(uint32_t h) {
+    if (h == 0xFFFF8000u || h == 0xFFFF8001u) {
+        Handle *ph = get_handle(h);
+        return ph ? (int)(ph - g_handles) : -1;
+    }
+    if (h == 0 || h >= (uint32_t)MAX_HANDLES) return -1;
+    if (!g_handles[h].used) return -1;
+    if (g_handles[h].alias != 0) return g_handles[h].alias;
+    return (int)h;
+}
+
+/* Gibt einen Handle-Slot frei. Das Objekt (Datei, Event-Zustand, Mutex ...)
+   wird erst zerstoert, wenn kein anderer Slot mehr darauf verweist
+   (Azahar HandleTable::Close). */
+static void close_handle_slot(uint32_t h) {
+    Handle *s;
+    if (h == 0 || h >= (uint32_t)MAX_HANDLES) return;
+    s = &g_handles[h];
+    if (!s->used) return;
+    if (s->alias != 0) {
+        int canon = s->alias;
+        memset(s, 0, sizeof(*s));
+        s->file = -1;
+        if (canon > 0 && canon < MAX_HANDLES && g_handles[canon].used &&
+            g_handles[canon].refs > 1)
+            g_handles[canon].refs--;
+        return;
+    }
+    if (s->refs > 1) {
+        /* Ein Alias wird zum neuen kanonischen Slot; die uebrigen Aliase
+           werden umgebogen (Azahar: das Objekt bleibt am Leben). */
+        int p = -1;
+        for (int i = 1; i < MAX_HANDLES; i++) {
+            if (g_handles[i].used && g_handles[i].alias == (int)h) { p = i; break; }
+        }
+        if (p > 0) {
+            int refs = s->refs - 1;
+            g_handles[p] = *s;
+            g_handles[p].alias = 0;
+            g_handles[p].refs = refs;
+            for (int i = 1; i < MAX_HANDLES; i++) {
+                if (i != p && g_handles[i].used && g_handles[i].alias == (int)h)
+                    g_handles[i].alias = p;
+            }
+            memset(s, 0, sizeof(*s));
+            s->file = -1;
+            return;
+        }
+    }
+    if (s->file >= 0 && s->file < MAX_FILES) {
+        if (g_files[s->file].fp != NULL) fclose(g_files[s->file].fp);
+        g_files[s->file].used = 0;
+        g_files[s->file].fp = NULL;
+    }
+    memset(s, 0, sizeof(*s));
+    s->file = -1;
 }
 
 /* Typisierte Kernel-Objekte fuer HLE-Dienste (Azahar legt sie ebenfalls als
@@ -638,17 +734,40 @@ static void srv_command(Ipc *r, uint32_t *p) {
             name[8] = 0;
             uint32_t name_len = p[2];
             if (name_len < 8) name[name_len] = 0;
-            int svc = service_from_name(name);
-            int h = alloc_handle(svc, name);
-            if (svc == SVC_GSP_GPU) g_hle_gsp_handle = h;
-            if (g_log || getenv("HLE_SRV_NAMES")) {
-                printf("[srvname] \"%s\" srvh=%u blk=%08X lr=%08X desc=%08X -> %d (%s)\n",
-                       name, g_cur_handle, arm_last_block, g_cpu ? g_cpu->r[14] : 0u,
-                       0x003D91E8u, h, SERVICE_NAMES[svc]);
+            /* Azahar sm/srv.cpp: kMaxPortSize = 8 -> ResultInvalidNameSize
+               (0xD9006405). */
+            if (name_len > 8) {
+                if (g_log) printf("[srv] GetServiceHandle name_len=%u -> 0xD9006405\n", name_len);
+                ipc_begin(r, 5, 1, 0);
+                ipc_put(r, 0xD9006405u);
+                break;
             }
-            ipc_begin(r, 5, 1, 2);
-            put_result(r);
-            ipc_put_handle(r, (uint32_t)h);
+            {
+                int svc = service_from_name(name);
+                int h;
+                if (svc == SVC_OTHER) {
+                    /* Azahar sm/sm.cpp GetServicePort: ResultServiceNotRegistered
+                       (0xD0406401). Azahar wartet nur mit flags-Bit0 auf eine
+                       spaetere Registrierung; der Port bildet keinen
+                       Registrierungsdienst ab und meldet den Fehler sofort. */
+                    if (g_log || getenv("HLE_SRV_NAMES")) {
+                        printf("[srvname] \"%s\" unbekannt -> 0xD0406401\n", name);
+                    }
+                    ipc_begin(r, 5, 1, 0);
+                    ipc_put(r, 0xD0406401u);
+                    break;
+                }
+                h = alloc_handle(svc, name);
+                if (svc == SVC_GSP_GPU) g_hle_gsp_handle = h;
+                if (g_log || getenv("HLE_SRV_NAMES")) {
+                    printf("[srvname] \"%s\" blk=%08X lr=%08X -> %d (%s)\n",
+                           name, arm_last_block, g_cpu ? g_cpu->r[14] : 0u,
+                           h, SERVICE_NAMES[svc]);
+                }
+                ipc_begin(r, 5, 1, 2);
+                put_result(r);
+                ipc_put_handle(r, (uint32_t)h);
+            }
             break;
         }
         default:
@@ -687,41 +806,43 @@ static void apt_command(Ipc *r, uint32_t *p) {
     switch (r->cmd) {
         case 1: { /* GetLockHandle: Result, AppletAttributes, State, CopyHandle(Lock) */
             uint32_t attrs = (r->normal >= 1) ? p[0] : 0u;
-            uint32_t lock = new_mutex_handle("apt-lock", 0);
+            if (g_apt_lock_handle == 0)
+                g_apt_lock_handle = new_mutex_handle("apt-lock", 0);
             /* Azahar (apt.cpp): MakeBuilder(3,2), Push(ResultSuccess,
                corrected_attributes, state), PushCopyObjects(lock). */
             ipc_begin(r, 1, 3, 2);
             put_result(r);
             ipc_put(r, attrs);      /* corrected AppletAttributes */
             ipc_put(r, 0u);         /* state */
-            ipc_put_handle_copy(r, lock);
+            ipc_put_handle_copy(r, g_apt_lock_handle);
             break;
         }
         case 2: { /* Initialize: Result, CopyHandle(Notification), CopyHandle(Parameter) */
             uint32_t app_id = (r->normal >= 1) ? p[0] : 0x300u;
-            uint32_t ev1 = new_event_handle("apt-notif", 0);
-            uint32_t ev2 = new_event_handle("apt-param", 0);
-            g_apt_param_ev = ev2;
-            /* Azahar AppletManager::Initialize -> SendParameter(Wakeup): der
-               erste registrierte Applet bekommt sofort einen Wakeup-Parameter
-               (Sender 0, Signal 1, Groesse 0), das Parameter-Event wird
-               signalisiert. Ohne dieses Signal warten APT-Notification-Thread
-               und Main-Loop (LightEvent) aufeinander. */
-            g_apt_next_param.used = 1;
-            g_apt_next_param.sender = 0;
-            g_apt_next_param.dest = app_id;
-            g_apt_next_param.signal = 1;   /* SignalType::Wakeup */
-            g_apt_next_param.size = 0;
-            {
-                Handle *ph = get_handle(ev2);
-                if (ph != NULL) ph->signaled = 1;
+            if (!g_apt_initialized) {
+                g_apt_notif_handle = new_event_handle("apt-notif", 0);
+                g_apt_param_ev = new_event_handle("apt-param", 0);
+                /* Azahar AppletManager::Initialize -> SendParameter(Wakeup):
+                   der erste registrierte Applet bekommt sofort einen
+                   Wakeup-Parameter (Sender 0, Signal 1, Groesse 0), das
+                   Parameter-Event wird signalisiert. */
+                g_apt_next_param.used = 1;
+                g_apt_next_param.sender = 0;
+                g_apt_next_param.dest = app_id;
+                g_apt_next_param.signal = 1;   /* SignalType::Wakeup */
+                g_apt_next_param.size = 0;
+                {
+                    Handle *ph = get_handle(g_apt_param_ev);
+                    if (ph != NULL) ph->signaled = 1;
+                }
+                g_apt_initialized = 1;
             }
             /* Azahar: MakeBuilder(1,3), PushCopyObjects(notif, param). */
             ipc_begin(r, 2, 1, 3);
             put_result(r);
             ipc_put(r, (1u << 26));   /* CopyHandle-Deskriptor, 2 Handles */
-            ipc_put(r, ev1);
-            ipc_put(r, ev2);
+            ipc_put(r, g_apt_notif_handle);
+            ipc_put(r, g_apt_param_ev);
             break;
         }
         case 3: case 4: case 0x28: { /* Enable / Finalize / CloseLibraryApplet */
@@ -1246,6 +1367,15 @@ static void fs_command(Ipc *r, uint32_t *p) {
     }
 }
 
+/* Zieladresse eines Antwort-StaticBuffers. Die Kernel-Übersetzung
+   (Azahar kernel/hle_ipc.cpp, DescriptorType::StaticBuffer) liest sie aus dem
+   Static-Buffer-Bereich hinter dem Kommandopuffer:
+   buf[0x40 + 2*id + 1]. Nicht aus den Translate-Parametern des Requests. */
+static uint32_t ipc_resp_static_buffer_addr(uint32_t *buf, int id) {
+    uint32_t off = 0x40u + 2u * (uint32_t)id;
+    return buf[off + 1u];
+}
+
 static uint32_t ipc_out_buffer(uint32_t *p, int normal, int translate) {
     for (int i = 0; i < translate; i++) {
         uint32_t w = p[normal + i];
@@ -1406,7 +1536,7 @@ enum {
     CFG_COUNTRY_GB = 110,
 };
 
-static void cfg_write_block(uint32_t block, uint8_t *dst, uint32_t size) {
+static int cfg_write_block(uint32_t block, uint8_t *dst, uint32_t size) {
     memset(dst, 0, size);
     switch (block) {
         case 0x00030001:  /* UserTimeOffsetBlock */
@@ -1478,9 +1608,11 @@ static void cfg_write_block(uint32_t block, uint8_t *dst, uint32_t size) {
             if (size >= 1) dst[0] = 1;
             break;
         default:
-            /* Unbekannte Bloecke bleiben genullt. */
-            break;
+            /* Unbekannter Block: Azahar cfg.cpp GetConfigBlockPointer ->
+               ResultNotFound (0xD9010004), kein Erfolg mit Nullen. */
+            return 0;
     }
+    return 1;
 }
 
 static void cfg_command(Ipc *r, uint32_t *p) {
@@ -1503,14 +1635,24 @@ static void cfg_command(Ipc *r, uint32_t *p) {
             }
             if (addr == 0) limit = 0;
             if (limit > 0x1000) limit = 0x1000;
-            if (limit != 0)
-                cfg_write_block(block, g_cur_mem + (addr & 0x1FFFFFFFu), limit);
+            {
+                uint32_t result = 0;
+                if (limit != 0 &&
+                    !cfg_write_block(block, g_cur_mem + (addr & 0x1FFFFFFFu), limit)) {
+                    /* Azahar GetConfigBlockPointer: unbekannter Block ohne
+                       Default -> ResultNotFound (0xD9010004). */
+                    printf("[cfg] GetConfig unbekannter Block 0x%08X size=%u -> 0xD9010004\n",
+                           block, size);
+                    fflush(stdout);
+                    result = 0xD9010004u;
+                }
 
-            if (g_log) printf("[cfg] GetConfig block=0x%08X size=%u buf=0x%08X\n", block, size, addr);
-            /* Azahar (cfg.cpp): MakeBuilder(1,2), Push(result), PushMappedBuffer. */
-            ipc_begin(r, 0x0001, 1, 2);
-            put_result(r);
-            for (int i = 0; i < 2; i++) ipc_put(r, (r->translate >= 2) ? p[r->normal + i] : 0u);
+                if (g_log) printf("[cfg] GetConfig block=0x%08X size=%u buf=0x%08X\n", block, size, addr);
+                /* Azahar (cfg.cpp): MakeBuilder(1,2), Push(result), PushMappedBuffer. */
+                ipc_begin(r, 0x0001, 1, 2);
+                ipc_put(r, result);
+                for (int i = 0; i < 2; i++) ipc_put(r, (r->translate >= 2) ? p[r->normal + i] : 0u);
+            }
             break;
         }
         case 0x0002:   /* GetRegion */
@@ -1645,6 +1787,65 @@ static void ptm_command(Ipc *r, uint32_t *p) {
     }
 }
 
+/* DSP-Interrupt-Ereignisse: RegisterInterruptEvents (cmd 0x0015) bindet pro
+ * (InterruptType, Pipe) ein Gast-Ereignis (Azahar dsp_dsp.cpp GetInterruptEvent). */
+#define DSP_INT_TYPES 3
+#define DSP_NUM_PIPES 8
+static uint32_t g_dsp_events[DSP_INT_TYPES][DSP_NUM_PIPES];
+
+/* DSP-Pipe-Daten und Semaphore-Event. Azahar haelt pro Pipe einen Puffer
+ * (audio_core/hle/hle.cpp PipeRead/PipeWrite) und ein OneShot-Semaphore-Event
+ * (service/dsp/dsp_dsp.cpp), das nicht vorab signalisiert wird. */
+#define DSP_PIPE_CAP 0x10000
+static uint8_t g_dsp_pipe[DSP_NUM_PIPES][DSP_PIPE_CAP];
+static uint32_t g_dsp_pipe_len[DSP_NUM_PIPES];
+static uint32_t g_dsp_semaphore_ev = 0;
+
+static void dsp_signal_events(int type, int pipe) {
+    if (type < 0 || type >= DSP_INT_TYPES || pipe < 0 || pipe >= DSP_NUM_PIPES)
+        return;
+    {
+        uint32_t ev = g_dsp_events[type][pipe];
+        Handle *hh = get_handle(ev);
+        if (hh != NULL) hh->signaled = 1;
+    }
+}
+
+static void dsp_pipe_append(int ch, const void *src, uint32_t n) {
+    if (ch < 0 || ch >= DSP_NUM_PIPES) return;
+    if (n > DSP_PIPE_CAP - g_dsp_pipe_len[ch]) n = DSP_PIPE_CAP - g_dsp_pipe_len[ch];
+    if (n == 0) return;
+    memcpy(g_dsp_pipe[ch] + g_dsp_pipe_len[ch], src, n);
+    g_dsp_pipe_len[ch] += n;
+}
+
+static uint32_t dsp_pipe_read(int ch, uint8_t *dst, uint32_t n) {
+    if (ch < 0 || ch >= DSP_NUM_PIPES) return 0;
+    if (n > g_dsp_pipe_len[ch]) n = g_dsp_pipe_len[ch];
+    if (n == 0) return 0;
+    memcpy(dst, g_dsp_pipe[ch], n);
+    memmove(g_dsp_pipe[ch], g_dsp_pipe[ch] + n, g_dsp_pipe_len[ch] - n);
+    g_dsp_pipe_len[ch] -= n;
+    return n;
+}
+
+/* Azahar audio_core/hle/hle.cpp AudioPipeWriteStructAddresses: 15 DSP-DRAM-
+ * Adressen (shared_memory.h), Basis 0x8000, danach Pipe-Interrupt. */
+static void dsp_audio_struct_addresses(void) {
+    static const uint16_t addrs[15] = {
+        0xBFFF, 0x9E92, 0x8680, 0xA792, 0x9430, 0x8400, 0x8540, 0x9492,
+        0x8710, 0x8410, 0xA912, 0xAA12, 0xAAD2, 0xAC52, 0xAC5C,
+    };
+    uint8_t buf[2 + 15 * 2];
+    buf[0] = 15; buf[1] = 0;
+    for (int i = 0; i < 15; i++) {
+        buf[2 + i * 2] = (uint8_t)(addrs[i] & 0xFF);
+        buf[2 + i * 2 + 1] = (uint8_t)(addrs[i] >> 8);
+    }
+    dsp_pipe_append(2, buf, sizeof(buf));   /* DspPipe::Audio */
+    dsp_signal_events(2, 2);                /* InterruptType::Pipe, Audio */
+}
+
 static void dsp_command(Ipc *r, uint32_t *p) {
     /* Antwortlayouts nach Azahar src/core/hle/service/dsp/dsp_dsp.cpp. */
     switch (r->cmd) {
@@ -1660,7 +1861,15 @@ static void dsp_command(Ipc *r, uint32_t *p) {
             ipc_put(r, 1);
             break;
         }
-        case 0x0007:   /* SetSemaphore: Result */
+        case 0x0007: { /* SetSemaphore: Result
+                        Der DSP wertet das Semaphor aus und meldet danach den
+                        Pipe-Interrupt (Azahar SignalInterrupt). */
+            ipc_begin(r, r->cmd, 1, 0);
+            put_result(r);
+            for (int pipe = 0; pipe < DSP_NUM_PIPES; pipe++)
+                dsp_signal_events(2, pipe);   /* InterruptType::Pipe */
+            break;
+        }
         case 0x0017: { /* SetSemaphoreMask: Result */
             ipc_begin(r, r->cmd, 1, 0);
             put_result(r);
@@ -1676,57 +1885,72 @@ static void dsp_command(Ipc *r, uint32_t *p) {
             if (g_log) printf("[dsp] ConvertProcessAddress 0x%X -> 0x%X\n", dsp_addr, arm);
             break;
         }
-        case 0x000D: { /* WriteProcessPipe: Result */
+        case 0x000D: { /* WriteProcessPipe: Result
+                          Daten in den Pipe-Puffer (Azahar PipeWrite). */
+            uint32_t ch = p[0];
             uint32_t size = p[1];
             uint32_t addr = 0;
             if (r->translate >= 2) addr = p[r->normal + 1];
+            if (addr != 0 && size != 0 && g_cpu != NULL &&
+                (addr & 0x1FFFFFFFu) + size <= g_cpu->mem_size) {
+                const uint8_t *src = g_cur_mem + (addr & 0x1FFFFFFFu);
+                if (ch == 2 && size >= 1 && (src[0] == 0 || src[0] == 2)) {
+                    /* Audio-Pipe: Initialize/Wakeup -> Puffer leeren und die
+                       DSP-Struktur-Adressen liefern (Azahar PipeWrite). */
+                    g_dsp_pipe_len[2] = 0;
+                    dsp_audio_struct_addresses();
+                } else {
+                    dsp_pipe_append((int)ch, src, size);
+                    dsp_signal_events(2, (int)ch);
+                }
+            }
             ipc_begin(r, 0x000D, 1, 0);
             put_result(r);
             if (g_log) printf("[dsp] WriteProcessPipe ch=%u size=%u addr=%08X\n",
-                              p[0], size, addr);
+                              ch, size, addr);
             break;
         }
-        case 0x000E: { /* ReadPipe: Result + StaticBuffer-Echo */
-            uint32_t dsc_flags = 0, dsc_addr = 0;
-            if (r->translate >= 2) {
-                dsc_flags = p[r->normal];
-                dsc_addr = p[r->normal + 1];
+        case 0x000E: { /* ReadPipe: Result + StaticBuffer (echte Pipe-Daten) */
+            uint32_t ch = p[0];
+            uint32_t size = p[1];
+            uint32_t dsc_addr = ipc_resp_static_buffer_addr(r->buf, 0);
+            uint32_t n = 0;
+            if (size != 0 && dsc_addr != 0 && g_cpu != NULL &&
+                (dsc_addr & 0x1FFFFFFFu) + size <= g_cpu->mem_size) {
+                n = dsp_pipe_read((int)ch, g_cur_mem + (dsc_addr & 0x1FFFFFFFu), size);
             }
             ipc_begin(r, 0x000E, 1, 2);
             put_result(r);
-            ipc_put(r, dsc_flags);
+            ipc_put(r, 0x2u | ((n & 0x3FFFFu) << 14));
             ipc_put(r, dsc_addr);
-            if (g_log) printf("[dsp] ReadPipe ch=%u size=%u -> 0\n", p[0], p[1]);
+            if (g_log) printf("[dsp] ReadPipe ch=%u size=%u -> %u\n", ch, size, n);
             break;
         }
         case 0x000F: { /* GetPipeReadableSize: Result + u16 */
+            uint32_t ch = p[0];
+            uint32_t avail = (ch < DSP_NUM_PIPES) ? g_dsp_pipe_len[ch] : 0;
             ipc_begin(r, 0x000F, 2, 0);
             put_result(r);
-            ipc_put(r, 0);
+            ipc_put(r, avail > 0xFFFFu ? 0xFFFFu : avail);
             break;
         }
-        case 0x0010: { /* ReadPipeIfPossible: Result + Groesse + StaticBuffer-Echo */
-            uint32_t dsc_flags = 0, dsc_addr = 0;
-            static int rp_calls = 0;
-            if (r->translate >= 2) {
-                dsc_flags = p[r->normal];
-                dsc_addr = p[r->normal + 1];
-            }
-            rp_calls++;
-            {
-                /* Erster Read: Anzahl DSP-Variablen (1). Zweiter: die
-                   Variablenliste (eine DSP-DRAM-Adresse). */
-                uint16_t val = (rp_calls & 1) ? 1u : 0x0000u;
-                if (dsc_addr && g_cpu != NULL &&
-                    (dsc_addr & 0x1FFFFFFFu) + 2u <= g_cpu->mem_size)
-                    memcpy(g_cur_mem + (dsc_addr & 0x1FFFFFFFu), &val, 2);
+        case 0x0010: { /* ReadPipeIfPossible: Result + Groesse + StaticBuffer */
+            uint32_t ch = p[0];
+            uint32_t size = p[2];
+            uint32_t dsc_addr = ipc_resp_static_buffer_addr(r->buf, 0);
+            uint32_t n = 0;
+            /* Azahar: nur lesen, wenn genug Daten da sind. */
+            if (ch < DSP_NUM_PIPES && size != 0 && dsc_addr != 0 &&
+                g_dsp_pipe_len[ch] >= size && g_cpu != NULL &&
+                (dsc_addr & 0x1FFFFFFFu) + size <= g_cpu->mem_size) {
+                n = dsp_pipe_read((int)ch, g_cur_mem + (dsc_addr & 0x1FFFFFFFu), size);
             }
             ipc_begin(r, 0x0010, 2, 2);
             put_result(r);
-            ipc_put(r, 2);          /* gelesene Bytes */
-            ipc_put(r, dsc_flags);
+            ipc_put(r, n);
+            ipc_put(r, 0x2u | ((n & 0x3FFFFu) << 14));
             ipc_put(r, dsc_addr);
-            if (g_log) printf("[dsp] ReadPipeIfPossible ch=%u size=%u -> 2\n", p[0], p[2]);
+            if (g_log) printf("[dsp] ReadPipeIfPossible ch=%u size=%u -> %u\n", ch, size, n);
             break;
         }
         case 0x0011: { /* LoadComponent: Result + bool + MappedBuffer-Echo */
@@ -1750,19 +1974,33 @@ static void dsp_command(Ipc *r, uint32_t *p) {
         }
         case 0x0013:   /* FlushDataCache */
         case 0x0014:   /* InvalidateDataCache */
-        case 0x0015: { /* RegisterInterruptEvents: Result (kein Handle) */
+            ipc_begin(r, r->cmd, 1, 0);
+            put_result(r);
+            break;
+        case 0x0015: { /* RegisterInterruptEvents: Result
+                          Params (Azahar): interrupt(type), channel(pipe),
+                          CopyHandle(event). */
+            uint32_t type = p[0];
+            uint32_t chan = p[1];
+            uint32_t ev = (r->translate >= 2) ? p[r->normal + 1] : 0u;
+            if (type < DSP_INT_TYPES && chan < DSP_NUM_PIPES) {
+                g_dsp_events[type][chan] = ev;
+                if (g_log) printf("[dsp] RegisterInterruptEvents type=%u pipe=%u ev=%u\n",
+                                  type, chan, ev);
+            }
             ipc_begin(r, r->cmd, 1, 0);
             put_result(r);
             break;
         }
-        case 0x0016: { /* GetSemaphoreEventHandle: Result + CopyHandle(Event) */
-            uint32_t ev = new_event_handle("dsp-ev", 0);
-            Handle *hh = get_handle(ev);
-            if (hh) hh->signaled = 1;
+        case 0x0016: { /* GetSemaphoreEventHandle: Result + CopyHandle(Event)
+                          Azahar: OneShot-Event, wird hier nicht vorab
+                          signalisiert. */
+            if (g_dsp_semaphore_ev == 0)
+                g_dsp_semaphore_ev = new_event_handle("dsp-sem", 0);
             ipc_begin(r, 0x0016, 1, 2);
             put_result(r);
-            ipc_put_handle(r, ev);
-            if (g_log) printf("[dsp] GetSemaphoreEventHandle -> %u\n", ev);
+            ipc_put_handle_copy(r, g_dsp_semaphore_ev);
+            if (g_log) printf("[dsp] GetSemaphoreEventHandle -> %u\n", g_dsp_semaphore_ev);
             break;
         }
         case 0x001F: { /* GetHeadphoneStatus: Result + bool */
@@ -2536,39 +2774,95 @@ static void gsp_command(Ipc *r, uint32_t *p) {
     }
 }
 
-/* Y2R: die meisten Kommandos sind Setter (1 Result). Wichtig ist
- * 0x000F GetTransferEndEvent -> Event-Handle, sonst wartet das Spiel auf
- * Handle 0 und kommt nie zur Grafik-Initialisierung.
- * Layouts nach Azahar src/core/hle/service/cam/y2r_u.cpp. */
+/* Y2R-Layouts nach Azahar src/core/hle/service/cam/y2r_u.cpp:
+ *  - GetTransferEndEvent liefert das eine completion_event (OneShot) und
+ *    signalisiert es nicht vorab.
+ *  - StartConversion plant die Fertigmeldung (MinY2RDelay = 50000 Zyklen,
+ *    hier ~186 us), danach Event-Signal und is_busy_conversion = false.
+ *  - IsFinished* spiegeln den Fertigzustand (Azahar stubbt sie auf 1). */
+static uint32_t g_y2r_event = 0;
+static int g_y2r_interrupt_enabled = 0;
+static int g_y2r_busy = 0;
+static uint64_t g_y2r_due_us = 0;
+
+static void y2r_poll(void) {
+    if (g_y2r_busy && host_us() >= g_y2r_due_us) {
+        g_y2r_busy = 0;
+        {
+            Handle *hh = get_handle(g_y2r_event);
+            if (hh != NULL) hh->signaled = 1;
+        }
+    }
+}
+
 static void y2r_command(Ipc *r, uint32_t *p) {
+    y2r_poll();
     switch (r->cmd) {
         case 0x0002: case 0x0004: case 0x0006: case 0x0008:
-        case 0x000A: case 0x000C: case 0x000E: { /* Get*: Result + Wert */
+        case 0x000A: case 0x000C: { /* Get*: Result + Wert */
             ipc_begin(r, r->cmd, 2, 0);
             put_result(r);
             ipc_put(r, 0);
             break;
         }
         case 0x000D: { /* SetTransferEndInterrupt: Result */
+            g_y2r_interrupt_enabled = (r->normal >= 1 && p[0] != 0);
             ipc_begin(r, 0x000D, 1, 0);
             put_result(r);
             break;
         }
+        case 0x000E: { /* GetTransferEndInterrupt: Result + bool */
+            ipc_begin(r, 0x000E, 2, 0);
+            put_result(r);
+            ipc_put(r, (uint32_t)g_y2r_interrupt_enabled);
+            break;
+        }
         case 0x000F: { /* GetTransferEndEvent: Result + CopyHandle(Event) */
-            uint32_t ev = new_event_handle("y2r-ev", 0);
-            Handle *hh = get_handle(ev);
-            if (hh) hh->signaled = 1;
+            if (g_y2r_event == 0)
+                g_y2r_event = new_event_handle("y2r-ev", 0);
             ipc_begin(r, 0x000F, 1, 2);
             put_result(r);
-            ipc_put_handle_copy(r, ev);
-            if (g_log) printf("[y2r] GetTransferEndEvent -> %u\n", ev);
+            ipc_put_handle_copy(r, g_y2r_event);
+            if (g_log) printf("[y2r] GetTransferEndEvent -> %u\n", g_y2r_event);
             break;
         }
         case 0x0014: case 0x0015: case 0x0016: case 0x0017:
-        case 0x0019: { /* IsFinished*: Result + bool(true) */
+        case 0x0019: { /* IsFinished*: Result + bool (Fertigzustand) */
             ipc_begin(r, r->cmd, 2, 0);
             put_result(r);
-            ipc_put(r, 1);
+            ipc_put(r, g_y2r_busy ? 0u : 1u);
+            break;
+        }
+        case 0x0026: { /* StartConversion: Result; Fertigmeldung planen */
+            g_y2r_busy = 1;
+            g_y2r_due_us = host_us() + 186;
+            ipc_begin(r, 0x0026, 1, 0);
+            put_result(r);
+            break;
+        }
+        case 0x0027: { /* StopConversion: Result */
+            g_y2r_busy = 0;
+            ipc_begin(r, 0x0027, 1, 0);
+            put_result(r);
+            break;
+        }
+        case 0x0028: { /* IsBusyConversion: Result + bool */
+            ipc_begin(r, 0x0028, 2, 0);
+            put_result(r);
+            ipc_put(r, (uint32_t)g_y2r_busy);
+            break;
+        }
+        case 0x002B: { /* DriverInitialize: Result; completion_event->Clear() */
+            Handle *hh = get_handle(g_y2r_event);
+            if (hh != NULL) hh->signaled = 0;
+            ipc_begin(r, 0x002B, 1, 0);
+            put_result(r);
+            break;
+        }
+        case 0x002C: { /* DriverFinalize: Result */
+            g_y2r_busy = 0;
+            ipc_begin(r, 0x002C, 1, 0);
+            put_result(r);
             break;
         }
         default: {
@@ -2582,12 +2876,18 @@ static void y2r_command(Ipc *r, uint32_t *p) {
 }
 
 static void generic_command(Ipc *r, int service) {
-    if (g_log) {
-        printf("[%s] cmd 0x%04X normal=%d -> 0\n",
-               SERVICE_NAMES[service], r->cmd, r->normal);
+    /* Azahar ServiceFrameworkBase::ReportUnimplementedFunction meldet das
+       Kommando laut und liefert Header (normal=1, translate=0) mit Result 0. */
+    static int logged = 0;
+    if (logged < 200) {
+        logged++;
+        printf("[ipc] UNIMPLEMENTIERT %s cmd=0x%04X n=%d t=%d",
+               SERVICE_NAMES[service], r->cmd, r->normal, r->translate);
+        for (int i = 0; i < r->normal && i < 12; i++)
+            printf(" p%d=%08X", i, r->buf[1 + i]);
+        printf("\n");
+        fflush(stdout);
     }
-    /* Azahar ServiceFrameworkBase::ReportUnimplementedFunction: Header mit
-       derselben Kommandonummer, normal_params_size = 1, Result = 0. */
     ipc_begin(r, r->cmd, 1, 0);
     put_result(r);
 }
@@ -3087,16 +3387,23 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             }
             return 0;
         }
-        case 0x0A: { /* SleepThread(ns): echte Wartezeit */
-            uint64_t ns = (uint64_t)c->r[0] | ((uint64_t)c->r[1] << 32);
-            uint32_t ms = (uint32_t)(ns / 1000000ull);
-            if (ms > 50) ms = 50;
+        case 0x0A: { /* SleepThread(ns): echte Wartezeit (Azahar svc.cpp:
+                        WakeAfterDelay; ns <= 0 = sofort weiter, Yield) */
+            int64_t ns = (int64_t)((uint64_t)c->r[0] | ((uint64_t)c->r[1] << 32));
+            uint32_t sleep_ms;
+            if (ns <= 0) {
+                sleep_ms = 0;
+            } else {
+                uint64_t ms = (uint64_t)ns / 1000000ull;
+                if (ms > 0xFFFFFFFFull) ms = 0xFFFFFFFFull;
+                sleep_ms = (uint32_t)ms;
+            }
             if (g_guest_lock_init && !g_no_lock) {
                 guest_lock_leave();
-                Sleep(ms ? ms : 0);
+                Sleep(sleep_ms);
                 guest_lock_reacquire();
             } else {
-                Sleep(ms ? ms : 0);
+                Sleep(sleep_ms);
             }
             return 0;
         }
@@ -3297,13 +3604,7 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             uint32_t h = c->r[0];
             Handle *hh = get_handle(h);
             if (hh == NULL) return RESULT_INVALID_HANDLE;
-            if (hh->file >= 0 && hh->file < MAX_FILES) {
-                if (g_files[hh->file].fp != NULL) fclose(g_files[hh->file].fp);
-                g_files[hh->file].used = 0;
-                g_files[hh->file].fp = NULL;
-            }
-            memset(hh, 0, sizeof(*hh));
-            hh->file = -1;
+            close_handle_slot(h);
             return 0;
         }
         case 0x24: { /* WaitSynchronization1(handle, timeout) */
@@ -3382,9 +3683,24 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
         }
         case 0x27: { /* DuplicateHandle(out, handleO) */
             Handle *h = get_handle(c->r[1]);
-            uint32_t nh = h ? (uint32_t)alloc_handle(h->service, h->name) : 0;
-            if (c->r[0]) write_u32(c, c->r[0], nh);
-            c->r[1] = nh;
+            int canon = canonical_slot(c->r[1]);
+            if (h == NULL || canon <= 0) return RESULT_INVALID_HANDLE;
+            {
+                /* Azahar kernel/handle_table.cpp Duplicate: neuer Handle-Slot
+                   auf dasselbe Objekt (gleicher Zustand, gleiche Datei). */
+                int nh = alloc_handle(h->service, h->name);
+                Handle *n;
+                if (nh <= 0) return RESULT_OUT_OF_RANGE;
+                n = &g_handles[nh];
+                memset(n, 0, sizeof(*n));
+                n->used = 1;
+                n->file = -1;
+                n->alias = canon;
+                n->refs = 0;
+                g_handles[canon].refs++;
+                if (c->r[0]) write_u32(c, c->r[0], (uint32_t)nh);
+                c->r[1] = (uint32_t)nh;
+            }
             return 0;
         }
         case 0x28: { /* GetSystemTick -> 64 Bit in r0:r1 (echte Zeitbasis) */

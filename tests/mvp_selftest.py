@@ -221,6 +221,24 @@ CASES = [
         "regs": {},
         "expect": {"r0": 8, "r13": 0x8000},
     },
+    {
+        # Bedingte Terminatoren (bx<cond> lr, pop<cond> {pc}) haben einen
+        # Fallthrough. Wurde der Folgeblock nicht angelegt, endete die Funktion
+        # nach `bxne lr` sofort; im Boot uebersprang das die FS-Session-Init
+        # (fn_00291C64 -> 0x291C74).
+        "name": "bx_cond_fallthrough",
+        "asm": """
+            mov r0, #1
+            cmp r0, #2
+            bxeq lr
+            mov r0, #42
+            cmp r0, #41
+            popeq {pc}
+            bx lr
+        """,
+        "regs": {},
+        "expect": {"r0": 42},
+    },
 ]
 
 
