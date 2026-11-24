@@ -6,6 +6,7 @@
 
 #include "arm_cpu.h"
 #include "gsp_fb.h"
+#include "hid_ring.h"
 
 void hle_init(ArmCpu *c, const char *romfs_dir);
 /* Der Gast-Lock gehoert dem Host-Thread, der Gastcode ausfuehrt (bei uns der
@@ -36,14 +37,9 @@ void hle_gpu_command_list(const uint8_t *data, uint32_t size, uint32_t flags);
 /* Host-Eingabe fuer hid:USER/hid:SPVR (runtime/main.c setzt sie je Frame aus
  * runtime/platform/window.c). Bitfelder: 1 = gedrueckt. Circle-Pad-Werte in
  * Rohkoordinaten -0x9A..0x9A (Azahar MAX_CIRCLEPAD_POS), Touch in Pixeln des
- * unteren Bildschirms (0..319 / 0..239). */
-typedef struct {
-    uint32_t a, b, x, y, l, r, start, select;
-    uint32_t up, down, left, right;      /* Steuerkreuz */
-    int16_t circle_x, circle_y;          /* Circle-Pad */
-    int touch_pressed;
-    uint16_t touch_x, touch_y;
-} HleHidInput;
+ * unteren Bildschirms (0..319 / 0..239). Layout in runtime/platform/
+ * hid_ring.h (HidRingInput). */
+typedef HidRingInput HleHidInput;
 
 void hle_hid_set_input(const HleHidInput *in);
 #endif

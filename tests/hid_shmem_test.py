@@ -10,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 HLE = (ROOT / "runtime" / "kernel" / "hle.c").read_text(encoding="utf-8")
+HDR = (ROOT / "runtime" / "platform" / "hid_ring.h").read_text(encoding="utf-8")
 
 # Azahar core/hle/service/hid/hid.h:
 #   pad:       ticks 0x00/0x08, index 0x10, slider 0x18, current 0x1C,
@@ -57,16 +58,16 @@ SYSCLOCK = 268111856
 
 
 def macro_hex(name):
-    m = re.search(r"#define\s+%s\s+0x([0-9A-Fa-f]+)u" % re.escape(name), HLE)
+    m = re.search(r"#define\s+%s\s+0x([0-9A-Fa-f]+)u" % re.escape(name), HDR)
     if not m:
-        raise AssertionError("Makro %s fehlt in hle.c" % name)
+        raise AssertionError("Makro %s fehlt in hid_ring.h" % name)
     return int(m.group(1), 16)
 
 
 def macro_int(name):
-    m = re.search(r"#define\s+%s\s+(\d+)u" % re.escape(name), HLE)
+    m = re.search(r"#define\s+%s\s+(\d+)u" % re.escape(name), HDR)
     if not m:
-        raise AssertionError("Makro %s fehlt in hle.c" % name)
+        raise AssertionError("Makro %s fehlt in hid_ring.h" % name)
     return int(m.group(1))
 
 

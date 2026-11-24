@@ -120,8 +120,16 @@ gebaut und mit `tools/frontier.py` gemessen; der Stand blieb **9/10
 
 **Host-Eingabe (kein Workaround):** `runtime/platform/window.c` bildet Tastatur
 (A/B/X/Y, L/R, Start/Select, Steuerkreuz, Circle-Pad) und die Maus ueber dem
-unteren Screen auf `HleHidInput` ab; ohne Eingabe schreibt HID weiter den
-neutralen Zustand mit fortlaufenden Zeitstempeln.
+unteren Screen auf `HleHidInput` ab (`runtime/platform/hid_ring.h`); das
+Circle-Pad der Tastatur wird wie Azahar `analog_from_button`/`hid.cpp` auf den
+Einheitskreis normiert und mit `0x9A` skaliert (Diagonale also 109, nicht
+154/154). `hle_hid_set_input` schreibt nur in den Host-Puffer; die HID-Ringe
+werden ausschliesslich in `hid_poll` unter dem Gast-Lock aktualisiert (aus
+`hle_pump`, den Warteschleifen und dem VBlank-Thread). Kopiert werden nur die
+von Azahar geschriebenen Ringbereiche, nicht die ganze 0x1000-Byte-Seite.
+Ohne Eingabe schreibt HID den neutralen Zustand mit fortlaufenden
+Zeitstempeln, Touch ohne Druck `x=y=0`, Accelerometer-Ruhelage `(0,-512,0)`
+(Erdbeschleunigung des Motion-Emulators).
 
 **Host-Bildausgabe (kein Workaround):** `runtime/platform/framebuffer.h` liest
 die vom Spiel gemeldeten Puffer spaltenweise (`address + x*stride +
@@ -129,9 +137,16 @@ die vom Spiel gemeldeten Puffer spaltenweise (`address + x*stride +
 `--shot datei.bmp` zeigen beide Screens untereinander (oben 400x240, unten
 320x240). `runtime/platform/gsp_fb.h` bildet `GPU::SetBufferSwap` nach
 (address_left1/2 nach `active_fb`, Register-`active_fb` aus `shown_fb`), und
-`runtime/kernel/hle.c` uebernimmt den sichtbaren Puffer erst beim VBlank.
-Getestet mit synthetischen Puffern in `tests/framebuffer_test.py`; das Spiel
-selbst ruft `SetBufferSwap` im natuerlichen Boot noch nicht auf (M2 offen).
+`runtime/kernel/hle.c` uebernimmt den sichtbaren Puffer erst beim VBlank. Der
+VBlank-Thread liest die FrameBufferInfo und loescht ihr dirty-Flag atomar
+unter dem Gast-Lock (wie die GSP-Signalisierung in die InterruptRelayQueue),
+damit ein Buffer-Swap des Spiels nicht verloren gehen kann.
+Getestet mit synthetischen Puffern in `tests/framebuffer_test.py`. Im
+natuerlichen Boot schreibt das Spiel inzwischen seine FrameBufferInfo in den
+GSP-Shared-Memory; der VBlank-Pfad uebernimmt sie
+(`[gsp] SetBufferSwap screen=0 fb=0x1F346500 stride=0x321 fmt=1 (VBlank)`,
+reproduzierbar). Damit ist M2 belegt (eigener Framebuffer des Spiels, kein
+Host-Eingriff); der IPC-Aufruf `0x0005` selbst kommt weiterhin nicht vor.
 
 
 **Y2R (kein Workaround):** `runtime/platform/y2r.h` bildet die echte

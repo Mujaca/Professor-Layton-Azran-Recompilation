@@ -8,6 +8,7 @@
 #include "hle.h"
 #include "gpu.h"
 #include "gsp_fb.h"
+#include "hid_ring.h"
 #include "y2r.h"
 
 static uint32_t g_hle_gsp_handle;
@@ -999,59 +1000,29 @@ static void apt_command(Ipc *r, uint32_t *p) {
 }
 
 /* ---------- HID (hid:USER / hid:SPVR) ----------
- * Layout von Azahar core/hle/service/hid/hid.h (SharedMem):
- *   pad 0x000, touch 0x0A8, accelerometer 0x108, gyroscope 0x158.
- * Die Ringpuffer werden in einem Host-Schattenpuffer gefuehrt. Sobald der
- * Gast den Shared-Memory-Block per svcMapMemoryBlock einblendet, wird der
- * Schatten nach jedem Update dorthin kopiert (wie Azahar in shared_mem). */
-#define HID_SHMEM_SIZE      0x1000u
-#define HID_PAD_ENTRIES     8u
-#define HID_TOUCH_ENTRIES   8u
-#define HID_ACCEL_ENTRIES   8u
-#define HID_GYRO_ENTRIES    32u
-
-#define HID_PAD_TICKS        0x000u
-#define HID_PAD_TICKS_PREV   0x008u
-#define HID_PAD_INDEX        0x010u
-#define HID_PAD_SLIDER       0x018u
-#define HID_PAD_CURRENT      0x01Cu
-#define HID_PAD_ENTRIES_OFF  0x028u   /* 8 x 16 Byte */
-
-#define HID_TOUCH_TICKS      0x0A8u
-#define HID_TOUCH_TICKS_PREV 0x0B0u
-#define HID_TOUCH_INDEX      0x0B8u
-#define HID_TOUCH_RAW        0x0C0u
-#define HID_TOUCH_ENTRIES_OFF 0x0C8u  /* 8 x 8 Byte */
-
-#define HID_ACC_TICKS        0x108u
-#define HID_ACC_TICKS_PREV   0x110u
-#define HID_ACC_INDEX        0x118u
-#define HID_ACC_RAW          0x120u
-#define HID_ACC_ENTRIES_OFF  0x128u   /* 8 x 6 Byte */
-
-#define HID_GYRO_TICKS       0x158u
-#define HID_GYRO_TICKS_PREV  0x160u
-#define HID_GYRO_INDEX       0x168u
-#define HID_GYRO_RAW         0x170u
-#define HID_GYRO_ENTRIES_OFF 0x178u   /* 32 x 6 Byte */
-
+ * Layout und reine Ringpuffer-Logik stehen in runtime/platform/hid_ring.h
+ * (Azahar core/hle/service/hid/hid.h bzw. hid.cpp). Die Ringpuffer werden in
+ * einem Host-Schattenpuffer gefuehrt. Sobald der Gast den Shared-Memory-Block
+ * per svcMapMemoryBlock einblendet, werden nach jedem Update nur die von
+ * Azahar geschriebenen Ringbereiche (HID_RING_RANGES) dorthin kopiert. */
 /* Azahar hid.h: BASE_CLOCK_RATE_ARM11 / 234, /104, /101 (empirisch). */
 #define HID_PAD_TICKS_PERIOD   (SYSCLOCK_ARM11 / 234u)
 #define HID_ACC_TICKS_PERIOD   (SYSCLOCK_ARM11 / 104u)
 #define HID_GYRO_TICKS_PERIOD  (SYSCLOCK_ARM11 / 101u)
 
+/* Ruhelage des Motion-Emulators (Azahar input_common/motion_emu.cpp: gravity
+ * (0,-1,0) in 3DS-Koordinaten, hid.cpp multipliziert mit accelerometer_coef
+ * 512). Ohne Bewegungseingabe liegt das Geraet flach, also y = -512. */
+#define HID_ACCEL_REST_X  (0)
+#define HID_ACCEL_REST_Y  (-512)
+#define HID_ACCEL_REST_Z  (0)
+
 typedef struct {
     int initialized;
     uint32_t shmem;                 /* Handle des Shared-Memory-Blocks */
     uint32_t events[5];             /* Pad0, Pad1, Accel, Gyro, DebugPad */
-    uint32_t next_pad, next_touch, next_acc, next_gyro;
-    int64_t pad_ticks, pad_ticks_prev;
-    int64_t touch_ticks, touch_ticks_prev;
-    int64_t acc_ticks, acc_ticks_prev;
-    int64_t gyro_ticks, gyro_ticks_prev;
+    HidRing ring;                   /* Indizes/Ticks/Mittelung (hid_ring.h) */
     uint64_t pad_due, acc_due, gyro_due;
-    uint32_t pad_state;
-    int16_t circle_old_x[2], circle_old_y[2];
     int enable_acc, enable_gyro;
     int guest_mapped;
     uint32_t guest_addr;
@@ -1061,18 +1032,12 @@ typedef struct {
 
 static HidState g_hid;
 static SRWLOCK g_hid_srw = SRWLOCK_INIT;
+/* Eigener Mutex nur fuer den Host-Eingabepuffer: Fenster-/Hauptthread
+ * schreiben hier, hid_poll liest ihn unter dem Gast-Lock. */
+static SRWLOCK g_hid_in_srw = SRWLOCK_INIT;
 static HleHidInput g_hid_input;
 static int g_hid_log = -1;
 
-static void hid_wr16(HidState *s, uint32_t off, uint16_t v) {
-    memcpy(s->shadow + off, &v, 2);
-}
-static void hid_wr32(HidState *s, uint32_t off, uint32_t v) {
-    memcpy(s->shadow + off, &v, 4);
-}
-static void hid_wr64(HidState *s, uint32_t off, uint64_t v) {
-    memcpy(s->shadow + off, &v, 8);
-}
 static uint32_t hid_rd32(const HidState *s, uint32_t off) {
     uint32_t v = 0;
     memcpy(&v, s->shadow + off, 4);
@@ -1084,154 +1049,66 @@ static void hid_signal_event(int which) {
     if (hh != NULL) hh->signaled = 1;
 }
 
-/* Richtungsbits des Circle-Pads (Azahar GetStickDirectionState: Schwelle
- * 40^2, tan30/tan60; x>0 = rechts, y>0 = oben). */
-static uint32_t hid_circle_direction(int16_t x, int16_t y) {
-    uint32_t bits = 0;
-    if ((int32_t)x * x + (int32_t)y * y > 40 * 40) {
-        float t = (x != 0) ? fabsf((float)y / (float)x) : 1.0e9f;
-        if (x != 0 && t < 1.7320508075688772f) {          /* tan60 */
-            bits |= (x > 0) ? (1u << 28) : (1u << 29);
-        }
-        if (x == 0 || t > 0.5773502691896257f) {          /* tan30 */
-            bits |= (y > 0) ? (1u << 30) : (1u << 31);
-        }
-    }
-    return bits;
+/* Signalisiert die Ereignisse, die ein Ring-Update gemeldet hat. */
+static void hid_signal_events(uint32_t ev) {
+    if (ev & HID_RING_EV_PAD0) hid_signal_event(0);
+    if (ev & HID_RING_EV_PAD1) hid_signal_event(1);
+    if (ev & HID_RING_EV_ACCEL) hid_signal_event(2);
+    if (ev & HID_RING_EV_GYRO) hid_signal_event(3);
 }
 
 static void hid_update_pad_locked(uint64_t tick) {
-    HidState *s = &g_hid;
-    const HleHidInput *in = &g_hid_input;
-    uint32_t hex = 0, idx, last, old, e;
-    int32_t nx = in->circle_x, ny = in->circle_y;
-    int16_t ax, ay, tx, ty;
-
-    if (in->a) hex |= 1u << 0;
-    if (in->b) hex |= 1u << 1;
-    if (in->select) hex |= 1u << 2;
-    if (in->start) hex |= 1u << 3;
-    if (in->right) hex |= 1u << 4;
-    if (in->left) hex |= 1u << 5;
-    if (in->up) hex |= 1u << 6;
-    if (in->down) hex |= 1u << 7;
-    if (in->r) hex |= 1u << 8;
-    if (in->l) hex |= 1u << 9;
-    if (in->x) hex |= 1u << 10;
-    if (in->y) hex |= 1u << 11;
-
-    /* Azahar mittelt den neuen Rohwert mit den zwei vorherigen (CIRCLE_PAD_
-     * AVERAGING = 3), damit das Pad traeger wirkt wie auf Hardware. */
-    ax = (int16_t)((nx + s->circle_old_x[0] + s->circle_old_x[1]) / 3);
-    ay = (int16_t)((ny + s->circle_old_y[0] + s->circle_old_y[1]) / 3);
-    s->circle_old_x[0] = s->circle_old_x[1]; s->circle_old_x[1] = (int16_t)nx;
-    s->circle_old_y[0] = s->circle_old_y[1]; s->circle_old_y[1] = (int16_t)ny;
-
-    hex |= hid_circle_direction(ax, ay);
-    s->pad_state = hex;
-    s->pad_updates++;
-    hid_wr32(s, HID_PAD_CURRENT, hex);
-
-    idx = s->next_pad;
-    s->next_pad = (idx + 1u) % HID_PAD_ENTRIES;
-    hid_wr32(s, HID_PAD_INDEX, idx);
-    last = (idx - 1u) % HID_PAD_ENTRIES;      /* u32-Arithmetik wie Azahar */
-    old = hid_rd32(s, HID_PAD_ENTRIES_OFF + last * 16u);
-    e = HID_PAD_ENTRIES_OFF + idx * 16u;
-    hid_wr32(s, e + 0u, hex);
-    hid_wr32(s, e + 4u, hex & ~old);          /* delta_additions */
-    hid_wr32(s, e + 8u, old & ~hex);          /* delta_removals */
-    hid_wr16(s, e + 12u, (uint16_t)ax);
-    hid_wr16(s, e + 14u, (uint16_t)ay);
-    if (idx == 0u) {
-        s->pad_ticks_prev = s->pad_ticks;
-        s->pad_ticks = (int64_t)tick;
-        hid_wr64(s, HID_PAD_TICKS_PREV, (uint64_t)s->pad_ticks_prev);
-        hid_wr64(s, HID_PAD_TICKS, (uint64_t)s->pad_ticks);
-    }
-
-    /* Touch: gueltige Koordinaten nur bei gedrueckter Maus/Touch-Eingabe. */
-    idx = s->next_touch;
-    s->next_touch = (idx + 1u) % HID_TOUCH_ENTRIES;
-    hid_wr32(s, HID_TOUCH_INDEX, idx);
-    tx = (int16_t)(in->touch_x < 320 ? in->touch_x : 319);
-    ty = (int16_t)(in->touch_y < 240 ? in->touch_y : 239);
-    e = HID_TOUCH_ENTRIES_OFF + idx * 8u;
-    hid_wr16(s, e + 0u, (uint16_t)tx);
-    hid_wr16(s, e + 2u, (uint16_t)ty);
-    hid_wr32(s, e + 4u, in->touch_pressed ? 1u : 0u);
-    if (idx == 0u) {
-        s->touch_ticks_prev = s->touch_ticks;
-        s->touch_ticks = (int64_t)tick;
-        hid_wr64(s, HID_TOUCH_TICKS_PREV, (uint64_t)s->touch_ticks_prev);
-        hid_wr64(s, HID_TOUCH_TICKS, (uint64_t)s->touch_ticks);
-    }
-
-    /* 3D-Slider: Azahar schreibt factor_3d/100 (Standard 0). */
-    hid_wr32(s, HID_PAD_SLIDER, 0u);
-
-    /* Azahar signalisiert beide Pad-/Touch-Events bei jedem Update. */
-    hid_signal_event(0);
-    hid_signal_event(1);
+    HidRingInput in;
+    AcquireSRWLockShared(&g_hid_in_srw);
+    in = g_hid_input;
+    ReleaseSRWLockShared(&g_hid_in_srw);
+    g_hid.pad_updates++;
+    hid_signal_events(hid_ring_write_pad(&g_hid.ring, g_hid.shadow,
+                                        &in, (int64_t)tick));
 }
 
 static void hid_update_acc_locked(uint64_t tick) {
-    HidState *s = &g_hid;
-    uint32_t idx = s->next_acc, e;
-    int16_t x = 0, y = 0, z = 0;   /* ohne Motion-Eingabe: Ruhelage */
-
-    s->next_acc = (idx + 1u) % HID_ACCEL_ENTRIES;
-    hid_wr32(s, HID_ACC_INDEX, idx);
-    e = HID_ACC_ENTRIES_OFF + idx * 6u;
-    hid_wr16(s, e + 0u, (uint16_t)x);
-    hid_wr16(s, e + 2u, (uint16_t)y);
-    hid_wr16(s, e + 4u, (uint16_t)z);
-    /* Azahar: raw.x = -2*x, raw.z = 2*y, raw.y = -2*z */
-    hid_wr16(s, HID_ACC_RAW + 0u, (uint16_t)(int16_t)(-2 * x));
-    hid_wr16(s, HID_ACC_RAW + 2u, (uint16_t)(int16_t)(-2 * z));
-    hid_wr16(s, HID_ACC_RAW + 4u, (uint16_t)(int16_t)(2 * y));
-    if (idx == 0u) {
-        s->acc_ticks_prev = s->acc_ticks;
-        s->acc_ticks = (int64_t)tick;
-        hid_wr64(s, HID_ACC_TICKS_PREV, (uint64_t)s->acc_ticks_prev);
-        hid_wr64(s, HID_ACC_TICKS, (uint64_t)s->acc_ticks);
-    }
-    hid_signal_event(2);
+    /* Ohne Bewegungseingabe: Erdbeschleunigung in Ruhelage (Azahar). */
+    hid_signal_events(hid_ring_write_accel(&g_hid.ring, g_hid.shadow,
+                                           HID_ACCEL_REST_X, HID_ACCEL_REST_Y,
+                                           HID_ACCEL_REST_Z, (int64_t)tick));
 }
 
 static void hid_update_gyro_locked(uint64_t tick) {
-    HidState *s = &g_hid;
-    uint32_t idx = s->next_gyro, e;
-    int16_t x = 0, y = 0, z = 0;
+    hid_signal_events(hid_ring_write_gyro(&g_hid.ring, g_hid.shadow,
+                                          0, 0, 0, (int64_t)tick));
+}
 
-    s->next_gyro = (idx + 1u) % HID_GYRO_ENTRIES;
-    hid_wr32(s, HID_GYRO_INDEX, idx);
-    e = HID_GYRO_ENTRIES_OFF + idx * 6u;
-    hid_wr16(s, e + 0u, (uint16_t)x);
-    hid_wr16(s, e + 2u, (uint16_t)y);
-    hid_wr16(s, e + 4u, (uint16_t)z);
-    /* Azahar: raw.x = x, raw.z = -y, raw.y = z */
-    hid_wr16(s, HID_GYRO_RAW + 0u, (uint16_t)x);
-    hid_wr16(s, HID_GYRO_RAW + 2u, (uint16_t)z);
-    hid_wr16(s, HID_GYRO_RAW + 4u, (uint16_t)(int16_t)(-y));
-    if (idx == 0u) {
-        s->gyro_ticks_prev = s->gyro_ticks;
-        s->gyro_ticks = (int64_t)tick;
-        hid_wr64(s, HID_GYRO_TICKS_PREV, (uint64_t)s->gyro_ticks_prev);
-        hid_wr64(s, HID_GYRO_TICKS, (uint64_t)s->gyro_ticks);
+/* Kopiert genau die Ringbereiche, die Azahar im Shared Memory aktualisiert.
+ * Der Aufrufer haelt den Gast-Lock und g_hid_srw: Gast-Speicher wird nur
+ * unter dem Gast-Lock geschrieben. */
+static void hid_copy_to_guest_locked(void) {
+    uint32_t off;
+    if (!g_hid.guest_mapped || g_cpu == NULL) return;
+    off = g_hid.guest_addr & 0x1FFFFFFFu;
+    if ((uint64_t)off + HID_SHMEM_SIZE > g_cpu->mem_size) return;
+    for (size_t i = 0; i < HID_RING_RANGE_COUNT; i++) {
+        uint32_t o = HID_RING_RANGES[i].offset;
+        memcpy(g_cpu->mem + off + o, g_hid.shadow + o, HID_RING_RANGES[i].length);
     }
-    hid_signal_event(3);
 }
 
 /* Regelt die Update-Zeitpunkte (Azahar CoreTiming: pad_update_ticks usw.).
- * Wird aus hle_pump, den Warteschleifen, dem VBlank-Thread und nach jeder
- * Host-Eingabe aufgerufen; verpasste Perioden werden nachgeholt. */
+ * Wird aus hle_pump, den Warteschleifen und dem VBlank-Thread aufgerufen;
+ * verpasste Perioden werden nachgeholt. Der Gast-Lock wird hier genommen,
+ * falls der Aufrufer ihn nicht schon haelt, weil der Schatten in den
+ * Gast-Shared-Memory kopiert wird. */
 static void hid_poll(void) {
     uint64_t now;
     int guard;
+    int had_lock;
     if (!g_hid.initialized) return;
     now = host_system_ticks();
 
+    /* Der Lock ist nicht rekursiv: nur abgeben, wenn hid_poll ihn selbst
+       genommen hat (VBlank-Thread nimmt ihn bereits aussen). */
+    had_lock = t_lock_owned;
+    if (!had_lock) guest_lock_enter();
     AcquireSRWLockExclusive(&g_hid_srw);
     guard = 0;
     while (now >= g_hid.pad_due && guard++ < 64) {
@@ -1254,11 +1131,7 @@ static void hid_poll(void) {
     }
     if (g_hid.gyro_due < now) g_hid.gyro_due = now + HID_GYRO_TICKS_PERIOD;
 
-    if (g_hid.guest_mapped && g_cpu != NULL) {
-        uint32_t off = g_hid.guest_addr & 0x1FFFFFFFu;
-        if ((uint64_t)off + HID_SHMEM_SIZE <= g_cpu->mem_size)
-            memcpy(g_cpu->mem + off, g_hid.shadow, HID_SHMEM_SIZE);
-    }
+    hid_copy_to_guest_locked();
     if (g_hid_log < 0) g_hid_log = getenv("HLE_HID_LOG") ? 1 : 0;
     if (g_hid_log && g_hid.pad_updates != 0u && (g_hid.pad_updates % 234u) == 0u) {
         static uint64_t last_logged = 0;
@@ -1274,31 +1147,30 @@ static void hid_poll(void) {
                    "valid=%u pos=(%u,%u) acc_idx=%u gyro_idx=%u\n",
                    (unsigned long long)g_hid.pad_updates,
                    hid_rd32(&g_hid, HID_PAD_INDEX), hid_rd32(&g_hid, HID_PAD_CURRENT),
-                   (long long)g_hid.pad_ticks, ti, vx & 1u, tx, ty,
+                   (long long)g_hid.ring.pad_ticks, ti, vx & 1u, tx, ty,
                    hid_rd32(&g_hid, HID_ACC_INDEX), hid_rd32(&g_hid, HID_GYRO_INDEX));
             fflush(stdout);
         }
     }
     ReleaseSRWLockExclusive(&g_hid_srw);
+    if (!had_lock) guest_lock_leave();
 }
 
+/* Host-Threads (Fenster/Hauptthread) schreiben nur in diesen Host-Puffer,
+ * nie in Gast-Speicher. Angewendet wird er ausschliesslich in hid_poll unter
+ * dem Gast-Lock. */
 void hle_hid_set_input(const HleHidInput *in) {
     if (in == NULL) return;
-    AcquireSRWLockExclusive(&g_hid_srw);
+    AcquireSRWLockExclusive(&g_hid_in_srw);
     g_hid_input = *in;
-    ReleaseSRWLockExclusive(&g_hid_srw);
-    hid_poll();
+    ReleaseSRWLockExclusive(&g_hid_in_srw);
 }
 
 static void hid_map_guest(uint32_t addr) {
     AcquireSRWLockExclusive(&g_hid_srw);
     g_hid.guest_addr = addr;
     g_hid.guest_mapped = 1;
-    if (g_cpu != NULL) {
-        uint32_t off = addr & 0x1FFFFFFFu;
-        if ((uint64_t)off + HID_SHMEM_SIZE <= g_cpu->mem_size)
-            memcpy(g_cpu->mem + off, g_hid.shadow, HID_SHMEM_SIZE);
-    }
+    hid_copy_to_guest_locked();
     ReleaseSRWLockExclusive(&g_hid_srw);
     if (getenv("HLE_MAP_LOG"))
         printf("[hid] Shared-Memory gemappt auf 0x%08X\n", addr);
@@ -2559,8 +2431,9 @@ static void gsp_vblank_fb_update(ArmCpu *c, int tid) {
         ReleaseSRWLockExclusive(&g_gsp_fb_srw);
         if (left != 0u) {
             gpu_set_fb_size(left, (screen == 1) ? 320 : 400, 240);
-            printf("[gsp] SetBufferSwap screen=%d fb=0x%08X stride=0x%X fmt=%X (VBlank)\n",
-                   screen, left, st, fmt);
+            if (g_log)
+                printf("[gsp] SetBufferSwap screen=%d fb=0x%08X stride=0x%X fmt=%X (VBlank)\n",
+                       screen, left, st, fmt);
         }
     }
     /* Anzeige-Wechsel genau im VBlank: der sichtbare Puffer (active_fb aus
@@ -3365,7 +3238,7 @@ static void y2r_command(Ipc *r, uint32_t *p) {
             ipc_put(r, 0);
             break;
         }
-        case 0x002B: { /* DriverInitialize */
+        case 0x002B: { /* DriverInitialize: Azahar MakeBuilder(1,0) + Result */
             Handle *hh = get_handle(g_y2r_event);
             g_y2r.input_format = Y2R_IN_YUV422_INDIV8;
             g_y2r.output_format = Y2R_OUT_RGBA8;
@@ -3380,6 +3253,8 @@ static void y2r_command(Ipc *r, uint32_t *p) {
             memset(&g_y2r.src_v, 0, sizeof(g_y2r.src_v));
             memset(&g_y2r.dst, 0, sizeof(g_y2r.dst));
             if (hh != NULL) hh->signaled = 0;
+            ipc_begin(r, r->cmd, 1, 0);
+            put_result(r);
             break;
         }
         case 0x002C: { /* DriverFinalize */
@@ -3727,12 +3602,17 @@ static DWORD WINAPI vblank_thread(LPVOID p) {
         Sleep(16);
         /* Echte VBlank-Quelle: GSP uebernimmt die FrameBufferInfo aus dem
          * Shared-Memory und meldet PDC0 (oben) / PDC1 (unten) per RelayQueue
-         * und Event (Azahar GPU::VBlankCallback / GSP_GPU::SignalInterrupt). */
+         * und Event (Azahar GPU::VBlankCallback / GSP_GPU::SignalInterrupt).
+         * Lesen + dirty-Flag loeschen und das Schreiben in Gast-Speicher
+         * (RelayQueue) muessen atomar unter dem Gast-Lock passieren; sonst
+         * kann ein Buffer-Swap des Spiels verloren gehen. */
+        guest_lock_enter();
         gsp_vblank_fb_update(g_cpu, g_gsp_thread_id);
         gsp_signal_interrupt(GSP_IRQ_PDC0);
         gsp_signal_interrupt(GSP_IRQ_PDC1);
         kernel_poll_timers();
         hid_poll();
+        guest_lock_leave();
     }
     return 0;
 }
@@ -3753,8 +3633,6 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     setup_config_mem(c);
     arm_pump_hook = hle_pump;
     gsp_fb_init();
-    g_vblank_run = 1;
-    CreateThread(NULL, 0, vblank_thread, NULL, 0, NULL);
 
     memset(g_handles, 0, sizeof(g_handles));
     g_next_handle = 1;
@@ -3777,6 +3655,10 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
         g_det_sched = getenv("HLE_DET_SCHED") != NULL;
         if (g_det_sched) g_turn = 1;
     }
+    /* VBlank-Thread erst nach Lock- und HID-Initialisierung starten: er
+       nimmt fuer jeden VBlank den Gast-Lock. */
+    g_vblank_run = 1;
+    CreateThread(NULL, 0, vblank_thread, NULL, 0, NULL);
     printf("[hle] romfs=%s log=%d srv-handle=%u\n", g_romfs, g_log, g_srv_handle);
 }
 

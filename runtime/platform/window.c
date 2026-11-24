@@ -1,6 +1,7 @@
 #include "window.h"
 
 #include <windows.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -197,7 +198,7 @@ void win_set_touch_rect(int x, int y, int w, int h) {
 }
 
 void win_input_poll(WinInput *out) {
-    int mx, my, md, cx = 0, cy = 0;
+    int mx, my, md;
     int down[256];
     if (out == NULL) return;
     memset(out, 0, sizeof(*out));
@@ -223,12 +224,20 @@ void win_input_poll(WinInput *out) {
     out->left = down[VK_LEFT] != 0;
     out->right = down[VK_RIGHT] != 0;
 
-    if (down['I']) cy += 0x9A;
-    if (down['K']) cy -= 0x9A;
-    if (down['J']) cx -= 0x9A;
-    if (down['L']) cx += 0x9A;
-    out->circle_x = (int16_t)cx;
-    out->circle_y = (int16_t)cy;
+    /* Circle-Pad wie Azahar analog_from_button: jede Achse -1/0/+1, beide
+     * Achsen zugleich mit sqrt(1/2), dann * MAX_CIRCLEPAD_POS (0x9A) und
+     * gerundet (hid.cpp). Damit liegt auch die Diagonale auf dem Einheits-
+     * kreis und nicht bei (0x9A,0x9A). */
+    {
+        const double SQRT_HALF = 0.7071067811865476;
+        int cxdir = 0, cydir = 0;
+        if (down['I']) cydir += 1;
+        if (down['K']) cydir -= 1;
+        if (down['J']) cxdir -= 1;
+        if (down['L']) cxdir += 1;
+        out->circle_x = (int16_t)lround(cxdir * (cydir == 0 ? 1.0 : SQRT_HALF) * 0x9A);
+        out->circle_y = (int16_t)lround(cydir * (cxdir == 0 ? 1.0 : SQRT_HALF) * 0x9A);
+    }
 
     if (g_has_touch_rect && g_scale > 0) {
         int px = mx / g_scale, py = my / g_scale;

@@ -221,7 +221,14 @@ Quelle: Azahar `core/hle/service/cam/y2r_u.{h,cpp}`, `core/hw/y2r.cpp`.
   `MinY2RDelay = 50000` Zyklen (≈186 µs) danach: Event signalisieren,
   `is_busy_conversion=false`. `DriverInitialize` setzt YUV422_Indiv8/RGBA8/
   keine Rotation/Linear/Koeffizienten 0/1024×1024/alpha 0 und löscht das
-  OneShot-Event.
+  OneShot-Event; die Antwort ist `MakeBuilder(1,0)` (Result, keine Parameter).
+  `GetPackageParameter` liefert `MakeBuilder(4,0)` (Result + 12 Byte).
+* Ungültige Konfiguration (Format/Rotation/Alignment oder Zeilenbreite):
+  Azahar bricht in `y2r.cpp` per ASSERT ab, es wird **kein**
+  Completion-Interrupt/Event signalisiert und die DMA-Ausgabe bleibt aus.
+  Der Port verhält sich genauso (Event bleibt unsignalisiert) und loggt
+  `[y2r] ungueltige Konfiguration (...)`; das ist kein Workaround, sondern
+  die dokumentierte Azahar-/Hardware-Semantik.
 * Das Spiel nutzt es für Video: 400×240, YUV420_Indiv8, RGB8, Block8×8,
   Rec601_Scaling, alpha 255 (Azahar-Referenzspur). Umsetzung in
   `runtime/platform/y2r.h` (reine Funktionen), Anbindung in

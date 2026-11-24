@@ -67,6 +67,18 @@ Neue Semantikfehler zuerst hier reproduzieren und dann als festen Fall in
 
 Selbsttest: `python tools/selftest_tools.py`.
 
+## Weitere Tests (bewusst nicht in `tools/check.py`)
+
+| Befehl | Zweck |
+|---|---|
+| `python tests/hid_shmem_test.py` | HID-Shared-Memory-Layout (Offsets/Groessen/Takt) gegen Azahar `hid.h`, liest `runtime/platform/hid_ring.h` |
+| `python tests/hid_ring_test.py` | HID-Ring-Verhalten: Index-Umlauf (8/8/8/32), Tastenbits, Circle-Pad-Richtungsbits, `delta_additions`/`delta_removals`, Ereignis-Signalisierung, Touch ohne/mit Druck, Accelerometer-Ruhelage |
+| `python tests/framebuffer_test.py` | Bildausgabe/FrameBufferInfo mit synthetischen Puffern |
+| `python tests/y2r_test.py` | YUV→RGB-Konverter mit synthetischen Bildern |
+
+Diese Tests brauchen nur `zig cc` und laufen in Sekunden; sie gehoeren
+absichtlich nicht zum Commit-Gate.
+
 ## Diagnose-Umgebungsvariablen (verändern keinen Gastzustand)
 
 `HLE_LOG=1`, `HLE_SRV_NAMES=1`, `HLE_IPC_LOG=<n>`, `HLE_TRACE=1`,

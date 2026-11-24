@@ -137,8 +137,8 @@ int main(int argc, char **argv) {
             if (shot != NULL) save_shot(shot);
             break;
         }
-        /* Host-Eingabe je Frame; hid_poll() im Runtime verteilt sie auf die
-           Ringpuffer im Takt von Azahars pad_update_ticks. */
+        /* Host-Eingabe je Frame; der Runtime wendet sie in hid_poll unter dem
+           Gast-Lock an (nur Host-Puffer, nie direkter Gastzugriff). */
         win_input_poll(&wi);
         memset(&hi, 0, sizeof(hi));
         hi.a = (uint32_t)wi.a; hi.b = (uint32_t)wi.b;
