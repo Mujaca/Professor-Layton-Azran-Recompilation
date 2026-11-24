@@ -2050,19 +2050,22 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
         g_no_lock = getenv("HLE_NO_THREAD_LOCK") != NULL;
         g_det_sched = getenv("HLE_DET_SCHED") != NULL;
         if (g_det_sched) g_turn = 1;
-        if (!g_no_lock) guest_lock_enter();
     }
     printf("[hle] romfs=%s log=%d srv-handle=%u\n", g_romfs, g_log, g_srv_handle);
 }
 
-/* Befund 2026-11-24: hle_init nimmt den Gast-Lock auf dem Host-Hauptthread,
- * waehrend der Gastcode im game_thread laeuft. Dadurch blockieren alle per
- * svcCreateThread gestarteten Gast-Threads dauerhaft in guest_lock_enter()
- * (per HLE_PERFMAP: Threads 3..6 = 0 Bloecke, ARM_WATCH auf 0x123168 nie
- * getroffen). Korrekte Variante waere, den Lock im game_thread zu nehmen
- * (hle_guest_enter) und in hle_init nicht; das legt aber derzeit einen
- * frueheren Gast-Exit offen (OS-Init-Flag -> fn_00100CE0-Finalize ->
- * fn_001016B8 liefert 0 -> ExitProcess). Siehe scratch/night/last_summary.md. */
+/* Der Gast-Lock wird NICHT hier (Host-Hauptthread/main) genommen, sondern im
+ * game_thread vor dem Einstieg in den Gastcode (runtime/main.c). Sonst haelt
+ * ein Thread den Lock, der nie Gastcode ausfuehrt, und alle per
+ * svcCreateThread gestarteten Gast-Threads blockieren dauerhaft in
+ * guest_lock_enter() (Befund 2026-11-24, Commit 60a3682). */
+void hle_guest_enter(void) {
+    guest_lock_enter();
+}
+
+void hle_guest_leave(void) {
+    guest_lock_leave();
+}
 
 void hle_tick_stats(int *calls, unsigned long long *tick) {
     if (calls) *calls = g_tick_calls;

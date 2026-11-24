@@ -37,7 +37,11 @@ static unsigned char g_rgb[FB_W * FB_H * 3];
 
 static DWORD WINAPI game_thread(LPVOID unused) {
     (void)unused;
+    /* Der Gast-Lock gehoert dem Thread, der Gastcode ausfuehrt. hle_init()
+       laeuft dagegen auf dem Host-Hauptthread und darf ihn nicht nehmen. */
+    hle_guest_enter();
     fn_00100000(&g_cpu);
+    hle_guest_leave();
     g_halt = 1;
     return 0;
 }

@@ -7,6 +7,12 @@
 #include "arm_cpu.h"
 
 void hle_init(ArmCpu *c, const char *romfs_dir);
+/* Der Gast-Lock gehoert dem Host-Thread, der Gastcode ausfuehrt (bei uns der
+   game_thread in runtime/main.c), nicht dem Thread, der hle_init aufruft.
+   Nur der Besitzer darf Gast-Bloecke ausfuehren bzw. den Lock kooperativ
+   abgeben (hle_pump/guest_yield). */
+void hle_guest_enter(void);
+void hle_guest_leave(void);
 uint32_t hle_svc(ArmCpu *c, uint32_t imm);
 void hle_report(void);
 void hle_tick_stats(int *calls, unsigned long long *tick);

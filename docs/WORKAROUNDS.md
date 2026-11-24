@@ -74,3 +74,50 @@ gegen Azahar `IPC::RequestBuilder` geprüft (srv, APT, fs, file, hid, cfg,
 ndm, ptm, gsp, dsp, y2r, boss). Damit entfielen `wa-fs-client-slot` sowie die
 `g_srv_layout`-Varianten; das Spiel liest den fs-Handle jetzt selbst aus der
 Antwort.
+
+## 6. Befunde (offene Ursachen, kein Workaround eingebaut)
+
+### Gast-Threads liefen nie – behoben 2026-11-24
+
+**Befund:** `hle_init()` lief auf dem Host-Hauptthread (`runtime/main.c`) und
+nahm dort den Gast-Lock. Der Gastcode läuft aber im `game_thread`; dessen
+`hle_pump()`/`guest_yield()` sahen `t_lock_owned == 0` und gaben den Lock nie
+ab. Jeder per `svcCreateThread` gestartete Gast-Thread blockierte dauerhaft
+in `guest_lock_enter()`. Belege (Commit 60a3682): `HLE_PERFMAP` zeigte Blöcke
+nur für Thread 2, Threads 3–6 exakt 0; `[thrlock]` erschien nie.
+
+**Korrektur (dieses Paket):** `hle_guest_enter()`/`hle_guest_leave()` in
+`runtime/kernel/hle.[ch]`; `hle_init()` nimmt den Lock nicht mehr, `game_thread`
+nimmt ihn vor `fn_00100000` und gibt ihn danach ab. Beleg: `[thrlock]` für
+id=1/2, `HLE_PERFMAP_FILE` mit Blöcken für Thread 2 (161.263), 3 (10.796)
+und 4 (29.278.181).
+
+### Neue erste Divergenz: `ptm:u` (Frontier 7 → 4)
+
+Mit laufenden Worker-Threads endet der Hauptthread zu früh; `services` fällt
+von 7 auf 4 (APT:U, ndm:u, fs:USER, hid:USER), erste Divergenz `ptm:u`.
+
+**Belegkette:**
+* `fn_00100CE0` ruft bei `0x100D08` `fn_001028A0`; darin ruft `fn_0028E410`
+  den Helfer `fn_00119D34`, der `g_os+9 = 1` setzt (`g_os = 0x003D8D58`,
+  belegt mit `ARM_MEMWATCHRANGE=3D8D60,3D8D64`).
+* `fn_002921A8` liest `g_os+6` (bleibt 0) – der Auslöser ist **nicht** `+6`,
+  sondern `fn_00292198`, das `g_os+9` als signed byte liest.
+  `+9 == 1` ⇒ `beq 0x100D98` wird nicht genommen, es geht nach `0x100D24`.
+* Dort wird das Init-Flag `0x003D8CE0` gelöscht und die Shutdown-Routine
+  (`fn_002920D4`, …) ausgeführt. Danach liefert `fn_001016B8` über
+  `fn_001036B4` 0 (`beq 0x1014E4`), `fn_00100F98` bricht die Init ab.
+* `svc 0x03` (`_exit`) bei `0x29225C`, LR `0x00100B94`; danach `halted=1`.
+  Ein übrig gebliebener Worker-Thread läuft weiter und wiederholt
+  `srv` cmd `0x000B`, erreicht aber kein neues Spiel-Init.
+
+**Vermutete Ursache:** kein Fehler der Lock-Korrektur, sondern
+OS-Init-/Semantik-Reihenfolge: Erst weil die Worker-Threads jetzt laufen,
+vollendet `fn_001028A0` den OS-Init-Pfad und setzt `g_os+9`. `fn_00100CE0`
+interpretiert das beim selben Aufruf als „schon initialisiert“ und nimmt den
+Finalize-Zweig. Auf echter Hardware bleibt `g_os+9` an dieser Stelle offenbar
+0 (oder die Initialisierung erfolgt später/außerhalb dieses Pfads). Zu klären
+ist die Semantik von `fn_00292198` (`g_os+9`) und warum `fn_001028A0` diesen
+Pfad im Port durchläuft (möglicher Recompiler-/HLE-Unterschied bei
+OS-Init/Syscall-Rückgaben, kein Spielcode-Patch).
+

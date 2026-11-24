@@ -64,3 +64,4 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | 2026-11-24 | ipc-layouts | 7/10 | y2r:u fehlt | 23 |
 | 2026-11-24 | night | 7/10 | y2r:u | 23 |
 | 2026-11-24 | night | 7/10 | y2r:u | 23 |
+| 2026-11-24 | night | 4/10 | ptm:u | 23 |
