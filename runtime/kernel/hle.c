@@ -113,11 +113,28 @@ static void sched_wait_turn(void) {
    aufrufen, sonst wird der Lock-Count korrupt (Races/Starvation). */
 static _Thread_local int t_lock_owned = 0;
 
+static uint64_t host_us(void);
+/* Diagnose (HLE_YSTAT): Wandzeit in den kooperativen Lock-Abgaben sowie
+ * Zeit, in der der Gast-Lock zwischen zwei Gast-Abschnitten frei lag.
+ * Reine Zaehler, kein Gastzustand. */
+static int g_ystat = 0;
+static unsigned long long g_yield_n, g_yield_us, g_pump_rel_n, g_pump_rel_us;
+static unsigned long long g_lock_idle_us;
+static volatile unsigned long long g_lock_free_us = 0;
+static unsigned g_vblank_tick = 0;
+
 static void guest_lock_enter(void) {
     if (!g_guest_lock_init || g_no_lock) return;
     if (t_lock_owned) return;
     EnterCriticalSection(&g_guest_lock);
     t_lock_owned = 1;
+    if (g_ystat) {
+        unsigned long long free_at = g_lock_free_us;
+        if (free_at != 0ull) {
+            g_lock_idle_us += host_us() - free_at;
+            g_lock_free_us = 0ull;
+        }
+    }
 }
 static void guest_lock_leave(void) {
     if (!g_guest_lock_init || g_no_lock) return;
@@ -129,6 +146,7 @@ static void guest_lock_leave(void) {
      * invalidieren global, weil der naechste Thread beliebig ist. */
     arm_excl_clear_all();
     LeaveCriticalSection(&g_guest_lock);
+    if (g_ystat) g_lock_free_us = host_us();
 }
 /* Wartet garantiert, bis der Lock wieder erlangt ist (kein "ohne Lock
    weiterlaufen" mehr). */
@@ -141,6 +159,7 @@ static void guest_lock_reacquire(void) {
     EnterCriticalSection(&g_guest_lock);
     t_lock_owned = 1;
 }
+
 /* Wird bei jedem Gast-Block aufgerufen: verhindert, dass rein
  * CPU-gebundene Gast-Schleifen (ohne SVC) den kooperativen Lock
  * dauerhaft halten und andere Threads aushungern. */
@@ -158,15 +177,24 @@ void hle_pump(void) {
     y2r_poll();
     if (!g_guest_lock_init || g_no_lock) return;
     if (!t_lock_owned) return;
-    guest_lock_leave();
-    Sleep(0);
-    guest_lock_reacquire();
+    {
+        uint64_t t0 = g_ystat ? host_us() : 0;
+        guest_lock_leave();
+        Sleep(0);
+        guest_lock_reacquire();
+        if (g_ystat) {
+            g_pump_rel_n++;
+            g_pump_rel_us += host_us() - t0;
+        }
+    }
 }
 
 static void guest_yield(void) {
+    uint64_t t0;
     if (!g_guest_lock_init) return;
     if (g_no_lock) { Sleep(0); return; }
     if (!t_lock_owned) { Sleep(0); return; }
+    t0 = g_ystat ? host_us() : 0;
     guest_lock_leave();
     if (g_det_sched && t_tid >= 0) {
         g_turn = sched_next(t_tid);
@@ -177,6 +205,10 @@ static void guest_yield(void) {
     Sleep(0);
     /* Garantiert wieder in den Lock zurueck (bilanziert ueber t_lock_owned). */
     guest_lock_reacquire();
+    if (g_ystat) {
+        g_yield_n++;
+        g_yield_us += host_us() - t0;
+    }
 }
 
 
@@ -4080,6 +4112,15 @@ static DWORD WINAPI vblank_thread(LPVOID p) {
         gsp_signal_interrupt(GSP_IRQ_PDC1);
         kernel_poll_timers();
         hid_poll();
+        if (g_ystat && (++g_vblank_tick % 62u) == 0u) {
+            printf("[ystat] vbl=%u t=%llus yields=%llu yield_ms=%llu pumps=%llu pump_ms=%llu idle_ms=%llu\n",
+                   g_vblank_tick,
+                   (unsigned long long)((host_us() - g_boot_ns / 1000ull) / 1000000ull),
+                   g_yield_n, g_yield_us / 1000ull,
+                   g_pump_rel_n, g_pump_rel_us / 1000ull,
+                   g_lock_idle_us / 1000ull);
+            fflush(stdout);
+        }
         guest_lock_leave();
     }
     return 0;
@@ -4099,6 +4140,7 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     g_boot_ns = host_ns();
     snprintf(g_romfs, sizeof(g_romfs), "%s", romfs_dir ? romfs_dir : "out/romfs");
     g_log = getenv("HLE_LOG") != NULL;
+    g_ystat = getenv("HLE_YSTAT") != NULL;
     /* Diagnose-Laeufe werden per Timeout beendet; ungepufferte Ausgabe
        verhindert, dass die letzten Zeilen im stdio-Puffer verloren gehen. */
     if (getenv("HLE_ARB_LOG") || getenv("HLE_KLOG")) setvbuf(stdout, NULL, _IONBF, 0);
