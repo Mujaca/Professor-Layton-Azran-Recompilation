@@ -243,8 +243,24 @@ class Emitter:
             lines.append("  switch (c->r[15]) {")
             for a in labs:
                 lines.append("    case 0x%08Xu: goto %s;" % (u32(a), self.label(a)))
-            lines.append("    default: arm_call_guest(c, t); return;")
+            lines.append("    default: arm_call_guest(c, t); break;")
             lines.append("  }")
+            # Das Ziel kann per `mov pc, lr` mitten in *diese* Funktion
+            # zurueckkehren (Tail-Jump auf eine Adresse, die das Ziel als LR
+            # erhalten hat, z. B. `add lr, pc, #4; add pc, rN, rM`). Dann muss
+            # die Ausfuehrung am gesetzten Gast-PC weiterlaufen, statt die
+            # Funktion zu verlassen. Nur echte Blockanfaenge sind anspringbar;
+            # alle Rueckkehradressen von `bl` sind Bloecke.
+            local = sorted(self.block_labels or ())
+            if local:
+                lines.append("  switch (c->r[15]) {")
+                for a in local:
+                    lines.append("    case 0x%08Xu: goto %s;"
+                                 % (u32(a), self.label(a)))
+                lines.append("    default: return;")
+                lines.append("  }")
+            else:
+                lines.append("  return;")
         else:
             lines.append("  arm_call_guest(c, t); return;")
         lines.append("}")

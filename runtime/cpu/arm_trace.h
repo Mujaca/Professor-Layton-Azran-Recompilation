@@ -33,6 +33,7 @@ void arm_trace_event(uint32_t kind, uint32_t a, uint32_t b);
 /* Diagnose bei Abbruch / Profiling (HLE_PERFMAP_FILE). */
 void arm_trace_pc_ring_dump(unsigned count);
 void arm_trace_thread_dump(int ti, unsigned n);
+void arm_trace_thread_regs(int ti);
 void arm_perfmap_report(void);
 
 /* Vom Recompiler emittiert (ldr-pc-Sprungtabellen). */

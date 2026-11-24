@@ -1166,13 +1166,21 @@ static void apt_command(Ipc *r, uint32_t *p) {
             break;
         }
         case 0x4B: { /* AppletUtility: Result, UtilityResult, StaticBuffer(out) */
+            uint32_t utility = (r->normal >= 1) ? p[0] : 0u;
             uint32_t out_size = (r->normal >= 3) ? p[2] : 0u;
             uint32_t dsc_flags = (r->translate >= 2) ? p[r->normal] : 2u;
             uint32_t dsc_addr = (r->translate >= 2) ? p[r->normal + 1] : 0u;
             (void)dsc_flags;
             if (dsc_addr != 0u && out_size != 0u && g_cpu != NULL) {
                 uint32_t off = dsc_addr & 0x1FFFFFFFu;
-                if (off + out_size <= g_cpu->mem_size) memset(g_cpu->mem + off, 0, out_size);
+                if (off + out_size <= g_cpu->mem_size) {
+                    memset(g_cpu->mem + off, 0, out_size);
+                    /* Azahar (apt.cpp, AppletUtility): Kommando 0x6
+                       (TryLockTransition) meldet Erfolg in out[0], damit
+                       die App nicht in den Fehlerpfad laeuft. */
+                    if (utility == 0x6u)
+                        g_cpu->mem[off] = 1;
+                }
             }
             ipc_begin(r, 0x4B, 2, 2);
             put_result(r);
