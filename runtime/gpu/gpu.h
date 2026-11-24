@@ -31,6 +31,13 @@ void gpu_pica_set_irq_handler(void (*fn)(int id));
 /* Nur fuer Diagnose/Tests: zuletzt geschriebener Registerinhalt. */
 uint32_t gpu_pica_reg(uint32_t id);
 
+/* Vertex-Shader-Zustand (Tests/Diagnose): Float-Uniform idx/comp, ob ein
+   Programm hochgeladen ist, und der zuletzt verarbeitete Vertex nach
+   Ausgangs-Mapping (POSITION/COLOR/TEXCOORD0). */
+float gpu_pica_vs_uniform(int index, int comp);
+int gpu_pica_vs_active(void);
+int gpu_pica_last_vertex(float *pos, float *color, float *uv);
+
 /* Texturzustand fuer Textureinheit 0 aus dem Engine-Texturobjekt setzen.
    Register: 0x80 main_config (bit0 enable), 0x82 height[0..10]/width[16..26],
    0x85 Adresse/8, 0x8E Format (1 = RGB8). */

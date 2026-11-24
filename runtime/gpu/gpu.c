@@ -5,15 +5,20 @@
  * heuristischen Rasterizer aus: Position = Attribut 0, UV = erstes
  * 2-Komponenten-Attribut, Textur 0 aus 0x080..0x08E.
  *
- * Fehlt noch (ROADMAP M5): Vertex-Shader (0x2C0..), TEV (0x0C0..),
- * Tiefen-/Alpha-/Blend-Zustand, Index-Puffer, Ausgabe in das vom Spiel
- * konfigurierte Farbziel (0x11C..).
+ * Vertex-Pipeline: Vertex-Shader-Interpreter (0x2B0..0x2DF: Uniforms,
+ * Programm, Swizzle, Arithmetik, CALL/IF/LOOP/BREAK) und Attribute-Loader
+ * (0x200..0x227 inkl. Defaults, Index-Puffer 0x22F, Immediate 0x232) nach
+ * Azahar shader_interpreter.cpp/vertex_loader.cpp; Ausgangs-Mapping
+ * 0x04F..0x056. Ohne geladenes Programm bleibt die alte Draw-Heuristik.
+ * Fehlt noch (ROADMAP M5): TEV (0x0C0..), Viewport/Clip/Depth,
+ * Blend-Zustand, Ausgabe in das vom Spiel konfigurierte Farbziel (0x11C..).
  */
 
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <math.h>
 
 #include "arm_cpu.h"
 
@@ -115,6 +120,9 @@ static uint32_t p_regs[PICA_NREGS] = {
     [0x034] = 0x00000001u,  /* irq_autostop */
 };
 
+static void p_vs_reset(void);
+static void p_vs_reset_draw_state(void);
+
 uint32_t gpu_pica_phys_to_guest(uint32_t paddr)
 {
     if (paddr >= PICA_VRAM_PADDR && paddr < PICA_VRAM_PADDR + PICA_VRAM_SIZE)
@@ -149,6 +157,8 @@ void gpu_pica_reset(void)
     p_regs[0x020] = 0x12345678u;
     p_regs[0x030] = 0xFFFFFFF0u;
     p_regs[0x034] = 0x00000001u;
+    p_vs_reset();
+    p_vs_reset_draw_state();
 }
 
 void gpu_pica_bind_texture(uint32_t addr, int w, int h, int fmt)
@@ -191,6 +201,71 @@ static uint32_t p_read32(ArmCpu *c, uint32_t off)
     return v;
 }
 
+/* ===================== Vertex-Shader-Zustand =====================
+ * Azahar ShaderSetup/ShaderRegs: Registerbereich 0x2B0..0x2DF.
+ *   0x2B0 bool_uniforms (1 Bit je Uniform)
+ *   0x2B1..0x2B4 int_uniforms[4] (4 Byte je Uniform)
+ *   0x2C0 uniform_setup.index (+ Bit31 = Float32-Format),
+ *   0x2C1..0x2C8 set_value (gepackte float24/float32-Queue)
+ *   0x2CB program.offset, 0x2CC..0x2D3 set_word
+ *   0x2D5 swizzle_patterns.offset, 0x2D6..0x2DD set_word
+ * Default-Attribute/Immediate: 0x232 index, 0x233..0x235 set_value.
+ */
+#define VS_PROG_WORDS 512u
+#define VS_SWZ_WORDS  4096u
+#define VS_MAX_STEPS  0x10000u
+
+static float g_vs_def_attr[16][4];   /* input_default_attributes (0x232) */
+static float g_vs_float[96][4];      /* uniforms.f */
+static unsigned char g_vs_bool[16];
+static unsigned char g_vs_int[4][4];
+static uint32_t g_vs_code[VS_PROG_WORDS];
+static unsigned g_vs_code_words;
+static uint32_t g_vs_swz[VS_SWZ_WORDS];
+static unsigned g_vs_pack_n;         /* Uniform-Packing-Queue */
+static uint32_t g_vs_pack[4];
+
+static void p_vs_reset(void)
+{
+    memset(g_vs_def_attr, 0, sizeof(g_vs_def_attr));
+    memset(g_vs_float, 0, sizeof(g_vs_float));
+    memset(g_vs_bool, 0, sizeof(g_vs_bool));
+    memset(g_vs_int, 0, sizeof(g_vs_int));
+    memset(g_vs_code, 0, sizeof(g_vs_code));
+    memset(g_vs_swz, 0, sizeof(g_vs_swz));
+    g_vs_code_words = 0;
+    g_vs_pack_n = 0;
+}
+
+/* Azahar Pica::Float<16,7>::FromRaw: normal/denormal/inf-nan. */
+static float p_f24_to_float(uint32_t hex)
+{
+    int32_t exponent = (int32_t)((hex >> 16) & 0x7Fu);
+    uint32_t mantissa = hex & 0xFFFFu;
+    uint32_t fp32;
+    uint32_t sign = (hex >> 23) << 31;
+    if (exponent == 0 && mantissa == 0) {
+        fp32 = sign;
+    } else if (exponent == 0) {
+        exponent = 65;              /* bias + 1, bias = 127 - 63 */
+        while ((mantissa & (1u << 16)) == 0) {
+            exponent--;
+            mantissa <<= 1;
+        }
+        mantissa &= 0xFFFFu;
+        fp32 = sign | ((uint32_t)exponent << 23) | (mantissa << 7);
+    } else if (exponent == 0x7F) {
+        fp32 = sign | (0xFFu << 23) | (mantissa << 7);
+    } else {
+        fp32 = sign | ((uint32_t)(64 + exponent) << 23) | (mantissa << 7);
+    }
+    {
+        float f;
+        memcpy(&f, &fp32, 4);
+        return f;
+    }
+}
+
 static float p_attr_comp(ArmCpu *c, uint32_t addr, int fmt)
 {
     uint32_t o = addr & 0x1FFFFFFFu;
@@ -200,51 +275,94 @@ static float p_attr_comp(ArmCpu *c, uint32_t addr, int fmt)
     { int8_t b = 0; if (o + 1u <= c->mem_size) b = (int8_t)c->mem[o]; return (float)b; }
 }
 
-/* Liest die Vertex-Attribute fuer Vertex v und schreibt sie nach out[attr][0..3]. */
-static void p_load_attrs(ArmCpu *c, uint32_t vert, float out[16][4])
+/* ===================== Vertex-Attribut-Loader =====================
+ * Semantik wie Azahar pica/vertex_loader.cpp + regs_pipeline.h:
+ *  - 0x200 base_address (Bits 1..28), physisch: base = value * 16
+ *  - 0x201/0x202: 12 Format-Nibbles (Bits 0..1 Format, 2..3 Komponenten-1)
+ *  - 0x202 Bits 16..27 attribute_mask: gesetzt = Default-Attribut (kein Load)
+ *  - 0x202 Bits 28..31 max_attribute_index (Gesamtzahl Attribute - 1)
+ *  - 0x203 + 3*l: data_offset, Komponentennibbles, byte_count/Stride,
+ *    component_count. Innerhalb eines Loaders wird der Offset vor jeder
+ *    Komponente auf ihre Elementgroesse ausgerichtet (AlignUp), Attribute
+ *    12..15 sind 4/8/12/16-Byte-Padding.
+ * Default-Attribute kommen aus 0x232/0x233..0x235 (Immediate-Queue).
+ */
+typedef struct {
+    uint32_t src[16];
+    uint32_t stride[16];
+    int fmt[16];
+    int ncomp[16];
+    int isdef[16];
+    uint32_t base;
+    int total;
+} PicaAttrCfg;
+
+static int p_attr_elem_size(int fmt)
 {
-    int fmt[16], ncomp[16];
-    uint32_t src[16], stride[16];
-    /* 0x200: base_address (bits 1..28) * 16 = physische Adresse. */
-    uint32_t base = gpu_pica_phys_to_guest(((p_regs[0x200] >> 1) & 0x0FFFFFFFu) * 16u);
-    uint32_t maxattr = (p_regs[0x202] >> 28) & 0xFu;
-    for (int i = 0; i < 16; i++) { fmt[i] = 3; ncomp[i] = 0; src[i] = 0; stride[i] = 0; }
-    for (int i = 0; i < 8; i++) {
-        uint32_t b = (p_regs[0x201] >> (i * 4)) & 0xFu;
-        fmt[i] = b & 3; ncomp[i] = ((b >> 2) & 3) + 1;
+    return (fmt == 3) ? 4 : (fmt == 2) ? 2 : 1;
+}
+
+static void p_attr_config(PicaAttrCfg *ac)
+{
+    uint32_t i, l;
+    ac->base = gpu_pica_phys_to_guest(((p_regs[0x200] >> 1) & 0x0FFFFFFFu) * 16u);
+    ac->total = (int)((p_regs[0x202] >> 28) & 0xFu) + 1;
+    for (i = 0; i < 16; i++) {
+        uint32_t nib;
+        ac->src[i] = 0; ac->stride[i] = 0;
+        ac->isdef[i] = (i >= 12) || ((p_regs[0x202] & (1u << (16u + i))) != 0u);
+        if (i < 8) nib = (p_regs[0x201] >> (i * 4)) & 0xFu;
+        else nib = (p_regs[0x202] >> ((i - 8) * 4)) & 0xFu;
+        ac->fmt[i] = (int)(nib & 3u);
+        ac->ncomp[i] = (int)((nib >> 2) & 3u) + 1;
     }
-    for (int i = 0; i < 4; i++) {
-        uint32_t b = (p_regs[0x202] >> (i * 4)) & 0xFu;
-        fmt[8 + i] = b & 3; ncomp[8 + i] = ((b >> 2) & 3) + 1;
-    }
-    for (int l = 0; l < 12; l++) {
-        /* 12 Loader zu je 3 Woertern ab 0x203 (Azahar regs_internal.h:
-           vertex_attributes 0x200 .. index_array 0x227). */
+    for (l = 0; l < 12; l++) {
         uint32_t w0 = p_regs[0x203 + l * 3];
         uint32_t w1 = p_regs[0x204 + l * 3];
         uint32_t w2 = p_regs[0x205 + l * 3];
-        uint32_t off = w0 & 0x0FFFFFFFu;
-        uint32_t bcount = (w2 >> 16) & 0xFFu;
+        uint32_t off = 0;
+        uint32_t data_offset = w0 & 0x0FFFFFFFu;
+        uint32_t stride = (w2 >> 16) & 0xFFu;
         uint32_t cc = (w2 >> 28) & 0xFu;
-        uint32_t cur = off;
-        for (uint32_t k = 0; k < cc && k < 12; k++) {
-            uint32_t ai = (k < 8) ? ((w1 >> (k * 4)) & 0xFu) : ((w2 >> ((k - 8) * 4)) & 0xFu);
+        uint32_t k;
+        for (k = 0; k < cc && k < 12; k++) {
+            uint32_t ai = (k < 8) ? ((w1 >> (k * 4)) & 0xFu)
+                                  : ((w2 >> ((k - 8) * 4)) & 0xFu);
             if (ai < 12) {
-                src[ai] = cur; stride[ai] = bcount;
-                cur += (uint32_t)ncomp[ai] * ((fmt[ai] == 3) ? 4u : (fmt[ai] == 2) ? 2u : 1u);
+                int es = p_attr_elem_size(ac->fmt[ai]);
+                off = (off + (uint32_t)es - 1u) & ~((uint32_t)es - 1u);
+                ac->src[ai] = data_offset + off;
+                ac->stride[ai] = stride;
+                off += (uint32_t)(ac->ncomp[ai] * es);
             } else if (ai < 16) {
-                cur += (ai - 11) * 4u;
+                off = (off + 3u) & ~3u;
+                off += (ai - 11u) * 4u;
             }
         }
     }
-    for (int i = 0; i <= (int)maxattr && i < 16; i++) {
-        for (int k = 0; k < 4; k++) out[i][k] = (k == 3) ? 1.0f : 0.0f;
-        if (src[i] == 0 && stride[i] == 0 && ncomp[i] == 0) continue;
-        uint32_t a = base + src[i] + stride[i] * vert;
-        int eb = (fmt[i] == 3) ? 4 : (fmt[i] == 2) ? 2 : 1;
-        for (int k = 0; k < ncomp[i] && k < 4; k++)
-            out[i][k] = p_attr_comp(c, a + (uint32_t)(k * eb), fmt[i]);
-        for (int k = ncomp[i]; k < 4; k++) out[i][k] = (k == 3) ? 1.0f : 0.0f;
+}
+
+/* Liest die Attribute von Vertex `vert` (ohne Index-Umrechnung) nach
+   out[attr][0..3]. Nicht geladene/default Attribute kommen aus vs.def_attr. */
+static void p_load_attrs(ArmCpu *c, uint32_t vert, float out[16][4])
+{
+    PicaAttrCfg ac;
+    int i, k;
+    p_attr_config(&ac);
+    for (i = 0; i < 16; i++) {
+        for (k = 0; k < 4; k++) out[i][k] = 0.0f;
+        if (i >= ac.total) continue;
+        if (ac.isdef[i]) {
+            for (k = 0; k < 4; k++) out[i][k] = g_vs_def_attr[i][k];
+            continue;
+        }
+        {
+            uint32_t a = ac.base + ac.src[i] + ac.stride[i] * vert;
+            int es = p_attr_elem_size(ac.fmt[i]);
+            for (k = 0; k < ac.ncomp[i] && k < 4; k++)
+                out[i][k] = p_attr_comp(c, a + (uint32_t)(k * es), ac.fmt[i]);
+        }
+        for (k = ac.ncomp[i]; k < 4; k++) out[i][k] = (k == 3) ? 1.0f : 0.0f;
     }
 }
 
@@ -311,9 +429,11 @@ static uint32_t p_texel(ArmCpu *c, float u, float v, int *ok)
 }
 
 static void p_raster_tri(ArmCpu *c, float x0, float y0, float u0, float v0,
+                         float c0r, float c0g, float c0b, float c0a,
                          float x1, float y1, float u1, float v1,
+                         float c1r, float c1g, float c1b, float c1a,
                          float x2, float y2, float u2, float v2,
-                         uint32_t col)
+                         float c2r, float c2g, float c2b, float c2a)
 {
     float d = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
     if (d == 0.0f) return;
@@ -336,13 +456,525 @@ static void p_raster_tri(ArmCpu *c, float x0, float y0, float u0, float v0,
             float v = w0 * v0 + w1 * v1 + w2 * v2;
             int ok = 0;
             uint32_t tex = p_texel(c, u, v, &ok);
-            uint32_t rgb = ok ? tex : col;
             if (ok) {
-                put_px_blend(c, x, y, rgb & 0xFFFFFFu, (tex >> 24) & 0xFFu);
+                put_px_blend(c, x, y, tex & 0xFFFFFFu, (tex >> 24) & 0xFFu);
             } else {
-                put_px(c, x, y, rgb & 0xFFFFFFu);
+                /* VS-Farbe (COLOR_R..A) linear interpolieren, clampen. */
+                float cr = w0 * c0r + w1 * c1r + w2 * c2r;
+                float cg = w0 * c0g + w1 * c1g + w2 * c2g;
+                float cb = w0 * c0b + w1 * c1b + w2 * c2b;
+                float ca = w0 * c0a + w1 * c1a + w2 * c2a;
+                uint32_t rgb;
+                if (cr < 0.0f) cr = 0.0f; if (cr > 1.0f) cr = 1.0f;
+                if (cg < 0.0f) cg = 0.0f; if (cg > 1.0f) cg = 1.0f;
+                if (cb < 0.0f) cb = 0.0f; if (cb > 1.0f) cb = 1.0f;
+                if (ca < 0.0f) ca = 0.0f; if (ca > 1.0f) ca = 1.0f;
+                rgb = ((uint32_t)(cr * 255.0f)) |
+                      (((uint32_t)(cg * 255.0f)) << 8) |
+                      (((uint32_t)(cb * 255.0f)) << 16);
+                                                                            put_px_blend(c, x, y, rgb, (uint32_t)(ca * 255.0f));
             }
         }
+    }
+}
+
+/* ================= Vertex-Shader-Interpreter =================
+ * Nachbildung von Azahar shader/shader_interpreter.cpp (RunInterpreter).
+ * Instruktionskodierung: nihstro shader_bytecode.h
+ *   opcode = instr >> 26 (6 Bit)
+ *   common: desc = bits 0..6, src2 7..11, src1 12..18
+ *           (invertiert: src1i 14..18, src2i 7..13)
+ *           addr_reg 19..20, dest 21..25
+ *   flow:   num = 0..7, dest_offset = 10..21, op 22..23, refx/y 24/25
+ */
+typedef struct {
+    float pos[4];
+    float color[4];
+    float uv[2];
+} PicaVertex;
+
+typedef struct {
+    float in[16][4];
+    float tmp[16][4];
+    float out[2][16][4];
+    int bank;
+    int cc[2];
+    int32_t addr[3];
+} VsUnit;
+
+static float g_vs_ones[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+static float g_vs_zeros[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+static float g_vs_discard[4];
+static PicaVertex g_vs_last_vertex;
+static int g_vs_have_last = 0;
+
+static const float *p_vs_src(const VsUnit *u, uint32_t reg, int ari)
+{
+    if (ari) {
+        int32_t off = u->addr[ari - 1];
+        if (off < -128 || off > 127) off = 0;
+        if (reg >= 0x20u && reg < 0x20u + 96u) {
+            uint32_t idx = (uint32_t)((int32_t)(reg - 0x20u) + off) & 0x7Fu;
+            if (idx >= 96u) return g_vs_ones;
+            return g_vs_float[idx];
+        }
+    }
+    if (reg < 0x10u) return u->in[reg];
+    if (reg < 0x20u) return u->tmp[reg - 0x10u];
+    if (reg < 0x20u + 96u) return g_vs_float[reg - 0x20u];
+    return g_vs_zeros;
+}
+
+static float *p_vs_dest(VsUnit *u, uint32_t d)
+{
+    if (d < 0x10u) return u->out[u->bank][d];
+    if (d < 0x20u) return u->tmp[d - 0x10u];
+    return g_vs_discard;
+}
+
+static int p_vs_s1sel(uint32_t sw, int i) { return (int)((sw >> (11 - 2 * i)) & 3u); }
+static int p_vs_s2sel(uint32_t sw, int i) { return (int)((sw >> (20 - 2 * i)) & 3u); }
+static int p_vs_s3sel(uint32_t sw, int i) { return (int)((sw >> (29 - 2 * i)) & 3u); }
+static float p_vs_mul(float a, float b)
+{
+    float r = a * b;
+    if (r != r && a == a && b == b) r = 0.0f;   /* PICA: 0 statt NaN */
+    return r;
+}
+
+static int p_vs_condition(const VsUnit *u, uint32_t instr)
+{
+    int rx = (int)((instr >> 25) & 1u);
+    int ry = (int)((instr >> 24) & 1u);
+    int op = (int)((instr >> 22) & 3u);
+    int bx = (rx == u->cc[0]);
+    int by = (ry == u->cc[1]);
+    switch (op) {
+    case 0: return bx || by;          /* Or */
+    case 1: return bx && by;          /* And */
+    case 2: return bx;                /* JustX */
+    default: return by;                /* JustY */
+    }
+}
+
+typedef struct { uint32_t els, end; } VsIf;
+typedef struct { uint32_t end, ret; } VsCall;
+typedef struct { uint32_t entry, end; unsigned down, inc, prev; } VsLoop;
+
+static void p_vs_execute(VsUnit *u)
+{
+    VsIf ifs[8];
+    VsCall calls[4];
+    VsLoop loops[4];
+    int ifn = 0, ifh = 0, cn = 0, ch = 0, ln = 0, lh = 0;
+    uint32_t pc = 0;
+    unsigned steps = 0;
+    int stop = 0;
+
+    while (!stop && steps++ < VS_MAX_STEPS) {
+        uint32_t oldpc = pc;
+        uint32_t instr, op;
+        int is_break = 0;
+
+        if (pc >= g_vs_code_words) break;
+        instr = g_vs_code[pc];
+        op = instr >> 26;
+
+        if (op <= 0x1Fu || (op & ~1u) == 0x2Eu) {
+            int inv = (op >= 0x18u && op <= 0x1Bu);
+            uint32_t desc = instr & 0x7Fu;
+            uint32_t s1r = inv ? ((instr >> 14) & 0x1Fu) : ((instr >> 12) & 0x7Fu);
+            uint32_t s2r = inv ? ((instr >> 7) & 0x7Fu) : ((instr >> 7) & 0x1Fu);
+            uint32_t ari = (instr >> 19) & 3u;
+            uint32_t dreg = (instr >> 21) & 0x1Fu;
+            uint32_t sw = g_vs_swz[desc & (VS_SWZ_WORDS - 1u)];
+            const float *r1 = p_vs_src(u, s1r, inv ? 0 : (int)ari);
+            const float *r2 = p_vs_src(u, s2r, inv ? (int)ari : 0);
+            float s1[4], s2[4];
+            float *dst;
+            int i;
+
+            for (i = 0; i < 4; i++) {
+                s1[i] = r1[p_vs_s1sel(sw, i)];
+                s2[i] = r2[p_vs_s2sel(sw, i)];
+            }
+            if (sw & (1u << 4)) for (i = 0; i < 4; i++) s1[i] = -s1[i];
+            if (sw & (1u << 13)) for (i = 0; i < 4; i++) s2[i] = -s2[i];
+            dst = p_vs_dest(u, dreg);
+
+            if ((op & ~1u) == 0x2Eu) {
+                int cx = (int)((instr >> 24) & 7u);
+                int cy = (int)((instr >> 21) & 7u);
+                for (i = 0; i < 2; i++) {
+                    int cop = (i == 0) ? cx : cy;
+                    int res = 0;
+                    switch (cop) {
+                    case 0: res = s1[i] == s2[i]; break;
+                    case 1: res = s1[i] != s2[i]; break;
+                    case 2: res = s1[i] < s2[i]; break;
+                    case 3: res = s1[i] <= s2[i]; break;
+                    case 4: res = s1[i] > s2[i]; break;
+                    case 5: res = s1[i] >= s2[i]; break;
+                    default: res = 0; break;
+                    }
+                    u->cc[i] = res;
+                }
+            }
+
+            switch (op) {
+            case 0x00u:
+                for (i = 0; i < 4; i++)
+                    if ((sw >> (3 - i)) & 1u) dst[i] = s1[i] + s2[i];
+                break;
+            case 0x08u:
+                for (i = 0; i < 4; i++)
+                    if ((sw >> (3 - i)) & 1u) dst[i] = p_vs_mul(s1[i], s2[i]);
+                break;
+            case 0x0Bu:
+                for (i = 0; i < 4; i++)
+                    if ((sw >> (3 - i)) & 1u) dst[i] = floorf(s1[i]);
+                break;
+            case 0x0Cu:
+                for (i = 0; i < 4; i++)
+                    if ((sw >> (3 - i)) & 1u) dst[i] = (s1[i] > s2[i]) ? s1[i] : s2[i];
+                break;
+            case 0x0Du:
+                for (i = 0; i < 4; i++)
+                    if ((sw >> (3 - i)) & 1u) dst[i] = (s1[i] < s2[i]) ? s1[i] : s2[i];
+                break;
+            case 0x01u:
+            case 0x02u:
+            case 0x03u: {
+                int nc = (op == 0x01u) ? 3 : 4;
+                float dot = 0.0f;
+                if (op == 0x03u) s1[3] = 1.0f;
+                for (i = 0; i < nc; i++) dot += p_vs_mul(s1[i], s2[i]);
+                for (i = 0; i < 4; i++)
+                    if ((sw >> (3 - i)) & 1u) dst[i] = dot;
+                break;
+            }
+            case 0x05u:
+                for (i = 0; i < 4; i++)
+                    if ((sw >> (3 - i)) & 1u) dst[i] = exp2f(s1[0]);
+                break;
+            case 0x06u:
+                for (i = 0; i < 4; i++)
+                    if ((sw >> (3 - i)) & 1u) dst[i] = log2f(s1[0]);
+                break;
+            case 0x0Eu:
+                for (i = 0; i < 4; i++)
+                    if ((sw >> (3 - i)) & 1u) dst[i] = 1.0f / s1[0];
+                break;
+            case 0x0Fu:
+                for (i = 0; i < 4; i++)
+                    if ((sw >> (3 - i)) & 1u) dst[i] = 1.0f / sqrtf(s1[0]);
+                break;
+            case 0x12u:
+                for (i = 0; i < 2; i++)
+                    if ((sw >> (3 - i)) & 1u) u->addr[i] = (int32_t)s1[i];
+                break;
+            case 0x13u:
+                for (i = 0; i < 4; i++)
+                    if ((sw >> (3 - i)) & 1u) dst[i] = s1[i];
+                break;
+            case 0x09u:
+            case 0x1Au:
+                for (i = 0; i < 4; i++)
+                    if ((sw >> (3 - i)) & 1u) dst[i] = (s1[i] >= s2[i]) ? 1.0f : 0.0f;
+                break;
+            case 0x0Au:
+            case 0x1Bu:
+                for (i = 0; i < 4; i++)
+                    if ((sw >> (3 - i)) & 1u) dst[i] = (s1[i] < s2[i]) ? 1.0f : 0.0f;
+                break;
+            default:
+                break;      /* DST/LIT/unbekannt: Azahar schreibt nicht */
+            }
+        } else if (op >= 0x30u) {
+            int inv = ((op & ~7u) == 0x30u);
+            uint32_t desc = instr & 0x1Fu;
+            uint32_t sw = g_vs_swz[desc & (VS_SWZ_WORDS - 1u)];
+            uint32_t s1r = (instr >> 17) & 0x1Fu;
+            uint32_t s2r, s3r;
+            uint32_t ari = (instr >> 22) & 3u;
+            uint32_t dreg = (instr >> 24) & 0x1Fu;
+            const float *r1, *r2, *r3;
+            float a[4], b[4], c[4];
+            float *dst;
+            int i;
+
+            if (inv) {
+                s3r = (instr >> 5) & 0x7Fu;
+                s2r = (instr >> 12) & 0x1Fu;
+            } else {
+                s3r = (instr >> 5) & 0x1Fu;
+                s2r = (instr >> 10) & 0x7Fu;
+            }
+            r1 = p_vs_src(u, s1r, 0);
+            r2 = p_vs_src(u, s2r, inv ? 0 : (int)ari);
+            r3 = p_vs_src(u, s3r, inv ? (int)ari : 0);
+            for (i = 0; i < 4; i++) {
+                a[i] = r1[p_vs_s1sel(sw, i)];
+                b[i] = r2[p_vs_s2sel(sw, i)];
+                c[i] = r3[p_vs_s3sel(sw, i)];
+            }
+            if (sw & (1u << 4)) for (i = 0; i < 4; i++) a[i] = -a[i];
+            if (sw & (1u << 13)) for (i = 0; i < 4; i++) b[i] = -b[i];
+            if (sw & (1u << 22)) for (i = 0; i < 4; i++) c[i] = -c[i];
+            dst = p_vs_dest(u, dreg);
+            for (i = 0; i < 4; i++)
+                if ((sw >> (3 - i)) & 1u) dst[i] = p_vs_mul(a[i], b[i]) + c[i];
+        } else {
+            uint32_t num = instr & 0xFFu;
+            uint32_t dest = (instr >> 10) & 0xFFFu;
+            uint32_t bid = (instr >> 22) & 0xFu;
+            int cond;
+
+            switch (op) {
+            case 0x22u:                /* END */
+                stop = 1;
+                break;
+            case 0x2Cu:                /* JMPC */
+                if (p_vs_condition(u, instr)) pc = dest - 1;
+                break;
+            case 0x2Du:                /* JMPU */
+                cond = ((g_vs_bool[bid] != 0) == ((num & 1u) == 0u));
+                if (cond) pc = dest - 1;
+                break;
+            case 0x24u:                /* CALL */
+            case 0x25u:                /* CALLC */
+            case 0x26u: {              /* CALLU */
+                int take = 1;
+                VsCall v;
+                if (op == 0x26u) take = (g_vs_bool[bid] != 0);
+                else if (op == 0x25u) take = p_vs_condition(u, instr);
+                if (take) {
+                    v.end = dest + num;
+                    v.ret = pc + 1;
+                    if (cn < 4) { calls[(ch + cn) & 3] = v; cn++; }
+                    else { calls[ch] = v; ch = (ch + 1) & 3; }
+                    pc = dest - 1;
+                }
+                break;
+            }
+            case 0x21u:                /* NOP */
+                break;
+            case 0x27u:                /* IFU */
+            case 0x28u: {              /* IFC */
+                VsIf v;
+                cond = (op == 0x27u) ? (g_vs_bool[bid] != 0)
+                                     : p_vs_condition(u, instr);
+                if (cond) {
+                    v.els = dest;
+                    v.end = dest + num;
+                    if (ifn < 8) { ifs[(ifh + ifn) & 7] = v; ifn++; }
+                    else { ifs[ifh] = v; ifh = (ifh + 1) & 7; }
+                } else {
+                    pc = dest - 1;
+                }
+                break;
+            }
+            case 0x29u: {              /* LOOP */
+                uint32_t iid = (instr >> 22) & 3u;
+                VsLoop v;
+                u->addr[2] = (int32_t)g_vs_int[iid][1];
+                v.entry = pc + 1;
+                v.end = dest + 1;
+                v.down = g_vs_int[iid][0];
+                v.inc = g_vs_int[iid][2];
+                v.prev = (unsigned)g_vs_int[iid][1];
+                if (ln < 4) { loops[(lh + ln) & 3] = v; ln++; }
+                else { loops[lh] = v; lh = (lh + 1) & 3; }
+                break;
+            }
+            case 0x23u:                /* BREAKC */
+                if (p_vs_condition(u, instr)) is_break = 1;
+                break;
+            case 0x20u:                /* BREAK */
+                is_break = 1;
+                break;
+            case 0x2Au:                /* EMIT (VS: ungueltig) */
+            case 0x2Bu:                /* SETEMIT */
+            default:
+                break;
+            }
+        }
+
+        pc++;
+        {
+            uint32_t next = oldpc + 1;
+            unsigned k;
+            for (k = 0; k < 4; k++) {
+                VsCall *cb;
+                if (cn == 0) break;
+                cb = &calls[(ch + cn - 1) & 3];
+                if (cb->end != next) break;
+                if (k < 3) {
+                    pc = cb->ret;
+                    next = pc;
+                }
+                cn--;
+            }
+            if (ifn > 0) {
+                VsIf *ib = &ifs[(ifh + ifn - 1) & 7];
+                if (ib->els == oldpc + 1) {
+                    pc = ib->end;
+                    ifn--;
+                }
+            }
+            if (ln > 0) {
+                VsLoop *lb = &loops[(lh + ln - 1) & 3];
+                if (lb->end == oldpc + 1 || is_break) {
+                    u->addr[2] += (int32_t)lb->inc;
+                    if (!is_break && lb->down > 0) {
+                        lb->down--;
+                        pc = lb->entry;
+                    } else {
+                        pc = lb->end;
+                        if (ln > 1) u->addr[2] = (int32_t)lb->prev;
+                        ln--;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* ---- Ein-/Ausgangs-Mapping (Azahar shader_unit.cpp LoadInput/WriteOutput) ---- */
+static void p_vs_process(const float attrs[16][4], PicaVertex *v)
+{
+    VsUnit u;
+    float outs[16][4];
+    uint64_t map = ((uint64_t)p_regs[0x2BC] << 32) | p_regs[0x2BB];
+    uint32_t maxa = p_regs[0x2B9] & 0xFu;
+    uint32_t a, oi = 0;
+    float slot[32];
+    int i;
+
+    memset(&u, 0, sizeof(u));
+    for (a = 0; a <= maxa; a++) {
+        uint32_t reg = (uint32_t)((map >> (a * 4u)) & 0xFu);
+        if (reg < 16u) memcpy(u.in[reg], attrs[a], 4 * sizeof(float));
+    }
+    p_vs_execute(&u);
+    memset(outs, 0, sizeof(outs));
+    for (a = 0; a < 16u; a++) {
+        if ((p_regs[0x2BD] >> a) & 1u) {
+            memcpy(outs[oi], u.out[0][a], 4 * sizeof(float));
+            oi++;
+        }
+    }
+
+    for (i = 0; i < 32; i++) slot[i] = 1.0f;
+    {
+        uint32_t total = p_regs[0x4F] & 7u;
+        for (a = 0; a < total; a++) {
+            uint32_t m = p_regs[0x50 + a];
+            uint32_t sx = m & 0x1Fu, sy = (m >> 8) & 0x1Fu;
+            uint32_t sz = (m >> 16) & 0x1Fu, sw = (m >> 24) & 0x1Fu;
+            if (sx < 24u) slot[sx] = outs[a][0];
+            if (sy < 24u) slot[sy] = outs[a][1];
+            if (sz < 24u) slot[sz] = outs[a][2];
+            if (sw < 24u) slot[sw] = outs[a][3];
+        }
+    }
+    for (i = 0; i < 4; i++) v->pos[i] = slot[i];
+    for (i = 0; i < 4; i++) v->color[i] = slot[8 + i];
+    v->uv[0] = slot[12];
+    v->uv[1] = slot[13];
+    for (i = 0; i < 4; i++) {
+        float c = v->color[i];
+        if (c < 0.0f) c = -c;             /* Azahar: abs + saturate */
+        if (c > 1.0f) c = 1.0f;
+        v->color[i] = c;
+    }
+}
+
+static void p_vertex_from_attrs(const float attrs[16][4], PicaVertex *v, int use_shader)
+{
+    if (use_shader) {
+        p_vs_process(attrs, v);
+    } else {
+        memcpy(v->pos, attrs[0], 4 * sizeof(float));
+        v->uv[0] = attrs[1][0];
+        v->uv[1] = attrs[1][1];
+        v->color[0] = v->color[1] = v->color[2] = v->color[3] = 1.0f;
+    }
+    g_vs_last_vertex = *v;
+    g_vs_have_last = 1;
+}
+
+static void p_emit_tri(ArmCpu *c, const PicaVertex *a, const PicaVertex *b,
+                       const PicaVertex *d)
+{
+    const PicaVertex *src[3];
+    float px[3], py[3];
+    int k, ndc = 1;
+
+    src[0] = a; src[1] = b; src[2] = d;
+    for (k = 0; k < 3; k++) {
+        float x = src[k]->pos[0], y = src[k]->pos[1];
+        if (!(x > -1.6f && x < 1.6f && y > -1.6f && y < 1.6f)) ndc = 0;
+    }
+    for (k = 0; k < 3; k++) {
+        float x = src[k]->pos[0], y = src[k]->pos[1];
+        if (ndc) {
+            px[k] = (x + 1.0f) * 0.5f * (float)g_fb_w;
+            py[k] = (1.0f - y) * 0.5f * (float)g_fb_h;
+        } else {
+            px[k] = x;
+            py[k] = y;
+        }
+    }
+    p_raster_tri(c, px[0], py[0], src[0]->uv[0], src[0]->uv[1],
+                 src[0]->color[0], src[0]->color[1], src[0]->color[2], src[0]->color[3],
+                 px[1], py[1], src[1]->uv[0], src[1]->uv[1],
+                 src[1]->color[0], src[1]->color[1], src[1]->color[2], src[1]->color[3],
+                 px[2], py[2], src[2]->uv[0], src[2]->uv[1],
+                 src[2]->color[0], src[2]->color[1], src[2]->color[2], src[2]->color[3]);
+}
+
+static uint32_t p_read8m(ArmCpu *c, uint32_t addr)
+{
+    addr &= 0x1FFFFFFFu;
+    return (addr < c->mem_size) ? c->mem[addr] : 0u;
+}
+
+static uint32_t p_read16m(ArmCpu *c, uint32_t addr)
+{
+    uint16_t v = 0;
+    addr &= 0x1FFFFFFFu;
+    if (addr + 2u <= c->mem_size) memcpy(&v, c->mem + addr, 2);
+    return v;
+}
+
+/* Index-Puffer 0x227 (Offset relativ zur Attributbasis, Bit31 = u16). */
+static uint32_t p_index_vertex(ArmCpu *c, uint32_t i)
+{
+    uint32_t base = gpu_pica_phys_to_guest(((p_regs[0x200] >> 1) & 0x0FFFFFFFu) * 16u);
+    uint32_t off = p_regs[0x227] & 0x0FFFFFFFu;
+    int u16 = (int)((p_regs[0x227] >> 31) & 1u);
+    if (u16) return p_read16m(c, base + off + i * 2u);
+    return p_read8m(c, base + off + i);
+}
+
+/* ---- Default-Attribut-/Immediate-Modus (0x232, Azahar SubmitImmediate) ---- */
+static float g_vs_imm_attr[16][4];
+static unsigned g_vs_imm_cur;
+static uint32_t g_vs_imm_pack[4];
+static unsigned g_vs_imm_pack_n;
+static PicaVertex g_imm_tri[3];
+static unsigned g_imm_n;
+
+static void p_vs_draw_immediate(ArmCpu *c)
+{
+    PicaVertex v;
+    p_vertex_from_attrs(g_vs_imm_attr, &v, g_vs_code_words > 0);
+    g_imm_tri[g_imm_n++] = v;
+    g_vs_imm_cur = 0;
+    if (g_imm_n >= 3) {
+        p_emit_tri(c, &g_imm_tri[0], &g_imm_tri[1], &g_imm_tri[2]);
+        g_imm_n = 0;
     }
 }
 
@@ -352,6 +984,12 @@ static int p_draw_arrays(ArmCpu *c, int indexed)
     static unsigned draws = 0;
     uint32_t nv = p_regs[0x228];
     uint32_t voff = p_regs[0x22a];
+    int topo;
+    PicaVertex tri[3];
+    unsigned tri_n = 0;
+    uint32_t i;
+    int use_shader = (g_vs_code_words > 0);
+
     if (plog < 0) { const char *e = getenv("HLE_PICA_LOG"); plog = (e && *e) ? atoi(e) : 0; }
     if (nv == 0) return 0;
     if (nv > 0x10000u) nv = 0x10000u;
@@ -359,54 +997,168 @@ static int p_draw_arrays(ArmCpu *c, int indexed)
     if (plog > 0 && draws < (unsigned)plog) {
         uint32_t base = ((p_regs[0x200] >> 1) & 0x0FFFFFFFu) * 16u;
         printf("[pica] draw#%u nv=%u voff=%u base=%08X attr0=%08X attr1=%08X attr2=%08X "
-               "idx=%d tex0=%08X fmt=%08X\n", draws, nv, voff, base,
+               "idx=%d tex0=%08X fmt=%08X vs=%d\n", draws, nv, voff, base,
                p_regs[0x200], p_regs[0x201], p_regs[0x202], indexed,
-               p_regs[0x81], p_regs[0x8e]);
+               p_regs[0x81], p_regs[0x8e], use_shader);
+        printf("[pica] loaders %08X %08X %08X / %08X %08X %08X\n",
+               p_regs[0x203], p_regs[0x204], p_regs[0x205],
+               p_regs[0x206], p_regs[0x207], p_regs[0x208]);
         for (uint32_t v = 0; v < nv && v < 3u; v++) {
             float a[16][4];
-            p_load_attrs(c, voff + v, a);
+            p_load_attrs(c, indexed ? p_index_vertex(c, v) : (voff + v), a);
             printf("[pica]  v%u:", v);
-            for (int i = 0; i < 4; i++)
-                printf(" a%d=(%.3f,%.3f,%.3f,%.3f)", i, a[i][0], a[i][1], a[i][2], a[i][3]);
+            for (int k = 0; k < 4; k++)
+                printf(" a%d=(%.3f,%.3f,%.3f,%.3f)", k, a[k][0], a[k][1], a[k][2], a[k][3]);
             printf("\n");
         }
         fflush(stdout);
     }
-    /* Heuristischer 2D-Renderer: Position = Attribut 0, UV = erstes
-       Attribut mit 2 Komponenten (1, sonst 2), Farbe = Attribut 2/3.
-       Platzhalter bis Vertex-Shader + TEV existieren (ROADMAP M5). */
-    {
-        {
-            for (uint32_t v = 0; v + 2u < nv; v += 3u) {
-                float a[3][16][4];
-                p_load_attrs(c, voff + v, a[0]);
-                p_load_attrs(c, voff + v + 1u, a[1]);
-                p_load_attrs(c, voff + v + 2u, a[2]);
-                float px[3], py[3], uu[3], vv[3];
-                /* NDC nur, wenn ALLE drei Eckpunkte in [-1.6,1.6] liegen.
-                   Sonst sind es bereits Pixelkoordinaten (2D-Quad, z. B.
-                   (0,0)-(400,240)); sonst wuerde (0,0) als NDC-Mitte landen. */
-                int ndc = 1;
-                for (int k = 0; k < 3; k++) {
-                    float x = a[k][0][0], y = a[k][0][1];
-                    if (!(x > -1.6f && x < 1.6f && y > -1.6f && y < 1.6f))
-                        ndc = 0;
-                }
-                for (int k = 0; k < 3; k++) {
-                    float x = a[k][0][0], y = a[k][0][1];
-                    if (ndc) {
-                        px[k] = (x + 1.0f) * 0.5f * (float)g_fb_w;
-                        py[k] = (1.0f - y) * 0.5f * (float)g_fb_h;
-                    } else { px[k] = x; py[k] = y; }
-                    uu[k] = a[k][1][0]; vv[k] = a[k][1][1];
-                }
-                p_raster_tri(c, px[0], py[0], uu[0], vv[0],
-                             px[1], py[1], uu[1], vv[1],
-                             px[2], py[2], uu[2], vv[2], 0x00FFFFFFu);
+
+    topo = (int)((p_regs[0x25E] >> 8) & 3u);
+    if (topo == 3) topo = 0;            /* Shader-Topologie: als Liste */
+    for (i = 0; i < nv; i++) {
+        uint32_t vert = indexed ? p_index_vertex(c, i) : (i + voff);
+        float attrs[16][4];
+        p_load_attrs(c, vert, attrs);
+        p_vertex_from_attrs(attrs, &tri[tri_n++], use_shader);
+        if (tri_n == 3u) {
+            p_emit_tri(c, &tri[0], &tri[1], &tri[2]);
+            if (topo == 1) {          /* Strip */
+                tri[0] = tri[1];
+                tri[1] = tri[2];
+                tri_n = 2;
+            } else if (topo == 2) {   /* Fan */
+                tri[1] = tri[2];
+                tri_n = 2;
+            } else {
+                tri_n = 0;
             }
         }
     }
     draws++;
+    return 1;
+}
+
+static void p_unpack_f24(uint32_t w0, uint32_t w1, uint32_t w2, float out[4])
+{
+    uint32_t x = w2 & 0xFFFFFFu;
+    uint32_t y = ((w1 & 0xFFFFu) << 8) | ((w2 >> 24) & 0xFFu);
+    uint32_t z = ((w0 & 0xFFu) << 16) | ((w1 >> 16) & 0xFFFFu);
+    uint32_t w = w0 >> 8;
+    out[0] = p_f24_to_float(x);
+    out[1] = p_f24_to_float(y);
+    out[2] = p_f24_to_float(z);
+    out[3] = p_f24_to_float(w);
+}
+
+/* Float-Uniform-Queue (Azahar WriteUniformFloatReg): 3 Woerter float24
+   oder 4 Woerter float32 je Vec4. Index steht in 0x2C0 (Bit31 = Format),
+   wird nach jedem vollstaendigen Vec4 um eins erhoeht (7 Bit). */
+static void p_vs_uniform_push(uint32_t word)
+{
+    int is32 = (int)((p_regs[0x2C0] >> 31) & 1u);
+    unsigned need = is32 ? 4u : 3u;
+    unsigned idx;
+
+    g_vs_pack[g_vs_pack_n++] = word;
+    if (g_vs_pack_n < need) return;
+
+    idx = p_regs[0x2C0] & 0x7Fu;
+    if (idx < 96u) {
+        int i;
+        if (is32) {
+            for (i = 0; i < 4; i++) {
+                float f;
+                memcpy(&f, &g_vs_pack[i], 4);
+                g_vs_float[idx][3 - i] = f;
+            }
+        } else {
+            p_unpack_f24(g_vs_pack[0], g_vs_pack[1], g_vs_pack[2], g_vs_float[idx]);
+        }
+        p_regs[0x2C0] = (p_regs[0x2C0] & ~0x7Fu) | ((idx + 1u) & 0x7Fu);
+    }
+    g_vs_pack_n = 0;
+}
+
+/* Default-Attribute/Immediate: Azahar PicaCore::SubmitImmediate. */
+static void p_vs_submit_immediate(ArmCpu *c, uint32_t word)
+{
+    unsigned idx = p_regs[0x232] & 0xFu;
+    float a[4];
+
+    g_vs_imm_pack[g_vs_imm_pack_n++] = word;
+    if (g_vs_imm_pack_n < 3u) return;
+    p_unpack_f24(g_vs_imm_pack[0], g_vs_imm_pack[1], g_vs_imm_pack[2], a);
+    g_vs_imm_pack_n = 0;
+
+    if (idx < 0xFu) {
+        memcpy(g_vs_def_attr[idx], a, sizeof(a));
+        p_regs[0x232] = idx + 1u;
+        return;
+    }
+    memcpy(g_vs_imm_attr[g_vs_imm_cur], a, sizeof(a));
+    if (g_vs_imm_cur < (p_regs[0x242] & 0xFu)) {
+        g_vs_imm_cur++;
+        return;
+    }
+    p_vs_draw_immediate(c);
+}
+
+/* Spezialregister des Vertex-Shaders (Azahar HandleSpecialReg). Wird nach
+   dem maskierten Register-Schreiben mit dem Rohwert aufgerufen. */
+static void p_vs_reg_write(ArmCpu *c, uint32_t id, uint32_t value)
+{
+    if (id == 0x2B0u) {
+        unsigned i;
+        for (i = 0; i < 16u; i++) g_vs_bool[i] = (unsigned char)((value >> i) & 1u);
+    } else if (id >= 0x2B1u && id <= 0x2B4u) {
+        memcpy(g_vs_int[id - 0x2B1u], &value, 4);
+    } else if (id >= 0x2C1u && id <= 0x2C8u) {
+        p_vs_uniform_push(value);
+    } else if (id >= 0x2CCu && id <= 0x2D3u) {
+        uint32_t off = p_regs[0x2CB];
+        if (off < VS_PROG_WORDS) {
+            g_vs_code[off] = value;
+            if (off + 1u > g_vs_code_words) g_vs_code_words = off + 1u;
+            p_regs[0x2CB] = off + 1u;
+        }
+    } else if (id >= 0x2D6u && id <= 0x2DDu) {
+        uint32_t off = p_regs[0x2D5];
+        if (off < VS_SWZ_WORDS) {
+            g_vs_swz[off] = value;
+            p_regs[0x2D5] = off + 1u;
+        }
+    } else if (id == 0x232u) {
+        g_vs_imm_pack_n = 0;
+        g_vs_imm_cur = 0;
+    } else if (id >= 0x233u && id <= 0x235u) {
+        p_vs_submit_immediate(c, value);
+    }
+}
+
+/* ---- Test-/Diagnosezugriff (keine Spielsemantik) ---- */
+static void p_vs_reset_draw_state(void)
+{
+    g_vs_imm_pack_n = 0;
+    g_vs_imm_cur = 0;
+    g_imm_n = 0;
+    g_vs_have_last = 0;
+}
+
+float gpu_pica_vs_uniform(int index, int comp)
+{
+    if (index < 0 || index >= 96 || comp < 0 || comp >= 4) return 0.0f;
+    return g_vs_float[index][comp];
+}
+
+int gpu_pica_vs_active(void) { return g_vs_code_words > 0; }
+
+int gpu_pica_last_vertex(float *pos, float *color, float *uv)
+{
+    if (!g_vs_have_last) return 0;
+    if (pos) memcpy(pos, g_vs_last_vertex.pos, 4 * sizeof(float));
+    if (color) memcpy(color, g_vs_last_vertex.color, 4 * sizeof(float));
+    if (uv) memcpy(uv, g_vs_last_vertex.uv, 2 * sizeof(float));
     return 1;
 }
 
@@ -439,6 +1191,8 @@ static void p_write_reg(ArmCpu *c, uint32_t id, uint32_t value, uint32_t mask,
             old = (old & ~(0xFFu << (b * 8))) | (value & (0xFFu << (b * 8)));
     p_regs[id] = old;
     ctx->ops++;
+
+    p_vs_reg_write(c, id, value);
 
     if (id == 0x010u) {             /* Finalize / irq_request */
         /* Azahar: every_byte_match(irq_request, irq_compare) -> P3D; bei

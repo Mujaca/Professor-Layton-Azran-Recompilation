@@ -8,6 +8,13 @@ Azahar-Semantik des Kommandostroms: Header-Maske, Consecutive-Writes
 (group=0/1), 8-Byte-Ausrichtung, 0x010-Finalize (P3D/Autostop),
 Befehlspuffer-Sprung 0x238/0x23A/0x23C und die Abbildung physischer
 PICA-Adressen auf den Gast-Linearspeicher.
+
+Vertex-Pipeline (Azahar shader_interpreter.cpp / vertex_loader.cpp):
+float24-Uniform-Upload 0x2C0/0x2C1, Programm 0x2CB/0x2CC, Swizzle
+0x2D5/0x2D6, Bool-/Int-Uniforms 0x2B0/0x2B1, Eingangs-Mapping 0x2B9/0x2BB,
+Ausgangs-Mapping 0x04F/0x050, output_mask 0x2BD, Arithmetik/Swizzle,
+LOOP+aL, IFU, Default-Attribute 0x232, attribut_mask, Index-Puffer 0x227
+(0x22F/u16) und Immediate-Mode 0x232=0xF.
 """
 import os
 import subprocess

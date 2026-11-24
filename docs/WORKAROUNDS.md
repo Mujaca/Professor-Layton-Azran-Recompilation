@@ -89,6 +89,8 @@ fn_001B9938) sind entfernt: Build ohne sie bleibt Frontier 9/10 (boss:U).
 | – | fs `OpenFile`, `file_command` | Sentinel-Dateislot und Erfolg auch bei fehlgeschlagenem Open; `romfs_image.bin` mit Offset +0x1000 |
 | – | `SleepThread` | Schlafzeit auf 50 ms gedeckelt |
 | – | `gpu_pica_virt_to_phys` | Adressen außerhalb VRAM/Linear-Heap bleiben unverändert (der Port hat keine MMU/Seitentabelle); echtes GSP lehnt sie ab |
+| – | `p_draw_arrays` | Ohne hochgeladenes Vertex-Programm (0x2CB/0x2CC) fällt der Draw auf die alte Heuristik zurück (Position = Attribut 0, UV = Attribut 1). Mit Programm läuft der Azahar-Interpreter. |
+| – | `p_raster_tri` | Rasterizer ohne Viewport-/Clip-/Depth-/TEV-Semantik: NDC-Heuristik, Textur direkt als Farbe. Vertex-Ausgang, Index-Puffer und Immediate-Mode folgen Azahar. |
 | – | cfg `GetConfig` | unbekannte Blöcke liefern Erfolg mit Nullen (Azahar: Fehler) |
 
 Diese Liste stammt aus dem Review der Nachtarbeit (2026-11-24) gegen Azahar.

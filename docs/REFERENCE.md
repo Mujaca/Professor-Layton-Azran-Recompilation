@@ -183,9 +183,42 @@ dem Eintrag in die Kommandopuffer-Register um (`gpu_pica_virt_to_phys`).
 Bereiche außerhalb dieser Fenster bleiben unverändert, weil der Port keine
 MMU/Seitentabelle hat.
 
+### Vertex-Pipeline
+
+* Shader-Register: `vs` 0x2B0..0x2DF (`gs` 0x280..0x2AF). `bool_uniforms`
+  0x2B0 (Bit je Uniform), `int_uniforms` 0x2B1..0x2B4,
+  `uniform_setup.index`/Format 0x2C0 (Bit31 = float32), `set_value`
+  0x2C1..0x2C8, `program.offset` 0x2CB + `set_word` 0x2CC..0x2D3,
+  `swizzle.offset` 0x2D5 + `set_word` 0x2D6..0x2DD. Der Uniform-Index wird
+  je vollständigem Vec4 um eins erhöht (7 Bit); Indizes ≥ 96 werden ignoriert.
+* float24-Packing (3 Wörter je Vec4): `x=w2&0xFFFFFF`,
+  `y=((w1&0xFFFF)<<8)|(w2>>24)`, `z=((w0&0xFF)<<16)|(w1>>16)`, `w=w0>>8`;
+  float24 = Sign Bit23, Exponent Bits16..22 (Bias 63), Mantisse Bits0..15.
+  float32-Modus: 4 Wörter, Komponente `3-i` aus Wort `i`.
+* Attribute: 0x200 Basis (physisch, `(reg>>1)*16`), 0x201/0x202 Formate
+  (0..3 = BYTE/UBYTE/SHORT/FLOAT, Bits 2..3 = Komponenten-1), 0x202
+  Bits16..27 `attribute_mask` (gesetzt = Default-Attribut), Bits28..31
+  Maximalindex. Loader `0x203+3*l`: `data_offset`, 12 Komponentennibbles,
+  `byte_count`/Stride, `component_count`; der Offset wird vor jeder
+  Komponente auf ihre Elementgröße ausgerichtet, Attribute 12..15 sind
+  4/8/12/16-Byte-Padding. Default-Attribute: 0x232 Index,
+  0x233..0x235 `set_value` (gepackte float24-Queue); Index 0xF = Immediate.
+* Index-Puffer 0x227: Offset relativ zur Attributbasis, Bit31 = u16.
+  0x22E = DrawArrays (nutzt `vertex_offset` 0x22A), 0x22F = DrawElements
+  (Index-Puffer, `vertex_offset` wird ignoriert).
+* Ausgang: `output_mask` 0x2BD wählt o0..o15; 0x04F `vs_output_total`,
+  0x050..0x056 `vs_output_attributes` (5-Bit-Semantik je Komponente:
+  POSITION 0..3, COLOR 8..11, TEXCOORD0 12/13). Nicht gemappte Semantiken
+  sind 1.0; Farben werden vor der Interpolation abs/saturiert.
+* Instruktionen sind ein Wort: Opcode Bits26..31, Swizzle-Muster je
+  `operand_desc_id`. Bedingungen vergleichen `refx`/`refy` mit
+  `conditional_code` (Or/And/JustX/JustY). `LOOP` nutzt ein Int-Uniform
+  (x = Downcounter, y = aL-Start, z = aL-Inkrement); aL ist
+  `address_register[2]`. Bei nicht-invertierten Befehlen ist `src1` das
+  7-Bit-Register (Uniform/adressierbar), `src2` nur 5 Bit (Input/Temp).
+
 Das Titelbild ist ein 3D-Render (`title.xc`): korrekte Darstellung braucht
-einen **Vertex-Shader-Interpreter/Übersetzer** und **TEV**.
-`runtime/gpu/gpu.c` hat beides noch nicht.
+zusätzlich **TEV** und die Rasterizer-Zustände (Viewport/Clip/Depth).
 
 ## Quellen
 
