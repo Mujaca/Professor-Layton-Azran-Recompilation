@@ -957,8 +957,9 @@ static void srv_command(Ipc *r, uint32_t *p) {
             put_result(r);
             break;
         }
-        case 2: { /* EnableNotification: Result, CopyHandle(Semaphore) */
-            uint32_t h = new_semaphore_handle("srv:notif", 0, 2);
+        case 2: { /* EnableNotification: Result, CopyHandle(Semaphore)
+                     Azahar sm/srv.cpp: MAX_PENDING_NOTIFICATIONS = 16. */
+            uint32_t h = new_semaphore_handle("srv:notif", 0, 16);
             if (g_log) printf("[srv] EnableNotification -> %u\n", h);
             ipc_begin(r, 2, 1, 2);
             put_result(r);
@@ -2446,12 +2447,15 @@ static void cfg_command(Ipc *r, uint32_t *p) {
             break;
         }
         case 0x0003: { /* GetTransferableId(salt): Result + u64 */
-            /* Azahar: MakeBuilder(3,0), Push(result, low, high). */
+            /* Azahar: MakeBuilder(3,0), Push(result, low, high).
+             * p[0] vor der Antwort puffern: ipc_put() schreibt in denselben
+             * Kommandopuffer, den p zeigt (Diagnose las sonst 0). */
+            uint32_t salt = (r->normal >= 1) ? p[0] : 0u;
             ipc_begin(r, 0x0003, 3, 0);
             put_result(r);
             ipc_put(r, 0x12345678u);    /* low  */
             ipc_put(r, 0x00000000u);    /* high */
-            if (g_log) printf("[cfg] GetTransferableId salt=0x%X -> ok\n", p[0]);
+            if (g_log) printf("[cfg] GetTransferableId salt=0x%X -> ok\n", salt);
             break;
         }
         case 0x0005: { /* GetSystemModel: Result + Model */
@@ -2745,6 +2749,8 @@ static void dsp_command(Ipc *r, uint32_t *p) {
         }
         case 0x0011: { /* LoadComponent: Result + bool + MappedBuffer-Echo */
             uint32_t dsc_flags = 0, dsc_addr = 0;
+            /* Parameter vor der Antwort puffern (ipc_put() ueberschreibt p). */
+            uint32_t size = (r->normal >= 1) ? p[0] : 0u;
             if (r->translate >= 2) {
                 dsc_flags = p[r->normal];
                 dsc_addr = p[r->normal + 1];
@@ -2754,7 +2760,7 @@ static void dsp_command(Ipc *r, uint32_t *p) {
             ipc_put(r, 1);          /* true = geladen */
             ipc_put(r, dsc_flags);
             ipc_put(r, dsc_addr);
-            if (g_log) printf("[dsp] LoadComponent size=0x%X -> ok\n", p[0]);
+            if (g_log) printf("[dsp] LoadComponent size=0x%X -> ok\n", size);
             break;
         }
         case 0x0012: { /* UnloadComponent: Result */

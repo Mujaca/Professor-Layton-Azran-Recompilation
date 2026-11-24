@@ -109,3 +109,4 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | 2026-11-24 | m3-hang-timing | 10/10 | None | 0 |
 | 2026-11-24 | ringpuffer-wartestelle | 10/10 | None | 0 |
 | 2026-11-24 | ringpuffer-wartestelle-2 | 10/10 | None | 0 |
+| 2026-11-24 | ipc-folge-4 | 10/10 | None | 0 |

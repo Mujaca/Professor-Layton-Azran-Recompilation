@@ -372,11 +372,13 @@ mit dem Y2R-Framepfad (je Frame `SetInputFormat`, `SetInputLineWidth`,
 `SetBlockAlignment`, `SetTransferEndInterrupt`, `SetAlpha`,
 `SetStandardCoefficient`, `SetReceiving`, `StartConversion`, danach 4-5x
 `IsBusyConversion`; 520 Zyklen bis zum Trace-Ende 11 s). Der Port sendet
-davon **nichts**: nur `0x002B DriverInitialize`, `0x000D
-SetTransferEndInterrupt` und `0x000F GetTransferEndEvent` (`grep y2r:u
-out/logs/frontier.txt` = 3 Kommandos).
+den vollstaendigen Satz inzwischen selbst: im 40-s-Lauf **41** Zyklen
+(`grep -c "cmd=0x0026" out/logs/frontier.txt` = 41, dazu je Zyklus
+`0x0001/0x0003/0x0005/0x0007/0x000D/0x0010/0x0011/0x0012/0x0018/0x001A/
+0x001C/0x0020/0x0022`). Die Differenz zu den 520 Referenzzyklen ist der
+getrennt dokumentierte 41-Frame-Stall des Decoders, kein IPC-Fehler.
 
-**Belege (nur Diagnose, kein Gastzustand):**
+**Belege (Stand vor dem Decoder-Fix, nur Diagnose, kein Gastzustand):**
 * `ARM_WATCH=0x00347C68` (StartConversion-Wrapper des Spiels) und
   `ARM_WATCH=0x00218660`/`0x00171DAC` (Y2R-Treiber der Frame-Schleife):
   0 Treffer im gesamten Lauf.
@@ -410,10 +412,12 @@ out/logs/frontier.txt` = 3 Kommandos).
   `cfg` GetConfig-Blocks, `ndm` SuspendDaemons) stimmen; die Referenz
   enthaelt nach 2.6 s ausschliesslich Y2R-Zeilen.
 
-**Naechster Schritt:** Im Demuxer ansetzen: pruefen, warum der erste
-Videopaket des `m999.moflex` nicht in den Praesentations-Stream
-(`[movie+0x1e8]`) gelangt, obwohl der Koeffizientendecoder laeuft. Kein
-Kernel-/IPC-Fehler belegt; ein Workaround wurde nicht eingebaut.
+**Naechster Schritt:** ~~Im Demuxer ansetzen: pruefen, warum das erste
+Videopaket des `m999.moflex` nicht in den Praesentations-Stream gelangt.~~
+**Erledigt:** Der Praesentationspfad laeuft (Decoder-Fix am Recompiler,
+`dynamic_pc`); offen sind nur noch der 41-Frame-Stall und die
+Y2R-Sendeparameter (naechster Abschnitt). Kein Kernel-/IPC-Fehler belegt;
+ein Workaround wurde nicht eingebaut.
 
 ### Stall nach der zweiten PICA-Liste: Futex-Mutex bei `0x0040F120` – offen 2026-11-24
 
@@ -447,8 +451,10 @@ Kernel noetig.
 
 **Nebenbefund:** Der Notification-Thread (tid 1) sendet `srv 0x000B
 ReceiveNotification`, das in der Referenz nicht vorkommt (Azahar: nullptr-
-Handler, liefert ebenfalls Erfolg). Zu pruefen ist `EnableNotification`
-(Port-Sema max. 2, Azahar `MAX_PENDING_NOTIFICATIONS = 16`).
+Handler, liefert ebenfalls Erfolg). `EnableNotification` legt das
+Sema inzwischen mit `MAX_PENDING_NOTIFICATIONS = 16` an (Azahar
+`sm/srv.cpp`; vorher 2). `srv 0x000B` kommt im aktuellen 40-s-Lauf nicht
+mehr vor.
 
 ### IPC-Folge bis OpenLinkFile – Dienst-Routing/Reply behoben 2026-11-24
 
@@ -999,3 +1005,38 @@ Freigabe-Event beobachten (`ARM_MEMWATCHRANGE` auf die Ringstruktur
 Decoder beim Intra-Frame mehr als einen 96-Byte-Chunk anfordern muss und
 welches Event/Semaphor den Kopierer weckt. Erst danach ist eine
 Kernel-/Service-Korrektur belegbar.
+
+### Y2R-Sendeparameter: `gap` ist `-unit` statt `512-unit` – offen 2026-11-24
+
+**Befund (IPC-Parameter, nicht Sequenz):** Die Dienstfolge ist weiterhin
+kanonisch gleich (`trace-diff`), und der Y2R-Framepfad ist vorhanden
+(41 vollstaendige Zyklen). Die erste inhaltliche Abweichung steckt in den
+Parametern von `SetSendingY/U/V`:
+
+| Kommando | Referenz `transfer_stride` | Port `[y2r] ... gap` |
+|---|---|---|
+| SetSendingY (0x0010) | 112 (0x70) | 65136 (0xFE70) |
+| SetSendingU/V (0x0011/0x0012) | 312 (0x138) | 65336 (0xFF38) |
+| SetReceiving (0x0018) | 2688 (0xA80) | 2688 (0xA80), stimmt |
+
+In der Referenz ist `unit + gap` immer 512 (400+112, 200+312). Der Port
+uebergibt `gap = -unit` (als int16: 0xFE70 = -400, 0xFF38 = -200), also
+`unit + gap = 0`.
+
+**Belege:**
+* `grep "\[y2r\] cmd 0x0010" out/logs/frontier.txt` →
+  `gap=65136`; `reports/azahar_trace.txt:477` → `transfer_stride=112`.
+* `ARM_WATCH=00218660` (Einstieg des Presenters): `r2=0x190` (400),
+  `r3=0xF0` (240), `lr=0x00312B90`. Der Stride-Parameter steht im Stack
+  und stammt aus `[r5+0xc]` (`vldr s1,[r5,#0xc]` →
+  `vstr s1,[sp,#0xc]` in `fn_0031282C`). Der Port liest dort 0; erwartet
+  ist 512.
+* Im Presenter `fn_00218660` entsteht `gap` als `sb - r5`
+  (`0x218754: sub r0, sb, r5`); das Register `sb` (r9) wird aus dem
+  Stackargument geladen (`ldr sb,[sp,#0x44]`). Mit `sb = 0` ergibt das
+  exakt `-unit`.
+
+**Einordnung:** Der Wert entsteht im Gast-/Presenter-Pfad
+(Videoframe-Metadaten), nicht in einem Kernel- oder Dienst-Handler. Kein
+Workaround eingebaut; die Korrektur gehoert in den Decoder-/Frame-Strang.
+Fuer M4 relevant, sobald das Video wieder vollstaendig dekodiert wird.
