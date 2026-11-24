@@ -262,6 +262,7 @@ def _fill_empty_fns(res, data):
     if data is None:
         return
     md = capstone.Cs(capstone.CS_ARCH_ARM, capstone.CS_MODE_ARM)
+    md.detail = True
     n = 0
     for fn in res.functions.values():
         if fn.thumb or fn.blocks:

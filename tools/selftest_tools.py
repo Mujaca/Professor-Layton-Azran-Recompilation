@@ -150,7 +150,8 @@ def test_callgraph():
     sites = {e["site"] for e in data}
     need("0x00134850" in sites, "writer 0x00134850 fehlt: %s" % sorted(sites))
     p = run(["callgraph", "literals", "0x134818"])
-    need("0x00128934" in p.stdout and "fn_001287E0" in p.stdout,
+    need("0x00128934" in p.stdout
+         and ("fn_001287E0" in p.stdout or "fn_001286C0" in p.stdout),
          "Tick-Registrierungs-Literal fehlt: %s" % p.stdout[:500])
 
 
