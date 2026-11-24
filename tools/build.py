@@ -106,28 +106,32 @@ def main():
         print(run(apply_cmd).stdout.strip())
 
         env = dict(os.environ, PYTHONPATH=TOOLS, PYTHONIOENCODING="utf-8")
-        run([sys.executable, "-m", "recomp.cli", "gen",
-             "--in", os.path.join(ROOT, "out", "exefs", "code_decomp.bin"),
-             "--out", gen_c, "--prologues", "--seed-pointers", "--trace",
-             "--seed-file", os.path.join(TOOLS, "recomp", "seeds.txt")],
-            cwd=ROOT, env=env)
-        if not a.pristine:
-            sys.path.insert(0, os.path.join(TOOLS, "workarounds"))
-            import gen_patches
-            gen_patches.apply(gen_c)
+        # Erzeugen und Kompilieren unter derselben systemweiten Sperre: der
+        # Generator schreibt build/gen_boot.c neu, und ein parallel laufendes
+        # zig haelt die Datei gemappt - das Truncaten scheitert dann mit
+        # OSError EINVAL (beobachtet bei parallelen Laeufen im selben Baum).
+        with gen_lock():
+            run([sys.executable, "-m", "recomp.cli", "gen",
+                 "--in", os.path.join(ROOT, "out", "exefs", "code_decomp.bin"),
+                 "--out", gen_c, "--prologues", "--seed-pointers", "--trace",
+                 "--seed-file", os.path.join(TOOLS, "recomp", "seeds.txt")],
+                cwd=ROOT, env=env)
+            if not a.pristine:
+                sys.path.insert(0, os.path.join(TOOLS, "workarounds"))
+                import gen_patches
+                gen_patches.apply(gen_c)
 
-        digest = hashlib.sha256(open(gen_c, "rb").read()).hexdigest()
-        stamp = gen_o + ".sha256"
-        old = open(stamp).read().strip() if os.path.exists(stamp) else ""
-        if digest != old or not os.path.exists(gen_o):
-            print("kompiliere gen_boot.c (dauert einige Minuten) ...")
-            # Mehrere Worktrees bauen parallel; gleichzeitige gen_boot.c-
-            # Kompilierungen scheitern am Speicher. Systemweit serialisieren.
-            with gen_lock():
+            digest = hashlib.sha256(open(gen_c, "rb").read()).hexdigest()
+            stamp = gen_o + ".sha256"
+            old = open(stamp).read().strip() if os.path.exists(stamp) else ""
+            if digest != old or not os.path.exists(gen_o):
+                print("kompiliere gen_boot.c (dauert einige Minuten) ...")
+                # Mehrere Worktrees bauen parallel; gleichzeitige gen_boot.c-
+                # Kompilierungen scheitern am Speicher. Systemweit serialisieren.
                 run([zig(), "cc"] + cflags() + ["-c", gen_c, "-o", gen_o])
-            open(stamp, "w").write(digest)
-        else:
-            print("gen_boot.o aktuell")
+                open(stamp, "w").write(digest)
+            else:
+                print("gen_boot.o aktuell")
 
     srcs = [os.path.join(RUNTIME, s) for s in SOURCES]
     run([zig(), "cc"] + cflags() + srcs + [gen_o, "-o", os.path.join(ROOT, "out", "port.exe"),

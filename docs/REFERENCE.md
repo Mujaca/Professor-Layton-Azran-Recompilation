@@ -449,8 +449,14 @@ Quelle: Azahar `renderer_software/sw_rasterizer.cpp`, `sw_clipper.cpp`,
 * **Unicorn 2.1.4 (Testwerkzeug)**: Thumb wird nur ueber Bit 0 der
   Startadresse gewaehlt (`emu_start(addr | 1)`); `UC_MODE_THUMB` allein und
   CPSR.T genuegen nicht.
-* **ADR in Thumb** ist PC-relativ mit `Align(PC, 4)` (PC = addr + 4); im
-  Recompiler bereits so umgesetzt.
+* **PC-Lesen in Thumb** richtet sich nach der Instruktion, nicht nach dem
+  Modus (Azahar `arm/dyncom/arm_dyncom_run.h`): Adressrechnungen (`ADR`,
+  `ldr rX,[pc,#imm]`, `add rN, pc, #imm`) lesen `Align(addr+4, 4)`
+  (`CHECK_READ_REG15_WA`), Datenverarbeitung mit PC als Register
+  (`add`/`cmp`/`mov rX, pc`, 16-Bit-High-Register-Formen) liest `addr + 4`
+  **ohne** Wortausrichtung (`CHECK_READ_REG15`). Beleg: bei `0x001000FA`
+  (`add r7, pc`) muss `r7 = 0x003C4358` sein (4-Byte-Tabelle), nicht
+  `0x003C4356`; Test `tests/mvp_selftest.py::thumb_add_pc_ohne_ausrichtung`.
 * **ARM/Thumb-Interworking-Stubs**: `add rN, pc, #imm` (ARM PC = addr + 8,
   `imm` enthält das Thumb-Bit, z. B. `0x292264: add r12, pc, #1; bx r12` ->
   `0x29226C`) bzw. `adr rN, #imm` + `bx rN`. Ebenso `ldr pc, [pc, #imm]` mit
@@ -484,6 +490,20 @@ Quelle: Azahar `renderer_software/sw_rasterizer.cpp`, `sw_clipper.cpp`,
   absolute Codezeiger (ARM `pc+8`, Thumb `Align(pc+4,4)`); `tbb/tbh` nutzen
   Byte-/Halbwort-Offsets ab `Align(pc+4,4)`. Der Scanner legt diese Ziele als
   Bloecke an (`scan.ldr_pc_table`/`tbb_table`).
+* **Terminatoren in IT-Bloecken**: `b`, `bx`, `pop {..,pc}`, `ldm ..,{..,pc}`
+  innerhalb eines IT-Blocks tragen in ihrer Kodierung kein Bedingungsfeld;
+  die Bedingung kommt aus dem ITSTATE. Sie sind also bedingt ausgefuehrt und
+  haben einen Fallthrough. Scanner (`scan.decode_function`) und Emitter
+  (`cli.needs_fallthrough`) muessen den ITSTATE dafuer mitfuehren.
+* **MLS** (nur Thumb-2): `Rd = Ra - Rn*Rm`, kein S-Bit. Belegt mit Unicorn
+  (`tools/recomp_difftest.py`).
+* **RRX/RRXS** ist auch in Thumb eine 32-Bit-Kodierung (`0xEA4F`/`0xEA5F`),
+  nicht die 16-Bit-Datenverarbeitung; `rrxs` setzt N/Z, C = Rm[0].
+* **LDR mit Writeback und Rt == Rn** ist nach ARM ARM UNPREDICTABLE. Azahar
+  (`LDR_INST`: `get_addr` schreibt zurueck, danach liest der Load) und Unicorn
+  lassen den geladenen Wert gewinnen; der Recompiler unterdrueckt dafuer den
+  Writeback. Bei `LDRD`/`STRD` mit Basis == Rd/Rd+1 weichen Unicorn und
+  Azahar dagegen ab (UNPREDICTABLE, kein Testfall).
 
 ## Kernel: Threads, Prioritaeten, SVC-ABI
 
@@ -921,8 +941,14 @@ einen **Vertex-Shader-Interpreter/Übersetzer** und **TEV**.
 * **Unicorn 2.1.4 (Testwerkzeug)**: Thumb wird nur ueber Bit 0 der
   Startadresse gewaehlt (`emu_start(addr | 1)`); `UC_MODE_THUMB` allein und
   CPSR.T genuegen nicht.
-* **ADR in Thumb** ist PC-relativ mit `Align(PC, 4)` (PC = addr + 4); im
-  Recompiler bereits so umgesetzt.
+* **PC-Lesen in Thumb** richtet sich nach der Instruktion, nicht nach dem
+  Modus (Azahar `arm/dyncom/arm_dyncom_run.h`): Adressrechnungen (`ADR`,
+  `ldr rX,[pc,#imm]`, `add rN, pc, #imm`) lesen `Align(addr+4, 4)`
+  (`CHECK_READ_REG15_WA`), Datenverarbeitung mit PC als Register
+  (`add`/`cmp`/`mov rX, pc`, 16-Bit-High-Register-Formen) liest `addr + 4`
+  **ohne** Wortausrichtung (`CHECK_READ_REG15`). Beleg: bei `0x001000FA`
+  (`add r7, pc`) muss `r7 = 0x003C4358` sein (4-Byte-Tabelle), nicht
+  `0x003C4356`; Test `tests/mvp_selftest.py::thumb_add_pc_ohne_ausrichtung`.
 
 
 * **16-Bit-Thumb im IT-Block**: Die "S"-Formen (ADD/SUB/AND/EOR/LSL/LSR/
@@ -950,6 +976,20 @@ einen **Vertex-Shader-Interpreter/Übersetzer** und **TEV**.
   absolute Codezeiger (ARM `pc+8`, Thumb `Align(pc+4,4)`); `tbb/tbh` nutzen
   Byte-/Halbwort-Offsets ab `Align(pc+4,4)`. Der Scanner legt diese Ziele als
   Bloecke an (`scan.ldr_pc_table`/`tbb_table`).
+* **Terminatoren in IT-Bloecken**: `b`, `bx`, `pop {..,pc}`, `ldm ..,{..,pc}`
+  innerhalb eines IT-Blocks tragen in ihrer Kodierung kein Bedingungsfeld;
+  die Bedingung kommt aus dem ITSTATE. Sie sind also bedingt ausgefuehrt und
+  haben einen Fallthrough. Scanner (`scan.decode_function`) und Emitter
+  (`cli.needs_fallthrough`) muessen den ITSTATE dafuer mitfuehren.
+* **MLS** (nur Thumb-2): `Rd = Ra - Rn*Rm`, kein S-Bit. Belegt mit Unicorn
+  (`tools/recomp_difftest.py`).
+* **RRX/RRXS** ist auch in Thumb eine 32-Bit-Kodierung (`0xEA4F`/`0xEA5F`),
+  nicht die 16-Bit-Datenverarbeitung; `rrxs` setzt N/Z, C = Rm[0].
+* **LDR mit Writeback und Rt == Rn** ist nach ARM ARM UNPREDICTABLE. Azahar
+  (`LDR_INST`: `get_addr` schreibt zurueck, danach liest der Load) und Unicorn
+  lassen den geladenen Wert gewinnen; der Recompiler unterdrueckt dafuer den
+  Writeback. Bei `LDRD`/`STRD` mit Basis == Rd/Rd+1 weichen Unicorn und
+  Azahar dagegen ab (UNPREDICTABLE, kein Testfall).
 * **Funktionserkennung / Seeds** (verifiziert 2026-11-24):
   - Direkte Calls: `bl` bleibt im Modus des Aufrufers, `blx #imm` wechselt ihn
     (Thumb -> ARM, ARM -> Thumb; das Thumb-Bit des Ziels ist dort implizit).
@@ -999,6 +1039,39 @@ einen **Vertex-Shader-Interpreter/Übersetzer** und **TEV**.
   `vmov dN, Rt, Rt2` / `vmov Rt, Rt2, dN` (niedriges Wort zuerst).
 * VNEG/VABS sind Bitoperationen (Vorzeichen invertieren/loeschen) und
   unterliegen weder FTZ noch der NaN-Kanonisierung.
+
+### DSP/Medien- und Statusbefehle (2026-11-24 verifiziert)
+
+* **MRS/MSR (APSR)**: MRS liefert NZCV (31..28), Q (27), GE (19..16), das
+  T-Bit (5) und die Modusbits. Im User-Mode ist der Modus 0x10. MSR maskiert
+  nach Feld: `apsr_nzcvq` schreibt 31..27, `apsr_g` nur 19..16; andere
+  Felder bleiben unveraendert. CPSR/SPSR-Schreibzugriffe (privilegiert) sind
+  im Port nicht abgebildet. (`tools/recomp/emit.py`, `ArmCpu.cpsr_mode`.)
+* **SMMUL/SMMLA/SMMLS**: `Ra` liegt im **oberen** 32-Bit-Wort:
+  `SMMLA = (Ra<<32 + Rn*Rm) >> 32`, `SMMLS = (Ra<<32 - Rn*Rm) >> 32`,
+  `SMMUL` ohne Ra. Das ist *kein* `Ra + (Produkt>>32)` mit
+  vorzeichenerweitertem Ra (Azahar dyncom `SMMLA_INST`, mit Unicorn belegt).
+* **SMUAD/SMUADX/SMUSD/SMUSDX**: `p1 = lo*lo`, `p2 = hi*hi`; SMUAD addiert,
+  SMUSD subtrahiert `p2`. Das X-Suffix tauscht die Halbwoerter des *zweiten*
+  Operanden. Q wird bei signed Ueberlauf der Addition gesetzt; die
+  Subtraktion kann mit 16-Bit-Produkten nicht ueberlaufen.
+* **SMLAD/SMLSD**: wie oben, zusaetzlich `+ Ra`; Q bei Ueberlauf beider
+  Additionen. **SMLALD/SMLSLD**: 64-Bit-Akkumulator `RdHi:RdLo` plus
+  Produktpaar (immer addiert, `sub` waehlt `p1-p2`).
+* **UMAAL**: `RdLo:RdHi = Rn*Rm + RdLo + RdHi` (unsigned, 64 Bit).
+* **SXTAB16/UXTAB16**: die Extension wird **je 16-Bit-Lane** zu Rn addiert;
+  ein Uebertrag der unteren Haelfte laeuft nicht in die obere.
+* **SWP/SWPB**: `temp = [Rn]; [Rn] = Rm; Rd = temp` (Rd/Rm duerfen nicht
+  gleich sein; keine Exklusiv-Semantik).
+* **LDRT/STRT** sind immer post-indexiert; im User-Mode verhalten sie sich
+  wie LDR/STR. **LDM/STM mit `^`** adressieren im User-Mode dieselben
+  r0-r12; `pc` in der Liste ist ein Interworking-Sprung.
+* **Logische Operationen mit Immediate**: C ist Bit 31 des expandierten
+  Immediates, wenn der Shifter tatsaechlich rotiert; bei Rotation 0 bleibt C
+  unveraendert. Thumb-2: die Muster `00XY00XY`/`XY00XY00`/`XYXYXYXY` lassen C
+  unveraendert, sonst gilt die Rotationsregel (ARM ARM ThumbExpandImm_C).* **ARMv6K kennt kein `rbit`** (erst ARMv6T2/ARMv7); `setend` existiert in
+  ARMv6, kommt im Spiel-Image aber nicht vor. Kein Code im Port erzeugt
+  Big-Endian-Zugriffe.
 
 ## Quellen
 * https://www.3dbrew.org/wiki/IPC, /RomFS, /GSP_Shared_Memory, /GPU/Internal_Registers

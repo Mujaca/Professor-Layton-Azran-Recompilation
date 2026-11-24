@@ -258,7 +258,8 @@ CASES = [
     },
     {
         # Thumb `add rD, pc` (Register-Form) liest PC = Adresse + 4 OHNE
-        # Ausrichtung (nur adr/Literal-Loads richten aus). Im printf des
+        # Ausrichtung (Azahar CHECK_READ_REG15, maskiert nur Bit 0; nur
+        # adr/Literal-Loads richten aus). Im printf des
         # Spiels (0x1000FA) zeigte die Formattabelle sonst 2 Byte zu frueh,
         # `%03d` wurde mit Leerzeichen statt Nullen formatiert und Dateinamen
         # wie `15_   999.xs` entstanden.
@@ -420,6 +421,29 @@ CASES = [
         },
         "regs": {},
         "expect": {"r0": 8, "r13": 0x8000},
+    },
+    {
+        # PIC-Epilog: Rueckkehr ueber ein Register, das zuvor aus LR geladen
+        # wurde (`mov rN, lr; ... mov pc, rN`). Das ist eine Rueckkehr in den
+        # C-Aufrufer; ein arm_call_guest am Rueckkehrziel startet sonst eine
+        # Gastfunktion an einer Adresse mitten in der Aufruferfunktion
+        # (Mobiclip-Decoder-Kette 0x16C230 -> LR 0x16C340).
+        "name": "mov_pc_lr_rueckkehr_arm",
+        "asm": """
+            mov r0, #2
+            bl 0x100200
+            add r0, r0, #1
+            bx lr
+        """,
+        "extra": {
+            0x100200: """
+                mov r4, lr
+                mov r0, #5
+                mov pc, r4
+            """,
+        },
+        "regs": {},
+        "expect": {"r0": 6},
     },
     {
         # Bedingte Terminatoren (bx<cond> lr, pop<cond> {pc}) haben einen
@@ -832,6 +856,229 @@ CASES = [
         "regs": {"r1": 0x1000, "r3": 0x55667788, "r5": 0x0A0B0C0D},
         "mem": [(0x1000, 0x44), (0x1001, 0x33), (0x1002, 0x22), (0x1003, 0x11)],
         "expect": {"r0": 0x11223344, "r2": 1, "r4": 0x0A0B0C0D},
+    },
+    {
+        # SWP: temp = [Rn]; [Rn] = Rm; Rd = temp.
+        "name": "swp",
+        "asm": """
+            swp r0, r1, [r2]
+            ldr r4, [r2]
+            bx lr
+        """,
+        "regs": {"r1": 0x55667788, "r2": 0x1000},
+        "mem": [(0x1000, 0x44), (0x1001, 0x33), (0x1002, 0x22), (0x1003, 0x11)],
+        "expect": {"r0": 0x11223344, "r4": 0x55667788},
+    },
+    {
+        "name": "swpb",
+        "asm": """
+            swpb r0, r1, [r2]
+            ldrb r4, [r2]
+            bx lr
+        """,
+        "regs": {"r1": 0xAB, "r2": 0x1000},
+        "mem": [(0x1000, 0x44)],
+        "expect": {"r0": 0x44, "r4": 0xAB},
+    },
+    {
+        # ^-Form (S-Bit) im User-Mode: r0-r12 sind ungebankt.
+        "name": "ldmia_user_form",
+        "asm": """
+            ldmia r1, {r2, r3} ^
+            bx lr
+        """,
+        "regs": {"r1": 0x1000},
+        "mem_bytes": [(0x1000, b"\x44\x33\x22\x11\x88\x77\x66\x55")],
+        "expect": {"r2": 0x11223344, "r3": 0x55667788},
+    },
+    {
+        # Negative Register-Offsets sind modular (U=0).
+        "name": "ldr_neg_register",
+        "asm": """
+            ldr r0, [r1, -r2]
+            bx lr
+        """,
+        "regs": {"r1": 0x1010, "r2": 8},
+        "mem_bytes": [(0x1008, b"\x0A\x0B\x0C\x0D")],
+        "expect": {"r0": 0x0D0C0B0A},
+    },
+    {
+        # SMMUL: obere 32 Bit des 64-Bit-Produkts.
+        "name": "smmul",
+        "asm": """
+            smmul r0, r2, r3
+            bx lr
+        """,
+        "regs": {"r2": 0xFFFF0000, "r3": 0x00020000},
+        "expect": {"r0": 0xFFFFFFFE},
+    },
+    {
+        # SMUADX: halbwortweise getauschter zweiter Operand.
+        "name": "smuadx",
+        "asm": """
+            smuadx r0, r2, r3
+            bx lr
+        """,
+        "regs": {"r2": 0x00040003, "r3": 0x00020001},
+        "expect": {"r0": 10},
+    },
+    {
+        # SMUSD: lo*lo - hi*hi.
+        "name": "smusd",
+        "asm": """
+            smusd r0, r2, r3
+            bx lr
+        """,
+        "regs": {"r2": 0x00040003, "r3": 0x00020001},
+        "expect": {"r0": 0xFFFFFFFB},
+    },
+    {
+        # SMUAD setzt bei Ueberlauf der Produktsumme CPSR.Q.
+        "name": "smuad_q",
+        "asm": """
+            smuad r0, r2, r3
+            bx lr
+        """,
+        "regs": {"r2": 0x80008000, "r3": 0x80008000},
+        "expect": {"r0": 0x80000000, "q": 1},
+    },
+    {
+        # SMLAD: Akkumulator-Ueberlauf setzt Q, Ergebnis bleibt 32 Bit.
+        "name": "smlad_q",
+        "asm": """
+            smlad r0, r2, r3, r1
+            bx lr
+        """,
+        "regs": {"r1": 0x7FFFFFFF, "r2": 0x7FFF7FFF, "r3": 0x7FFF7FFF},
+        "expect": {"r0": 0xFFFE0001, "q": 1},
+    },
+    {
+        # SMLALD: 64-Bit-Akkumulator + (lo*lo + hi*hi).
+        "name": "smlald",
+        "asm": """
+            smlald r0, r1, r2, r3
+            bx lr
+        """,
+        "regs": {"r0": 0x100, "r1": 1, "r2": 0x00040003, "r3": 0x00020001},
+        "expect": {"r0": 0x10B, "r1": 1},
+    },
+    {
+        # UMAAL: RdLo:RdHi = Rn*Rm + RdLo + RdHi.
+        "name": "umaal",
+        "asm": """
+            umaal r0, r1, r2, r3
+            bx lr
+        """,
+        "regs": {"r0": 1, "r1": 2, "r2": 3, "r3": 4},
+        "expect": {"r0": 15, "r1": 0},
+    },
+    {
+        # SXTAB16 mit ROR #16: addiert zwei sign-extendierte Bytes.
+        "name": "sxtab16_ror",
+        "asm": """
+            sxtab16 r0, r1, r2, ror #16
+            bx lr
+        """,
+        "regs": {"r1": 0x00010002, "r2": 0x0000FF80},
+        "expect": {"r0": 0xFF810002},
+    },
+    {
+        # MRS/MSR nur APSR-Felder: NZCVQ und GE getrennt, T/Mode 0x10.
+        "name": "mrs_msr_apsr",
+        "asm": """
+            msr apsr_nzcvq, r3
+            mrs r0, apsr
+            msr apsr_g, r4
+            mrs r1, apsr
+            bx lr
+        """,
+        "regs": {"r3": 0xA8000000, "r4": 0x000A0000},
+        "expect": {"r0": 0xA8000010, "r1": 0xA80A0010},
+    },
+    {
+        # 16-Bit-Shift im IT-Block: ausgefuehrt, aber ohne Flag-Wirkung
+        # (ARM ARM A7.7.3). Der fruehere Code nutzte capstone update_flags
+        # und setzte Z/C.
+        "name": "thumb_it_lsls_no_flags",
+        "thumb": True,
+        "asm": """
+            movs r0, #0
+            it eq
+            lsreq r1, r2, #1
+            bx lr
+        """,
+        "regs": {"r2": 0x80000001},
+        "expect": {"r0": 0, "r1": 0x40000000, "z": 1, "c": 0, "n": 0},
+    },
+    {
+        # 16-Bit-MUL im IT-Block setzt ebenfalls keine Flags.
+        "name": "thumb_it_muls_no_flags",
+        "thumb": True,
+        "asm": """
+            movs r0, #0
+            it eq
+            muleq r1, r2, r1
+            bx lr
+        """,
+        "regs": {"r1": 5, "r2": 3},
+        "expect": {"r0": 0, "r1": 15, "z": 1},
+    },
+    {
+        # Bedingter Sprung in einem IT-Block: Ziel genommen -> kein Add.
+        "name": "thumb_it_branch_taken",
+        "thumb": True,
+        "asm": """
+            movs r0, #0
+            cmp r1, #0
+            it eq
+            beq skip
+            adds r0, #5
+        skip:
+            bx lr
+        """,
+        "regs": {"r1": 0},
+        "expect": {"r0": 0},
+    },
+    {
+        # Derselbe Block ohne genommene Bedingung: der Folgeblock muss
+        # existieren (der Scanner legte ihn fuer IT-Terminatoren nicht an).
+        "name": "thumb_it_branch_fallthrough",
+        "thumb": True,
+        "asm": """
+            movs r0, #0
+            cmp r1, #0
+            it eq
+            beq skip
+            adds r0, #5
+        skip:
+            bx lr
+        """,
+        "regs": {"r1": 1},
+        "expect": {"r0": 5},
+    },
+    {
+        # MLS (Thumb-2): Rd = Ra - Rn*Rm.
+        "name": "thumb_mls",
+        "thumb": True,
+        "asm": """
+            mls r0, r1, r2, r3
+            bx lr
+        """,
+        "regs": {"r1": 7, "r2": 9, "r3": 100},
+        "expect": {"r0": 37},
+    },
+    {
+        # RRXS (32-Bit-Thumb): Rotate Right with Extend; der fruehere Code
+        # verwechselte die Form mit einem reinen Register-Move.
+        "name": "thumb_rrxs",
+        "thumb": True,
+        "asm": """
+            movs r0, #0
+            rrxs r1, r2
+            bx lr
+        """,
+        "regs": {"r2": 0x80000001},
+        "expect": {"r1": 0x40000000, "z": 0, "n": 0, "c": 1},
     },
 ]
 

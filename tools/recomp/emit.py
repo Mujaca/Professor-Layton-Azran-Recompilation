@@ -61,6 +61,11 @@ TBB_IDS = tuple(getattr(A, n) for n in ("ARM_INS_TBB", "ARM_INS_TBH")
 
 SHIFT = {"lsl": "SH_LSL", "lsr": "SH_LSR", "asr": "SH_ASR", "ror": "SH_ROR"}
 
+# Logische DP-Operationen: ihr C-Flag kommt aus dem Shifter (auch bei
+# Immediate-Operanden), arithmetische setzen es aus dem Uebertrag.
+LOGICAL_DP = {"DP_AND", "DP_EOR", "DP_ORR", "DP_BIC", "DP_MOV", "DP_MVN",
+              "DP_TST", "DP_TEQ"}
+
 VFP_ARITH = {"vadd": 0, "vsub": 1, "vmul": 2, "vdiv": 3}
 VFP_UNARY = {"vneg": 4, "vabs": 5, "vsqrt": 6}
 
@@ -77,7 +82,8 @@ CORE_BASES = {"nop", "hint", "pld", "pldw", "clrex", "cdp", "cdp2",
               "ldc", "stc", "mcrr", "mrrc", "lsl", "lsr", "asr", "ror",
               "rrx", "uxth", "uxtb", "sxth", "sxtb", "uxtah", "sxtah", "ldrd", "strd",
               "ldrex", "strex", "mrc", "mcr", "ldm", "stm", "push", "pop", "rev",
-              "rev16", "revsh", "usat", "ssat", "qadd", "qsub", "sdiv", "udiv"}
+              "rev16", "revsh", "usat", "ssat", "qadd", "qsub", "sdiv", "udiv",
+              "swp", "swpb"}
 
 
 def _known(core):
@@ -224,8 +230,7 @@ def _build_aliases():
                          ("ARM_INS_LDRT", "ARM_INS_LDR"), ("ARM_INS_STRT", "ARM_INS_STR"),
                          ("ARM_INS_LDRBT", "ARM_INS_LDRB"), ("ARM_INS_STRBT", "ARM_INS_STRB"),
                          ("ARM_INS_LDRHT", "ARM_INS_LDRH"), ("ARM_INS_STRHT", "ARM_INS_STRH"),
-                         ("ARM_INS_LDRSBT", "ARM_INS_LDRSB"), ("ARM_INS_LDRSHT", "ARM_INS_LDRSH"),
-                         ("ARM_INS_SMLSLD", "ARM_INS_SMULL")):
+                         ("ARM_INS_LDRSBT", "ARM_INS_LDRSB"), ("ARM_INS_LDRSHT", "ARM_INS_LDRSH")):
         a = getattr(A, name, None)
         b = getattr(A, target, None)
         if a is not None and b is not None:
@@ -257,9 +262,17 @@ class Emitter:
         self.ret_mov = set()       # `mov pc, rN` mit rN = unveraenderte lr-Kopie
         self.it_cond = {}          # id(ins) -> Bedingung aus einem IT-Block
 
-    def pc_value(self, pc):
+    def pc_value(self, pc, aligned=True):
+        """Wert von PC als Quelloperand.
+
+        Thumb-Adressrechnungen (ADR, `ldr rX,[pc,#imm]`) benutzen
+        Align(pc+4,4) (Azahar `CHECK_READ_REG15_WA`); Datenverarbeitung mit
+        PC als Register (`add/cmp/mov rX, pc`, 16-Bit) dagegen pc+4 ohne
+        Wortausrichtung (Azahar `CHECK_READ_REG15`, maskiert nur Bit 0).
+        Die Ausrichtung ist eine Eigenschaft der Instruktion, nicht des Modus.
+        """
         if self.thumb:
-            return (pc + 4) & ~3
+            return (pc + 4) & ~3 if aligned else pc + 4
         return pc + 8
 
     def label(self, addr):
@@ -329,26 +342,26 @@ class Emitter:
         return lines
 
     # ---------- operands ----------
-    def value(self, tok, pc):
+    def value(self, tok, pc, aligned=True):
         t = tok.strip()
         if t.startswith("#"):
             v = isa.imm_value(t)
             if v is None:
                 raise Unsupported(t)
             return "0x%08Xu" % u32(v)
+        n = isa.reg_num(t[1:]) if t.startswith("-") else None
+        if n is not None:
+            # Negative Register-Offsets (`ldr r0, [r1, -r2, lsl #2]`) sind
+            # modular zu rechnen.
+            return "(0u - c->r[%d])" % n
         n = isa.reg_num(t)
         if n is None:
             raise Unsupported(t)
         if n == 15:
-            if self.thumb and getattr(self, "_thumb_pc_unaligned", False):
-                # Thumb-Datenverarbeitung mit PC als Registeroperand
-                # (`add r7, pc`, `mov r0, pc`): PC = Instruktion + 4, ohne
-                # Ausrichtung. Align(PC, 4) gilt nur fuer adr/Literal-Loads.
-                return "0x%08Xu" % u32(pc + 4)
-            return "0x%08Xu" % u32(self.pc_value(pc))
+            return "0x%08Xu" % u32(self.pc_value(pc, aligned))
         return "c->r[%d]" % n
 
-    def operand2(self, toks, pc):
+    def operand2(self, toks, pc, aligned=True):
         if not toks:
             raise Unsupported("leerer Operand")
         if len(toks) == 2 and toks[0].startswith("#") and toks[1].startswith("#"):
@@ -361,7 +374,7 @@ class Emitter:
             if r:
                 v = ((v >> r) | (v << (32 - r))) & 0xFFFFFFFF
             return "0x%08Xu" % v, None
-        base = self.value(toks[0], pc)
+        base = self.value(toks[0], pc, aligned)
         if len(toks) == 1:
             return base, None
         st = toks[1].strip()
@@ -380,20 +393,77 @@ class Emitter:
         return "arm_shift_reg(%s, %s, %s, &sh)" % (kind, raddr, base), "sh"
 
     # ---------- instruction classes ----------
-    def dp(self, ins, in_it=False):
-        ops = isa.split_operands(ins.op_str)
-        # Register-Form (kein Immediate) -> PC unausgerichtet (siehe value()).
-        self._thumb_pc_unaligned = bool(self.thumb and ops
-                                        and not ops[-1].strip().startswith("#"))
-        try:
-            return self._dp(ins, in_it)
-        finally:
-            self._thumb_pc_unaligned = False
+    def dp_inline(self, code, rd, rn, o2, sf, sc, writes):
+        """Haeufige DP-Formen ohne Shift als direkten C-Ausdruck.
 
-    def _dp(self, ins, in_it=False):
+        Semantik identisch zu arm_dp() (runtime/cpu/arm_cpu.c): gleiche
+        NZCV-Berechnung, gleiche Shifter-Carry-Regel. Rueckgabe None, wenn
+        die Form nicht abgedeckt ist (dann bleibt es beim arm_dp-Aufruf).
+        """
+        if rd == 15:
+            return None
+        if code in ("DP_AND", "DP_EOR", "DP_ORR", "DP_BIC", "DP_MOV", "DP_MVN",
+                    "DP_TST", "DP_TEQ"):
+            if code in ("DP_TST", "DP_TEQ"):
+                if not sf or sc != -1:
+                    return None
+                expr = "(%s & %s)" if code == "DP_TST" else "(%s ^ %s)"
+                return ["{ uint32_t r = " + expr % (rn, o2) + ";",
+                        "  c->n = r >> 31; c->z = (r == 0); }"]
+            if sc >= 0:
+                return None            # C-Flag haengt an der Immediate-Rotation
+            if code == "DP_MOV":
+                expr = o2
+            elif code == "DP_MVN":
+                expr = "(~" + o2 + ")"
+            elif code == "DP_AND":
+                expr = "(%s & %s)" % (rn, o2)
+            elif code == "DP_EOR":
+                expr = "(%s ^ %s)" % (rn, o2)
+            elif code == "DP_ORR":
+                expr = "(%s | %s)" % (rn, o2)
+            else:
+                expr = "(%s & ~%s)" % (rn, o2)
+            if not sf:
+                return ["c->r[%d] = %s;" % (rd, expr)]
+            return ["{ uint32_t r = " + expr + ";",
+                    "  c->n = r >> 31; c->z = (r == 0); c->r[%d] = r; }" % rd]
+        if code in ("DP_ADD", "DP_SUB", "DP_CMN", "DP_CMP"):
+            sub = code in ("DP_SUB", "DP_CMP")
+            if not sf:
+                if code not in ("DP_ADD", "DP_SUB"):
+                    return None
+                op = "-" if sub else "+"
+                return ["c->r[%d] = %s %s %s;" % (rd, rn, op, o2)]
+            if sub:
+                body = "  c->c = (a >= b); c->v = (((a ^ b) & (a ^ r)) >> 31) & 1u;"
+                res = "r = a - b;"
+            else:
+                body = "  c->c = (r < a); c->v = ((~(a ^ b) & (a ^ r)) >> 31) & 1u;"
+                res = "r = a + b;"
+            lines = ["{ uint32_t a = %s, b = %s, r;" % (rn, o2),
+                     "  " + res,
+                     "  c->n = r >> 31; c->z = (r == 0);",
+                     body]
+            if writes:
+                lines.append("  c->r[%d] = r; }" % rd)
+            else:
+                lines[-1] += " }"
+            return lines
+        return None
+
+    def dp(self, ins, in_it=False):
         code, uses_rn, writes = DP_OPS[ins.id]
         ops = isa.split_operands(ins.op_str)
         pc = ins.address
+        # 16-Bit-Thumb-DP mit PC als Register: PC = addr+4 (nicht wort-
+        # ausgerichtet, Azahar CHECK_READ_REG15). Nur Adressrechnungen
+        # (ADR, ldr [pc]) runden auf 4 ab (CHECK_READ_REG15_WA).
+        # Nur die Register-Form (letzter Operand kein Immediate) liest PC
+        # unausgerichtet; `add rN, pc, #imm` (ADR) richtet weiterhin aus.
+        aligned_pc = not (self.thumb and getattr(ins, "size", 4) == 2
+                          and ops
+                          and not ops[-1].strip().startswith("#"))
         if writes:
             rd = isa.reg_num(ops[0])
             if rd is None:
@@ -403,41 +473,49 @@ class Emitter:
                     rn = "c->r[%d]" % rd
                     rest = ops[1:]
                 else:
-                    rn = self.value(ops[1], pc)
+                    rn = self.value(ops[1], pc, aligned_pc)
                     rest = ops[2:]
             else:
                 rn = "0"
                 rest = ops[1:]
         else:
             rd = -1
-            rn = self.value(ops[0], pc)
+            rn = self.value(ops[0], pc, aligned_pc)
             rest = ops[1:]
-        o2, sh = self.operand2(rest, pc)
+        o2, sh = self.operand2(rest, pc, aligned_pc)
         sf = sets_flags(ins, self.thumb, in_it)
-        imm_c = -1
-        if not sh and rest and rest[0].strip().startswith("#"):
-            imm_c = imm_shifter_carry(ins, self.thumb)
-        if not sh and imm_c >= 0:
+        sc = -1
+        if sh is None and sf and code in LOGICAL_DP and rest \
+                and rest[0].strip().startswith("#"):
             # Rotierter Immediate-Operand: Shifter-Carry = Bit 31 des Werts
             # (ARM ARM A5.1.3; Thumb-2 ThumbExpandImm_C). Wirkt nur bei
             # logischen Operationen mit S-Bit (tst/teq/ands/orrs/movs ...).
-            lines = ["arm_dp(c, %s, %d, %s, %s, %d, %d);" % (code, rd, rn, o2, sf, imm_c)]
-        elif sh:
+            # Auch die Capstone-Form `#imm, #rot` (zwei Operanden) zaehlt.
+            sc = imm_shifter_carry(ins, self.thumb)
+        supp = None
+        if sh is None:
+            supp = self.dp_inline(code, rd, rn, o2, sf, sc, writes)
+        if supp is not None:
+            return supp
+        if sh:
             lines = ["{", "  int sh = -1;",
                      "  arm_dp(c, %s, %d, %s, %s, %d, sh);" % (code, rd, rn, o2, sf),
                      "}"]
         else:
-            lines = ["arm_dp(c, %s, %d, %s, %s, %d, -1);" % (code, rd, rn, o2, sf)]
+            lines = ["arm_dp(c, %s, %d, %s, %s, %d, %d);"
+                     % (code, rd, rn, o2, sf, sc)]
         if writes and rd == 15:
             src = isa.reg_num(ops[1]) if len(ops) > 1 else None
-            if code == "DP_MOV" and src is not None and src != 14 and pc in self.ret_mov:
-                # rN ist eine Kopie von lr (cli.lr_copy_returns): Rueckkehr.
-                lines.append("return;")
-            elif code == "DP_MOV" and src == 14:
-                # `mov pc, lr` ist eine Rueckkehr in den C-Aufrufer; ein
-                # arm_call_guest am Rueckkehrziel wuerde eine Gastfunktion
-                # an einer Adresse mitten in der Aufruferfunktion starten.
-                lines.append("c->r[15] = c->r[14];")
+            if code == "DP_MOV" and (src == 14 or pc in self.ret_bx
+                                     or pc in self.ret_mov):
+                # `mov pc, lr` bzw. `mov rN, lr; ... mov pc, rN` ist eine
+                # Rueckkehr in den C-Aufrufer; ein arm_call_guest am
+                # Rueckkehrziel wuerde eine Gastfunktion an einer Adresse
+                # mitten in der Aufruferfunktion starten (SP-Drift,
+                # abgeschnittene Fortsetzung). ret_bx: Kopie im selben Block
+                # (cli.return_bx_in_block), ret_mov: ueber Bloecke hinweg
+                # (cli.lr_copy_returns, z. B. `mov r6, lr; bl ...; mov pc, r6`).
+                lines.append("c->r[15] = c->r[%d];" % (src if src is not None else 14))
                 lines.append("return;")
             else:
                 # `mov pc, rN` / `add pc, ...` / Sprungtabellen: dynamisch
@@ -486,7 +564,9 @@ class Emitter:
             lines.append("  c->r[%d] = arm_ld(c, a, %d, %d);" % (rd, size, signed))
         else:
             lines.append("  arm_st(c, a, %d, c->r[%d]);" % (size, rd))
-        if wb:
+        # Azahar/Unicorn: Writeback wird vor dem Laden ausgefuehrt; ist das
+        # Basisregister auch Ziel (UNPREDICTABLE), gewinnt der geladene Wert.
+        if wb and not (load and base_reg == rd):
             if post:
                 lines.append("  c->r[%d] = a + o;" % base_reg)
             else:
@@ -504,6 +584,14 @@ class Emitter:
             # Label springen (sonst wird der Epilog uebersprungen und SP
             # bleibt unbalanciert). Nur echte Fremd-Eintraege via
             # arm_call_guest ausfuehren.
+            #
+            # Ausnahme: laedt der Befehl PC aus dem Stack, ist die geladene
+            # Adresse die Rueckkehradresse dieses Funktionsaufrufs (ARM-
+            # Epilog `add sp,#n; pop {callee-saved}; ldr pc,[sp],#m`). Ein
+            # arm_call_guest an dieser Adresse startet eine Gastfunktion
+            # mitten im C-Aufrufer bzw. endet als No-op; die richtige
+            # Semantik ist die Rueckkehr in den C-Aufrufer (`return`).
+            from_stack = base_reg == 13
             lines.append("if (arm_ldrpc_log_on()) arm_ldrpc_log(c->r[15]);")
             lines.append("{ uint32_t t = c->r[15]; c->r[15] = t & ~1u;")
             lines.append("  c->t = t & 1u;")
@@ -517,10 +605,12 @@ class Emitter:
                 for a in labs:
                     lines.append("    case 0x%08Xu: goto %s;"
                                  % (u32(a), self.label(a)))
-                lines.append("    default: arm_call_guest(c, t); return;")
+                lines.append("    default: return;" if from_stack
+                             else "    default: arm_call_guest(c, t); return;")
                 lines.append("  }")
             else:
-                lines.append("  arm_call_guest(c, t); return;")
+                lines.append("  return;" if from_stack
+                             else "  arm_call_guest(c, t); return;")
             lines.append("}")
             lines.append("return;")
         return lines
@@ -792,7 +882,7 @@ class Emitter:
         raise Unsupported(ins.op_str)
 
     # ---------- dispatch per mnemonic (Fallback fuer nicht-per-id erkannte Formen) ----------
-    def by_mnemonic(self, ins):
+    def by_mnemonic(self, ins, in_it=False):
         m = ins.mnemonic.lower()
         base = strip_cc(m)
         ops = isa.split_operands(ins.op_str)
@@ -819,6 +909,25 @@ class Emitter:
         if base == "clrex":
             return ["arm_excl_clear(c);"]
 
+        if base in ("swp", "swpb"):
+            d = isa.reg_num(ops[0]) if len(ops) > 0 else None
+            n = isa.reg_num(ops[1]) if len(ops) > 1 else None
+            if d is None or n is None or len(ops) < 3:
+                raise Unsupported(ins.op_str)
+            mem_txt = ops[2].strip()
+            if not (mem_txt.startswith("[") and mem_txt.endswith("]")):
+                raise Unsupported(ins.op_str)
+            inner = isa.split_operands(mem_txt[1:-1])
+            rn = isa.reg_num(inner[0]) if inner else None
+            if rn is None:
+                raise Unsupported(ins.op_str)
+            size = 1 if base == "swpb" else 4
+            # SWP: temp = [Rn]; [Rn] = Rm; Rd = temp (ARM ARM A8.8.160).
+            return ["{ uint32_t a = c->r[%d];" % rn,
+                    "  uint32_t v = arm_ld(c, a, %d, 0);" % size,
+                    "  arm_st(c, a, %d, c->r[%d]);" % (size, n),
+                    "  c->r[%d] = v; }" % d]
+
         if base in ("nop", "hint", "pld", "pldw", "dbg", "sev", "wfe", "wfi",
                     "it", "cdp", "cdp2", "ldc", "stc", "mcrr", "mrrc") or base.startswith(("ldc", "stc")):
             return []
@@ -830,7 +939,7 @@ class Emitter:
             if rd is None:
                 raise Unsupported(ins.op_str)
 
-            if base == "rrx":
+            if base.startswith("rrx"):
                 expr = "arm_rrx(c, %s, &sh)" % self.value(ops[1], pc)
                 plain = "arm_rrx(c, %s, 0)" % self.value(ops[1], pc)
             elif len(ops) >= 3:
@@ -848,7 +957,7 @@ class Emitter:
                 expr = src
                 plain = src
 
-            if not ins.update_flags:
+            if not sets_flags(ins, self.thumb, in_it):
                 return ["c->r[%d] = %s;" % (rd, plain)]
 
             return ["{", "  int sh = -1;",
@@ -1215,16 +1324,31 @@ class Emitter:
             rd = isa.reg_num(ops[0])
             if rd is None:
                 raise Unsupported(ins.op_str)
-            lines = ["c->r[%d] = (c->n << 31) | (c->z << 30) | (c->c << 29) | (c->v << 28);" % rd]
+            # APSR: NZCVQ (Bits 31..27), GE (19..16), T (5) und der
+            # User-Mode (0x10). Das Spiel laeuft immer im User-Mode.
+            lines = ["c->r[%d] = (c->n << 31) | (c->z << 30) | (c->c << 29) | "
+                     "(c->v << 28) | (c->qflag << 27) | (c->ge << 16) | "
+                     "(c->t << 5) | c->cpsr_mode;" % rd]
         elif ins.id == A.ARM_INS_MSR:
             ops = isa.split_operands(ins.op_str)
-            if len(ops) < 2 or ops[1].startswith("#"):
+            if len(ops) < 2:
                 raise Unsupported(ins.op_str)
-            rn = isa.reg_num(ops[1])
-            if rn is None:
+            fields = ops[0].lower()
+            if "cpsr" in fields or "spsr" in fields:
+                # Nur APSR-Felder sind abbildbar (kein privilegierter Modus).
                 raise Unsupported(ins.op_str)
-            lines = ["{ uint32_t v = c->r[%d]; c->n = (v >> 31) & 1u; c->z = (v >> 30) & 1u; "
-                     "c->c = (v >> 29) & 1u; c->v = (v >> 28) & 1u; }" % rn]
+            upd = []
+            for ch, field, bit in (("n", "n", 31), ("z", "z", 30),
+                                   ("c", "c", 29), ("v", "v", 28),
+                                   ("q", "qflag", 27)):
+                if ch in fields:
+                    upd.append("c->%s = (v >> %d) & 1u;" % (field, bit))
+            if "g" in fields:
+                upd.append("c->ge = (v >> 16) & 0xFu;")
+            if not upd:
+                raise Unsupported(ins.op_str)
+            lines = ["{ uint32_t v = %s;" % self.value(ops[1], pc)] + \
+                    ["  " + u for u in upd] + ["}"]
         elif ins.id == A.ARM_INS_CLZ:
             ops = isa.split_operands(ins.op_str)
             rd = isa.reg_num(ops[0])
@@ -1242,12 +1366,12 @@ class Emitter:
                 lines = ["c->r[%d] = %s & 0xFFFFu;" % (rd, val)]
             else:
                 lines = ["c->r[%d] = (c->r[%d] & 0xFFFFu) | ((%s & 0xFFFFu) << 16);" % (rd, rd, val)]
-        elif ins.id in (A.ARM_INS_MUL, A.ARM_INS_MLA):
+        elif ins.id in (A.ARM_INS_MUL, A.ARM_INS_MLA, A.ARM_INS_MLS):
             ops = isa.split_operands(ins.op_str)
             rd = isa.reg_num(ops[0])
             if rd is None or len(ops) < 2:
                 raise Unsupported(ins.op_str)
-            sf = 1 if ins.update_flags else 0
+            sf = sets_flags(ins, self.thumb, in_it)
             if ins.id == A.ARM_INS_MUL:
                 rn = isa.reg_num(ops[1])
                 rm = isa.reg_num(ops[2]) if len(ops) > 2 else rn
@@ -1260,7 +1384,12 @@ class Emitter:
                 ra = isa.reg_num(ops[3])
                 if None in (rn, rm, ra):
                     raise Unsupported(ins.op_str)
-                lines = ["arm_mla(c, %d, c->r[%d], c->r[%d], c->r[%d], %d);" % (rd, rn, rm, ra, sf)]
+                if ins.id == A.ARM_INS_MLS:
+                    # MLS: Rd = Ra - Rn*Rm (Thumb-2, kein S-Bit).
+                    lines = ["arm_mls(c, %d, c->r[%d], c->r[%d], c->r[%d]);"
+                             % (rd, rn, rm, ra)]
+                else:
+                    lines = ["arm_mla(c, %d, c->r[%d], c->r[%d], c->r[%d], %d);" % (rd, rn, rm, ra, sf)]
         elif ins.id in (A.ARM_INS_UMULL, A.ARM_INS_UMLAL, A.ARM_INS_SMULL, A.ARM_INS_SMLAL):
             ops = isa.split_operands(ins.op_str)
             if len(ops) < 4:
@@ -1273,7 +1402,7 @@ class Emitter:
                 raise Unsupported(ins.op_str)
             signed = 1 if ins.id in (A.ARM_INS_SMULL, A.ARM_INS_SMLAL) else 0
             acc = 1 if ins.id in (A.ARM_INS_UMLAL, A.ARM_INS_SMLAL) else 0
-            sf = 1 if ins.update_flags else 0
+            sf = sets_flags(ins, self.thumb, in_it)
             lines = ["arm_mull(c, %d, %d, c->r[%d], c->r[%d], %d, %d, %d);" % (
                 rdlo, rdhi, rn, rm, signed, acc, sf)]
         elif ins.id in (A.ARM_INS_VLDR, A.ARM_INS_VSTR, A.ARM_INS_VMOV, A.ARM_INS_VADD,
@@ -1282,7 +1411,7 @@ class Emitter:
                         A.ARM_INS_VMRS, A.ARM_INS_VMSR, A.ARM_INS_VPUSH, A.ARM_INS_VPOP):
             lines = self.vfp(ins)
         else:
-            lines = self.by_mnemonic(ins)
+            lines = self.by_mnemonic(ins, in_it)
 
         if cond is not None:
             wrapped = ["if (arm_cond(c, %d)) {" % (cond - 1)]

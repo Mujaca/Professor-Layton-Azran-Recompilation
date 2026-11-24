@@ -418,6 +418,98 @@ Videopaket des `m999.moflex` nicht in den Praesentations-Stream gelangt.~~
 `dynamic_pc`); offen sind nur noch der 41-Frame-Stall und die
 Y2R-Sendeparameter (naechster Abschnitt). Kein Kernel-/IPC-Fehler belegt;
 ein Workaround wurde nicht eingebaut.
+### Co-Simulation: Decoder-Kette bricht nach 92 Bloecken ab (belegt 2026-11-24)
+
+**Werkzeug:** `tools/cosim.py` (neu, `docs/TOOLS.md`): Schnappschuss per
+`ARM_DUMP`, danach Blockgleichschritt Port-Code (`build/gen_boot.o`) gegen die
+Originalbytes in Unicorn, inkl. Register/Flags je Blockgrenze und
+Speichervergleich an der ersten Abweichung. Reines Testwerkzeug, kein
+Produktcode.
+
+**Messung:** Schnappschuss am Decoder-Einstieg `0x0016A500` im natuerlichen
+Boot (Stand `b9b2932`), Co-Simulation:
+
+```
+unicorn: 177609 Instruktionen
+port:    RETURNED, 92 Bloecke
+ERSTE ABWEICHUNG (Endzustand): Port 92 Bloecke, Unicorn 177609 Instruktionen
+  r0: unicorn=0x000001B8 port=0x0C682378
+  r13(sp): unicorn=0x1667FCA0 port=0x1667FC54
+  r14(lr): unicorn=0xE0000000 port=0x0016C340
+  ... 5 abweichende Speicherseiten
+  Vorgaenger 0x0016CEE4: mov r6,#0x80; orr ...; stm ...
+```
+
+Alle 92 Blockgrenzen, die der Port erreicht, stimmen in r0-r12/Flags mit den
+Originalbytes ueberein; die Abweichung ist **kein Rechenfehler in einem
+ausgefuehrten Block**, sondern der bereits in §6 dokumentierte Kontrollfluss:
+`0x16CEE4` endet mit `mov pc,lr` (LR = `0x16C340`, Rueckkehradresse eines
+aeusseren Aufrufers, keine Funktion), der Port setzt den Gast dort **nicht**
+fort und kehrt aus dem C-Stack zum Aufrufer zurueck (SP um 0x4C zu klein).
+Unicorn laeuft 177.609 Instruktionen bis zum echten Funktionsende. Der
+Videodecoder liefert damit kein Bild; auf diesem Stand gibt es **0x
+`y2r StartConversion`** im 60-s-Lauf (die 41 der m3-Branches setzen die
+dortigen Recompiler-Fixes voraus) und einen einfarbigen Screenshot
+(`--shot --frames 900`: 400x480, 1 Farbe 000000).
+
+**Naechster Schritt (unveraendert):** Fortsetzung bei `c->r[14]` im
+Dispatcher (Block-Einstieg statt nur Funktions-Einstieg), Regression ueber
+`tools/cosim.py run` mit diesem Schnappschuss. Die Co-Simulation schliesst
+einen reinen Instruktionssemantikfehler auf dem *ausgefuehrten* Pfad aus.
+
+### Dekoder-Kette: dynamischer Sprung + `mov pc,lr` verliert den Gast-PC – offen 2026-11-24
+
+**Teilweise behoben (2026-11-24, Recompiler-Abdeckung):** Zwei Klassen sind
+generisch im Emitter behoben:
+
+* `ldr pc, [sp...]` ist ein ARM-Epilog (Rueckkehr aus dem C-Aufruf), kein
+  indirekter Gastaufruf. Vorher landeten die Rueckkehradressen als
+  `unbekanntes call-Ziel` in `out/missing_calls.txt` (2x `0x0035649C` aus
+  `fn_0020E250`); jetzt 0.
+* Funktionen, die per `add lr, pc, #imm` LR auf eine eigene Fortsetzung
+  setzen (Tabellen-Handler als Pseudounterprogramm), pruefen nach
+  `arm_call_guest` das Rueckkehrziel `c->r[15]` und setzen auf einem lokalen
+  Block fort (`has_pc_relative_lr` in `tools/recomp/cli.py`). Damit faellt
+  die `[sp]`-Korrektur bei `0x16CEE4` (LR `0x16C340`) weg und
+  `0x16EF38`/LR `0x16A600` von 3x auf 1x.
+
+**Weiter offen:** 1x `[sp] blk=0x0016E708 lr=0x0CA91AE8` (LR ist eine
+Heap-Adresse, SP -0x3C). Der Decoder laeuft damit weiter, liefert aber
+weiterhin kein Bild; M3 (`draws>0`) bleibt offen. Frontier unveraendert
+10/10, M1/M2 ja, Patches 0.
+
+
+**Werkzeug:** neuer Funktions-Differenztest `tools/func_difftest.py`
+(Schnappschuss per `ARM_DUMP` aus einem Port-Lauf, Originalbytes in Unicorn,
+Port-Code aus `build/gen_boot.o`). Dokumentation in `docs/TOOLS.md`.
+
+**Befund:** Schnappschuss am Einstieg `0x0016A500` (Mobiclip-Decoder,
+r0=0x0C682378, sp=0x1667FCA0) in einem 40-s-Lauf. Unicorn fuehrt die
+Originalbytes in 177.609 Instruktionen bis zum Ruecksprung aus; der
+Port-Code terminiert ebenfalls, aber mit falschem Endzustand (sp um 0x4C
+zu klein, r0..r14 abweichend, Objekt-/Framestatus an `+0x3D4` und der
+Referenzpuffer `0x0CA90xxx` bleiben auf dem alten `0x80`-Muster statt
+`0x10`).
+
+**Ursache (Recompiler, belegt mit der Blocktrace):** Die Kette
+`0x16BEC8 -> 0x16C170 -> 0x16CF48 -> (add pc,r5,r6) -> 0x16CEE4` wird im
+Gast per dynamischem Sprung/Tail-Jump erreicht; `0x16CEE4` endet mit
+`mov pc,lr`, LR ist dabei `0x16C340` (Rueckkehradresse des aeusseren
+Aufrufers, **keine** Funktion). Der Recompiler emittiert den dynamischen
+Sprung als `arm_call_guest(c, ziel)` und danach `return;`. Der von
+`arm_call_guest` gestartete C-Aufruf von `fn_0016CEE4` kehrt damit aus dem
+C-Stack zum *Aufrufer* zurueck, statt den Gast bei `0x16C340` fortzusetzen
+(Unicorn tut genau das und laeuft weitere ~9.000 Instruktionen bis zum
+echten Funktionsende). Folge: Die Port-Kette bricht nach `0x16CEE4` ab,
+der Decoder liefert kein Bild, der Film-Player bleibt in Zustand 5.
+
+**Naechster Schritt:** Beim dynamischen Sprung (`add pc`, `ldr pc`,
+`mov pc,rN`, `bx rN`) den Rueckkehr-PC des Ziels unterscheiden:
+Rueckkehr zum C-Aufrufer nur, wenn LR der Aufrufstelle entspricht; sonst
+muss `arm_call_guest`/der generierte Code den Gast bei `c->r[14]`
+fortsetzen (Fortsetzungsschleife im Dispatcher). Kein Spielcode-Patch;
+Regressionstest ueber `tools/func_difftest.py diff` mit dem
+`0x0016A500`-Schnappschuss.
 
 ### Stall nach der zweiten PICA-Liste: Futex-Mutex bei `0x0040F120` – offen 2026-11-24
 
@@ -1490,3 +1582,34 @@ duenne Dreiecke: 62 % der Pixelzeilen liegen unter der Parallelschwelle).
 Echte Abhilfe ist M9 (Hardware-Rasterizer); Zwischenschritte waeren Early-Z
 (nach Azahar erst nach TEV), ein schnellerer TEV-Pfad und eine
 Draw-Parallelisierung ohne Ordnungswechsel.
+### Renderziel/Draws: Thumb-PC, Attribut-Loader, Scissor – behoben 2026-11-24
+
+Der Sweep (`tools/cosim/sweep.py`) sollte den fehlenden Renderziel-Pfad
+finden. Vier Ursachen lagen hintereinander:
+
+1. **Recompiler, bedingter ARM-Switch** (`ldr<cond> pc, [pc, rN, lsl #2]`):
+   Der Scanner setzte den Fallthrough hinter die Tabelle, obwohl bei +4 der
+   Default-Zweig steht. Der Default wurde nie dekodiert; im Ressourcenpfad
+   endete ein dynamischer Sprung im No-op (SP-Drift + `svcBreak` vor
+   `SetBufferSwap`). Tests `arm_switch_default_zweig`, `arm_switch_fall`.
+2. **Recompiler, Thumb-Datenverarbeitung mit PC als Registeroperand**
+   (`add rD, pc` u. a.): Der Emitter las `Align(addr+4,4)`. Azahar
+   (`arm_dyncom_run.h`, `CHECK_READ_REG15`) maskiert nur Bit 0, also
+   `addr+4` **ohne** Wortausrichtung; nur Adressrechnungen (`ADR`,
+   `ldr rX,[pc,#imm]`, `add rN, pc, #imm`) benutzen `Align(addr+4,4)`
+   (`CHECK_READ_REG15_WA`). Im `printf` des Spiels zeigte die Formattabelle
+   dadurch zwei Byte zu frueh; Szenen-/Layout-Ressourcen fehlten und das
+   Draw-Gate blieb zu. Test:
+   `tests/mvp_selftest.py::thumb_add_reg_pc_unausgerichtet`.
+3. **PICA Attribut-Loader/Indexpuffer** (`runtime/gpu/gpu.c`): Basis
+   (Register 0x200) und Offset (Quelle 0x227) wurden getrennt in
+   Gastadressen umgerechnet. Die Basis liegt im VRAM-Fenster, die Daten per
+   Offset im FCRAM; richtig ist `gpu_pica_phys_to_guest(basis + offset)`.
+4. **PICA Scissor** (`runtime/gpu/gpu.c`): 0x065 ist der Modus, 0x066 die
+   Position (x1/y1) und 0x067 die Ausdehnung (x2/y2, inklusiv). Der Port
+   las x1/y1 aus 0x065 und erzeugte ein 1x1-Rechteck.
+
+**Beleg:** `python tools/frontier.py` meldet mit den vier Korrekturen
+`[gsp] SetBufferSwap` (M2) und PICA-Listen mit `draws>0` (M3);
+`python tools/check.py --full` ist gruen. Kein Spielcode-Patch, keine
+Eintraege in `tools/workarounds/`.
