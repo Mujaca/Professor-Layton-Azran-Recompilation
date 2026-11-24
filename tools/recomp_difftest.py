@@ -225,6 +225,28 @@ def arm_mem_cases(rng):
          note="ldr literal")
     _add(cases, "ldrb r%d, [pc, #4]\nbx lr\n.word 0x%08X" % (R(), rng.getrandbits(32)),
          note="ldrb literal")
+    # Exklusiv-Zugriffe ohne Threadwechsel: muessen in Unicorn und im
+    # recompilierten Code gleich wirken (STREX schreibt, Rueckgabe 0).
+    b = _mem_base(rng)
+    _add(cases, "ldrex r0, [r1]\nstrex r2, r3, [r1]\nldr r4, [r1]",
+         regs={1: b, 3: 0x12345678}, small=True, note="ldrex strex erfolg")
+    _add(cases, "ldrexb r0, [r1]\nstrexb r2, r3, [r1]\nldrb r4, [r1]",
+         regs={1: b, 3: 0x9A}, small=True, note="ldrexb strexb erfolg")
+    _add(cases, "ldrexh r0, [r1]\nstrexh r2, r3, [r1]\nldrh r4, [r1]",
+         regs={1: b, 3: 0x9ABC}, small=True, note="ldrexh strexh erfolg")
+    # CLREX entwertet die Reservierung: STREX scheitert (Rueckgabe 1) und
+    # schreibt nicht.
+    _add(cases, "ldrex r0, [r1]\nclrex\nstrex r2, r3, [r1]\nldr r4, [r1]",
+         regs={1: b, 3: 0x12345678}, small=True, note="ldrex clrex strex fehler")
+    # Ein normaler Store auf die ueberwachte Adresse entwertet sie ebenfalls.
+    _add(cases, "ldrex r0, [r1]\nstr r5, [r1]\nstrex r2, r3, [r1]\nldr r4, [r1]",
+         regs={1: b, 3: 0x12345678, 5: 0x0A0B0C0D}, small=True,
+         note="ldrex store strex fehler")
+    # LDREXD/STREXD mit geradem Registerpaar und 8-Byte-Ausrichtung.
+    b8 = DATA_BASE + 0x400 + 8 * rng.randrange(0, 16)
+    _add(cases, "ldrexd r0, r1, [r2]\nstrexd r3, r4, r5, [r2]\nldr r6, [r2]\nldr r7, [r2, #4]",
+         regs={2: b8, 4: 0x11223344, 5: 0x55667788}, small=True,
+         note="ldrexd strexd erfolg")
     return cases
 
 

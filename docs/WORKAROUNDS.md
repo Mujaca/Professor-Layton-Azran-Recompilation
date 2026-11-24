@@ -251,6 +251,17 @@ Antwort.
 
 ## 6. Befunde (offene Ursachen, kein Workaround eingebaut)
 
+### VFP-Semantik korrigiert – kein Workaround 2026-11-24
+
+Der Recompiler erzeugte VFP-Code mit vier Abweichungen: `vcmp` setzte das
+C-Flag bei Gleichheit/Groesser nicht, `vcvt.f32.s32`/`f32<->f64` nutzten die
+Host-Rundung (nearest) statt FPSCR (3DS-Default: Richtung Null), `vmla` u.a.
+ignorierten FPSCR (Default-NaN/FTZ) und Doppelpraezisions-VMLA sowie
+`vmov dN, Ra, Rb` fehlten. Korrigiert in `runtime/cpu/arm_cpu.c` (Helfer) und
+`tools/recomp/emit.py`; Belege/Fuzz: `tools/vfp_difftest.py` (Unicorn-Referenz)
+und feste Faelle in `tests/mvp_selftest.py`. Kein Code-Patch, kein Eintrag in
+`tools/workarounds/`.
+
 ### Gast-Threads liefen nie – behoben 2026-11-24
 
 **Befund:** `hle_init()` lief auf dem Host-Hauptthread (`runtime/main.c`) und

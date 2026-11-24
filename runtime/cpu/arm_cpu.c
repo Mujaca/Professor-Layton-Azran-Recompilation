@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include <fenv.h>
 
 static uint32_t g_memwatchrd = 0;
 static uint32_t g_memwatchrd_end = 0;
@@ -18,6 +19,10 @@ void arm_cpu_init(ArmCpu *c, void *mem, uint32_t size) {
     memset(c, 0, sizeof(*c));
     c->mem = (uint8_t *)mem;
     c->mem_size = size;
+    /* 3DS/Azahar-Thread-Kontext: Default-NaN, Flush-to-Zero, Rundung Richtung
+     * Null, Inexact-Cumulative. Das steuert VFP-Ergebnisse und Vergleiche. */
+    c->fpscr = 0x03C00010u;
+    vfp_apply_rounding(c->fpscr);
     g_pool_cpu = c;
     {
         const char *mw = getenv("ARM_MEMWATCH");
@@ -85,8 +90,32 @@ uint32_t arm_mem_read(ArmCpu *c, uint32_t addr, int size) {
     return v;
 }
 
+/* ---------------- exclusive monitor ---------------- */
+
+/* Globaler Monitor: pro (Adresse, Groesse) ein Slot mit Generationszaehler.
+ * Ein LDREX merkt sich (Slot, Generation) im ArmCpu; jeder Store auf den
+ * ueberwachten Bereich, ein CLREX oder ein Threadwechsel erhoeht die
+ * Generation bzw. entwertet den Slot. STREX gelingt nur, wenn die gemerkte
+ * Generation noch aktuell ist. Damit kann ein STREX nach einem Threadwechsel
+ * nicht mehr den Wert eines anderen Threads ueberschreiben. */
+#define ARM_EXCL_SLOTS 8
+typedef struct {
+    int used;
+    uint32_t addr;
+    uint32_t size;
+    uint32_t gen;
+} ArmExclSlot;
+static ArmExclSlot g_excl[ARM_EXCL_SLOTS];
+static unsigned g_excl_rr = 0;
+static volatile int g_excl_active = 0;
+static void arm_excl_invalidate(uint32_t addr, uint32_t size);
+
 void arm_mem_write(ArmCpu *c, uint32_t addr, int size, uint32_t val) {
     if (addr >= 0x20000000u) addr &= 0x1FFFFFFFu;
+    /* Jede Schreiboperation auf einen ueberwachten Bereich macht die
+     * Reservierung ungueltig (ARMv6K: lokaler Monitor wird von einem
+     * Store auf die ueberwachte Adresse geloescht). */
+    if (g_excl_active) arm_excl_invalidate(addr, (uint32_t)size);
     if (g_memwatch != 0 &&
         ((g_memwatch_end != 0) ? (addr >= g_memwatch && addr < g_memwatch_end)
                                : ((addr & ~3u) == g_memwatch)) &&
@@ -103,6 +132,131 @@ void arm_mem_write(ArmCpu *c, uint32_t addr, int size, uint32_t val) {
     for (int i = 0; i < size; i++) {
         c->mem[addr + i] = (uint8_t)(val >> (8 * i));
     }
+}
+
+/* ---- Exklusiv-Monitor: siehe Kommentar oben ---- */
+
+static uint32_t excl_norm(uint32_t addr) {
+    return (addr >= 0x20000000u) ? (addr & 0x1FFFFFFFu) : addr;
+}
+
+static void arm_excl_invalidate(uint32_t addr, uint32_t size) {
+    uint32_t end;
+    if (size == 0) return;
+    end = addr + size;
+    for (int i = 0; i < ARM_EXCL_SLOTS; i++) {
+        if (!g_excl[i].used) continue;
+        /* Byte-Bereiche ueberlappen sich? */
+        if (addr < g_excl[i].addr + g_excl[i].size && g_excl[i].addr < end) {
+            g_excl[i].used = 0;
+            if (g_excl_active > 0) g_excl_active--;
+        }
+    }
+}
+
+static void excl_reserve(ArmCpu *c, uint32_t addr, uint32_t size) {
+    int slot = -1;
+    c->excl_valid = 0;
+    for (int i = 0; i < ARM_EXCL_SLOTS; i++) {
+        if (g_excl[i].used && g_excl[i].addr == addr &&
+            g_excl[i].size == size) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        int free_slot = -1;
+        for (int i = 0; i < ARM_EXCL_SLOTS; i++) {
+            if (!g_excl[i].used) { free_slot = i; break; }
+        }
+        slot = (free_slot >= 0) ? free_slot
+                                : (int)(g_excl_rr++ % ARM_EXCL_SLOTS);
+        if (!g_excl[slot].used) g_excl_active++;
+        g_excl[slot].used = 1;
+        g_excl[slot].addr = addr;
+        g_excl[slot].size = size;
+    }
+    /* Jede neue Reservierung entwertet eine evtl. vorhandene alte auf
+     * derselben Adresse (globaler Monitor, nur ein Exklusivzugriff). */
+    g_excl[slot].gen++;
+    c->excl_valid = 1;
+    c->excl_slot = slot;
+    c->excl_addr = addr;
+    c->excl_size = size;
+    c->excl_gen = g_excl[slot].gen;
+}
+
+uint32_t arm_excl_load(ArmCpu *c, uint32_t addr, int size) {
+    uint32_t value;
+    addr = excl_norm(addr);
+    value = arm_mem_read(c, addr, size);
+    excl_reserve(c, addr, (uint32_t)size);
+    return value;
+}
+
+uint64_t arm_excl_load64(ArmCpu *c, uint32_t addr) {
+    /* LDREXD: zwei Worte; die Reservierung gilt fuer den 8-Byte-Bereich. */
+    uint64_t lo, hi;
+    addr = excl_norm(addr);
+    lo = arm_mem_read(c, addr, 4);
+    hi = arm_mem_read(c, addr + 4u, 4);
+    excl_reserve(c, addr, 8u);
+    return lo | (hi << 32);
+}
+
+uint32_t arm_excl_store(ArmCpu *c, uint32_t addr, int size, uint32_t value) {
+    int ok = 0;
+    addr = excl_norm(addr);
+    if (c->excl_valid && c->excl_addr == addr &&
+        c->excl_size == (uint32_t)size &&
+        c->excl_slot >= 0 && c->excl_slot < ARM_EXCL_SLOTS) {
+        ArmExclSlot *s = &g_excl[c->excl_slot];
+        if (s->used && s->gen == c->excl_gen && s->addr == addr &&
+            s->size == (uint32_t)size) {
+            s->used = 0;
+            if (g_excl_active > 0) g_excl_active--;
+            arm_mem_write(c, addr, size, value);
+            ok = 1;
+        }
+    }
+    /* STREX loescht den lokalen Monitor immer (ARM ARM, STREX). */
+    c->excl_valid = 0;
+    return ok ? 0u : 1u;
+}
+
+uint32_t arm_excl_store64(ArmCpu *c, uint32_t addr, uint32_t lo, uint32_t hi) {
+    int ok = 0;
+    addr = excl_norm(addr);
+    if (c->excl_valid && c->excl_addr == addr && c->excl_size == 8u &&
+        c->excl_slot >= 0 && c->excl_slot < ARM_EXCL_SLOTS) {
+        ArmExclSlot *s = &g_excl[c->excl_slot];
+        if (s->used && s->gen == c->excl_gen && s->addr == addr &&
+            s->size == 8u) {
+            s->used = 0;
+            if (g_excl_active > 0) g_excl_active--;
+            arm_mem_write(c, addr, 4, lo);
+            arm_mem_write(c, addr + 4u, 4, hi);
+            ok = 1;
+        }
+    }
+    c->excl_valid = 0;
+    return ok ? 0u : 1u;
+}
+
+void arm_excl_clear(ArmCpu *c) {
+    if (c->excl_valid && c->excl_slot >= 0 && c->excl_slot < ARM_EXCL_SLOTS) {
+        ArmExclSlot *s = &g_excl[c->excl_slot];
+        if (s->used && s->addr == c->excl_addr && s->size == c->excl_size) {
+            s->used = 0;
+            if (g_excl_active > 0) g_excl_active--;
+        }
+    }
+    c->excl_valid = 0;
+}
+
+void arm_excl_clear_all(void) {
+    for (int i = 0; i < ARM_EXCL_SLOTS; i++) g_excl[i].used = 0;
+    g_excl_active = 0;
 }
 
 /* ---------------- conditions ---------------- */
@@ -393,6 +547,8 @@ void arm_set_svc_handler(ArmSvcHandler handler) {
 }
 
 void arm_svc(ArmCpu *c, uint32_t imm) {
+    /* Exception-Eintritt loescht den lokalen Exklusiv-Monitor (ARMv6K). */
+    arm_excl_clear(c);
     arm_trace_svc(imm);
     if (g_svc_handler != NULL) {
         c->r[0] = g_svc_handler(c, imm);
@@ -405,6 +561,31 @@ void arm_unimplemented(ArmCpu *c, uint32_t pc, uint32_t insn, const char *mnem) 
 }
 
 /* ---------------- VFP ---------------- */
+
+/* FPSCR-Bits, die das Rechenverhalten steuern (Azahar/ARM ARM). Der 3DS-
+ * Thread-Kontext startet mit DEFAULT_NAN | FLUSH_TO_ZERO | ROUND_TOZERO | IXC. */
+#define VFP_FPSCR_NZCV       0xF0000000u
+#define VFP_FPSCR_DN         (1u << 25)
+#define VFP_FPSCR_FZ         (1u << 24)
+#define VFP_FPSCR_RMODE_MASK (3u << 22)
+#define VFP_DEFAULT_FPSCR    0x03C00010u
+
+/* Die Host-Rundung wird pro Thread einmal gesetzt; die FPSCR-Rundung ist
+ * Gastzustand und kann sich per VMSR aendern. */
+static _Thread_local int g_vfp_fenv_rmode = -1;
+
+void vfp_apply_rounding(uint32_t fpscr) {
+    int mode = (int)((fpscr >> 22) & 3u);
+    if (g_vfp_fenv_rmode == mode)
+        return;
+    switch (mode) {
+        case 0: fesetround(FE_TONEAREST); break;
+        case 1: fesetround(FE_UPWARD); break;
+        case 2: fesetround(FE_DOWNWARD); break;
+        default: fesetround(FE_TOWARDZERO); break;
+    }
+    g_vfp_fenv_rmode = mode;
+}
 
 float vfp_get_s(ArmCpu *c, int s) {
     float f;
@@ -432,33 +613,241 @@ void vfp_set_d(ArmCpu *c, int d, double v) {
     c->sreg[d * 2 + 1] = raw[1];
 }
 
+/* FTZ: denormalisierte Ergebnisse werden zu Null mit erhaltenem Vorzeichen. */
+static float vfp_finish_s(ArmCpu *c, float r) {
+    uint32_t b;
+    memcpy(&b, &r, 4);
+    if ((c->fpscr & VFP_FPSCR_FZ) && (b & 0x7F800000u) == 0u &&
+        (b & 0x007FFFFFu) != 0u)
+        b &= 0x80000000u;
+    if ((c->fpscr & VFP_FPSCR_DN) && (b & 0x7F800000u) == 0x7F800000u &&
+        (b & 0x007FFFFFu) != 0u)
+        b = 0x7FC00000u;
+    memcpy(&r, &b, 4);
+    return r;
+}
+
+static double vfp_finish_d(ArmCpu *c, double r) {
+    uint64_t b;
+    memcpy(&b, &r, 8);
+    if ((c->fpscr & VFP_FPSCR_FZ) && (b & 0x7FF0000000000000ull) == 0ull &&
+        (b & 0x000FFFFFFFFFFFFFull) != 0ull)
+        b &= 0x8000000000000000ull;
+    if ((c->fpscr & VFP_FPSCR_DN) && (b & 0x7FF0000000000000ull) == 0x7FF0000000000000ull &&
+        (b & 0x000FFFFFFFFFFFFFull) != 0ull)
+        b = 0x7FF8000000000000ull;
+    memcpy(&r, &b, 8);
+    return r;
+}
+
+/* Denormalisierte Eingaben werden bei FTZ als Null (mit Vorzeichen) gelesen. */
+static float vfp_load_s(ArmCpu *c, int s) {
+    float f = vfp_get_s(c, s);
+    if (c->fpscr & VFP_FPSCR_FZ) {
+        uint32_t b;
+        memcpy(&b, &f, 4);
+        if ((b & 0x7F800000u) == 0u && (b & 0x007FFFFFu) != 0u) {
+            b &= 0x80000000u;
+            memcpy(&f, &b, 4);
+        }
+    }
+    return f;
+}
+
+static double vfp_load_d(ArmCpu *c, int d) {
+    double v = vfp_get_d(c, d);
+    if (c->fpscr & VFP_FPSCR_FZ) {
+        uint64_t b;
+        memcpy(&b, &v, 8);
+        if ((b & 0x7FF0000000000000ull) == 0ull &&
+            (b & 0x000FFFFFFFFFFFFFull) != 0ull) {
+            b &= 0x8000000000000000ull;
+            memcpy(&v, &b, 8);
+        }
+    }
+    return v;
+}
+
+/* Getrennte Rundung fuer VMLA/VMLS/VNMUL: VFPv2 (ARM11) rundet das Produkt
+ * vor der Addition (Unicorn/Azahar verhalten sich ebenso). volatile
+ * verhindert, dass der Compiler eine FMA-Kontraktion erzeugt. */
+static float vfp_mul_s(float x, float y) { volatile float r = x * y; return r; }
+static float vfp_add_s(float x, float y) { volatile float r = x + y; return r; }
+static double vfp_mul_d(double x, double y) { volatile double r = x * y; return r; }
+static double vfp_add_d(double x, double y) { volatile double r = x + y; return r; }
+
+/* Bei ungueltiger Operation (0/0, inf-inf, sqrt(negativ) ...) liefert die
+ * VFP-Hardware/Unicorn den positiven Default-qNaN, auch ohne FPSCR.DN. C
+ * erzeugt dagegen je nach Operation ein negatives NaN. */
+static float vfp_invalid_nan_s(void) {
+    float r;
+    uint32_t b = 0x7FC00000u;
+    memcpy(&r, &b, 4);
+    return r;
+}
+
+static double vfp_invalid_nan_d(void) {
+    double r;
+    uint64_t b = 0x7FF8000000000000ull;
+    memcpy(&r, &b, 8);
+    return r;
+}
+
 void vfp_op(ArmCpu *c, int op, int dbl, int dest, int a, int b) {
     if (!dbl) {
-        float x = vfp_get_s(c, a), y = vfp_get_s(c, b), r = 0.0f;
+        float x = vfp_load_s(c, a), y = vfp_load_s(c, b), r = 0.0f;
+        int in_nan = isnan(x) || isnan(y);
         switch (op) {
             case 0: r = x + y; break;
             case 1: r = x - y; break;
-            case 2: r = x * y; break;
+            case 2: r = vfp_mul_s(x, y); break;
             case 3: r = x / y; break;
-            case 4: r = -x; break;
-            case 5: r = fabsf(x); break;
-            case 6: r = sqrtf(x); break;
+            /* VNEG/VABS sind Bitoperationen: kein Flush, keine NaN-Kanonisierung. */
+            case 4: {
+                uint32_t bx, br;
+                bx = c->sreg[a];
+                br = bx ^ 0x80000000u;
+                memcpy(&r, &br, 4);
+                vfp_set_s(c, dest, r);
+                return;
+            }
+            case 5: {
+                uint32_t bx, br;
+                bx = c->sreg[a];
+                br = bx & 0x7FFFFFFFu;
+                memcpy(&r, &br, 4);
+                vfp_set_s(c, dest, r);
+                return;
+            }
+            case 6: r = sqrtf(x); in_nan = isnan(x); break;
             default: r = x; break;
         }
-        vfp_set_s(c, dest, r);
+        if (!in_nan && isnan(r))
+            r = vfp_invalid_nan_s();
+        vfp_set_s(c, dest, vfp_finish_s(c, r));
     } else {
-        double x = vfp_get_d(c, a), y = vfp_get_d(c, b), r = 0.0;
+        double x = vfp_load_d(c, a), y = vfp_load_d(c, b), r = 0.0;
+        int in_nan = isnan(x) || isnan(y);
         switch (op) {
             case 0: r = x + y; break;
             case 1: r = x - y; break;
-            case 2: r = x * y; break;
+            case 2: r = vfp_mul_d(x, y); break;
             case 3: r = x / y; break;
-            case 4: r = -x; break;
-            case 5: r = fabs(x); break;
-            case 6: r = sqrt(x); break;
+            case 4: {
+                uint64_t bx, br;
+                bx = ((uint64_t)c->sreg[a * 2 + 1] << 32) | c->sreg[a * 2];
+                br = bx ^ 0x8000000000000000ull;
+                memcpy(&r, &br, 8);
+                vfp_set_d(c, dest, r);
+                return;
+            }
+            case 5: {
+                uint64_t bx, br;
+                bx = ((uint64_t)c->sreg[a * 2 + 1] << 32) | c->sreg[a * 2];
+                br = bx & 0x7FFFFFFFFFFFFFFFull;
+                memcpy(&r, &br, 8);
+                vfp_set_d(c, dest, r);
+                return;
+            }
+            case 6: r = sqrt(x); in_nan = isnan(x); break;
             default: r = x; break;
         }
-        vfp_set_d(c, dest, r);
+        if (!in_nan && isnan(r))
+            r = vfp_invalid_nan_d();
+        vfp_set_d(c, dest, vfp_finish_d(c, r));
+    }
+}
+
+/* VMLA/VMLS/VNMLA/VNMLS/VNMUL. mode: 0=add, 1=sub, 2=negmul,
+ * 3=neg(addend)+(-prod) (VNMLA), 4=neg(addend)+prod (VNMLS). */
+void vfp_muladd(ArmCpu *c, int dbl, int dest, int n, int m, int mode) {
+    if (!dbl) {
+        float xn = vfp_load_s(c, n), xm = vfp_load_s(c, m);
+        float prod = vfp_finish_s(c, vfp_mul_s(xn, xm));
+        float acc = vfp_load_s(c, dest), r;
+        int in_nan = isnan(xn) || isnan(xm) || isnan(acc);
+        if (mode != 2 && isnan(acc)) {
+            /* UNICORN/ARM: Ist der Addend NaN, wird er (gequietet) propagiert;
+             * VNMLA/VNMLS negieren ihn. */
+            uint32_t b;
+            memcpy(&b, &acc, 4);
+            b |= 0x00400000u;
+            if (mode == 3 || mode == 4)
+                b ^= 0x80000000u;
+            memcpy(&r, &b, 4);
+            vfp_set_s(c, dest, vfp_finish_s(c, r));
+            return;
+        }
+        /* Ungueltiges Produkt (inf*0, 0*inf) -> positiver Default-qNaN; erst
+         * danach negiert VMLS/VNMLA/VNMUL das Vorzeichen. */
+        if (isnan(prod) && !isnan(xn) && !isnan(xm))
+            prod = vfp_invalid_nan_s();
+        /* Das Produkt wird fuer VMLS/VNMLA/VNMUL im Vorzeichen gedreht. */
+        if (mode == 1 || mode == 2 || mode == 3) {
+            uint32_t b;
+            memcpy(&b, &prod, 4);
+            b ^= 0x80000000u;
+            memcpy(&prod, &b, 4);
+            if (isnan(prod)) {
+                memcpy(&r, &prod, 4);
+                if (mode == 2 && (c->fpscr & VFP_FPSCR_DN))
+                    vfp_set_s(c, dest, r);   /* VNMUL: DN erst nach der Negation */
+                else
+                    vfp_set_s(c, dest, vfp_finish_s(c, r));
+                return;
+            }
+        }
+        switch (mode) {
+            case 0: r = vfp_add_s(acc, prod); break;
+            case 1: r = vfp_add_s(acc, prod); break;
+            case 2: r = prod; break;
+            case 3: r = vfp_add_s(-acc, prod); break;
+            default: r = vfp_add_s(-acc, prod); break;
+        }
+        if (!in_nan && isnan(r) && !isnan(prod))
+            r = vfp_invalid_nan_s();
+        vfp_set_s(c, dest, vfp_finish_s(c, r));
+    } else {
+        double xn = vfp_load_d(c, n), xm = vfp_load_d(c, m);
+        double prod = vfp_finish_d(c, vfp_mul_d(xn, xm));
+        double acc = vfp_load_d(c, dest), r;
+        int in_nan = isnan(xn) || isnan(xm) || isnan(acc);
+        if (mode != 2 && isnan(acc)) {
+            uint64_t b;
+            memcpy(&b, &acc, 8);
+            b |= 0x0008000000000000ull;
+            if (mode == 3 || mode == 4)
+                b ^= 0x8000000000000000ull;
+            memcpy(&r, &b, 8);
+            vfp_set_d(c, dest, vfp_finish_d(c, r));
+            return;
+        }
+        if (isnan(prod) && !isnan(xn) && !isnan(xm))
+            prod = vfp_invalid_nan_d();
+        if (mode == 1 || mode == 2 || mode == 3) {
+            uint64_t b;
+            memcpy(&b, &prod, 8);
+            b ^= 0x8000000000000000ull;
+            memcpy(&prod, &b, 8);
+            if (isnan(prod)) {
+                memcpy(&r, &prod, 8);
+                if (mode == 2 && (c->fpscr & VFP_FPSCR_DN))
+                    vfp_set_d(c, dest, r);   /* VNMUL: DN erst nach der Negation */
+                else
+                    vfp_set_d(c, dest, vfp_finish_d(c, r));
+                return;
+            }
+        }
+        switch (mode) {
+            case 0: r = vfp_add_d(acc, prod); break;
+            case 1: r = vfp_add_d(acc, prod); break;
+            case 2: r = prod; break;
+            case 3: r = vfp_add_d(-acc, prod); break;
+            default: r = vfp_add_d(-acc, prod); break;
+        }
+        if (!in_nan && isnan(r) && !isnan(prod))
+            r = vfp_invalid_nan_d();
+        vfp_set_d(c, dest, vfp_finish_d(c, r));
     }
 }
 
@@ -466,16 +855,97 @@ void vfp_cmp(ArmCpu *c, int dbl, int a, int b, int to_zero) {
     double x, y;
     uint32_t n = 0, z = 0, cc = 0, v = 0;
     if (!dbl) {
-        x = (double)vfp_get_s(c, a);
-        y = to_zero ? 0.0 : (double)vfp_get_s(c, b);
+        x = (double)vfp_load_s(c, a);
+        y = to_zero ? 0.0 : (double)vfp_load_s(c, b);
     } else {
-        x = vfp_get_d(c, a);
-        y = to_zero ? 0.0 : vfp_get_d(c, b);
+        x = vfp_load_d(c, a);
+        y = to_zero ? 0.0 : vfp_load_d(c, b);
     }
-    if (isnan(x) || isnan(y)) { n = 0; z = 0; cc = 1; v = 1; }
-    else if (x == y) { z = 1; }
+    /* ARM-Vergleich: NaN -> unordered (C=1,V=1); gleich -> Z=1,C=1;
+     * kleiner -> N=1; groesser -> C=1. */
+    if (isnan(x) || isnan(y)) { cc = 1; v = 1; }
+    else if (x == y) { z = 1; cc = 1; }
     else if (x < y) { n = 1; }
-    c->fpscr = (c->fpscr & 0x0FFFFFFFu) | (n << 31) | (z << 30) | (cc << 29) | (v << 28);
+    else { cc = 1; }
+    c->fpscr = (c->fpscr & ~VFP_FPSCR_NZCV)
+             | (n << 31) | (z << 30) | (cc << 29) | (v << 28);
+}
+
+void vfp_set_fpscr(ArmCpu *c, uint32_t value) {
+    c->fpscr = value;
+    vfp_apply_rounding(c->fpscr);
+}
+
+/* Konvertierung Gleitkomma -> Ganzzahl: immer Rundung Richtung Null, NaN -> 0,
+ * Ueberlauf saettigt (IOC). */
+void vfp_cvt_f2i(ArmCpu *c, int src_dbl, int is_signed, int dst_s, int src) {
+    double x = src_dbl ? vfp_load_d(c, src) : (double)vfp_load_s(c, src);
+    uint32_t r;
+    if (isnan(x)) {
+        r = 0;
+    } else if (is_signed) {
+        if (x >= 2147483648.0) r = 0x7FFFFFFFu;
+        else if (x < -2147483648.0) r = 0x80000000u;
+        else r = (uint32_t)(int32_t)x;
+    } else {
+        if (x >= 4294967296.0) r = 0xFFFFFFFFu;
+        else if (x <= 0.0) r = 0;
+        else r = (uint32_t)x;
+    }
+    c->sreg[dst_s] = r;
+}
+
+/* Festkomma-Varianten: Skalierung um 2^fbits vor/nach der Konvertierung. */
+void vfp_cvt_f2i_fixed(ArmCpu *c, int src_dbl, int is_signed, int dst_s, int src,
+                       int fbits) {
+    double x = src_dbl ? vfp_load_d(c, src) : (double)vfp_load_s(c, src);
+    x *= ldexp(1.0, fbits);
+    uint32_t r;
+    if (isnan(x)) {
+        r = 0;
+    } else if (is_signed) {
+        if (x >= 2147483648.0) r = 0x7FFFFFFFu;
+        else if (x < -2147483648.0) r = 0x80000000u;
+        else r = (uint32_t)(int32_t)x;
+    } else {
+        if (x >= 4294967296.0) r = 0xFFFFFFFFu;
+        else if (x <= 0.0) r = 0;
+        else r = (uint32_t)x;
+    }
+    c->sreg[dst_s] = r;
+}
+
+/* Ganzzahl -> Gleitkomma; die Casts folgen der aktuellen Host-Rundung, die
+ * ueber vfp_apply_rounding an die FPSCR-Rundung gekoppelt ist. */
+void vfp_cvt_i2f(ArmCpu *c, int dst_dbl, int is_signed, int dst, int src_s) {
+    uint32_t raw = c->sreg[src_s];
+    double v = is_signed ? (double)(int32_t)raw : (double)raw;
+    if (dst_dbl)
+        vfp_set_d(c, dst, vfp_finish_d(c, v));
+    else
+        vfp_set_s(c, dst, vfp_finish_s(c, (float)v));
+}
+
+void vfp_cvt_i2f_fixed(ArmCpu *c, int dst_dbl, int is_signed, int dst, int src_s,
+                       int fbits) {
+    uint32_t raw = c->sreg[src_s];
+    double v = is_signed ? (double)(int32_t)raw : (double)raw;
+    v = ldexp(v, -fbits);
+    if (dst_dbl)
+        vfp_set_d(c, dst, vfp_finish_d(c, v));
+    else
+        vfp_set_s(c, dst, vfp_finish_s(c, (float)v));
+}
+
+/* f32 <-> f64; die Verengung rundet nach FPSCR. */
+void vfp_cvt_fp(ArmCpu *c, int to_dbl, int dst, int from_dbl, int src) {
+    if (to_dbl) {
+        double v = from_dbl ? vfp_load_d(c, src) : (double)vfp_load_s(c, src);
+        vfp_set_d(c, dst, vfp_finish_d(c, v));
+    } else {
+        float v = from_dbl ? (float)vfp_load_d(c, src) : vfp_load_s(c, src);
+        vfp_set_s(c, dst, vfp_finish_s(c, v));
+    }
 }
 
 void vfp_fpscr_to_flags(ArmCpu *c) {
@@ -486,7 +956,7 @@ void vfp_fpscr_to_flags(ArmCpu *c) {
 }
 
 void vfp_flags_to_fpscr(ArmCpu *c) {
-    c->fpscr = (c->fpscr & 0x0FFFFFFFu) | (c->n << 31) | (c->z << 30)
+    c->fpscr = (c->fpscr & ~VFP_FPSCR_NZCV) | (c->n << 31) | (c->z << 30)
              | (c->c << 29) | (c->v << 28);
 }
 

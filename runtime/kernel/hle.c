@@ -121,6 +121,11 @@ static void guest_lock_leave(void) {
     if (!g_guest_lock_init || g_no_lock) return;
     if (!t_lock_owned) return;
     t_lock_owned = 0;
+    /* Threadwechsel: der lokale Exklusiv-Monitor eines abgeloesten Threads
+     * darf nicht in einen anderen Thread hineinwirken (Azahar
+     * ThreadManager::SwitchContext -> cpu->ClearExclusiveState()). Wir
+     * invalidieren global, weil der naechste Thread beliebig ist. */
+    arm_excl_clear_all();
     LeaveCriticalSection(&g_guest_lock);
 }
 /* Wartet garantiert, bis der Lock wieder erlangt ist (kein "ohne Lock
