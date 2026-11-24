@@ -11,7 +11,7 @@ Keine Experiment-Tagebücher. Neue Einträge nur mit Quelle.
 | `.text` | `0x00100000` | `code.bin` dekomprimiert, 3.059.712 B |
 | Heap (ControlMemory op=3) | `0x08000000` | Spiel fordert `0x5700000` an |
 | Linear-Heap | `0x14000000` | Spiel fordert `0x2900000` an (FCRAM linear) |
-| GSP-Shared-Memory | `0x10002000` (im Port) | CommandBuffer bei `+0x800`, InterruptRelayQueue bei `+0x1000` |
+| GSP-Shared-Memory | `0x10002000` (im Port, 0x1000 B) | InterruptRelayQueue bei `+tid*0x40`, CommandBuffer bei `+0x800`, FB-Update bei `+0x200` |
 | VRAM | `0x1F000000` | 6 MiB |
 | Stack Hauptthread | endet bei `0x10000000` | |
 
@@ -86,10 +86,29 @@ Assets: 3 × Level-5-`ARC0` (`lt6_*.fa`), 566 × BCSTM, 34 × MOFLEX. Texturen
 
 ## GSP
 
-* InterruptRelayQueue: Index u8, Anzahl u8, Fehler u8, Config u8, missed
-  PDC0/PDC1 u32, dann `slot[0x34]`. IDs: PSC0=0, PSC1=1, **PDC0 (VBlank
-  oben)=2**, PDC1=3, PPF=4, **P3D=5**, DMA=6 (Azahar `gsp_interrupt.h`).
-* CommandBuffer je Thread: `shmem + 0x800 + thread_id * 0x200`.
+* Shared-Memory ist 0x1000 Byte groß (Azahar `CreateSharedMemory(..., 0x1000)`),
+  im Port bei `0x10002000` gemappt (libctru `svcMapMemoryBlock`).
+* InterruptRelayQueue: `+ tid*0x40` (tid = GSP-Client-Index). Index u8 für den
+  nächsten Eintrag (absolut, `(index+count) % 0x34`), Anzahl u8, Fehler u8,
+  Config u8 (Bit0 = PDC ignorieren), missed PDC0/PDC1 u32, dann `slot[0x34]`.
+  IDs: PSC0=0, PSC1=1, **PDC0 (VBlank oben)=2**, PDC1=3, PPF=4, **P3D=5**,
+  DMA=6 (Azahar `gsp_interrupt.h`, 3dbrew).
+* PDC0/PDC1 gehen an alle registrierten Threads (max. 0x20 Einträge, danach
+  nur `missed_*`); andere Interrupts nur an den Thread mit GPU-Recht
+  (max. 0x34 Einträge, danach Fehlercode 1). Jeder Eintrag signalisiert das
+  bei `RegisterInterruptRelayQueue` übergebene Event.
+* Auslöser: PDC0/PDC1 je VBlank (60 Hz), P3D nach ProcessCommandList,
+  PSC0/PSC1 nach MemoryFill (nur PSC0, wenn beide Puffer gesetzt sind),
+  PPF nach DisplayTransfer/TextureCopy, DMA nach RequestDma.
+* CommandBuffer je Thread: `shmem + 0x800 + thread_id * 0x200`. Header:
+  Index u8, Anzahl u8, Status u8 (1 = gestoppt, 0x80 = Fehler), ShouldStop u8;
+  Kommandos ab `+0x20`, je 0x20 Byte, ID = Wort0 Bits 0..7, Stop = Bit16.
+  GX-IDs: 0x00 RequestDma, 0x01 ProcessCommandList, 0x02 MemoryFill,
+  0x03 DisplayTransfer, 0x04 TextureCopy, 0x05 FlushCacheRegions.
+* DisplayTransfer: Adressen/8 in den Transfer-Registern; Flags Bit0 flip,
+  Bit1 input_linear, Bit2 crop_input_lines, Bit5 dont_swizzle, Bits8..10
+  bzw. 12..14 Pixelformat, Bits24..25 Scaling. Gekachelt wird in 8x8-Morton-
+  Reihenfolge (`VideoCore::GetMortonOffset`).
 * Spiele warten im Render-Loop auf PDC0/P3D-Interrupts. Ohne korrekt
   signalisierte Events (RegisterInterruptRelayQueue-Event) hängt der
   Render-Task.

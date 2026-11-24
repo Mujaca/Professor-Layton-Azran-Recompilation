@@ -1463,6 +1463,126 @@ static void dsp_command(Ipc *r, uint32_t *p) {
  * (0x0006), TriggerCmdReqQueue (0x0008), ImportDisplayCaptureInfo (0x0009). */
 static int g_gsp_last_screen = 0;
 
+/* ---------- GSP-Interrupts und GX-Kommandos ----------
+ * Layout nach 3dbrew "GSP Shared Memory" und Azahar (gsp_gpu.cpp,
+ * gsp_command.h, gsp_interrupt.h). Das GSP-Shared-Memory wird vom Spiel
+ * per svcMapMemoryBlock auf 0x10002000 gemappt (Groesse 0x1000):
+ *   +0x000 + tid*0x40  InterruptRelayQueue (max. 4 Threads)
+ *   +0x200 + tid*0x80  FrameBufferUpdate je Screen (0x40 pro Screen)
+ *   +0x800 + tid*0x200 CommandBuffer (Header + 15 Kommandos)
+ * Interrupt-IDs: PSC0=0, PSC1=1, PDC0=2, PDC1=3, PPF=4, P3D=5, DMA=6. */
+#define GSP_SHMEM_BASE      0x10002000u
+#define GSP_RELAY_SLOTS     0x34
+#define GSP_RELAY_PDC_LIMIT 0x20
+
+enum {
+    GSP_IRQ_PSC0 = 0,
+    GSP_IRQ_PSC1 = 1,
+    GSP_IRQ_PDC0 = 2,
+    GSP_IRQ_PDC1 = 3,
+    GSP_IRQ_PPF  = 4,
+    GSP_IRQ_P3D  = 5,
+    GSP_IRQ_DMA  = 6,
+};
+
+/* Schuetzt die InterruptRelayQueue gegen gleichzeitige Zugriffe von
+ * VBlank-Thread und GSP-IPC. Statisch initialisiert, keine Init noetig. */
+static SRWLOCK g_gsp_srw = SRWLOCK_INIT;
+static volatile int g_gsp_registered = 0;
+static volatile int g_gsp_thread_id = 0;
+static volatile int g_gsp_right_thread = -1;
+
+static uint32_t gsp_rd32(ArmCpu *c, uint32_t off) {
+    uint32_t v = 0;
+    off &= 0x1FFFFFFFu;
+    if (off + 4u <= c->mem_size) memcpy(&v, c->mem + off, 4);
+    return v;
+}
+
+static void gsp_wr32(ArmCpu *c, uint32_t off, uint32_t v) {
+    off &= 0x1FFFFFFFu;
+    if (off + 4u <= c->mem_size) memcpy(c->mem + off, &v, 4);
+}
+
+/* Reiht einen Interrupt in die RelayQueue des registrierten Threads ein und
+ * signalisiert dessen Event (Azahar SignalInterruptForThread /
+ * ProcessPendingInterruptImpl). PDC0/PDC1 werden ab 0x20 Eintraegen nicht
+ * mehr eingereiht, sondern als "missed" gezaehlt; andere Interrupts setzen
+ * ab 0x34 den Fehlercode. */
+static void gsp_signal_interrupt(int id) {
+    ArmCpu *c = g_cpu;
+    int tid = g_gsp_thread_id;
+    uint32_t base;
+    uint8_t *q;
+    Handle *evh;
+
+    if (!g_gsp_registered || c == NULL) return;
+    base = (GSP_SHMEM_BASE + (uint32_t)tid * 0x40u) & 0x1FFFFFFFu;
+    if (base + 0x40u > c->mem_size) return;
+    q = c->mem + base;
+
+    AcquireSRWLockExclusive(&g_gsp_srw);
+    if (id == GSP_IRQ_PDC0 || id == GSP_IRQ_PDC1) {
+        if ((q[3] & 1u) != 0u) {  /* Client ignoriert PDC */
+            ReleaseSRWLockExclusive(&g_gsp_srw);
+            return;
+        }
+        if (q[1] >= GSP_RELAY_PDC_LIMIT) {
+            uint32_t mo = base + (id == GSP_IRQ_PDC0 ? 4u : 8u);
+            gsp_wr32(c, mo, gsp_rd32(c, mo) + 1u);
+            ReleaseSRWLockExclusive(&g_gsp_srw);
+            return;
+        }
+    } else if (q[1] >= GSP_RELAY_SLOTS) {
+        q[2] = 1u;  /* queue_full_error */
+        ReleaseSRWLockExclusive(&g_gsp_srw);
+        return;
+    }
+    q[0xC + ((q[0] + q[1]) % GSP_RELAY_SLOTS)] = (uint8_t)id;
+    q[1] = (uint8_t)(q[1] + 1u);
+    ReleaseSRWLockExclusive(&g_gsp_srw);
+    MemoryBarrier();
+
+    evh = get_handle(g_gsp_irq_handle);
+    if (evh != NULL) evh->signaled = 1;
+}
+
+
+/* GSP wendet beim VBlank die vom Spiel im Shared-Memory gesetzte
+ * FrameBufferInfo an (3dbrew "Framebuffer Info", Azahar
+ * GSP_GPU::SignalInterrupt -> GetFrameBufferInfo + GPU::SetBufferSwap).
+ * dirty-Flag im Update-Header: Bit0; Info-Eintrag = index & 1. */
+static void gsp_vblank_fb_update(ArmCpu *c, int tid) {
+    int screen;
+    if (c == NULL) return;
+    for (screen = 0; screen < 2; screen++) {
+        uint32_t base = (GSP_SHMEM_BASE + 0x200u +
+                         (uint32_t)(2 * tid + screen) * 0x40u) & 0x1FFFFFFFu;
+        uint32_t info, idx, left = 0, right = 0, st = 0, fmt = 0, shown = 0;
+        uint8_t *fbu;
+        if (base + 0x40u > c->mem_size) return;
+        fbu = c->mem + base;
+        if ((fbu[1] & 1u) == 0u) continue;   /* nicht aktualisiert */
+        idx = fbu[0] & 1u;
+        info = base + 8u + idx * 0x20u;
+        memcpy(&left, c->mem + info + 4u, 4);
+        memcpy(&right, c->mem + info + 8u, 4);
+        memcpy(&st, c->mem + info + 0xCu, 4);
+        memcpy(&fmt, c->mem + info + 0x10u, 4);
+        memcpy(&shown, c->mem + info + 0x14u, 4);
+        fbu[1] = 0;
+        (void)right; (void)shown;
+        if (left == 0u || st == 0u) continue;
+        g_gsp_fb_addr[screen] = left;
+        g_gsp_fb_stride[screen] = st;
+        g_gsp_fb_format[screen] = fmt;
+        gpu_set_fb_size(left, (screen == 1) ? 320 : 400, 240);
+        g_gsp_last_screen = screen;
+        printf("[gsp] SetBufferSwap screen=%d fb=0x%08X stride=0x%X fmt=%X (VBlank)\n",
+               screen, left, st, fmt);
+    }
+}
+
 /* Verarbeitet den GSP-Shared-Memory-Kommandopuffer (Azahar-Layout) und
    fuehrt ProcessCommandList-Eintraege (id 0x01) als PICA-Liste aus. */
 /* Liest die vom Spiel in den GSP-Shared-Memory geschriebene
@@ -1523,41 +1643,372 @@ static void pica_pair_put(ArmCpu *c, uint32_t a, uint32_t n, uint32_t value,
 
 
 
-static int gsp_process_cmdqueue(ArmCpu *c) {
-    /* GX-Kommandowarteschlange je Thread: shmem + 0x800 + tid * 0x200.
-       Kopf: Index (Bits 0..7), Anzahl (Bits 8..15); Eintraege je 0x20 Byte
-       ab +0x20 (3dbrew GSP_Shared_Memory). Bisher nur
-       0x01 ProcessCommandList; andere GX-Befehle werden gemeldet. */
-    int qops = 0;
-    if (c == NULL) return 0;
-    for (int tid = 0; tid < 8; tid++) {
-        uint32_t base = (0x10002000u + 0x800u + (uint32_t)tid * 0x200u) & 0x1FFFFFFFu;
-        uint32_t hdr = 0, guard = 0;
-        if (base + 0x200u > c->mem_size) break;
-        memcpy(&hdr, c->mem + base, 4);
-        while (((hdr >> 8) & 0xFFu) != 0u && guard++ < 0x20u) {
-            uint32_t idx = hdr & 0xFFu;
-            uint32_t cb = base + 0x20u + idx * 0x20u;
-            uint32_t cmd = 0, addr = 0, size = 0;
-            if (cb + 0x20u > c->mem_size) break;
-            memcpy(&cmd, c->mem + cb, 4);
-            memcpy(&addr, c->mem + cb + 4u, 4);
-            memcpy(&size, c->mem + cb + 8u, 4);
-            if ((cmd & 0xFFu) == 0x01u && addr != 0u && size != 0u && size <= 0x00100000u) {
-                int nops = gpu_run_pica_list(c, addr, size);
-                qops += nops;
-                printf("[gspq] tid=%d idx=%u ProcessCommandList list=%08X size=%X ops=%d\n",
-                       tid, idx, addr, size, nops);
+/* --- Pixelformate und Speichertransfers (Azahar renderer_software/
+ * sw_blitter.cpp, video_core/utils.h) --- */
+typedef struct { uint8_t r, g, b, a; } GspColor;
+
+static int gsp_bpp(uint32_t fmt) {
+    switch (fmt & 7u) {
+        case 0: return 4;                 /* RGBA8 */
+        case 1: return 3;                 /* RGB8  */
+        case 2: case 3: case 4: return 2; /* RGB565, RGB5A1, RGBA4 */
+        default: return 0;
+    }
+}
+
+static uint8_t gsp_5to8(uint32_t v) { return (uint8_t)((v << 3) | (v >> 2)); }
+static uint8_t gsp_6to8(uint32_t v) { return (uint8_t)((v << 2) | (v >> 4)); }
+static uint8_t gsp_4to8(uint32_t v) { return (uint8_t)((v << 4) | v); }
+
+static GspColor gsp_decode_pixel(uint32_t fmt, const uint8_t *p) {
+    GspColor col = {0, 0, 0, 0};
+    switch (fmt & 7u) {
+        case 0: /* RGBA8 */
+            col.r = p[3]; col.g = p[2]; col.b = p[1]; col.a = p[0];
+            break;
+        case 1: /* BGR8 */
+            col.r = p[2]; col.g = p[1]; col.b = p[0]; col.a = 255;
+            break;
+        case 2: { /* RGB565 */
+            uint32_t v; memcpy(&v, p, 2);
+            col.r = gsp_5to8((v >> 11) & 0x1Fu);
+            col.g = gsp_6to8((v >> 5) & 0x3Fu);
+            col.b = gsp_5to8(v & 0x1Fu); col.a = 255;
+            break;
+        }
+        case 3: { /* RGB5A1 */
+            uint32_t v; memcpy(&v, p, 2);
+            col.r = gsp_5to8((v >> 11) & 0x1Fu);
+            col.g = gsp_5to8((v >> 6) & 0x1Fu);
+            col.b = gsp_5to8((v >> 1) & 0x1Fu);
+            col.a = (uint8_t)((v & 1u) * 255u);
+            break;
+        }
+        case 4: { /* RGBA4 */
+            uint32_t v; memcpy(&v, p, 2);
+            col.r = gsp_4to8((v >> 12) & 0xFu);
+            col.g = gsp_4to8((v >> 8) & 0xFu);
+            col.b = gsp_4to8((v >> 4) & 0xFu);
+            col.a = gsp_4to8(v & 0xFu);
+            break;
+        }
+        default: break;
+    }
+    return col;
+}
+
+static void gsp_encode_pixel(uint32_t fmt, uint8_t *p, GspColor col) {
+    switch (fmt & 7u) {
+        case 0:
+            p[3] = col.r; p[2] = col.g; p[1] = col.b; p[0] = col.a;
+            break;
+        case 1:
+            p[2] = col.r; p[1] = col.g; p[0] = col.b;
+            break;
+        case 2: {
+            uint32_t v = ((uint32_t)(col.r >> 3) << 11) |
+                         ((uint32_t)(col.g >> 2) << 5) | (col.b >> 3);
+            memcpy(p, &v, 2);
+            break;
+        }
+        case 3: {
+            uint32_t v = ((uint32_t)(col.r >> 3) << 11) |
+                         ((uint32_t)(col.g >> 3) << 6) |
+                         ((uint32_t)(col.b >> 3) << 1) | (col.a >> 7);
+            memcpy(p, &v, 2);
+            break;
+        }
+        case 4: {
+            uint32_t v = ((uint32_t)(col.r >> 4) << 12) |
+                         ((uint32_t)(col.g >> 4) << 8) |
+                         ((uint32_t)(col.b >> 4) << 4) | (col.a >> 4);
+            memcpy(p, &v, 2);
+            break;
+        }
+        default: break;
+    }
+}
+
+/* 8x8-Morton-Offset (Z-Order) wie Azahar VideoCore::GetMortonOffset. */
+static uint32_t gsp_morton_offset(uint32_t x, uint32_t y, uint32_t bpp) {
+    static const uint32_t xlut[8] = {0x00, 0x01, 0x04, 0x05, 0x10, 0x11, 0x14, 0x15};
+    static const uint32_t ylut[8] = {0x00, 0x02, 0x08, 0x0A, 0x20, 0x22, 0x28, 0x2A};
+    uint32_t i = xlut[x & 7u] + ylut[y & 7u];
+    return (i + (x & ~7u) * 8u) * bpp;
+}
+
+/* Command 0x02: MemoryFill. control = Control0 | (Control1 << 16), Bits
+ * 0 Trigger, 8 = 24 Bit, 9 = 32 Bit (Azahar MemoryFillConfig). */
+static void gsp_gx_memory_fill(ArmCpu *c, const uint32_t *w) {
+    const uint32_t start1 = w[1], value1 = w[2], end1 = w[3];
+    const uint32_t start2 = w[4], value2 = w[5], end2 = w[6];
+    const uint32_t ctl_a = w[7] & 0xFFFFu, ctl_b = (w[7] >> 16) & 0xFFFFu;
+    const int both = (start1 != 0u) && (start2 != 0u);
+    int i;
+    for (i = 0; i < 2; i++) {
+        uint32_t start = i ? start2 : start1;
+        uint32_t value = i ? value2 : value1;
+        uint32_t end = i ? end2 : end1;
+        uint32_t control = i ? ctl_b : ctl_a;
+        uint32_t so, eo, off;
+        if (start == 0u) continue;
+        if ((control & 1u) == 0u) continue;   /* Trigger nicht gesetzt */
+        so = start & 0x1FFFFFFFu;
+        eo = end & 0x1FFFFFFFu;
+        if (so >= eo || eo > c->mem_size) {
+            printf("[gspq] MemoryFill ungueltig: %08X..%08X\n", start, end);
+            continue;
+        }
+        if (control & 0x200u) {
+            for (off = so; off + 4u <= eo; off += 4u) memcpy(c->mem + off, &value, 4);
+        } else if (control & 0x100u) {
+            for (off = so; off + 3u <= eo; off += 3u) {
+                c->mem[off] = (uint8_t)(value & 0xFFu);
+                c->mem[off + 1] = (uint8_t)((value >> 8) & 0xFFu);
+                c->mem[off + 2] = (uint8_t)((value >> 16) & 0xFFu);
+            }
+        } else {
+            uint16_t v16 = (uint16_t)(value & 0xFFFFu);
+            for (off = so; off + 2u <= eo; off += 2u) memcpy(c->mem + off, &v16, 2);
+        }
+    }
+    /* PSC0 fuer Puffer 0; sind beide Puffer gesetzt, meldet nur Puffer 1
+     * PSC0 (Azahar GPU::Execute / gpu.cpp). Puffer 1 allein meldet PSC1. */
+    if (both || start1 != 0u) {
+        gsp_signal_interrupt(GSP_IRQ_PSC0);
+    } else if (start2 != 0u) {
+        gsp_signal_interrupt(GSP_IRQ_PSC1);
+    }
+}
+/* Command 0x03: DisplayTransfer (Azahar SwBlitter::DisplayTransfer):
+ * Pixelformat-Konvertierung und Umsetzung zwischen linearer und gekachelter
+ * (8x8-Morton) Anordnung. Flags: Bit0 flip, Bit1 input_linear,
+ * Bit2 crop_input_lines, Bit5 dont_swizzle, Bits8..10 input_format,
+ * Bits12..14 output_format, Bits24..25 scaling. */
+static void gsp_gx_display_transfer(ArmCpu *c, const uint32_t *w) {
+    const uint32_t in_va = w[1], out_va = w[2];
+    const uint32_t in_size = w[3], out_size = w[4], flags = w[5];
+    const uint32_t in_w = in_size & 0xFFFFu, in_h = (in_size >> 16) & 0xFFFFu;
+    const uint32_t out_w = out_size & 0xFFFFu, out_h = (out_size >> 16) & 0xFFFFu;
+    const uint32_t in_fmt = (flags >> 8) & 7u, out_fmt = (flags >> 12) & 7u;
+    const int flip = (flags & 1u) != 0u;
+    const int in_linear = (flags & 2u) != 0u;
+    const int crop = (flags & 4u) != 0u;
+    const int dont_swizzle = (flags & 0x20u) != 0u;
+    const uint32_t scaling = (flags >> 24) & 3u;
+    const int in_bpp = gsp_bpp(in_fmt), out_bpp = gsp_bpp(out_fmt);
+    uint32_t src, dst, hs, vs, ow, oh, y, x;
+
+    if (in_w == 0u || in_h == 0u || out_w == 0u || out_h == 0u) return;
+    if (in_bpp == 0 || out_bpp == 0) {
+        printf("[gspq] DisplayTransfer Format %u/%u ungueltig\n", in_fmt, out_fmt);
+        return;
+    }
+    if (scaling > 2u || (in_linear && scaling != 0u)) {
+        printf("[gspq] DisplayTransfer Scaling %u ungueltig (linear=%d)\n", scaling, in_linear);
+        return;
+    }
+
+    src = in_va & 0x1FFFFFFFu;
+    dst = out_va & 0x1FFFFFFFu;
+    if (flip && crop)
+        dst += (in_w - out_w) * (out_h - 1u) * (uint32_t)out_bpp;
+    if ((uint64_t)src + (uint64_t)in_w * in_h * (uint32_t)in_bpp > c->mem_size ||
+        (uint64_t)dst + (uint64_t)out_w * out_h * (uint32_t)out_bpp > c->mem_size) {
+        printf("[gspq] DisplayTransfer ausserhalb: %08X -> %08X\n", in_va, out_va);
+        return;
+    }
+
+    hs = scaling != 0u ? 1u : 0u;
+    vs = scaling == 2u ? 1u : 0u;
+    ow = out_w >> hs;
+    oh = out_h >> vs;
+    if (ow == 0u || oh == 0u) return;
+
+    for (y = 0; y < oh; y++) {
+        for (x = 0; x < ow; x++) {
+            const uint32_t ix = x << hs, iy = y << vs;
+            const uint32_t oy = flip ? (oh - y - 1u) : y;
+            uint32_t so, dof;
+            GspColor col;
+
+            if (in_linear) {
+                if (!dont_swizzle) {
+                    so = (ix + iy * in_w) * (uint32_t)in_bpp;
+                    dof = gsp_morton_offset(x, oy, (uint32_t)out_bpp) +
+                          (oy & ~7u) * ow * (uint32_t)out_bpp;
+                } else {
+                    so = (ix + iy * in_w) * (uint32_t)in_bpp;
+                    dof = (x + oy * ow) * (uint32_t)out_bpp;
+                }
             } else {
-                printf("[gspq] tid=%d idx=%u GX-Befehl 0x%02X unbehandelt (a=%08X s=%X)\n",
-                       tid, idx, cmd & 0xFFu, addr, size);
+                if (!dont_swizzle) {
+                    so = gsp_morton_offset(ix, iy, (uint32_t)in_bpp) +
+                         (iy & ~7u) * in_w * (uint32_t)in_bpp;
+                    dof = (x + oy * ow) * (uint32_t)out_bpp;
+                } else {
+                    so = gsp_morton_offset(ix, iy, (uint32_t)in_bpp) +
+                         (iy & ~7u) * in_w * (uint32_t)in_bpp;
+                    dof = gsp_morton_offset(x, oy, (uint32_t)out_bpp) +
+                          (oy & ~7u) * ow * (uint32_t)out_bpp;
+                }
             }
-            {
-                uint32_t ni = (idx + 1u) % 0xFu;
-                uint32_t nn = ((hdr >> 8) & 0xFFu) - 1u;
-                hdr = (ni & 0xFFu) | ((nn & 0xFFu) << 8) | (hdr & 0xFFFF0000u);
-                memcpy(c->mem + base, &hdr, 4);
+            if ((uint64_t)src + so + (uint32_t)in_bpp > c->mem_size ||
+                (uint64_t)dst + dof + (uint32_t)out_bpp > c->mem_size)
+                continue;
+
+            col = gsp_decode_pixel(in_fmt, c->mem + src + so);
+            if (scaling == 1u) {
+                GspColor p1 = gsp_decode_pixel(in_fmt, c->mem + src + so + (uint32_t)in_bpp);
+                col.r = (uint8_t)((col.r + p1.r) / 2u);
+                col.g = (uint8_t)((col.g + p1.g) / 2u);
+                col.b = (uint8_t)((col.b + p1.b) / 2u);
+                col.a = (uint8_t)((col.a + p1.a) / 2u);
+            } else if (scaling == 2u) {
+                const uint32_t b = (uint32_t)in_bpp;
+                GspColor p1 = gsp_decode_pixel(in_fmt, c->mem + src + so + b);
+                GspColor p2 = gsp_decode_pixel(in_fmt, c->mem + src + so + 2u * b);
+                GspColor p3 = gsp_decode_pixel(in_fmt, c->mem + src + so + 3u * b);
+                col.r = (uint8_t)((col.r + p1.r + p2.r + p3.r) / 4u);
+                col.g = (uint8_t)((col.g + p1.g + p2.g + p3.g) / 4u);
+                col.b = (uint8_t)((col.b + p1.b + p2.b + p3.b) / 4u);
+                col.a = (uint8_t)((col.a + p1.a + p2.a + p3.a) / 4u);
             }
+            gsp_encode_pixel(out_fmt, c->mem + dst + dof, col);
+        }
+    }
+}
+
+/* Command 0x04: TextureCopy (Azahar SwBlitter::TextureCopy): kopiert
+ * 16-Byte-Zeilen mit optionalem Quell-/Ziel-Gap. */
+static void gsp_gx_texture_copy(ArmCpu *c, const uint32_t *w) {
+    uint32_t src = w[1] & 0x1FFFFFFFu;
+    uint32_t dst = w[2] & 0x1FFFFFFFu;
+    uint32_t size = w[3] & ~0xFu;   /* untere 4 Bit ignoriert */
+    uint32_t in_gap = ((w[4] >> 16) & 0xFFFFu) * 16u;
+    uint32_t out_gap = ((w[5] >> 16) & 0xFFFFu) * 16u;
+    uint32_t in_width = (in_gap == 0u) ? size : (w[4] & 0xFFFFu) * 16u;
+    uint32_t out_width = (out_gap == 0u) ? size : (w[5] & 0xFFFFu) * 16u;
+    uint32_t rem = size, ri, ro;
+    uint64_t need_in, need_out;
+
+    if (size == 0u || in_width == 0u || out_width == 0u) return;
+    need_in = (uint64_t)(size / in_width) * (in_width + in_gap);
+    need_out = (uint64_t)(size / out_width) * (out_width + out_gap);
+    if ((uint64_t)src + need_in > c->mem_size || (uint64_t)dst + need_out > c->mem_size) {
+        printf("[gspq] TextureCopy ausserhalb: %08X -> %08X (%X)\n", w[1], w[2], w[3]);
+        return;
+    }
+
+    ri = in_width;
+    ro = out_width;
+    while (rem > 0u) {
+        uint32_t n = ri < ro ? ri : ro;
+        if (n > rem) n = rem;
+        memmove(c->mem + dst, c->mem + src, n);
+        src += n; dst += n;
+        ri -= n; ro -= n; rem -= n;
+        if (ri == 0u) { ri = in_width; src += in_gap; }
+        if (ro == 0u) { ro = out_width; dst += out_gap; }
+    }
+}
+
+/* Verarbeitet den GX-Kommandopuffer des Threads mit GPU-Recht
+ * (Azahar GSP_GPU::TriggerCmdReqQueue). Header: Index u8, Anzahl u8,
+ * Status u8, ShouldStop u8; Kommandos ab +0x20 je 0x20 Byte. */
+static int gsp_process_cmdqueue(ArmCpu *c) {
+    int qops = 0;
+    int tid = g_gsp_right_thread >= 0 ? g_gsp_right_thread : g_gsp_thread_id;
+    uint32_t base = (GSP_SHMEM_BASE + 0x800u + (uint32_t)tid * 0x200u) & 0x1FFFFFFFu;
+    uint32_t guard;
+
+    if (c == NULL || base + 0x200u > c->mem_size) return 0;
+
+    for (guard = 0; guard < 0x40u; guard++) {
+        uint32_t hdr = gsp_rd32(c, base);
+        uint32_t n = (hdr >> 8) & 0xFFu;
+        uint32_t idx = hdr & 0xFFu;
+        uint32_t status = (hdr >> 16) & 0xFFu;
+        uint32_t stop_req = (hdr >> 24) & 0xFFu;
+        uint32_t cb, w[8], id, i;
+        uint32_t newhdr;
+        int failed = 0;
+        int stop_cmd = 0;
+
+        if (n == 0u) break;
+        if (status == 1u) break;                 /* STATUS_STOPPED */
+        if (stop_req != 0u) {                    /* should_stop */
+            hdr = (hdr & 0xFF00FFFFu) | (1u << 16);
+            gsp_wr32(c, base, hdr);
+            break;
+        }
+
+        cb = base + 0x20u + idx * 0x20u;
+        if (cb + 0x20u > c->mem_size) break;
+        for (i = 0; i < 8u; i++) w[i] = gsp_rd32(c, cb + i * 4u);
+
+        newhdr = (((idx + 1u) % 0xFu) & 0xFFu) |
+                 (((n - 1u) & 0xFFu) << 8) |
+                 (status << 16) | (stop_req << 24);
+        gsp_wr32(c, base, newhdr);
+
+        id = w[0] & 0xFFu;
+        stop_cmd = ((w[0] >> 16) & 0xFFu) != 0u;
+        switch (id) {
+            case 0x00: { /* RequestDma: Quelle -> Ziel, danach DMA-Interrupt */
+                uint32_t s0 = w[1] & 0x1FFFFFFFu;
+                uint32_t s1 = w[2] & 0x1FFFFFFFu;
+                uint32_t sz = w[3];
+                if (sz != 0u && sz <= 0x08000000u &&
+                    (uint64_t)s0 + sz <= c->mem_size &&
+                    (uint64_t)s1 + sz <= c->mem_size) {
+                    memmove(c->mem + s1, c->mem + s0, sz);
+                    printf("[gspq] RequestDma %08X -> %08X (%u)\n", w[1], w[2], sz);
+                } else {
+                    printf("[gspq] RequestDma ungueltig %08X -> %08X (%u)\n", w[1], w[2], sz);
+                }
+                gsp_signal_interrupt(GSP_IRQ_DMA);
+                break;
+            }
+            case 0x01: { /* ProcessCommandList */
+                uint32_t addr = w[1], size = w[2];
+                if (addr != 0u && size != 0u &&
+                    (uint64_t)(addr & 0x1FFFFFFFu) + size <= c->mem_size) {
+                    int nops = gpu_run_pica_list(c, addr, size);
+                    qops += nops;
+                    printf("[gspq] ProcessCommandList list=%08X size=%X ops=%d\n",
+                           addr, size, nops);
+                } else {
+                    printf("[gspq] ProcessCommandList ungueltig %08X/%X\n", addr, size);
+                }
+                gsp_signal_interrupt(GSP_IRQ_P3D);
+                break;
+            }
+            case 0x02: /* MemoryFill */
+                gsp_gx_memory_fill(c, w);
+                break;
+            case 0x03: /* DisplayTransfer */
+                gsp_gx_display_transfer(c, w);
+                gsp_signal_interrupt(GSP_IRQ_PPF);
+                break;
+            case 0x04: /* TextureCopy */
+                gsp_gx_texture_copy(c, w);
+                gsp_signal_interrupt(GSP_IRQ_PPF);
+                break;
+            case 0x05: /* FlushCacheRegions: kein CPU-Cache im Port */
+                printf("[gspq] FlushCacheRegions %08X/%X %08X/%X %08X/%X\n",
+                       w[1], w[2], w[3], w[4], w[5], w[6]);
+                break;
+            default:
+                printf("[gspq] GX-Befehl 0x%02X unbekannt\n", id);
+                failed = 1;
+                break;
+        }
+
+        if (stop_cmd || failed) {
+            newhdr = gsp_rd32(c, base) & 0xFF00FFFFu;
+            newhdr |= (failed ? 0x80u : 1u) << 16;
+            gsp_wr32(c, base, newhdr);
         }
     }
     return qops;
@@ -1669,11 +2120,34 @@ static void gsp_command(Ipc *r, uint32_t *p) {
             break;
         }
         case 0x000D: case 0x000E: case 0x000F: case 0x0010:
-        case 0x0011: case 0x0014: case 0x0015:
-        case 0x0016: case 0x0017:
+        case 0x0011:
         case 0x0019: case 0x001A: case 0x001B: case 0x001C:
-        case 0x001D: case 0x001E: case 0x001F: { /* Transfer / Right / Vram / Cache */
+        case 0x001D: case 0x001E: case 0x001F: { /* Transfer / Vram / Cache */
             ipc_begin(r, r->cmd, 1, 0);
+            put_result(r);
+            break;
+        }
+        case 0x0014: { /* UnregisterInterruptRelayQueue */
+            g_gsp_registered = 0;
+            ipc_begin(r, 0x0014, 1, 0);
+            put_result(r);
+            break;
+        }
+        case 0x0015: { /* TryAcquireRight: Recht geben, falls frei */
+            if (g_gsp_right_thread < 0) g_gsp_right_thread = g_gsp_thread_id;
+            ipc_begin(r, 0x0015, 1, 0);
+            put_result(r);
+            break;
+        }
+        case 0x0016: { /* AcquireRight */
+            g_gsp_right_thread = g_gsp_thread_id;
+            ipc_begin(r, 0x0016, 1, 0);
+            put_result(r);
+            break;
+        }
+        case 0x0017: { /* ReleaseRight */
+            g_gsp_right_thread = -1;
+            ipc_begin(r, 0x0017, 1, 0);
             put_result(r);
             break;
         }
@@ -1688,12 +2162,18 @@ static void gsp_command(Ipc *r, uint32_t *p) {
             /* Der Client uebergibt sein Interrupt-Event als CopyHandle im
                Translate-Bereich; dieses Handle wird bei Interrupts signalisiert. */
             uint32_t ev = (r->translate >= 2) ? p[r->normal + 1] : 0u;
+            uint32_t relay_off;
             if (get_handle(ev) == NULL) {
                 ev = (uint32_t)alloc_handle(SVC_OTHER, "gsp-ev");
-                Handle *hh = get_handle(ev);
-                if (hh) hh->signaled = 1;
             }
             g_gsp_irq_handle = ev;
+            g_gsp_thread_id = 0;
+            /* Azahar setzt die RelayQueue des Threads zurueck. */
+            relay_off = (GSP_SHMEM_BASE + (uint32_t)g_gsp_thread_id * 0x40u) & 0x1FFFFFFFu;
+            if (g_cpu != NULL && relay_off + 0x40u <= g_cpu->mem_size)
+                memset(g_cpu->mem + relay_off, 0, 0x40);
+            g_gsp_registered = 1;
+
             uint32_t shm = (uint32_t)alloc_handle(SVC_OTHER, "gsp-shmem");
             /* Azahar: MakeBuilder(2,2); Push(FirstInitialization/ResultSuccess),
                Push(thread_id), PushCopyObjects(shared_memory).
@@ -1701,9 +2181,10 @@ static void gsp_command(Ipc *r, uint32_t *p) {
             ipc_begin(r, 0x0013, 2, 2);
             ipc_put(r, gsp_relay_first ? 0x00002A07u : 0u);
             gsp_relay_first = 0;
-            ipc_put(r, 0u);          /* Thread-Index in den GSP-Shared-Memory */
+            ipc_put(r, (uint32_t)g_gsp_thread_id);   /* Thread-Index im Shmem */
             ipc_put_handle_copy(r, shm);
-            if (g_log) printf("[gsp] RegisterInterruptRelayQueue -> ev=%u shm=%u\n", ev, shm);
+            if (g_log) printf("[gsp] RegisterInterruptRelayQueue -> ev=%u shm=%u tid=%d\n",
+                                    ev, shm, g_gsp_thread_id);
             break;
         }
         case 0x0018: { /* ImportDisplayCaptureInfo: Result + 2 x 4 Woerter */
@@ -1987,32 +2468,20 @@ static volatile uint32_t g_arb_seen[64];
 static volatile int g_arb_seen_n = 0;
 static unsigned g_vblank_frames = 0;
 
-/* Simulierter VBlank: signalisiert periodisch alle Event-Handles. */
-/* Host-Takt (~60 Hz).
- * WORKAROUND(wa-kernel-signal-all): weckt pauschal alle Handles (ausser
- * APT-Parameter/Notification) und "postet" jedes je benutzte
- * ArbitrateAddress-Objekt. Das ersetzt echte Kernel-Semantik (Events,
- * Timer, Interrupt-Relay, Arbiter) und laeuft ohne Gast-Lock.
- * Ziel: durch echte Ereignisquellen ersetzen (docs/WORKAROUNDS.md). */
+/* Simulierter VBlank im Host-Takt (~60 Hz). Die fruehere pauschale
+ * Event-Flut (wa-kernel-signal-all) ist durch echte GSP-Ereignisse ersetzt:
+ * PDC0/PDC1 gehen ueber die InterruptRelayQueue an das bei
+ * RegisterInterruptRelayQueue registrierte Spiel-Event. */
 static DWORD WINAPI vblank_thread(LPVOID p) {
     (void)p;
     while (g_vblank_run) {
         Sleep(16);
-        for (int k = 1; k < MAX_HANDLES; k++) {
-            if (g_handles[k].used &&
-                strcmp(g_handles[k].name, "apt-param") != 0 &&
-                strcmp(g_handles[k].name, "apt-notif") != 0)
-                g_handles[k].signaled = 1;
-        }
-        if (g_cpu != NULL) {
-            for (int k = 0; k < g_arb_seen_n; k++) {
-                uint32_t off = g_arb_seen[k] & 0x1FFFFFFFu;
-                if (off + 4 <= g_cpu->mem_size) {
-                    int32_t *w = (int32_t *)(g_cpu->mem + off);
-                    if (*w <= 0) *w = 1;
-                }
-            }
-        }
+        /* Echte VBlank-Quelle: GSP uebernimmt die FrameBufferInfo aus dem
+         * Shared-Memory und meldet PDC0 (oben) / PDC1 (unten) per RelayQueue
+         * und Event (Azahar GPU::VBlankCallback / GSP_GPU::SignalInterrupt). */
+        gsp_vblank_fb_update(g_cpu, g_gsp_thread_id);
+        gsp_signal_interrupt(GSP_IRQ_PDC0);
+        gsp_signal_interrupt(GSP_IRQ_PDC1);
         g_vblank_frames++;
     }
     return 0;
@@ -2363,15 +2832,9 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
         case 0x24: { /* WaitSynchronization1(handle, timeout) */
             uint32_t h = c->r[0];
             Handle *hh = get_handle(h);
-            static unsigned vblank = 0;
             for (int i = 0; i < 8; i++) {
                 if (hh != NULL && hh->signaled) break;
                 guest_yield();
-                if ((++vblank & 0x3FFu) == 0) {
-                    /* Virtueller VBlank: alle Events signalisieren */
-                    for (int k = 1; k < MAX_HANDLES; k++)
-                        if (g_handles[k].used) g_handles[k].signaled = 1;
-                }
             }
             if (hh != NULL) hh->signaled = 0;
             return 0;
@@ -2396,7 +2859,6 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                 }
                 printf("\n");
             }
-            static unsigned vb2 = 0;
             int idx = 0;
             for (int i = 0; i < 64; i++) {
                 int hit = -1;
@@ -2416,10 +2878,6 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                 }
                 if (hit >= 0) { idx = hit; break; }
                 guest_yield();
-                if ((++vb2 & 0x3FFu) == 0) {
-                    for (int kk = 1; kk < MAX_HANDLES; kk++)
-                        if (g_handles[kk].used) g_handles[kk].signaled = 1;
-                }
             }
             if (cnt > 0) {
                 for (uint32_t k = 0; k < cnt && k < 16; k++) {

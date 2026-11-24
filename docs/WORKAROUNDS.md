@@ -58,12 +58,19 @@ das ist ein Workaround.
 
 | Kennung | Ort | Wirkung |
 |---|---|---|
-| `wa-kernel-signal-all` | `runtime/kernel/hle.c` (vblank_thread) | weckt alle Handles + Arbiter pauschal alle 16 ms, ohne Gast-Lock |
-| – | `hle_svc` WaitSynchronization | nach 0x400 Yields gelten Handles als signalisiert; Handle 0 gilt als signalisiert |
-| – | `hle_svc` ArbitrateAddress | negativer Wert/Timeout setzt das Wort auf 1 |
+| – | `hle_svc` WaitSynchronization1/N | 1 kehrt nach 8 Yields zurück, N nach 64 Yields mit Index 0, wenn kein Handle signalisiert ist; Handle 0 gilt als signalisiert |
+| – | `hle_svc` ArbitrateAddress | Wartetyp setzt nach Spin das Wort zwangsweise auf 1 |
 | – | `dispatch_ipc` | leitet Kommandos nach Form statt nach Handle um (APT/cfg/fs) |
 | – | generierter Code | unbekannte Aufrufziele = No-op (geloggt in `out/missing_calls.txt`) |
 | – | `arm_mem_read/write` | Zugriffe außerhalb des Speichers liefern 0 statt Abbruch (`ARM_STRICT=1` bricht ab) |
+
+`wa-kernel-signal-all` ist **entfernt**: `vblank_thread` flutet keine Handles
+mehr und postet keine Arbiter-Wörter; auch `WaitSynchronizationN` signalisiert
+keine Handles mehr pauschal. Echte Quellen: GSP meldet PDC0/PDC1 je
+VBlank (Host-Takt 16 ms) über die InterruptRelayQueue an das registrierte
+Event; P3D/PPF/PSC0/PSC1/DMA werden von den GX-Kommandos ausgelöst
+(`gsp_process_cmdqueue`). Beleg: Frontier 4 → 9 Dienste (Divergenz boss:U)
+mit identischen 23 Patches.
 
 ## 5. Erledigt: IPC-Reply-Layouts
 
