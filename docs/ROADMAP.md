@@ -35,6 +35,7 @@ Azahar-Referenz (`reports/azahar_trace.txt`) und meldet:
 | M6 | Input (hid), Menü bedienbar, Spielstart | manueller Test |
 | M7 | Audio (DSP/BCSTM), Video (MOFLEX), Saves | manueller Test |
 | M8 | `tools/workarounds/code_patches.json` ist leer | `workarounds == 0` |
+| M9 | Hardware-Renderer: PICA-Kommandolisten werden in eine native Grafik-API (D3D11/Vulkan/OpenGL) übersetzt (Details: `docs/IDEAS.md`). Frühestens nach M4/M5, darf parallel zu M6–M8 laufen | Bildvergleich Software- gegen Hardware-Pfad auf denselben Gast-Frames |
 
 Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 
@@ -102,3 +103,4 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | 2026-11-24 | ipc-folge-2 | 10/10 | None | 0 |
 | 2026-11-24 | kernel-scheduler | 10/10 | None | 0 |
 | 2026-11-24 | m3-erster-draw-2 | 10/10 | None | 0 |
+| 2026-11-24 | listen-flut | 10/10 | None | 0 |

@@ -705,3 +705,53 @@ weiterhin in keiner Liste vor. Beleg: `HLE_PICA_DIAG=1` (Register-Histogramm
 je Liste, `docs/TOOLS.md`) zeigt fuer alle Listen nur Setup-Register
 (Rasterizer, Texturen, TEV, Attribut-Loader 0x200..0x229, Shader-Uploads,
 Finalize 0x010), keine 0x22E/0x22F und keine Kanal-Spruenge.
+
+### PICA-Listen-Ausreisser (415-430 vs. 15.738 in 40 s): Host-Last, kein Gastfehler – 2026-11-24
+
+**Befund:** Die Zahl der `[gpu] list`-Zeilen ist nur ein Mass fuer die
+erreichte Frame-Rate; der Gastverlauf ist in allen Laeufen identisch. Nach dem
+Boot (2 Einmal-Listen: `168EC6B0 size=7480 ops=6590`, `168B5820 size=250
+ops=103`) wiederholt sich ein festes Frame-Set aus **14 Listen**: `1686E820/270
+ops=108`, `1686EA90/1C0 86`, `1686EC50/A0 21`, `1686ECF0/1B0 84`, `1686EEA0/A0
+21`, `1686EF40/150 72`, `1686F090/80 16` und dieselben sieben Groessen ab
+`168B5820`. Alle `draws=0`, keine 0x22E/0x22F, keine Kanal-Spruenge. Jede Liste
+wird von GX `0x05` FlushCacheRegions (gleiche Adresse/Groesse) begleitet und
+per `gsp::Gpu 0x000C` (n=0) aus dem Shared-Memory-Kommandopuffer (GX `0x01`)
+getriggert: 14 Listen + 14 Flushes und ~40 Trigger je Frame. Die Trigger kommen
+aus zwei Gast-Threads (TLS-Kennung `F82`/`F88`), der GSP-Interrupt-Handler
+(Gast-Thread 6, Wartepunkt LR `0x00142620`) wartet auf das Relay-Event 32.
+
+**Belege** (`scratch/outlier/`, Wegwerfskripte):
+* `m0.log` (2.047 Listen / 45 s) und `load1.log` (408 / 12 s) enthalten
+  dasselbe Multiset aus 16 (addr,size,ops,draws)-Tupeln, dieselben
+  14 Listen/Frame und 40-41 Trigger/Frame; kein Retry, kein Fehler-/Abbruch-
+  pfad, keine doppelten oder fehlenden Listen. Nur die Frame-Zahl differiert.
+* `repeat.py` (8x12 s, ohne Last): 7.573-7.701 Listen/12 s (~45 fps) mit dem
+  aus HEAD `282dd7d` gebauten `out/port.exe`. Mit der vorherigen (aelteren)
+  Binary waren es 268-317/12 s – die Beobachtung stammt also aus einem
+  anderen Build/Hostzustand, nicht aus einem Gastpfad.
+* `realload.py`: 12 s ohne Last **7.654** Listen; mit 8 CPU-Lastprozessen
+  **408** Listen (2,4 fps). Die Host-Last reproduziert das beobachtete
+  "4 von 5 Laeufen langsam"-Muster exakt.
+* `HLE_YSTAT=1`: bei 42 fps lag der Gast-Lock nur 3,8 % der Zeit frei; die
+  Frame-Zahl folgt der verfuegbaren Host-CPU, nicht einem Lock-Starvation-
+  oder IPC-Wiederholungsmuster.
+
+**Hardware/Azahar:** Der GSP-Kommandopuffer ist kein IPC; Azahar
+(`gsp_gpu.cpp` `TriggerCmdReqQueue`) fuehrt die Kommandos aus, loggt sie aber
+nicht, und `reports/azahar_trace.txt` endet bei 11 s (Y2R-Aufbau), also vor
+dem Render-Loop – die Referenzspur enthaelt daher keine GX-Rate. Auf Hardware
+ist der Loop VBlank-getaktet (60 Hz): 14 Listen/Frame sind ~840 Listen/s bzw.
+~33.600 in 40 s. **15.738** (393/s ~ 28 fps) ist als Software-Render-Rate des
+Ports plausibel, **415-430** (~0,75 fps) ist reine Host-Starvation. Es gibt
+daher keinen Kernel-/GSP-Fehler zu beheben; die Semantik bleibt unveraendert.
+
+**Offen (nicht geaendert):** `guest_lock_reacquire()` weckt mit `Sleep(1)`
+(auch mit `timeBeginPeriod(1)` ~1,5 ms), was jedem blockierten SVC-Wait eine
+Latency-Untergrenze gibt und den Port empfindlich gegen Host-Scheduling macht.
+Ein Umbau auf eine echte Handoff-Synchronisation waere moeglich, beruehrt aber
+den kooperativen Scheduler und wurde ohne Not (Boot ist 10/10) nicht gemacht.
+
+**Diagnose:** neuer Schalter `HLE_YSTAT=1` (`docs/TOOLS.md`) zaehlt Yields,
+Wandzeit in den Lock-Abgaben und die Zeit, in der der Gast-Lock frei lag –
+reine Zaehler, kein Gastzustand.
