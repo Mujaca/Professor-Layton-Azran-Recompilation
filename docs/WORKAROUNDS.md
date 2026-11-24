@@ -41,10 +41,12 @@ EUR-Werte (Sprache EN, Land GB, Modell Old3DS plausibel: der Zeiger auf
 (`0x12B60C` wählt `table[sprache]`); der Patch änderte also ausschließlich
 den JP-Eintrag, nie den von EUR verwendeten Index 2.
 
-Offen: `tools/fix_romfs_cycles.py` und `tools/rebuild_romfs_hash.py`
-verändern weiterhin das RomFS-Image, das der Port ausliefert. Auch das ist
-ein Workaround und sollte als nächstes durch korrekte IVFC-/Hash-Semantik
-oder ein unverändertes Image ersetzt werden.
+`tools/fix_romfs_cycles.py` und `tools/rebuild_romfs_hash.py` waren
+Workarounds am Image und sind entfernt (2026-11-24); der Port liest jetzt
+`out/romfs_image.bin`, wie es aus der ROM extrahiert wird. `tools/romfs_image.py`
+setzt zwar noch die IVFC-Größen, die Engine liest diese Bytes aber nicht:
+Alle Lesezugriffe beginnen per `+0x1000` beim Level-3-Header (siehe §6,
+RomFS-Mount), sodass die IVFC-Bytes nur toter Ballast im Image sind.
 
 ## 2. Block-Hooks im Recompiler – `tools/workarounds/block_hooks.json` (0)
 
@@ -189,12 +191,11 @@ wenn rN zuletzt durch `pop`/`ldm sp!` aus dem Stack geladen wurde; emit.py
 erzeugt dafuer `return;` statt `arm_call_guest`. Falscher Seed `001016E0`
 entfernt. Test: `tests/mvp_selftest.py::bx_rN_rueckkehr_thumb`.
 
-**Offen (Stand Kernel-Sync-Paket):** Der Fehlerpfad
-`fn_001028A0 -> fn_0028E410 -> fn_00119D34` (`g_os+9 = 1`) wird weiterhin
-ausgeloest; `err:f` meldet `E0A046DA/DB` (Modul FS, Summary InvalidState,
-Desc 0x2DA/0x2DB) mit `site=00212FD0`. Das ist der bekannte
-RomFS-/Pfadparser-Pfad (Code-Patches um 0x212F3C/0x399244), **nicht** mehr
-der Kernel: `services` ist inzwischen 9/10 (Divergenz `boss:U`).
+**Offen (Stand Kernel-Sync-Paket, durch den letzten Abschnitt ueberholt):**
+Der Fehlerpfad `fn_001028A0 -> fn_0028E410 -> fn_00119D34` (`g_os+9 = 1`)
+wird weiterhin ausgeloest; `err:f` meldet `E0A046DA/DB`. Der letzte Abschnitt
+zeigt: nicht der RomFS-/Hash-Parser, sondern die nie initialisierte
+FS-Session loest den Abbruch aus.
 
 Der Hauptthread bleibt nach `dsp::DSP cmd 0x0007 (SetSemaphore)` stehen: er
 wartet auf ein eigenes Event (Handle 35, `svcCreateEvent` direkt nach
@@ -213,6 +214,39 @@ Signal 1), das Parameter-Event wird signalisiert. Folge: Frontier 9 -> 3
 (`hid:USER`). Die 9 waren nur scheinbar: Der Gast-RomFS-Lookup schlaegt fehl
 (err:f `cmd 0x0001`, `E0A046DB`), danach legt das Spiel absichtlich einen
 Endlos-Halt ein (`LightEvent_Wait` auf ein Event auf dem Stack). Der alte
-Arbiter liess diesen Halt per Timeout 0 sofort zurueckkehren. Naechste
-Ursache: Lookup in `fn_00212E3C` (Vergleich bei 0x212F3C, Namensvergleich
-`fn_0021077C`) bzw. das RomFS-Image (`tools/fix_romfs_cycles.py`).
+Arbiter liess diesen Halt per Timeout 0 sofort zurueckkehren.
+
+### RomFS-Mount gelingt – Ursache ist die fehlende FS-Session (2026-11-24)
+
+**Korrigierter Befund:** Nicht der Hash-Lookup scheitert. `fn_0027DE14`
+(RomFS-Mount) liest Level-3-Header und alle vier Tabellen erfolgreich
+(`[file] Read off=0x0/0x28/0x4C/0x160/0xAF4`, jeweils volle Laenge), prueft
+`len == 0x28` und die Tabellensummen und initialisiert danach seine Struktur.
+`fn_00212CD0`/`fn_00212E3C` (Verzeichnis-/Datei-Lookup) werden **nie
+betreten** (`ARM_WATCH=212CD0/212E3C`: 0 Treffer); der Hash-Pfad ist also
+nicht die Ursache des Halts.
+
+**Wo der Fehler entsteht:** Im Erfolgspfad ruft der Mount bei `0x27E198`
+`fn_001250F0 -> fn_0028EDCC`. Das ist der libctru-FS-Session-Zugriff: er
+liest `[g_3D8D8C]` und ruft bei 0 `fn_0028F45C` mit `E0A046DB` auf (err:f).
+`g_3D8D8C` wird ausschliesslich vom Konstruktor `fn_00381918` aus
+`[0x39A0CC]` gesetzt; beide sind 0. `fn_00291C74` (das eigentliche
+`fsInit`: `srvGetServiceHandle("fs:USER")` ueber `0x28EE00`, danach
+`fn_00107A78` -> `[0x3D8D98+0x10]`) hat **keinen statischen Aufrufer und wird
+im Boot nie ausgefuehrt** (`ARM_WATCH=291C74`: 0 Treffer).
+
+**Beleg aus der Referenz:** Azahar oeffnet `fs:USER` per
+`srv GetServiceHandle` bei `1.309988`, direkt nach der APT-Initialisierung
+(`reports/azahar_trace.txt:340`). Im Port-Log fehlt dieser Request komplett;
+die ersten `fs:USER`-Kommandos gehen mit Handle 0 hinaus und werden nur
+deshalb beantwortet, weil `dispatch_ipc` nach Kommandoform routet
+(Workaround §4). Auf echter Hardware muss die FS-Session vor dem Mount
+existieren.
+
+**Naechster Arbeitsvorrat:** Herausfinden, warum der Boot die FS-Session-
+Initialisierung (`fn_00291C74` bzw. deren Aufrufer) ueberspringt –
+Kandidat ist die in §6 beschriebene OS-Init-/`g_os+9`-Reihenfolge, die
+schon einmal einen Init-Zweig vorzeitig beendet hat. Erst danach ist der
+Hash-Lookup ueberhaupt erreichbar; `tools/fix_romfs_cycles.py` und
+`tools/rebuild_romfs_hash.py` waren dafuer nachweislich nicht noetig und
+sind entfernt.
