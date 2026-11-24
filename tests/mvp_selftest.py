@@ -239,6 +239,80 @@ CASES = [
         "regs": {},
         "expect": {"r0": 42},
     },
+    {
+        # SBC rechnet -NOT(C): nach cmp geht das C-Flag als "kein Borrow"
+        # ein. Vorher wurde cin = C verwendet (Ergebnis um 1 zu klein).
+        "name": "sbc_borrow",
+        "asm": """
+            cmp r2, #0
+            sbc r0, r1, r4
+            bx lr
+        """,
+        "regs": {"r1": 100, "r4": 1, "r2": 0},
+        "expect": {"r0": 99, "c": 1},
+    },
+    {
+        # LSR/ASR #32: die Kodierung meint den Sonderfall (amount 0).
+        "name": "shift_32",
+        "asm": """
+            mov r0, #-1
+            mov r1, r0, lsr #32
+            mov r2, #0x80000000
+            mov r3, r2, asr #32
+            bx lr
+        """,
+        "regs": {},
+        "expect": {"r1": 0, "r3": 0xFFFFFFFF},
+    },
+    {
+        # RRX braucht das eingehende C-Flag (Shifter-Carry ist nur Ausgabe).
+        "name": "rrx_carry_in",
+        "asm": """
+            cmp r2, #0
+            mov r3, #2
+            mov r0, r3, rrx
+            bx lr
+        """,
+        "regs": {"r2": 0},
+        "expect": {"r0": 0x80000001},
+    },
+    {
+        # UXTAH extendiert 16 Bit, UXTAB dagegen 8 Bit (und optional ROR).
+        "name": "uxtab_uxtah",
+        "asm": """
+            uxtab r0, r1, r2
+            uxtah r3, r1, r2
+            uxtab r4, r5, r2, ror #16
+            bx lr
+        """,
+        "regs": {"r1": 0x100, "r2": 0x01FF01FF, "r5": 0},
+        "expect": {"r0": 0x1FF, "r3": 0x2FF, "r4": 0xFF},
+    },
+    {
+        # UBFX/SBFX/BFI/BFC (Bitfeld) waren nicht implementiert.
+        "name": "bitfield",
+        "asm": """
+            ubfx r0, r1, #4, #8
+            sbfx r2, r1, #4, #8
+            mvn r3, #0
+            bfi r3, r1, #4, #8
+            mvn r4, #0
+            bfc r4, #4, #8
+            bx lr
+        """,
+        "regs": {"r1": 0x12345678},
+        "expect": {"r0": 0x67, "r2": 0x67, "r3": 0xFFFFF78F, "r4": 0xFFFFF00F},
+    },
+    {
+        # PKHBT ohne Shift: rn[15:0] | rm[31:16].
+        "name": "pkhbt_shift0",
+        "asm": """
+            pkhbt r0, r1, r2
+            bx lr
+        """,
+        "regs": {"r1": 0x11223344, "r2": 0xAABBCCDD},
+        "expect": {"r0": 0xAABB3344},
+    },
 ]
 
 

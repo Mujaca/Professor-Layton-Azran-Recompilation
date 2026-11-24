@@ -21,7 +21,24 @@ $env:PYTHONPATH = "tools"
 python -m recomp.cli scan --in out/exefs/code_decomp.bin --prologues --json reports/recomp_stats_full.json
 python -m recomp.cli gen  --in out/exefs/code_decomp.bin --out build/gen_boot.c --prologues --seed-pointers --trace --seed-file tools/recomp/seeds.txt
 python tests/mvp_selftest.py      # Instruktionssemantik (keystone + zig cc)
+python tools/recomp_difftest.py   # Differenztest gegen Unicorn (ARM + Thumb-2)
 ```
+
+`tools/recomp_difftest.py`: erzeugt systematische und zufaellige
+ARM-/Thumb-2-Folgen (Datenverarbeitung mit allen Shifts/S-Flags, adc/sbc/rsc,
+mul/mla/umull/smull/smlal, clz/rev/extend, ubfx/sbfx/bfi/bfc, Saettigung,
+Parallel-/Medienbefehle, ldr/str/ldrd/strd/ldm/stm mit allen Adressierungsarten,
+bedingte Ausfuehrung inkl. IT-Bloecken). Jeder Fall laeuft einmal in Unicorn
+(Referenz) und einmal als recompilierter C-Code; verglichen werden r0-r14,
+NZCVQ/GE und ein Speicher-Digest.
+
+```powershell
+python tools/recomp_difftest.py --seed 7 --count 200
+python tools/recomp_difftest.py --mode arm --quick --filter sbc
+```
+
+Neue Semantikfehler zuerst hier reproduzieren und dann als festen Fall in
+`tests/mvp_selftest.py` aufnehmen.
 
 `tools/recomp/seeds.txt`: zusätzliche Funktionseinstiege (z. B. aus
 `out/missing_calls.txt`).

@@ -85,6 +85,10 @@ def _known(core):
 def strip_cc(mnemonic):
     """Entfernt eine Bedingungs-Endung (z.B. 'vmovls' -> 'vmov', 'ldrdeq' -> 'ldrd')."""
     m = mnemonic.split(".")[0].lower()
+    # IT-Blocks (Thumb-2): it/itt/ite/... sind Praefixe fuer bedingte
+    # Ausfuehrung; die folgenden Instruktionen tragen die Bedingung selbst.
+    if m.startswith("it") and len(m) <= 5 and set(m[1:]) <= set("te"):
+        return "it"
     if _known(m):
         return m
     for cc in COND_SUFFIXES:
@@ -97,6 +101,56 @@ def strip_cc(mnemonic):
 
 def u32(v):
     return v & 0xFFFFFFFF
+
+
+def sets_flags(ins, thumb):
+    """S-Bit aus der Kodierung lesen.
+
+    capstone 5.0.7 setzt ``update_flags`` fuer ADC/SBC/RSC immer auf True
+    (das C-Flag wird als impliziter Eingang gewertet). Das S-Bit steht bei ARM
+    in Bit 20, bei 32-Bit-Thumb in Bit 4 des ersten Halfwords.
+    """
+    try:
+        b = ins.bytes
+    except Exception:
+        return 1 if ins.update_flags else 0
+    if not thumb and len(b) >= 4:
+        return (int.from_bytes(b[:4], "little") >> 20) & 1
+    if thumb:
+        if len(b) == 4:
+            return (int.from_bytes(b[:2], "little") >> 4) & 1
+        return 1 if ins.update_flags else 0
+    return 1 if ins.update_flags else 0
+
+
+def it_conditions(insns):
+    """Bedingungen fuer Instruktionen in Thumb-2-IT-Bloecken.
+
+    ``isa.decode`` dekodiert jede Instruktion einzeln; capstone kennt dann den
+    IT-Zustand nicht und meldet AL. Ohne diese Zuordnung wuerde eine
+    Instruktion in einem IT-Block unbedingt ausgefuehrt (falsche Flags/Register).
+    """
+    out = {}
+    itstate = 0
+    for ins in insns:
+        if itstate:
+            # capstone-Konvention: ARM_CC_EQ == 1, IT liefert 0..14
+            out[id(ins)] = (itstate >> 4) + 1
+            if (itstate & 7) == 0:
+                itstate = 0
+            else:
+                itstate = (itstate & 0xE0) | ((itstate << 1) & 0x1F)
+            continue
+        m = ins.mnemonic.lower().split(".")[0]
+        if m.startswith("it") and len(m) <= 5 and set(m[1:]) <= set("te"):
+            b = ins.bytes
+            if len(b) >= 2:
+                hw = int.from_bytes(b[:2], "little")
+                firstcond = (hw >> 4) & 0xF
+                mask = hw & 0xF
+                if mask:
+                    itstate = (firstcond << 4) | mask
+    return out
 
 
 def _build_aliases():
@@ -138,6 +192,7 @@ class Emitter:
         self.thumb = thumb
         self.block_labels = None   # set of local block addresses (for ldr pc)
         self.ret_bx = set()        # bx-Adressen mit Rueckkehrziel aus dem Stack
+        self.it_cond = {}          # id(ins) -> Bedingung aus einem IT-Block
 
     def pc_value(self, pc):
         if self.thumb:
@@ -180,7 +235,7 @@ class Emitter:
             return base, None
         st = toks[1].strip()
         if st.lower() == "rrx":
-            return "arm_shift_imm(SH_ROR, 0u, %s, &sh)" % base, "sh"
+            return "arm_rrx(c, %s, &sh)" % base, "sh"
         parts = st.split()
         if len(parts) != 2:
             raise Unsupported(st)
@@ -217,7 +272,7 @@ class Emitter:
             rn = self.value(ops[0], pc)
             rest = ops[1:]
         o2, sh = self.operand2(rest, pc)
-        sf = 1 if ins.update_flags else 0
+        sf = sets_flags(ins, self.thumb)
         if sh:
             return ["{", "  int sh = -1;",
                     "  arm_dp(c, %s, %d, %s, %s, %d, sh);" % (code, rd, rn, o2, sf),
@@ -258,6 +313,7 @@ class Emitter:
             lines.append("  int sh = -1;")
         if post:
             lines.append("  uint32_t a = %s;" % basev)
+            lines.append("  uint32_t o = %s;" % off)
         else:
             lines.append("  uint32_t a = %s + %s;" % (basev, off))
         if load:
@@ -266,7 +322,7 @@ class Emitter:
             lines.append("  arm_st(c, a, %d, c->r[%d]);" % (size, rd))
         if wb:
             if post:
-                lines.append("  c->r[%d] = a + %s;" % (base_reg, off))
+                lines.append("  c->r[%d] = a + o;" % base_reg)
             else:
                 lines.append("  c->r[%d] = a;" % base_reg)
         lines.append("}")
@@ -552,7 +608,7 @@ class Emitter:
                     % (d, n, m, d)]
 
         if base in ("nop", "hint", "pld", "pldw", "clrex", "dbg", "sev", "wfe", "wfi",
-                    "cdp", "cdp2", "ldc", "stc", "mcrr", "mrrc") or base.startswith(("ldc", "stc")):
+                    "it", "cdp", "cdp2", "ldc", "stc", "mcrr", "mrrc") or base.startswith(("ldc", "stc")):
             return []
 
         if base.startswith(("lsl", "lsr", "asr", "ror", "rrx")):
@@ -563,8 +619,8 @@ class Emitter:
                 raise Unsupported(ins.op_str)
 
             if base == "rrx":
-                expr = "arm_shift_imm(SH_ROR, 0u, %s, &sh)" % self.value(ops[1], pc)
-                plain = "arm_shift_imm(SH_ROR, 0u, %s, 0)" % self.value(ops[1], pc)
+                expr = "arm_rrx(c, %s, &sh)" % self.value(ops[1], pc)
+                plain = "arm_rrx(c, %s, 0)" % self.value(ops[1], pc)
             elif len(ops) >= 3:
                 src = self.value(ops[1], pc)
                 amt = ops[2]
@@ -625,9 +681,17 @@ class Emitter:
             basev = ("0x%08Xu" % u32(self.pc_value(pc))
                      if base_reg == 15 else "c->r[%d]" % base_reg)
             off = "0"
-            if len(inner) > 1:
+            post = len(ops) > 3
+            if post:
+                wb = True
+                off = self.value(ops[3], pc)
+            elif len(inner) > 1:
                 off = self.value(inner[1], pc)
-            lines = ["{", "  uint32_t a = %s + %s;" % (basev, off)]
+            if post:
+                lines = ["{", "  uint32_t a = %s;" % basev,
+                         "  uint32_t o = %s;" % off]
+            else:
+                lines = ["{", "  uint32_t a = %s + %s;" % (basev, off)]
             if base == "ldrd":
                 if rd2 != (rd + 1) % 16:
                     raise Unsupported(ins.op_str)
@@ -637,7 +701,10 @@ class Emitter:
                 lines.append("  arm_mem_write(c, a, 4, c->r[%d]);" % rd)
                 lines.append("  arm_mem_write(c, a + 4, 4, c->r[%d]);" % rd2)
             if wb:
-                lines.append("  c->r[%d] = a;" % base_reg)
+                if post:
+                    lines.append("  c->r[%d] = a + o;" % base_reg)
+                else:
+                    lines.append("  c->r[%d] = a;" % base_reg)
             lines.append("}")
             return lines
 
@@ -647,8 +714,15 @@ class Emitter:
             rm = isa.reg_num(ops[2])
             if None in (rd, rn, rm):
                 raise Unsupported(ins.op_str)
-            ext = "(int32_t)(int16_t)c->r[%d]" if base.startswith("s") else "(uint32_t)(c->r[%d] & 0xFFFFu)"
-            ext = ext % rm
+            src = "c->r[%d]" % rm
+            if len(ops) > 3 and ops[3].lower().startswith("ror"):
+                sh = isa.imm_value(ops[3].split()[-1]) or 0
+                src = "arm_shift_imm(SH_ROR, %du, %s, 0)" % (sh, src)
+            bits = 8 if base.endswith("tab") else 16
+            if base.startswith("s"):
+                ext = "(uint32_t)(int32_t)(int%d_t)(%s)" % (bits, src)
+            else:
+                ext = "((%s) & 0x%Xu)" % (src, (1 << bits) - 1)
             return ["c->r[%d] = c->r[%d] + %s;" % (rd, rn, ext)]
 
         if base in ("usat", "ssat"):
@@ -656,22 +730,22 @@ class Emitter:
             bits = isa.imm_value(ops[1])
             rm = isa.reg_num(ops[2])
             shift = 0
+            kind = "lsl"
             if len(ops) > 3:
-                shift = isa.imm_value(ops[3].split()[-1])
-            if rd is None or rm is None:
+                parts = ops[3].split()
+                if len(parts) == 2:
+                    kind = parts[0].lower()
+                shift = isa.imm_value(parts[-1]) or 0
+            if rd is None or rm is None or bits is None:
                 raise Unsupported(ins.op_str)
             src = "c->r[%d]" % rm
             if shift:
-                src = "(%s << %du)" % (src, shift)
-            if base == "usat":
-                return ["{ int32_t v = (int32_t)(%s); if (v < 0) v = 0; "
-                        "if (v > %d) v = %d; c->r[%d] = (uint32_t)v; }"
-                        % (src, (1 << bits) - 1, (1 << bits) - 1, rd)]
-            hi = (1 << (bits - 1)) - 1
-            lo = -(1 << (bits - 1))
-            return ["{ int32_t v = (int32_t)(%s); if (v > %d) v = %d; "
-                    "if (v < %d) v = %d; c->r[%d] = (uint32_t)v; }"
-                    % (src, hi, hi, lo, lo, rd)]
+                if kind == "asr":
+                    src = "((uint32_t)((int32_t)%s >> %du))" % (src, shift)
+                else:
+                    src = "(%s << %du)" % (src, shift)
+            return ["c->r[%d] = arm_sat32(c, %d, %s, %d);"
+                    % (rd, 0 if base == "usat" else 1, src, bits)]
 
         if base in ("rev", "rev16", "revsh"):
             rd = isa.reg_num(ops[0])
@@ -685,6 +759,40 @@ class Emitter:
             else:
                 expr = "(uint32_t)(int32_t)(int16_t)(((c->r[%d] & 0xFFu) << 8) | ((c->r[%d] >> 8) & 0xFFu))" % (rm, rm)
             return ["c->r[%d] = %s;" % (rd, expr)]
+
+        if base in ("ubfx", "sbfx"):
+            rd = isa.reg_num(ops[0])
+            rn = isa.reg_num(ops[1])
+            lsb = isa.imm_value(ops[2])
+            width = isa.imm_value(ops[3])
+            if rd is None or rn is None or lsb is None or width is None:
+                raise Unsupported(ins.op_str)
+            if width < 1 or lsb + width > 32:
+                raise Unsupported(ins.op_str)
+            mask = (1 << width) - 1
+            if base == "ubfx":
+                return ["c->r[%d] = (c->r[%d] >> %d) & 0x%Xu;" % (rd, rn, lsb, mask)]
+            sh = 32 - width
+            return ["c->r[%d] = (uint32_t)((int32_t)(((c->r[%d] >> %d) & 0x%Xu) << %d) >> %d);"
+                    % (rd, rn, lsb, mask, sh, sh)]
+
+        if base in ("bfi", "bfc"):
+            rd = isa.reg_num(ops[0])
+            if base == "bfi":
+                rn = isa.reg_num(ops[1])
+                lsb = isa.imm_value(ops[2])
+                width = isa.imm_value(ops[3])
+            else:
+                rn = 0
+                lsb = isa.imm_value(ops[1])
+                width = isa.imm_value(ops[2])
+            if rd is None or lsb is None or width is None or width < 1:
+                raise Unsupported(ins.op_str)
+            mask = ((1 << width) - 1) << lsb
+            if base == "bfc":
+                return ["c->r[%d] &= ~0x%08Xu;" % (rd, mask)]
+            return ["c->r[%d] = (c->r[%d] & ~0x%08Xu) | ((c->r[%d] << %d) & 0x%08Xu);"
+                    % (rd, rd, mask, rn, lsb, mask)]
 
         if base in ("ldrex", "ldrexb", "ldrexh"):
             rd = isa.reg_num(ops[0])
@@ -802,11 +910,12 @@ class Emitter:
 
     # ---------- dispatch ----------
     def emit(self, ins):
+        cc0 = self.it_cond.get(id(ins), ins.cc)
         iid = ID_ALIASES.get(ins.id)
         if iid is not None:
             ins = InsnView(ins, iid)
         pc = ins.address
-        cond = None if ins.cc == A.ARM_CC_AL else ins.cc
+        cond = None if cc0 == A.ARM_CC_AL else cc0
         if ins.id in DP_OPS:
             lines = self.dp(ins)
         elif ins.id in MEM_OPS:
