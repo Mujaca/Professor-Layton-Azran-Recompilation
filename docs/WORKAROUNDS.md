@@ -1040,3 +1040,33 @@ uebergibt `gap = -unit` (als int16: 0xFE70 = -400, 0xFF38 = -200), also
 (Videoframe-Metadaten), nicht in einem Kernel- oder Dienst-Handler. Kein
 Workaround eingebaut; die Korrektur gehoert in den Decoder-/Frame-Strang.
 Fuer M4 relevant, sobald das Video wieder vollstaendig dekodiert wird.
+### Mobiclip-Decoder: Film haengt nach 41 Bildern – behoben 2026-11-24
+
+**Befund:** Der Film `m999.moflex` hat 520 Bilder (unabhaengiger Parser
+`tools/cosim/moflex.py`); Bild 2-62 sind identische 94-Byte-Bilder, Bild 63/64
+das erste mit Inhalt (1.498/1.108 Byte). Der Decoder las beim ersten
+Inhaltsbild 6.390 statt 1.108 Byte und geriet aus dem Bittakt. Unicorn auf
+den Originalbytes ab dem Port-Speicherabbild las genau 1.108 Byte;
+`tools/cosim/lockstep.py` zeigte die Abweichungen Block fuer Block.
+
+**Ursachen (alle im Recompiler, generisch behoben, je mit Testfall):**
+1. Pseudo-Aufruf `add lr, pc, #k; [push {.., lr}]; b<cond> ziel` mit LR auf
+   die Fortsetzung wurde als Sprung uebersetzt; das `pop {.., pc}` des Ziels
+   beendete die C-Funktion (`pseudo_aufruf_b_mit_lr`, `bedingter_pseudo_aufruf`).
+2. Logische S-Befehle mit rotiertem Immediate setzten C nicht auf Bit 31
+   (`tst r3, #0x80000000`, `tst_rotiertes_immediate_carry`).
+3. Berechnete Aufrufe `add lr, pc, #k; add pc, rX, rY`: die LR-Fortsetzung
+   war kein Blockanfang, lokale Ziele wurden per goto statt als Aufruf
+   ausgefuehrt (`berechneter_aufruf_lr_fortsetzung`).
+4. Zweistufige LR-Bildung `add lr, pc, #hi; add lr, lr, #lo`
+   (`berechneter_aufruf_lr_zweischritt`).
+
+5. ARM-Switch `ldr<cond> pc, [pc, rN, lsl #2]; b default; .word ...`: der
+   Default-Zweig bei +4 wurde nie dekodiert (Fallthrough hinter die
+   Tabelle). Betroffen war der Erfolgspfad von 0x38FBB0, der die
+   Y2R-Bildbeschreibung per `vstmia` kopiert (`arm_switch_default_zweig`).
+
+**Ergebnis:** 520/520 y2r `StartConversion` (vorher 41), Quellparameter wie
+in der Azahar-Referenz (Gap 112/312). Der Y2R-Ausgabepuffer enthaelt die
+echten Filmbilder (8x8-Kacheln, RGB24, 512x240). Offen: das Spiel zeichnet
+die Textur noch nicht (keine PICA-Draws), der Bildschirm bleibt einfarbig.

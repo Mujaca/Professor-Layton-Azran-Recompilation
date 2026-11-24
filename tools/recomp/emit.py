@@ -112,6 +112,47 @@ IT_NO_FLAGS_16 = {"add", "sub", "and", "eor", "lsl", "lsr", "asr", "adc",
                   "sbc", "ror", "rsb", "orr", "mul", "mov", "mvn", "bic"}
 
 
+def imm_shifter_carry(ins, thumb):
+    """Shifter-Carry eines Immediate-Operanden aus der Kodierung (0/1, -1 = C bleibt).
+
+    ARM: Datenverarbeitung mit Immediate (Bit 25), Rotation = Bits 11..8.
+    Rotation != 0 -> Carry = Bit 31 des rotierten Werts, sonst unveraendert.
+    Thumb-2 (32 Bit, modified immediate): imm12 = i:imm3:imm8; bei
+    imm12[11:10] == 0 bleibt C, sonst Carry = Bit 31 des expandierten Werts.
+    16-Bit-Thumb-Immediates veraendern C nicht.
+    """
+    raw = bytes(ins.bytes)
+    if not thumb:
+        if len(raw) != 4:
+            return -1
+        w = int.from_bytes(raw, "little")
+        if (w >> 26) & 3 != 0 or not (w >> 25) & 1:
+            return -1
+        rot = ((w >> 8) & 0xF) * 2
+        if rot == 0:
+            return -1
+        imm8 = w & 0xFF
+        val = ((imm8 >> rot) | (imm8 << (32 - rot))) & 0xFFFFFFFF
+        return (val >> 31) & 1
+    if len(raw) != 4:
+        return -1
+    hw1 = int.from_bytes(raw[0:2], "little")
+    hw2 = int.from_bytes(raw[2:4], "little")
+    # Data processing (modified immediate): 11110 i 0 op S Rn | 0 imm3 Rd imm8
+    if (hw1 & 0xFA00) != 0xF000 or (hw2 & 0x8000):
+        return -1
+    i = (hw1 >> 10) & 1
+    imm3 = (hw2 >> 12) & 7
+    imm8 = hw2 & 0xFF
+    imm12 = (i << 11) | (imm3 << 8) | imm8
+    if (imm12 >> 10) == 0:
+        return -1
+    unrot = 0x80 | (imm12 & 0x7F)
+    r = (imm12 >> 7) & 0x1F
+    val = ((unrot >> r) | (unrot << (32 - r))) & 0xFFFFFFFF
+    return (val >> 31) & 1
+
+
 def sets_flags(ins, thumb, in_it=False):
     """S-Bit aus der Kodierung lesen.
 
@@ -212,6 +253,7 @@ class Emitter:
         self.block_labels = None   # set of local block addresses (for ldr pc)
         self.pc_targets = None     # alle Instruktionsadressen (indirekte PC-Ziele)
         self.ret_bx = set()        # bx-Adressen mit Rueckkehrziel aus dem Stack
+        self.pseudo_calls = {}     # {adresse: LR-Fortsetzung} (scan.pseudo_call_info)
         self.ret_mov = set()       # `mov pc, rN` mit rN = unveraenderte lr-Kopie
         self.it_cond = {}          # id(ins) -> Bedingung aus einem IT-Block
 
@@ -223,7 +265,16 @@ class Emitter:
     def label(self, addr):
         return "L_%08X_%08X" % (self.func, u32(addr))
 
-    def dynamic_pc(self, expr, interwork=True):
+    def goto_cont(self, cont, nxt=None):
+        """Nach einem Pseudo-Aufruf an der LR-Fortsetzung weiterlaufen."""
+        if nxt is not None and cont == nxt:
+            return []
+        if self.block_labels is not None and cont in self.block_labels:
+            return ["goto %s;" % self.label(cont)]
+        # Fortsetzung kein lokaler Block: ueber den Gast-PC verteilen.
+        return ["c->r[15] = 0x%08Xu;" % u32(cont)] + self.dynamic_pc("c->r[15]")
+
+    def dynamic_pc(self, expr, interwork=True, call_cont=None):
         """Schreibt PC aus einem Ausdruck und springt dorthin.
 
         Ziele innerhalb der Funktion werden per switch/goto angesprungen
@@ -235,6 +286,15 @@ class Emitter:
                  "  c->r[15] = t & ~1u;"]
         if interwork:
             lines.append("  c->t = t & 1u;")
+        if call_cont is not None:
+            # Berechneter Aufruf (LR = Fortsetzung, scan.pseudo_call_info):
+            # immer als echter Aufruf ausfuehren, auch bei lokalem Ziel, damit
+            # dessen Rueckkehr (pop pc / bx lr) nicht diese C-Funktion beendet.
+            lines.append("  arm_call_guest(c, t);")
+            lines.append("  if (c->aborted) return;")
+            lines.extend("  " + ln for ln in self.goto_cont(call_cont))
+            lines.append("}")
+            return lines
         labs = []
         src = self.pc_targets if self.pc_targets else self.block_labels
         if src:
@@ -339,7 +399,15 @@ class Emitter:
             rest = ops[1:]
         o2, sh = self.operand2(rest, pc)
         sf = sets_flags(ins, self.thumb, in_it)
-        if sh:
+        imm_c = -1
+        if not sh and rest and rest[0].strip().startswith("#"):
+            imm_c = imm_shifter_carry(ins, self.thumb)
+        if not sh and imm_c >= 0:
+            # Rotierter Immediate-Operand: Shifter-Carry = Bit 31 des Werts
+            # (ARM ARM A5.1.3; Thumb-2 ThumbExpandImm_C). Wirkt nur bei
+            # logischen Operationen mit S-Bit (tst/teq/ands/orrs/movs ...).
+            lines = ["arm_dp(c, %s, %d, %s, %s, %d, %d);" % (code, rd, rn, o2, sf, imm_c)]
+        elif sh:
             lines = ["{", "  int sh = -1;",
                      "  arm_dp(c, %s, %d, %s, %s, %d, sh);" % (code, rd, rn, o2, sf),
                      "}"]
@@ -359,7 +427,7 @@ class Emitter:
             else:
                 # `mov pc, rN` / `add pc, ...` / Sprungtabellen: dynamisch
                 # weiterleiten (lokale Bloecke per switch/goto).
-                lines.extend(self.dynamic_pc("c->r[15]"))
+                lines.extend(self.dynamic_pc("c->r[15]", call_cont=self.pseudo_calls.get(pc)))
         return lines
 
     def mem(self, ins):
@@ -478,6 +546,14 @@ class Emitter:
             if not ins.operands or ins.operands[0].type != A.ARM_OP_IMM:
                 raise Unsupported(ins.op_str)
             tgt = ins.operands[0].imm
+            if pc in self.pseudo_calls:
+                # `add lr, pc, #k; ...; b<cond> ziel` mit LR = Fortsetzung: ein
+                # Aufruf (scan.is_pseudo_call). Kein arm_restore_sp: das Ziel
+                # raeumt ggf. einen vom Aufrufer selbst gebauten Stack-Frame mit
+                # ab, der SP nach der Rueckkehr ist daher bewusst ein anderer.
+                return (["fn_%08X(c);" % u32(tgt), "if (c->aborted) return;"]
+                        + self.goto_cont(self.pseudo_calls[pc],
+                                         nxt=pc + ins.size))
             if self.block_labels is not None and tgt not in self.block_labels:
                 # Ziel ausserhalb der Funktion (Tail-Call): als Gastaufruf
                 # ausfuehren; das Ziel kehrt ueber LR zum Aufrufer zurueck.

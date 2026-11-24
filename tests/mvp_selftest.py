@@ -79,6 +79,184 @@ CASES = [
         "expect": {"r0": 15},
     },
     {
+        # Pseudo-Aufruf aus handgeschriebenem Assembler (Mobiclip-Decoder):
+        # LR wird per `add lr, pc, #k` auf die Fortsetzung gesetzt, der
+        # Aufrufer baut den Stack-Frame des Ziels selbst und springt mit `b`
+        # hinter dessen Prolog. Das Ziel kehrt mit `pop {r4, pc}` zur
+        # Fortsetzung zurueck. Frueher war das `b` ein Sprung, die Rueckkehr
+        # verliess die C-Funktion und `add r0, #10` fehlte (r0 = 3 statt 13).
+        "name": "pseudo_aufruf_b_mit_lr",
+        "asm": """
+            push {lr}
+            mov r0, #1
+            add lr, pc, #4
+            push {r4, lr}
+            b 0x100104
+            add r0, r0, #10
+            pop {pc}
+        """,
+        "extra": {
+            0x100100: """
+                push {r4, lr}
+                add r0, r0, #2
+                pop {r4, pc}
+            """,
+        },
+        "regs": {},
+        "expect": {"r0": 13, "r13": 0x8000},
+    },
+    {
+        # Rotierter Immediate-Operand setzt bei logischen S-Befehlen das
+        # Carry auf Bit 31 des Werts (tst r3, #0x80000000 im Mobiclip-
+        # Bitreader). Frueher blieb C unveraendert.
+        "name": "tst_rotiertes_immediate_carry",
+        "asm": """
+            mov r3, #0x40000000
+            mov r0, #0
+            cmp r0, #1
+            tst r3, #0x80000000
+            movcs r1, #1
+            movcc r1, #2
+            mov r2, #0
+            cmp r2, #1
+            ands r4, r3, #0xFF
+            movcs r5, #1
+            movcc r5, #2
+            bx lr
+        """,
+        "regs": {},
+        "expect": {"r1": 1, "r5": 2},
+    },
+    {
+        # Berechneter Aufruf ueber `add pc, ip, r2` mit LR auf eine Fortsetzung,
+        # die NICHT direkt hinter dem Sprung liegt (Mobiclip 0x16C31C ->
+        # 0x16C340). Die Fortsetzung muss ein Blockanfang sein; frueher endete
+        # die C-Funktion nach der Rueckkehr (r0 = 3 statt 13).
+        "name": "berechneter_aufruf_lr_fortsetzung",
+        "asm": """
+            push {lr}
+            mov r0, #1
+            cmp r0, r0
+            blne 0x100100
+            mov r2, #0
+            mov ip, #0x100000
+            orr ip, ip, #0x100
+            add lr, pc, #4
+            add pc, ip, r2
+            add r0, r0, #100
+            add r0, r0, #10
+            pop {pc}
+        """,
+        "extra": {
+            0x100100: """
+                add r0, r0, #2
+                bx lr
+            """,
+        },
+        "regs": {},
+        "expect": {"r0": 13, "r13": 0x8000},
+    },
+    {
+        # Bedingter Pseudo-Aufruf (Mobiclip 0x16BE84: `add lr, pc, #0xc;
+        # bne 0x16C308`): das Ziel kehrt zur LR-Fortsetzung hinter dem Sprung
+        # zurueck, die dazwischenliegende Instruktion wird uebersprungen.
+        "name": "bedingter_pseudo_aufruf",
+        "asm": """
+            push {lr}
+            mov r0, #1
+            cmp r0, #0
+            add lr, pc, #4
+            bne 0x100100
+            add r0, r0, #100
+            add r0, r0, #10
+            pop {pc}
+        """,
+        "extra": {
+            0x100100: """
+                add r0, r0, #2
+                bx lr
+            """,
+        },
+        "regs": {},
+        "expect": {"r0": 13, "r13": 0x8000},
+    },
+    {
+        # LR-Fortsetzung in zwei Schritten (Mobiclip 0x16C42C:
+        # `add lr, pc, #0x80; add lr, lr, #0x38`) vor einem berechneten Aufruf.
+        "name": "berechneter_aufruf_lr_zweischritt",
+        "asm": """
+            push {lr}
+            mov r0, #1
+            cmp r0, r0
+            blne 0x100100
+            mov r2, #0
+            mov ip, #0x100000
+            orr ip, ip, #0x100
+            add lr, pc, #0
+            add lr, lr, #8
+            add pc, ip, r2
+            add r0, r0, #100
+            add r0, r0, #10
+            pop {pc}
+        """,
+        "extra": {
+            0x100100: """
+                add r0, r0, #2
+                bx lr
+            """,
+        },
+        "regs": {},
+        "expect": {"r0": 13, "r13": 0x8000},
+    },
+    {
+        # ARM-Switch `ldrls pc, [pc, rN, lsl #2]; b default; .word ...`:
+        # PC liest als +8, bei +4 steht der Default-Zweig. Frueher wurde der
+        # Default nie dekodiert (Fallthrough hinter die Tabelle), z. B. der
+        # Erfolgspfad von 0x38FBB0 (vstmia der Y2R-Bildbeschreibung).
+        "name": "arm_switch_default_zweig",
+        "asm": """
+            cmp r1, #2
+            ldrls pc, [pc, r1, lsl #2]
+            b 0x100030
+            .word 0x100018
+            .word 0x100020
+            .word 0x100028
+            mov r0, #10
+            bx lr
+            mov r0, #11
+            bx lr
+            mov r0, #12
+            bx lr
+            mov r0, #99
+            bx lr
+        """,
+        "regs": {"r1": 7},
+        "expect": {"r0": 99},
+    },
+    {
+        "name": "arm_switch_fall",
+        "asm": """
+            cmp r1, #2
+            ldrls pc, [pc, r1, lsl #2]
+            b 0x100030
+            .word 0x100018
+            .word 0x100020
+            .word 0x100028
+            mov r0, #10
+            bx lr
+            mov r0, #11
+            bx lr
+            mov r0, #12
+            bx lr
+            mov r0, #99
+            bx lr
+        """,
+        "regs": {"r1": 1},
+        # Der Harness legt nur Code ab; die Tabelle muss lesbar im Gastspeicher stehen.
+        "mem_bytes": [(0x10000C, bytes.fromhex("18001000" "20001000" "28001000"))],
+        "expect": {"r0": 11},
+    },
+    {
         "name": "push_pop_cond",
         "asm": """
             push {r4, lr}
