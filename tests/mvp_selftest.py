@@ -476,7 +476,17 @@ def main():
             print("[%s] FEHLER: %s" % (case["name"], status))
             failed += 1
 
-    print("\n%d/%d Tests bestanden" % (len(CASES) - failed, len(CASES)))
+    # Scheduler-/Kernel-Entscheidungen (reine Logik, ohne OS-Threads).
+    print("[sched] pruefe Prioritaeten/Ticks/Wait-Index ...")
+    r = subprocess.run([sys.executable, os.path.join(ROOT, "tests", "sched_selftest.py")],
+                       capture_output=True, text=True)
+    sys.stdout.write(r.stdout)
+    if r.returncode != 0:
+        sys.stdout.write(r.stderr)
+        failed += 1
+
+    total = len(CASES) + 1
+    print("\n%d/%d Tests bestanden" % (total - failed, total))
     return 1 if failed else 0
 
 

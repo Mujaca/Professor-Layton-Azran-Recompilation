@@ -96,6 +96,7 @@ deshalb lief der frühere Versuch in eine Endlosschleife; Puffer ist jetzt
 | Kennung | Ort | Wirkung |
 |---|---|---|
 | – | `dispatch_ipc` | leitet Kommandos nach Form statt nach Handle um (APT/cfg/fs) |
+| – | Thread-Scheduler | alle Gast-Threads laufen kooperativ auf **einem** Host-Thread; Prioritaeten gelten nur an SVC-/Yield-Grenzen, `GetCurrentProcessorNumber`/`GetThreadIdealProcessor` liefern die ExHeader-/CreateThread-Id (0 AppCore, 1 SysCore), ein zweiter Kern wird nicht simuliert |
 | – | generierter Code | unbekannte Aufrufziele = No-op (geloggt in `out/missing_calls.txt`) |
 | – | `arm_mem_read/write` | Zugriffe außerhalb des Speichers liefern 0 statt Abbruch (`ARM_STRICT=1` bricht ab) |
 | – | fs `OpenFile`, `file_command` | Sentinel-Dateislot und Erfolg auch bei fehlgeschlagenem Open; `romfs_image.bin` mit Offset +0x1000 |

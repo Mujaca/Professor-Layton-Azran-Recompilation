@@ -34,6 +34,8 @@ void arm_call_guest_pub(ArmCpu *c, uint32_t addr);   /* gen_boot.c */
 #include <windows.h>
 #include <direct.h>
 
+#include "kernel_sched.h"
+
 #define TLS_CMD_BUF 0x80u
 
 /* ---- kooperatives Threading: es laeuft immer nur ein Gast-Thread ---- */
@@ -147,6 +149,7 @@ typedef struct {
     uint32_t entry;
     int id;
     int prio;          /* Gast-Prioritaet aus svcCreateThread (kleiner = hoeher) */
+    int proc_id;       /* svcCreateThread processor_id (0 AppCore, 1 SysCore) */
     uint32_t handle;   /* Handle aus svcCreateThread */
 } GuestThread;
 static GuestThread g_threads[32];
@@ -254,8 +257,8 @@ typedef struct {
     int avail;               /* Semaphore: freie Plaetze */
     int max_count;           /* Semaphore: Maximum */
     int reset_type;          /* Event/Timer: 0 OneShot, 1 Sticky, 2 Pulse */
-    uint64_t timer_due;      /* Timer: faellig (Host-us) */
-    uint64_t timer_interval; /* Timer: Wiederholung (Host-us), 0 = einmalig */
+    uint64_t timer_due;      /* Timer: faellig (Host-ns) */
+    uint64_t timer_interval; /* Timer: Wiederholung (Host-ns), 0 = einmalig */
     int timer_active;        /* Timer: laeuft */
     char name[12];
 } Handle;
@@ -273,6 +276,7 @@ static ArmCpu *g_cpu = NULL;
 static char g_romfs[512];
 static int g_log = 0;
 static uint64_t g_tick = 0x1000;
+static uint64_t g_boot_ns = 0;   /* Nullpunkt fuer svcGetSystemTick */
 static int g_tick_calls = 0;
 static Handle g_handles[MAX_HANDLES];
 static int g_next_handle = 1;
@@ -492,13 +496,21 @@ static uint32_t new_semaphore_handle(const char *name, int initial, int maxc) {
 #define RESULT_TIMEOUT        0x09401BFEu
 #define RESULT_WRONG_THREAD   0xD8E0041Fu
 #define RESULT_OUT_OF_RANGE   0xD8E007FDu
+#define RESULT_NOT_AUTHORIZED 0xD9001BEAu
 
-static uint64_t host_us(void) {
+static uint64_t host_ns(void) {
     static LARGE_INTEGER freq;
     LARGE_INTEGER t;
     if (freq.QuadPart == 0) QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&t);
-    return (uint64_t)((t.QuadPart * 1000000ull) / (uint64_t)freq.QuadPart);
+    /* Zerlegung, damit t * 1e9 nicht ueberlaeuft (QPC-Takt ~10 MHz). */
+    return (uint64_t)(t.QuadPart / freq.QuadPart) * 1000000000ull +
+           (uint64_t)(t.QuadPart % freq.QuadPart) * 1000000000ull /
+               (uint64_t)freq.QuadPart;
+}
+
+static uint64_t host_us(void) {
+    return host_ns() / 1000ull;
 }
 
 /* Thread-Id des aktuell laufenden Gast-Threads (0 = Hauptthread). */
@@ -510,14 +522,33 @@ static uint32_t cur_tid(ArmCpu *c) {
     return 0;
 }
 
+/* Hauptthread: Prioritaet aus dem ExHeader (ARM11 SystemLocalCaps.priority,
+ * ExHeader+0x20F dieses Titels = 0x30; Azahar ThreadPrioDefault = 48, das ist
+ * zugleich der Wert den Azahar fuer fehlende ExHeader einsetzt). Ideal-
+ * Prozessor laut ExHeader-Flags0 Bits0..1 = Core 0 (AppCore). */
+static int g_main_prio = (int)KS_PRIO_DEFAULT;
+static int g_main_proc = 0;
+
 /* Gast-Prioritaet des aktuell laufenden Threads. Hauptthread und unbekannte
- * CPUs laufen mit der SDK-Default-Prioritaet 0x18 (Azahar Thread::DEFAULT). */
+ * CPUs laufen mit der Prioritaet des Hauptthreads. */
 static int cur_prio(ArmCpu *c) {
-    if (c == g_main_cpu) return 0x18;
+    if (c == g_main_cpu) return g_main_prio;
     for (int i = 0; i < 32; i++) {
         if (g_threads[i].used && g_threads[i].cpu == c) return g_threads[i].prio;
     }
-    return 0x18;
+    return g_main_prio;
+}
+
+/* Prozessor-Id (0 = AppCore, 1 = SysCore) des aktuell laufenden Threads.
+ * Der Port fuehrt alle Gast-Threads auf einem Host-Thread aus; die Id ist
+ * deshalb nur informativ (svcGetCurrentProcessorNumber/GetThreadIdealProcessor)
+ * und wird nicht zur Auswahl eines zweiten Kerns benutzt. */
+static int cur_proc(ArmCpu *c) {
+    if (c == g_main_cpu) return g_main_proc;
+    for (int i = 0; i < 32; i++) {
+        if (g_threads[i].used && g_threads[i].cpu == c) return g_threads[i].proc_id;
+    }
+    return g_main_proc;
 }
 
 static const char *handle_kind_name(const Handle *h) {
@@ -573,10 +604,104 @@ static void hs_signal(Handle *h) {
     h->signaled = 1;
 }
 
+/* Warteliste fuer WaitSynchronization (Azahar kernel/wait_object.cpp
+ * AddWaitingThread/GetHighestPriorityReadyThread). Jeder wartende Thread
+ * traegt seine Handle-Liste ein. Ein freigegebenes Objekt wird dem
+ * hoechstprioren bereiten Waiter zugesprochen (kleinster Prioritaetswert);
+ * bei Gleichstand gewinnt der zuerst eingetragene, also der laenger
+ * wartende Thread. Das ersetzt das fruehere "wer zuerst nachsieht, gewinnt"
+ * des kooperativen Ports. */
+#define KWAIT_MAX 64
+#define KWAIT_MAX_OBJS 32
+typedef struct {
+    volatile int used;
+    int tid;
+    int prio;
+    int wait_all;
+    int nobj;
+    uint32_t seq;            /* Eintragsreihenfolge */
+    int objs[KWAIT_MAX_OBJS];  /* kanonische Handle-Slots */
+} KernelWaiter;
+static KernelWaiter g_kwait[KWAIT_MAX];
+static uint32_t g_kwait_seq = 0;
+
+static int kwait_register(uint32_t tid, int prio, int wait_all, const Handle **objs, int cnt) {
+    for (int i = 0; i < KWAIT_MAX; i++) {
+        if (!g_kwait[i].used) {
+            g_kwait[i].tid = (int)tid;
+            g_kwait[i].prio = prio;
+            g_kwait[i].wait_all = wait_all;
+            g_kwait[i].nobj = cnt > KWAIT_MAX_OBJS ? KWAIT_MAX_OBJS : cnt;
+            g_kwait[i].seq = ++g_kwait_seq;
+            for (int k = 0; k < g_kwait[i].nobj; k++)
+                g_kwait[i].objs[k] = (int)(objs[k] - g_handles);
+            g_kwait[i].used = 1;   /* zuletzt veroeffentlichen */
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void kwait_unregister(int slot) {
+    if (slot >= 0 && slot < KWAIT_MAX) g_kwait[slot].used = 0;
+}
+
+static void kwait_unregister_tid(uint32_t tid) {
+    for (int i = 0; i < KWAIT_MAX; i++)
+        if (g_kwait[i].used && (uint32_t)g_kwait[i].tid == tid) g_kwait[i].used = 0;
+}
+
+/* Ist der Wunsch dieses Waiters jetzt erfuellbar? (Azahar ShouldWait fuer
+ * jedes Objekt; bei wait_all muessen alle bereit sein.) */
+static int kwait_ready(const KernelWaiter *w) {
+    if (w->wait_all) {
+        for (int k = 0; k < w->nobj; k++)
+            if (hs_should_wait(&g_handles[w->objs[k]], (uint32_t)w->tid)) return 0;
+        return 1;
+    }
+    for (int k = 0; k < w->nobj; k++)
+        if (!hs_should_wait(&g_handles[w->objs[k]], (uint32_t)w->tid)) return 1;
+    return 0;
+}
+
+static int kwait_shares(const KernelWaiter *w, const int *slots, int n) {
+    for (int i = 0; i < n; i++)
+        for (int k = 0; k < w->nobj; k++)
+            if (w->objs[k] == slots[i]) return 1;
+    return 0;
+}
+
+/* 1 = dieser Thread darf das Objekt nehmen; 0 = ein anderer registrierter
+ * Waiter hat Vorrang. */
+static int kwait_self_wins(uint32_t tid, const int *slots, int n) {
+    int best = -1;
+    for (int i = 0; i < KWAIT_MAX; i++) {
+        KernelWaiter *w = &g_kwait[i];
+        if (!w->used) continue;
+        if (!kwait_shares(w, slots, n)) continue;
+        if (!kwait_ready(w)) continue;
+        if (best < 0 || w->prio < g_kwait[best].prio ||
+            (w->prio == g_kwait[best].prio && w->seq < g_kwait[best].seq))
+            best = i;
+    }
+    return best < 0 || (uint32_t)g_kwait[best].tid == tid;
+}
+
+/* Ist ein hoeher priorisierter registrierter Thread bereit? Wird nach einem
+ * SVC als Preemptionspunkt benutzt (Azahar PrepareReschedule/Reschedule). */
+static int kernel_higher_ready(uint32_t tid, int prio) {
+    for (int i = 0; i < KWAIT_MAX; i++) {
+        KernelWaiter *w = &g_kwait[i];
+        if (!w->used || (uint32_t)w->tid == tid || w->prio >= prio) continue;
+        if (kwait_ready(w)) return 1;
+    }
+    return 0;
+}
+
 /* Abgelaufene Timer signalisieren (Azahar Timer::Signal). Wird aus den
  * Warteschleifen und dem VBlank-Thread gepollt. */
 static void kernel_poll_timers(void) {
-    uint64_t now = host_us();
+    uint64_t now = host_ns();
     for (int i = 1; i < MAX_HANDLES; i++) {
         Handle *h = &g_handles[i];
         if (!h->used || h->kind != HK_TIMER || !h->timer_active) continue;
@@ -594,45 +719,65 @@ static void kernel_poll_timers(void) {
 static int hs_wait(ArmCpu *c, Handle **objs, int cnt, int wait_all,
                    uint64_t timeout_ns, int *out_idx, uint32_t *result) {
     uint32_t tid = cur_tid(c);
+    int prio = cur_prio(c);
     int infinite = (timeout_ns == UINT64_MAX);
-    uint64_t timeout_us = infinite ? 0 : ((timeout_ns + 999ull) / 1000ull);
-    uint64_t start = host_us();
+    uint64_t timeout_ns_eff = infinite ? 0 : timeout_ns;
+    uint64_t start = host_ns();
+    int yielded = 0;
+    int slots[KWAIT_MAX_OBJS];
+    int wslot;
+    int n = cnt > KWAIT_MAX_OBJS ? KWAIT_MAX_OBJS : cnt;
+
+    for (int k = 0; k < n; k++) slots[k] = (int)(objs[k] - g_handles);
+    /* Azahar AddWaitingThread: der Thread steht ab jetzt in der Warteliste
+       jedes Objekts; ein spaeterer Signalisierer weckt den hoechstprioren
+       bereiten Waiter, nicht den zufaellig zuerst pollenden. */
+    wslot = kwait_register(tid, prio, wait_all, (const Handle **)objs, n);
 
     for (;;) {
         int hit = -1;
         kernel_poll_timers();
         if (wait_all) {
             int ok = 1;
-            for (int k = 0; k < cnt; k++) {
+            for (int k = 0; k < n; k++) {
                 if (hs_should_wait(objs[k], tid)) { ok = 0; break; }
             }
-            if (ok) {
-                for (int k = 0; k < cnt; k++) hs_acquire(objs[k], tid);
+            if (ok && kwait_self_wins(tid, slots, n)) {
+                for (int k = 0; k < n; k++) hs_acquire(objs[k], tid);
+                kwait_unregister(wslot);
                 *out_idx = -1;
                 *result = 0;
                 return 1;
             }
         } else {
-            for (int k = 0; k < cnt; k++) {
+            for (int k = 0; k < n; k++) {
                 if (!hs_should_wait(objs[k], tid)) { hit = k; break; }
             }
-            if (hit >= 0) {
+            if (hit >= 0 && kwait_self_wins(tid, slots, n)) {
                 hs_acquire(objs[hit], tid);
-                *out_idx = hit;
+                kwait_unregister(wslot);
+                /* Azahar: sofortiger Treffer meldet den ersten Index
+                   (find_if), ein Aufwachen aus dem Warten den letzten Index
+                   desselben Objekts (GetWaitObjectIndex via rbegin). */
+                *out_idx = yielded ? ks_wait_index_last((const void *const *)objs, n, hit)
+                                   : hit;
                 *result = 0;
                 return 1;
             }
         }
-        if (!infinite && timeout_us == 0) {
+        if (!infinite && timeout_ns_eff == 0) {
+            kwait_unregister(wslot);
             *out_idx = -1;
             *result = RESULT_TIMEOUT;
             return 0;
         }
-        if (!infinite && (host_us() - start) >= timeout_us) {
+        if (!infinite && (host_ns() - start) >= timeout_ns_eff) {
+            kwait_unregister(wslot);
             *out_idx = -1;
             *result = RESULT_TIMEOUT;
             return 0;
         }
+        yielded = 1;
         guest_yield();
     }
 }
@@ -3201,6 +3346,7 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     ensure_savedata();
     g_cpu = c;
     g_main_cpu = c;
+    g_boot_ns = host_ns();
     snprintf(g_romfs, sizeof(g_romfs), "%s", romfs_dir ? romfs_dir : "out/romfs");
     g_log = getenv("HLE_LOG") != NULL;
     /* Diagnose-Laeufe werden per Timeout beendet; ungepufferte Ausgabe
@@ -3280,6 +3426,7 @@ static void thread_signal_exit(ArmCpu *c) {
     for (int i = 0; i < g_thread_count; i++) {
         if (!g_threads[i].used || g_threads[i].cpu != c) continue;
         uint32_t tid = (uint32_t)g_threads[i].id;
+        kwait_unregister_tid(tid);
         Handle *hh = get_handle(g_threads[i].handle);
         /* Nur signalisieren, wenn der Slot noch dieser Thread ist: nach
            CloseHandle kann er fuer ein anderes Objekt wiederverwendet sein. */
@@ -3301,7 +3448,7 @@ static void thread_signal_exit(ArmCpu *c) {
     }
 }
 
-uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
+static uint32_t hle_svc_dispatch(ArmCpu *c, uint32_t imm) {
     if (getenv("HLE_SVC_SEEN")) {
         static unsigned char seen[256];
         if (imm < 256 && !seen[imm]) {
@@ -3386,10 +3533,26 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             if (page) write_u32(c, page, 0);
             return 0;
         }
-        case 0x08: { /* CreateThread(out, entry, arg, stack, prio, ...) */
-            uint32_t out = c->r[0], entry = c->r[1], arg = c->r[2];
-            uint32_t stack = c->r[3];
-            uint32_t h = (uint32_t)alloc_handle(SVC_OTHER, "thread");
+        case 0x08: { /* CreateThread: SVC-ABI (Azahar svc_wrapper.h):
+                        r0 = priority, r1 = entry, r2 = arg, r3 = stack_top,
+                        r4 = processor_id; Rueckgabe Result in r0, Handle in r1.
+                        (Das `out`-Pointer-Argument der C-Signatur ist ein
+                        Output-Parameter und wird ueber r1 zurueckgegeben.) */
+            uint32_t prio = c->r[0];
+            uint32_t entry = c->r[1], arg = c->r[2], stack = c->r[3];
+            int32_t proc = (int32_t)c->r[4];
+            uint32_t h;
+            /* Azahar svc.cpp/CreateThread: ThreadProcessorIdDefault (-2) nimmt
+               den Ideal-Prozessor des Prozesses (ExHeader), All (-1) laeuft auf
+               Core 0. Prioritaet > ThreadPrioLowest = OutOfRange. */
+            if (proc == -2) proc = g_main_proc;
+            if (proc == -1) proc = 0;
+            if (getenv("HLE_THR_LOG"))
+                printf("[thrarg] prio=%u entry=%08X arg=%08X stack=%08X proc=%d"
+                       " lr=%08X\n", prio, entry, arg, stack, (int)proc, c->r[14]);
+            if (prio > KS_PRIO_LOWEST) return RESULT_OUT_OF_RANGE;
+            if (proc < 0 || proc > 3) return RESULT_OUT_OF_RANGE;
+            h = (uint32_t)alloc_handle(SVC_OTHER, "thread");
             {
                 Handle *th = get_handle(h);
                 if (th != NULL) th->kind = HK_THREAD;   /* ShouldWait: lebt noch */
@@ -3407,11 +3570,13 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                     t->cpu = tc;
                     t->entry = entry;
                     t->id = ((g_thread_count + 1) & 15);
-                    t->prio = (int)c->r[4];
+                    t->prio = (int)prio;
+                    t->proc_id = (int)proc;
                     t->handle = h;
                     if (getenv("HLE_THR_LOG"))
-                        printf("[thrnew] handle=%u entry=%08X arg=%08X stack=%08X id=%d\n",
-                               h, entry, arg, stack, t->id);
+                        printf("[thrnew] handle=%u entry=%08X arg=%08X stack=%08X id=%d"
+                               " prio=%u proc=%d\n",
+                               h, entry, arg, stack, t->id, prio, (int)proc);
                     g_thread_count++;
                     CreateThread(NULL, 0, guest_thread_main, t, 0, NULL);
                     if (g_det_sched && t->id >= 0 && t->id < 16) {
@@ -3424,7 +3589,6 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                     }
                 }
             }
-            if (out) write_u32(c, out, h);
             c->r[1] = h;
             return 0;
         }
@@ -3435,9 +3599,29 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                 if (g_guest_lock_init) ExitThread(0);
             }
             return 0;
+        case 0x0B: { /* GetThreadPriority(out*, handle) */
+            uint32_t out = c->r[0], handle = c->r[1];
+            if (handle == 0xFFFF8000u) {
+                if (out) write_u32(c, out, (uint32_t)g_main_prio);
+                c->r[1] = (uint32_t)g_main_prio;   /* SVC-ABI: Output in r1 */
+                return 0;
+            }
+            for (int i = 0; i < 32; i++) {
+                if (g_threads[i].used && g_threads[i].handle == handle) {
+                    if (out) write_u32(c, out, (uint32_t)g_threads[i].prio);
+                    c->r[1] = (uint32_t)g_threads[i].prio;
+                    return 0;
+                }
+            }
+            return RESULT_INVALID_HANDLE;
+        }
         case 0x0C: { /* SetThreadPriority(handle, prio) -> Result */
             Handle *hh;
-            if (c->r[1] > 0x3Fu) return RESULT_OUT_OF_RANGE;
+            if (c->r[1] > KS_PRIO_LOWEST) return RESULT_OUT_OF_RANGE;
+            /* Azahar: ResourceLimit Priority der Kategorie Application = 0x18;
+               hoeher (kleinerer Wert) darf eine App nicht setzen. */
+            if (c->r[1] < KS_PRIO_APP_MAX) return RESULT_NOT_AUTHORIZED;
+            if (c->r[0] == 0xFFFF8000u) { g_main_prio = (int)c->r[1]; return 0; }
             hh = get_handle(c->r[0]);
             if (hh == NULL || hh->kind != HK_THREAD) return RESULT_INVALID_HANDLE;
             for (int i = 0; i < 32; i++) {
@@ -3448,6 +3632,24 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             }
             return 0;
         }
+        case 0x0F: { /* GetThreadIdealProcessor(out*, handle) */
+            uint32_t out = c->r[0], handle = c->r[1];
+            if (handle == 0xFFFF8000u) {
+                if (out) write_u32(c, out, (uint32_t)g_main_proc);
+                c->r[1] = (uint32_t)g_main_proc;
+                return 0;
+            }
+            for (int i = 0; i < 32; i++) {
+                if (g_threads[i].used && g_threads[i].handle == handle) {
+                    if (out) write_u32(c, out, (uint32_t)g_threads[i].proc_id);
+                    c->r[1] = (uint32_t)g_threads[i].proc_id;
+                    return 0;
+                }
+            }
+            return RESULT_INVALID_HANDLE;
+        }
+        case 0x11: /* GetCurrentProcessorNumber -> r0 = Core (0 App, 1 Sys) */
+            return (uint32_t)cur_proc(c);
         case 0x0A: { /* SleepThread(ns): echte Wartezeit (Azahar svc.cpp:
                         WakeAfterDelay; ns <= 0 = sofort weiter, Yield) */
             int64_t ns = (int64_t)((uint64_t)c->r[0] | ((uint64_t)c->r[1] << 32));
@@ -3562,13 +3764,14 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             int64_t interval = (int64_t)((uint64_t)c->r[3] | ((uint64_t)c->r[4] << 32));
             if (hh == NULL || hh->kind != HK_TIMER) return RESULT_INVALID_HANDLE;
             if (initial < 0 || interval < 0) return RESULT_OUT_OF_RANGE;
-            /* Azahar Timer::Set laesst den Signalzustand unveraendert. */
-            hh->timer_interval = (uint64_t)interval / 1000ull;
+            /* Azahar Timer::Set laesst den Signalzustand unveraendert.
+               Zeitbasis sind Host-Nanosekunden (CoreTiming-Takt ~3,7 ns). */
+            hh->timer_interval = (uint64_t)interval;
             if (initial == 0) {
                 hh->timer_active = 0;
                 hh->signaled = 1;              /* sofort faellig */
             } else {
-                hh->timer_due = host_us() + (uint64_t)initial / 1000ull;
+                hh->timer_due = host_ns() + (uint64_t)initial;
                 hh->timer_active = 1;
             }
             return 0;
@@ -3685,11 +3888,15 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             }
             return 0;
         }
-        case 0x25: { /* WaitSynchronizationN(out, handles, count, wait_all, timeout) */
+        case 0x25: { /* WaitSynchronizationN: SVC-ABI (Azahar svc_wrapper.h)
+                        r1 = Handle-Liste, r2 = Anzahl, r3 = wait_all,
+                        Timeout (s64) in r0:r4 (Stack-Argumente werden in die
+                        freien Register r0/r4 umgehaengt). Der Index geht als
+                        Output-Parameter in r1 zurueck. */
             static int wl = 0;
-            uint32_t out = c->r[0], hlist = c->r[1], cnt = c->r[2];
+            uint32_t hlist = c->r[1], cnt = c->r[2];
             int32_t wait_all = (int32_t)c->r[3];
-            uint64_t timeout_ns = (uint64_t)c->r[4] | ((uint64_t)c->r[5] << 32);
+            uint64_t timeout_ns = (uint64_t)c->r[0] | ((uint64_t)c->r[4] << 32);
             Handle *objs[32];
             int idx = -1;
             uint32_t res = 0;
@@ -3734,11 +3941,9 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                 return res;
             }
             if (getenv("HLE_WAIT_LOG"))
-                printf("[wait25 idx] tid=%u out=%08X cnt=%u -> idx=%d\n",
-                       cur_tid(c), out, cnt, idx);
-            if (!wait_all && out != 0 && out != 0xFFFFFFFFu)
-                write_u32(c, out, (uint32_t)idx);
-            /* SDK-Wrapper (0x287B90) liefert den Index zusaetzlich in r1. */
+                printf("[wait25 idx] tid=%u cnt=%u -> idx=%d\n", cur_tid(c), cnt, idx);
+            /* SVC-ABI: der Index ist Output-Parameter in r1; der SDK-Stub
+               (0x287B90) speichert r1 nach *out. */
             c->r[1] = (uint32_t)idx;
             return 0;
         }
@@ -3764,17 +3969,20 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             }
             return 0;
         }
-        case 0x28: { /* GetSystemTick -> 64 Bit in r0:r1 (echte Zeitbasis) */
-            static uint64_t base_ms = 0;
-            uint64_t now = GetTickCount64();
-            if (base_ms == 0) base_ms = now;
-            g_tick = (now - base_ms) * 268111ull;   /* ~268.111 MHz */
+        case 0x28: { /* GetSystemTick -> 64 Bit in r0:r1.
+                        Azahar: GetTimer().GetTicks() mit
+                        BASE_CLOCK_RATE_ARM11 = 268111856 Hz, also echte
+                        Nanosekunden seit dem Nullpunkt (kein 15,6-ms-Raster
+                        von GetTickCount64). */
+            uint64_t ns = host_ns() - g_boot_ns;
+            g_tick = ks_tick_from_ns(ns);
             g_tick_calls++;
             c->r[1] = (uint32_t)(g_tick >> 32);
             return (uint32_t)g_tick;
         }
-        case 0x2A: { /* GetSystemInfo(type, out u64*, param, process) */
-            uint32_t type = c->r[0], out = c->r[1];
+        case 0x2A: { /* GetSystemInfo: out-Pointer r0, type r1;
+                        Ausgabe (s64) als Output-Parameter in r1:r2. */
+            uint32_t type = c->r[1], out = c->r[0];
             uint64_t value = 0;
             switch (type) {
                 case 0x10000: value = 0x08000000ull; break;  /* FCRAM gesamt */
@@ -3784,12 +3992,14 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                 default: value = 0; break;
             }
             if (out) write_u64(c, out, value);
+            c->r[1] = (uint32_t)value;
+            c->r[2] = (uint32_t)(value >> 32);
             if (g_log) printf("[svc] GetSystemInfo type=0x%X -> 0x%llX\n", type,
                               (unsigned long long)value);
             return 0;
         }
-        case 0x2B: { /* GetProcessInfo(type, out, process) */
-            uint32_t type = c->r[0], out = c->r[1];
+        case 0x2B: { /* GetProcessInfo: out-Pointer r0, type r1 */
+            uint32_t type = c->r[1], out = c->r[0];
             uint64_t value = 0;
             switch (type) {
                 case 0: value = 0x00000020ull; break;
@@ -3798,6 +4008,8 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                 default: value = 0; break;
             }
             if (out) write_u64(c, out, value);
+            c->r[1] = (uint32_t)value;
+            c->r[2] = (uint32_t)(value >> 32);
             return 0;
         }
         case 0x2D: { /* ConnectToPort(out_ptr=r0, name=r1) -> r1 = handle */
@@ -3822,13 +4034,29 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             dispatch_ipc(handle);
             return 0;
         }
-        case 0x35: /* GetProcessId(out, process) */
+        case 0x35: /* GetProcessId: Prozess-Handle r1, PID als Output in r1 */
             if (c->r[0]) write_u32(c, c->r[0], 0x20);
+            c->r[1] = 0x20;
             return 0;
-        case 0x37: { /* GetThreadId(out_*, thread): pro Thread eindeutig */
-            uint32_t tid = 0x100u + ((c->tpidruro >> 12) & 0xFu);
-            if (c->r[0]) write_u32(c, c->r[0], tid);
-            return tid;
+        case 0x37: { /* GetThreadId: Handle in r1, Thread-Id als Output in r1
+                        (SVC-ABI; der SDK-Stub 0x283354 speichert r1). */
+            uint32_t handle = c->r[1];
+            uint32_t tid;
+            if (handle == 0xFFFF8000u) {
+                tid = 0x100u + cur_tid(c);      /* aktueller Thread */
+            } else {
+                int found = 0;
+                tid = 0;
+                for (int i = 0; i < 32; i++)
+                    if (g_threads[i].used && g_threads[i].handle == handle) {
+                        tid = 0x100u + (uint32_t)g_threads[i].id;
+                        found = 1;
+                        break;
+                    }
+                if (!found) return RESULT_INVALID_HANDLE;
+            }
+            c->r[1] = tid;
+            return 0;
         }
         case 0x38: { /* GetResourceLimit(out, process) */
             uint32_t out = c->r[0];
@@ -3861,6 +4089,19 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             }
             return 0;
     }
+}
+
+/* Oeffentlicher SVC-Einstieg: nach dem eigentlichen Kommando folgt der
+ * Preemptionspunkt. Azahar ruft nach jedem SVC system.PrepareReschedule();
+ * dort laeuft ein durch das SVC bereiter Thread mit hoeherer Prioritaet vor
+ * der Rueckkehr in den Gastcode. Im kooperativen Port ist das ein
+ * guest_yield(), das den Gast-Lock kurz abgibt. */
+uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
+    uint32_t r = hle_svc_dispatch(c, imm);
+    if (g_guest_lock_init && !g_no_lock && !g_det_sched &&
+        kernel_higher_ready(cur_tid(c), cur_prio(c)))
+        guest_yield();
+    return r;
 }
 
 /* Platzhalter, bis die GPU angebunden ist */

@@ -471,6 +471,37 @@ Quelle: Azahar `renderer_software/sw_rasterizer.cpp`, `sw_clipper.cpp`,
   Byte-/Halbwort-Offsets ab `Align(pc+4,4)`. Der Scanner legt diese Ziele als
   Bloecke an (`scan.ldr_pc_table`/`tbb_table`).
 
+## Kernel: Threads, Prioritaeten, SVC-ABI
+
+Quelle: Azahar `core/hle/kernel/{thread.h,thread.cpp,svc.cpp,svc_wrapper.h,wait_object.cpp}`.
+
+* Prioritaeten `0..63`, **kleiner = hoeher**. `ThreadPrioDefault = 0x30`
+  (Hauptthread einer App; der ExHeader dieses Titels hat in
+  `ARM11_SystemLocalCaps.priority` ebenfalls 0x30), `ThreadPrioUserlandMax =
+  0x18` (ResourceLimit `Priority` der Kategorie Application: `SetThreadPriority`
+  mit kleinerem Wert liefert `0xD9001BEA` NotAuthorized), `ThreadPrioLowest = 0x3F`.
+* `svcCreateThread`-ABI: r0 = Prioritaet, r1 = Entry, r2 = Arg, r3 = Stack-Top,
+  r4 = processor_id (-2 = Ideal-Prozessor aus dem ExHeader, -1 = Core 0);
+  Handle als Output in r1. Prioritaet > 0x3F → `0xD8E007FD`.
+* SVC-Rueckgaben: `Result` in r0, Pointer-Output-Parameter als **Wert** in den
+  folgenden Registern (nicht durch den Pointer geschrieben). Beispiele:
+  `GetThreadId` (Handle r1) → Id in r1; `GetProcessId` → PID in r1;
+  `GetSystemInfo`/`GetProcessInfo` (out-Pointer r0, Typ r1) → s64 in r1:r2.
+  Der SDK-Stub speichert den Registerwert anschliessend nach `*out`.
+* `svcWaitSynchronizationN`: r1 = Handle-Liste, r2 = Anzahl, r3 = wait_all,
+  Timeout (s64) in **r0:r4** (Stack-Argumente werden in freie Register
+  umgehaengt), Index als Output in r1. Bei doppelten Handles meldet Azahar
+  beim Aufwachen aus dem Warten den **letzten** Index
+  (`Thread::GetWaitObjectIndex` sucht rueckwaerts), beim sofortigen Treffer
+  den ersten.
+* Wecken: `WaitObject::WakeupAllWaitingThreads` weckt den bereiten Waiter mit
+  der kleinsten `current_priority`; bei Gleichstand den zuerst eingetragenen.
+* `svcGetSystemTick` liefert `GetTimer().GetTicks()` mit
+  `BASE_CLOCK_RATE_ARM11 = 268111856` Hz (CoreTiming), also echte
+  Nanosekunden-Zeitbasis; `svcSleepThread(0)` ist ein Yield
+  (`WaitCurrentThread_Sleep`).
+* Prozessor-IDs: 0 = AppCore, 1 = SysCore, 2/3 nur New3DS.
+
 ## Quellen
 * https://www.3dbrew.org/wiki/IPC, /RomFS, /GSP_Shared_Memory, /GPU/Internal_Registers
 * libctru: `source/services/{apt,gsp,srv,fs}.c`, `source/ndsp/ndsp.c`
