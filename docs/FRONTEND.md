@@ -90,3 +90,23 @@ Link). Belegung:
 
 Tasten werden mit der Tastatur ODER-verknuepft; der Stick ersetzt das
 Tastatur-Circle-Pad nur, wenn er die Deadzone verlaesst.
+
+## Diagnose-CLI fuer Testlaeufe
+
+```
+out/port.exe [romfs] [--frames N] [--shot datei.bmp] [--shot-every N]
+             [--press taste@frame[:dauer[:x:y]],...]
+```
+
+* `--frames N` beendet nach N Host-Frames (`--shot` allein setzt 600).
+* `--shot datei.bmp` schreibt beim Beenden ein BMP des zusammengesetzten
+  Bildes (400x480: oben 400x240, unten 320x240 ab x=40,y=240).
+  `--shot-every N` schreibt zusaetzlich alle N Host-Frames
+  `name_000600.bmp` (Szenenfolge dokumentieren).
+* `--press` haelt eine logische Taste (`a`, `b`, `x`, `y`, `start`,
+  `select`, `touch`) fuer `dauer` Host-Frames ab `frame` gedrueckt
+  (Standard 10). `touch` nimmt zusaetzlich Koordinaten auf dem unteren
+  Screen auf (`touch@9000:20:160:120`, Standard 160,120); Werte werden auf
+  0..319 bzw. 0..239 begrenzt.
+* Alle drei Optionen sind reine Diagnose: die Eingabe geht denselben Weg wie
+  Tastatur/Maus (`hle_hid_set_input`), es wird kein Gastzustand gesetzt.

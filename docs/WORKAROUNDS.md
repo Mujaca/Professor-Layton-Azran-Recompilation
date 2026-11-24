@@ -956,6 +956,127 @@ Decoder beim Intra-Frame mehr als einen 96-Byte-Chunk anfordern muss und
 welches Event/Semaphor den Kopierer weckt. Erst danach ist eine
 Kernel-/Service-Korrektur belegbar.
 
+### Chunk-Geber vermessen: 96-Byte-Pakete, Intra-Frame liegt in einem 4-KiB-Puffer – Befund 2026-11-24
+
+**Diagnose (nur lesend):** `ARM_WATCH` gibt jetzt je Treffer eine laufende
+Nummer und je 8 Woerter ab `r0`, `r1`, `r5` aus (`[watchmem]`), siehe
+`docs/TOOLS.md`. Damit sind die Eingangswerte der Aufrufe 60-64 belegt.
+
+**Treiberobjekt (r0 von `fn_0017A6A0` = `0x0CFFFA24`), Felder:**
+
+| Feld | Wert | Bedeutung |
+|---|---|---|
+| `+0x00` | `0x0C682378` | Decoderobjekt (`fn_0016A500`) |
+| `+0x04` | `0x0CFFF8A4` | 24-Pointer-Historie der letzten Chunks |
+| `+0x08` | `0x18` | Historiegroesse 24 |
+| `+0x0c` | 0 … 0x17 | Historien-Index (laeuft um) |
+| `+0x10` | 0/1 | `([chunk] & 0x8000) >> 15` des **vorigen** Aufrufs |
+| `+0x14` | 0 | Freigabe-Flag (immer 0 im Stall) |
+| `+0x18` | `0x200` | Modus → Handler `[0x170ABC]` = `fn_0016A500` |
+| `+0x1c` | 1 | Aufruf-Flag (immer 1) |
+
+Die Modi sind Zeiger auf globale Funktionszeiger: `0x100` → `[0x16A4BC]` =
+`0x163F00`, `0x200` → `[0x170ABC]` = **`0x16A500`**, `0x400` → `[0x163EBC]` =
+`0x15D900`.
+
+**Chunk-Folge (64 Aufrufe, `[watch #n] r1`):** `#0 0CABDF28` (+0x1BC),
+`#1…#36` je +0x60, `#37 0CFFEE4C`, `#38 0CABDF80`, `#39…#61` je +0x60,
+`#62 0CABDF28`, `#63 0CABE504`. Die Chunk-Inhalte sind ueberwiegend
+`FFFF7FFF FFFFFFFF …` (Skip-Makrobloecke); `#0`, `#62`, `#63` enthalten echte
+Koeffizienten. Die Woerter im Gast stehen 32-Bit-byte-getauscht zur Datei
+(`0D BE 04 93` → `9304BE0D`), wie der Kopierpfad `0x20D2CC` es macht.
+
+**Zuordnung zur Datei** (`m999.moflex`, 0x912A4 Byte, Suchmuster = 12 Byte
+Chunk-Kopf, 32-Bit-Tausch rueckgaengig): `#0` → Datei `0xC5`, `#1` →
+`0x287` (Δ0x1C2 = 450, Chunk-Δ0x1BC), `#62` → `0x1A85`, `#63` → `0x2065`
+(Δ0x5E0 = 1504, Chunk-Δ0x5DC). Die Datei ist also in **96-Byte-Pakete**
+zerlegt (P-Frames), dazwischen groessere Pakete.
+
+**Frame-Flag richtiggestellt:** Die 16-Bit-Kopfzeile ist das *niedrige*
+Halbwort des ersten Wortes (`[r4+0x10]` beim naechsten Aufruf belegt es):
+`#62` beginnt mit `0xE8C2` (Bit 15 = 1), `#63` mit `0x1397` (Bit 15 = 0).
+Der Intra-/Refresh-Frame ist also `#62` (Datei `0x1A85`), nicht `#63`:
+Aufruf 62 verbraucht 1500 Byte und landet exakt auf dem naechsten
+Paketanfang (Datei `0x2065`). Der stallende Aufruf 63 ist ein
+gewoehnlicher P-Frame (Bit 15 = 0) und verbraucht trotzdem 6390 Byte.
+
+**Warteschlange statt Ring:** Der Puffer, auf den die Chunk-Zeiger zeigen, ist
+ein **wachsender Byte-Puffer** (Stream-Objekt `0x0CFFFE14`):
+`+0x08` Basis `0x0CABDF28`, `+0x0c` Kapazitaet **`0x1000`** (4 KiB).
+`ARM_MEMWATCH=0CFFFE1C`/`=0CFFFE20` zeigt das Wachstum
+`0x1BC → 0x378 → 0x6F0 → 0x800 → 0xC00 → 0x1000` und Umzuege der Basis
+(`0CABDD08 → 0CABDEE4 → 0CABE27C → 0CABE98C → 0CABF1AC → 0CABDF28`), jeweils
+von `0x0020D068+0x2BC` (generisches Puffer-Wachstum). Bei `#63` liegt der
+Zeiger bei Offset `0x5DC`, es sind also nur `0x1000-0x5DC = 0xA24` (2596)
+Byte bis zum Pufferende – der Decoder verbraucht aber **6390** Byte
+(`0x18F6`). Das passt nicht in den Puffer.
+
+**Kein Laengen-/Bounds-Check im Decoder:** `fn_0016BBE4` liest den Bitstrom
+aus `[obj]`; der Refill `0x16C568` ist `ldrh sl,[r1],#2` ohne Grenzpruefung,
+und `0x16BD08..0x16BD18` liefert nur `r1-start-2` als verbrauchte Bytes
+zurueck. Die Entscheidung „genug Daten?“ kann also nur auf der
+Bereitstellungsseite liegen.
+
+**Aufrufkette (belegt, nur ein statischer Aufrufer je Stufe):**
+Presenter `fn_00218248` ruft in Zeile `0x21845C` den VTable-Slot `[obj+0x14]`
+(`r0=[r4+0x188]`, `r1=[sp+0x1c]`); das ist `fn_0033C9E4` →
+`fn_003902E0` (Queue-Push, Grenze `[+0x38] < [+8]`) → `fn_0017A6A0` →
+Handler `fn_0016A500`. Den Zeiger liefert vorher `fn_00218A94`; die
+Peek-Funktion `0x3905E8` gibt `[stream+0x48]` zurueck (nur einen Zeiger,
+**keine Laenge**).
+
+**Folgerung (Hypothese, noch nicht bewiesen):** Fuer den Frame ab Datei
+`0x2065` wird der Decoder mit einem Zeiger in einen Puffer gerufen, der nur
+2596 Byte Restkapazitaet hat. Entweder hat die Paketgroessen-Bestimmung aus
+dem Container fuer dieses Paket nicht 6390 Byte geliefert (dann wurde zu
+wenig angehaengt), oder der Decoder wird gerufen, bevor der Puffer fuer das
+grosse Paket gewachsen ist. **Naechster Schritt:** in `fn_0035737C`
+(Paketkopf-Parser, Byte `[src+idx]`, Flags in Bit 0/1) und `fn_00358958`
+(Index-Lookup, Varint-Reader `0x20D5A8`, Kopierpfad `0x358FA8`) die
+berechnete Paketgroesse fuer den Index protokollieren und mit den 6390 Byte
+und dem naechsten Paketanfang (Datei `0x2065 + 6390 = 0x3943`) vergleichen;
+danach Funktion-Differenztest (Unicorn) fuer den Parser. Kein Workaround, kein
+Recompiler-Fehler bisher belegt.
+
+### Decode-Queue: Commit endet 2548 Byte vor dem Frame-Ende – Befund 2026-11-24
+
+**Befund (nur Diagnose, kein Gastzustand):** Die Praesentations-/Decode-Queue
+ist ein echter Ring; ihre Felder sind jetzt vollstaendig belegt. Der
+Ringzustand wurde je `fn_0037E6D4` (Peek) ueber `ARM_WATCH=0x37E6D4`
+ausgelesen (die 8 Woerter ab `r0` = Queue-Objekt, im Lauf `0x0CFFFE14`):
+
+| Feld | Wert im Stall | Bedeutung |
+|---|---|---|
+| `+0x08` | `0x0CABDF28` | Basis des Byte-Rings |
+| `+0x0c` | `0x1000` | Kapazitaet (4 KiB) |
+| `+0x10` | `0x0FD0` | vom Produzenten **committetes Ende** |
+| `+0x14` | `0x05DC` | Leseposition des Konsumenten |
+| `+0x18` | `0x0FD0` | Schreibposition |
+| `+0x1c` | `0x09F4` | verfuegbar = Ende − Leseposition |
+
+**Ablauf:** Vor dem Intra-Frame wird der Ring umgesetzt (Ende `0x0F44`,
+Lesepos `0x08F8`, verfuegbar `0x60`), dann steht `Ende = Schreibpos = 0x0FD0`
+und die Leseposition beginnt bei 0. Frame #62 (Intra) beginnt damit bei
+Offset 0 und wird mit exakt `0x5DC` (1500) Byte dekodiert; seine Daten
+entsprechen Datei `0x1A85..0x2065`. Frame #63 beginnt korrekt bei
+Offset `0x5DC` (Inhalt = Datei `0x2065`, `97 13 E8 0F …`).
+
+**Widerspruch:** Im Ring sind ab `0x5DC` nur noch `0x0FD0 - 0x5DC = 0x9F4`
+(2548) Byte committet. Der Decoder verbraucht fuer #63 aber `0x18F6` (6390)
+Byte (`r1` endet bei `0x0CABFDFA` = Basis + `0x1ED2`) und liest damit 3842
+Byte hinter dem Commit bzw. 5342 Byte hinter der Ringkapazitaet. Da ein
+Frame nicht ueber das Ringende laufen kann (der Bit-Refill `0x16C568` ist
+`ldrh [r1],#2` ohne Grenzpruefung) und #62 exakt an der Dateigrenze endet,
+ist die Grenze fuer #63 entweder falsch berechnet/zu wenig committet, oder
+der P-Frame-Parser liest ueber sein Frame-Ende hinaus (Zustand aus dem
+Intra-Frame).
+
+**Naechster Schritt:** Laenge des Frames #63 aus dem Demuxer-Deskriptor
+(`[stream+0x34]`-Ring, Eintrag `+4` = Zeiger, `0x37E6D4`) protokollieren und
+mit 2548 vergleichen: ist sie groesser, ist der Commit zu kurz (Produzent);
+ist sie kleiner/gleich, ist der P-Frame-Parse falsch (Recompiler/Decoder-
+Zustand, dann Differenztest des Decoders). Kein Workaround eingebaut.
+
 ### Mobiclip-Decoder: Film haengt nach 41 Bildern – behoben 2026-11-24
 
 **Befund:** Der Film `m999.moflex` hat 520 Bilder (unabhaengiger Parser
@@ -987,6 +1108,115 @@ in der Azahar-Referenz (Gap 112/312). Der Y2R-Ausgabepuffer enthaelt die
 echten Filmbilder (8x8-Kacheln, RGB24, 512x240). Offen: das Spiel zeichnet
 die Textur noch nicht (keine PICA-Draws), der Bildschirm bleibt einfarbig.
 
+### Nach dem Intro-Film: zweite Wiedergabe ohne Praesentation; Savedata-Hypothese ausgeschlossen – Befund 2026-11-24
+
+**Auftragshypothese (fs/Savedata) ist widerlegt.** Die IPC-/fs-Antworten der
+Titel-/Savedata-Initialisierung sind vollstaendig und entsprechen Azahar; sie
+sind nicht die Ursache fuer die fehlenden Draws. Belege aus zwei 900-Frame-
+Laeufen (`HLE_LOG=1`, je einmal mit vorhandenem und mit geloeschtem
+`out/savedata`):
+
+* Vorhandener Spielstand: `OpenArchive 4 -> 0`, `GetFormatInfo -> 0`,
+  `OpenFile /head.lt6 -> 0`, `Read` liefert die vollen `0x9768` Byte.
+* Frischer Start (kein `out/savedata`): `OpenArchive 4 -> C8A04554`
+  (`NotFormatted`). Das Spiel formatiert selbst und zwar erfolgreich:
+  `0x084C FormatSaveData -> 0`, `OpenArchive -> 0`, `ControlArchive -> 0`,
+  `OpenFile -> C8804470` (NotFound), `CreateFile size=38760 -> 0`,
+  `OpenFile -> 0`, `WriteFile 38760 Byte -> 0`, `ControlArchive -> 0`.
+  Danach laeuft es in exakt denselben Zustand wie mit vorhandenem Stand.
+* `CreateFile "/gamecoin.dat" -> C8A044B4` ist `FileAlreadyExists` und damit
+  korrekt: Azahar protokolliert an derselben Stelle
+  (`reports/azahar_trace.txt:365`, `savedata_archive.cpp:229`) ebenfalls
+  "already exists" und liefert den Fehler; das anschliessende
+  `OpenFile mode=3` gelingt in beiden Laeufen.
+
+**Korrektur (2026-11-24): Es gibt keine zweite Wiedergabe.** Die fruehere
+Deutung des zweiten `m999`-Reads als "zweite Wiedergabe" ist widerlegt; der
+Y2R-/Present-Pfad ist intakt. Belege (`ARM_WATCH`, `HLE_PERFMAP_FILE`,
+isolierte Laeufe):
+
+* `fn_00218660` steigt **nie** frueh aus: `0x2186C0` (alle Argumente geprueft)
+  520 Treffer, `0x218700` (jeder Fruehausstieg) **0**. `[sp+4]`, `r4` und
+  `[sp+0x40]/[0x48]/[0x50]` sind also nie leer.
+* Der Presenter endet regulaer: `fn_002779F8` liefert nach dem Film Zustand 8
+  (kurz), dann 3 und **2**; `ARM_WATCH=0x312E60` zeigt `r0` = 1/5/2
+  (zuletzt 159x Zustand 2). In Zustand 2 ruft `fn_00218248` sofort `0` zurueck.
+* `Movie::play` (`0x311CE0`) und Open (`0x311D5C`) werden je genau **1x**
+  gerufen (Boot); Resume (`0x311C5C`) **0x**. Der eingebaute Selbst-Neustart
+  im Zustand-2-Pfad (`0x312684` -> `0x277A44` = `ldrsb [stream+0xa74]`) laeuft
+  nicht, weil das **Loop-Flag 0** ist: `ARM_WATCH=0x1F78D8` zeigt
+  `strb r1,[wrapper,#0xa74]` mit `r1=0`, direkt vor dem ersten Film-Read.
+  Der Aufrufer `0x35ECFC` oeffnet den Film ueber den Zweig `r3 == 0`
+  (`0x35EE88`); der andere Zweig (`0x35EE0C`) setzt `loop = 1`.
+* Der zweite `m999`-Read ist ein Buffer-Wrap desselben Demuxers (gleicher
+  Reader-Thread `th=F8F`, Block `0x33E8F8`, dieselbe Datei Handle 22,
+  sequenziell `0x26B10510..0x26BA0514`); `0x1F76D0` (Stream-Open) hat genau
+  1 Treffer, es wird kein zweiter Player/Stream angelegt.
+
+Die Decoder-Threads laufen waehrend/nach dem Film weiter (Perfmap), das ist
+normale Decodierung bis zum Stream-Ende. Im Frontier-Lauf bleibt es bei 520
+`StartConversion`, weil der Titel die Hintergrundwiedergabe noch nicht
+anfordert; der Bildschirm bleibt schwarz (`--shot`: eine Farbe `000000`).
+
+**Draw-Pfad:** `0x27B34C` und der Builder `0x1323FC` werden nie ausgefuehrt
+(Perfmap: 0 Treffer). Auch keiner der fuenf Wrapper (`fn_0011AD4C`,
+`fn_00250FE8`, `fn_00256E40`, `fn_0027B6CC`, `fn_002812EC`) laeuft. Die 14
+pro Frame eingereichten Listen (`0x1686E8xx`/`0x168B58xx`) werden per
+`fn_001ED4B8` aus einer Vorlage kopiert (Schreiber `0x1ED6C8`/`0x28EEE8`,
+`ARM_MEMWATCHRANGE`), enthalten nur Setup und kein `0x22E/0x22F`. Sie werden
+also auch ohne die zweite Filmwiedergabe nicht zu Draws.
+
+**Nebenbefund (nicht geaendert):** `boss:U 0x000E GetTaskIdList` und
+`0x0016 ReceiveProperty(0x35/0x36)` sind im Port noch generisch
+(„UNIMPLEMENTIERT“, Result 0 ohne Daten); Azahar liefert dort `TotalTasks`
+(u16) bzw. die Task-ID-Liste. Ein Zusammenhang mit dem Draw-Gate ist nicht
+belegt.
+
+**Naechster Schritt:** Beim Titel-Szenen-Start ansetzen: die Engine oeffnet
+den Film in `0x35ECFC`; erst ein Aufruf mit `r3 != 0` setzt das Loop-Flag und
+laesst den Player aus Zustand 2 neu starten (Self-Restart `0x312684` ->
+`play`). Dieser Aufruf (bzw. der Titel-Szenen-Zustand, der ihn ausloest)
+kommt im 60-s-Lauf nicht; er haengt am noch fehlenden Draw-/Szenen-Pfad
+(M3/M4), nicht am Y2R-Treiber. Kein Workaround eingebaut.
+
+### Filmtonspur: DSP-Quellen spielen die BCSTM vollstaendig ab – Hypothese widerlegt 2026-11-24
+
+**Auftragshypothese** („der Stream-Thread wartet auf freie DSP-Puffer, das
+HLE-DSP meldet nichts als abgespielt“) ist **widerlegt**. Belege aus einem
+25-s-Lauf mit `HLE_LOG=1 HLE_AUDIO_LOG=1` (Laeufe `scratch/diag_audio2.log`,
+`scratch/diag_state2c.log`):
+
+* **Datei vollstaendig gelesen:** `MOV_999.dspadpcm.bcstm` ist `0x4F4A0`
+  Byte. Der Port liest `0x40`/`0x140` ab `0x379F19C0` (BCSTM-Kopf, 0x220)
+  und danach 14x `0x4000` + `0x3280` ab `0x379F1BE0`; der letzte Read endet
+  bei `0x37A40E60`, also exakt am Dateiende. Alle Reads liefern `done == len`.
+* **Ton vollstaendig abgespielt:** Quellen 0 und 1 (ADPCM, mono) bekommen
+  Puffer-IDs 1…20 (`18x 14336` + `11258` Samples). `dequeue` schreitet fort,
+  `buffer_position` laeuft mit, nach dem letzten Puffer meldet der DSP den
+  Underrun (`enabled=0`, `buffer_update=1`, `last_buffer_id=20`), das Spiel
+  setzt selbst `enable=0` (dirty `0x20010000`). Die Statusfelder
+  `is_enabled`/`current_buffer_id_dirty`/`current_buffer_id`/
+  `last_buffer_id`/`buffer_position` aus `source.cpp` funktionieren also.
+* **Reihenfolge:** `ARM_WATCH=0x312684` (Zustand-2-Pfad des Movie-Players,
+  Loop-Check) trifft erstmals **vor** dem Audio-Underrun (Logzeile 4259 vs.
+  4799). Der Film ist bereits in Zustand 2 (fertig), waehrend die Tonspur
+  noch laeuft; der Szenenwechsel kann nicht auf das Tonende warten.
+
+**Was den Szenenwechsel stattdessen aufhaelt (belegt, nicht behoben):** Der
+Movie-Task bleibt im Task-Runner `fn_0012B3EC` haengen. Er ruft weiterhin
+`fn_00380D34 -> fn_00312E98` (Movie-Update) auf; der Presenter `fn_00218248`
+kehrt in Zustand 2 sofort mit 0 zurueck (`HLE_STALLDUMP`, Thread 0:
+`0x00218270/0x00218280`), und der Stream-Thread schreibt den Moflex-Ring
+weiter (zweiter Dateidurchlauf, bekannt). Nach dem Film folgen
+**keine** neuen `fs OpenFile`/Archiv-Ladevorgaenge (kein Titelressourcen-
+Start), und `fn_0035ECF0` mit `loop=1` (Neustart des Films fuer den Titel)
+kommt nie. Der Asset-Loader-Thread (TLS 14) fuehrt vorher noch 39
+Dekompressions-Aufrufe (`fn_00270B14`) aus und steht danach idle im
+Futex des Task-Runners. Naechster Schritt: den Aufraeumpfad des Movie-Tasks
+suchen (wer ruft die vtable-Methode `0x380D1C`, den Destruktor) und die
+Bedingung, unter der der Intro-Scene-Task den Titel-Scene-Task startet.
+Kein Workaround eingebaut; `HLE_AUDIO_LOG` wurde nur um Quellen-/Puffer-
+Diagnosezeilen erweitert (reine Diagnose, kein Gastzustand).
 ### Erster selbst gerenderter Frame (M3/M4) – 2026-11-24
 
 Drei weitere Fehler verhinderten nach dem Film jedes Bild:
