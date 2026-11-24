@@ -955,3 +955,30 @@ Freigabe-Event beobachten (`ARM_MEMWATCHRANGE` auf die Ringstruktur
 Decoder beim Intra-Frame mehr als einen 96-Byte-Chunk anfordern muss und
 welches Event/Semaphor den Kopierer weckt. Erst danach ist eine
 Kernel-/Service-Korrektur belegbar.
+
+### Mobiclip-Decoder: Film haengt nach 41 Bildern – behoben 2026-11-24
+
+**Befund:** Der Film `m999.moflex` hat 520 Bilder (unabhaengiger Parser
+`tools/cosim/moflex.py`); Bild 2-62 sind identische 94-Byte-Bilder, Bild 63/64
+das erste mit Inhalt (1.498/1.108 Byte). Der Decoder las beim ersten
+Inhaltsbild 6.390 statt 1.108 Byte und geriet aus dem Bittakt. Unicorn auf
+den Originalbytes ab dem Port-Speicherabbild las genau 1.108 Byte;
+`tools/cosim/lockstep.py` zeigte die Abweichungen Block fuer Block.
+
+**Ursachen (alle im Recompiler, generisch behoben, je mit Testfall):**
+1. Pseudo-Aufruf `add lr, pc, #k; [push {.., lr}]; b<cond> ziel` mit LR auf
+   die Fortsetzung wurde als Sprung uebersetzt; das `pop {.., pc}` des Ziels
+   beendete die C-Funktion (`pseudo_aufruf_b_mit_lr`, `bedingter_pseudo_aufruf`).
+2. Logische S-Befehle mit rotiertem Immediate setzten C nicht auf Bit 31
+   (`tst r3, #0x80000000`, `tst_rotiertes_immediate_carry`).
+3. Berechnete Aufrufe `add lr, pc, #k; add pc, rX, rY`: die LR-Fortsetzung
+   war kein Blockanfang, lokale Ziele wurden per goto statt als Aufruf
+   ausgefuehrt (`berechneter_aufruf_lr_fortsetzung`).
+4. Zweistufige LR-Bildung `add lr, pc, #hi; add lr, lr, #lo`
+   (`berechneter_aufruf_lr_zweischritt`).
+
+**Ergebnis:** 520/520 y2r `StartConversion` (vorher 41). Offen: die
+Y2R-Quelladressen sind falsch (`SetSendingY 0x003EC9FD`, `SetSendingV
+0x41F00000`, Gap 0xFE70 statt 112), weil die Bildbeschreibung auf dem Stack
+(`fn_0031282C`, `vldr s0-s2, [r5]`) nicht befuellt wird – der Bildschirm
+bleibt einfarbig.

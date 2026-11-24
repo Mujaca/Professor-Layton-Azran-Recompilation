@@ -261,6 +261,92 @@ def call_target_thumb(ins, caller_thumb):
     return caller_thumb
 
 
+def lr_const_after(ins, lr_const, thumb):
+    """Fortschreibung eines statisch bekannten LR-Werts ueber eine Instruktion.
+
+    `add lr, pc, #imm` / `sub lr, pc, #imm` (auch `adr lr`) setzen LR auf eine
+    Konstante; jede andere Instruktion, die LR schreibt (mov, ldr, pop, bl ...),
+    macht den Wert unbekannt (None).
+    """
+    try:
+        ops = isa.split_operands(ins.op_str)
+    except Exception:
+        ops = []
+    if (ins.id in (A.ARM_INS_ADD, A.ARM_INS_SUB) and len(ops) >= 3
+            and isa.reg_num(ops[0]) == 14 and isa.reg_num(ops[1]) == 15
+            and ins.cc == A.ARM_CC_AL):
+        imm = isa.imm_value(ops[2])
+        if imm is not None:
+            base = ((ins.address + 4) & ~3) if thumb else (ins.address + 8)
+            return (base + (imm if ins.id == A.ARM_INS_ADD else -imm)) & 0xFFFFFFFF
+    if (lr_const is not None and ins.id in (A.ARM_INS_ADD, A.ARM_INS_SUB)
+            and len(ops) >= 3 and isa.reg_num(ops[0]) == 14
+            and isa.reg_num(ops[1]) == 14 and ins.cc == A.ARM_CC_AL):
+        # Zweischritt-Adressbildung: `add lr, pc, #hi; add lr, lr, #lo`.
+        imm = isa.imm_value(ops[2])
+        if imm is not None:
+            return (lr_const + (imm if ins.id == A.ARM_INS_ADD else -imm)) & 0xFFFFFFFF
+    try:
+        _, written = ins.regs_access()
+    except Exception:
+        written = ()
+    if A.ARM_REG_LR in written or ins.id in (A.ARM_INS_BL, A.ARM_INS_BLX):
+        return None
+    return lr_const
+
+
+def is_pseudo_call(ins, lr_const):
+    """`add lr, pc, #k ... b<cond> ziel` mit LR = nahe Fortsetzung hinter dem `b`.
+
+    Handgeschriebener Assembler (z. B. der Mobiclip-Videodecoder) baut so
+    Aufrufe: LR wird auf eine Fortsetzung gesetzt (oft zusaetzlich mit einem
+    eigenen Stack-Frame), dann wird mit `b` (auch bedingt) zu einer Routine
+    gesprungen, die mit `pop {..., pc}` bzw. `bx lr` zur Fortsetzung
+    zurueckkehrt. Semantisch ist das ein (bedingter) Aufruf; als Sprung
+    behandelt wuerde die Rueckkehr des Ziels die rekompilierte C-Funktion
+    verlassen und die Fortsetzung ueberspringen. Die Fortsetzung muss hinter
+    dem `b` liegen (hoechstens 0x100 Byte), sonst ist LR nur ein Datenregister.
+    """
+    if ins.id != A.ARM_INS_B or lr_const is None:
+        return False
+    if direct_target(ins) is None:
+        return False
+    nxt = ins.address + ins.size
+    return nxt <= (lr_const & ~1) <= nxt + 0x100
+
+
+def pseudo_call_info(blk, thumb):
+    """{adresse: fortsetzung} fuer Pseudo-Aufrufe (`b`) und berechnete
+    Spruenge (`add/ldr/mov pc, ...`) mit bekannter LR-Fortsetzung im Block."""
+    out = {}
+    lr = None
+    for ins in blk.insns:
+        if is_pseudo_call(ins, lr):
+            out[ins.address] = lr & ~1
+            if ins.cc == A.ARM_CC_AL:
+                lr = None
+            continue
+        if (lr is not None and op0_is_pc(ins)
+                and ins.id in (A.ARM_INS_ADD, A.ARM_INS_SUB, A.ARM_INS_LDR, A.ARM_INS_MOV)):
+            src = None
+            try:
+                ops = isa.split_operands(ins.op_str)
+                src = isa.reg_num(ops[1]) if len(ops) > 1 else None
+            except Exception:
+                pass
+            if src != 14:
+                nxt = ins.address + ins.size
+                if nxt <= (lr & ~1) <= nxt + 0x100:
+                    out[ins.address] = lr & ~1
+        lr = lr_const_after(ins, lr, thumb)
+    return out
+
+
+def pseudo_calls_in_block(blk, thumb):
+    """Adressen der `b`-Instruktionen eines Blocks, die Pseudo-Aufrufe sind."""
+    return {a for a, _ in pseudo_call_info(blk, thumb).items()}
+
+
 def decode_function(data, fn, visited):
     # Modus automatisch erkennen, falls der Seed falsch geraten war
     if isa.decode(data, fn.addr, thumb=fn.thumb) is None:
@@ -282,12 +368,32 @@ def decode_function(data, fn, visited):
         pc_const = {}
         # `ldr rX,[rB,rI,lsl #2]` mit pc-relativer Basis rB: Offset-Tabelle.
         off_tbl = {}
+        lr_known = None
         while True:
             ins = isa.decode(data, cur, thumb=fn.thumb)
             if ins is None:
                 break
             blk.insns.append(ins)
             visited[cur] = ins.size
+            if is_pseudo_call(ins, lr_known):
+                # `add lr, pc, #k; ...; b<cond> ziel` = Aufruf: Ziel als
+                # Funktion seeden und hinter dem `b` weiter dekodieren; die
+                # Fortsetzung (LR) ist bereits als Block vorgemerkt.
+                fn.calls.add((direct_target(ins), fn.thumb))
+                if ins.cc == A.ARM_CC_AL:
+                    lr_known = None
+                cur += ins.size
+                continue
+            new_lr = lr_const_after(ins, lr_known, fn.thumb)
+            if new_lr is not None and new_lr != lr_known:
+                # `add lr, pc, #k` setzt eine Rueckkehradresse fuer einen
+                # folgenden (oft berechneten) Aufruf. Die Fortsetzung muss ein
+                # Blockanfang sein, sonst findet der Dispatch nach der
+                # Rueckkehr kein Ziel und die C-Funktion endet vorzeitig.
+                tgt = new_lr & ~1
+                if tgt not in seen and isa.ARM_BASE <= tgt < isa.ARM_BASE + len(data):
+                    todo.append(tgt)
+            lr_known = new_lr
             ldrpc = ldrpc_literal_target(ins, fn.thumb, data)
             if ldrpc is not None:
                 fn.calls.add(ldrpc)
