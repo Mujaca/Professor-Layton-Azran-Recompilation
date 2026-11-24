@@ -99,6 +99,15 @@ deshalb lief der frühere Versuch in eine Endlosschleife; Puffer ist jetzt
 | – | generierter Code | unbekannte Aufrufziele = No-op (geloggt in `out/missing_calls.txt`) |
 | – | `arm_mem_read/write` | Zugriffe außerhalb des Speichers liefern 0 statt Abbruch (`ARM_STRICT=1` bricht ab) |
 | – | fs `OpenFile`, `file_command` | Sentinel-Dateislot und Erfolg auch bei fehlgeschlagenem Open; `romfs_image.bin` mit Offset +0x1000 |
+| – | `gpu_pica_virt_to_phys` | Adressen außerhalb VRAM/Linear-Heap bleiben unverändert (der Port hat keine MMU/Seitentabelle); echtes GSP lehnt sie ab |
+| – | `p_process_tri` | Rasterizer nach Azahar: Sutherland-Hodgman-Clipping (7 Ebenen + 0x47/0x48..0x4B), Viewport 0x41/0x43/0x68, Perspective-Divide, 12.4-Fixed-Point-Coverage + Top-Left-Bias, perspektivkorrekte Attribute, TEV 0x0C0..0x0FD inkl. Combiner-Buffer, Texturen 0x080..0x09F (alle 14 Formate inkl. ETC1/ETC1A4 mit Subtile `x/4+2*(y/4)`, 8x8-Morton, Wrap/Border, keine Filterung wie Azahar), Fog 0xE0/0xE1/0xE6/0xE8..0xEF (LUT-Upload mit Offset-Inkrement, Flip, Index/Fraktion, vor dem Depth-Test), Output-Merger 0x100..0x107 (Alpha-Blend, LogicOp, Alpha-Test, Kanalmasken) und Farb-/Tiefenziel 0x117/0x11C..0x11E (RGBA8/RGB8/RGB565/RGB5A1/RGBA4 in Azahar-Byte-Reihenfolge, D16/D24/D24S8, Depth-/Stencil-Test, 8x8-Morton, Schreibgrenzen des Farbziels). Fragment-Lighting 0x140..0x1D9 nach `sw_lighting.cpp` (Lichtquellen, Distanz-/Spot-Daempfung, Fresnel, Bump-Mapping, Clamp, LUT-Upload 0x1C5/0x1C8..0x1CF) in die TEV-Quellen Primary/SecondaryFragment sowie Texturtypen auf Einheit 0 (Projection2D, Cube/ShadowCube, Shadow2D inkl. Bias, tc0_w). **Noch offen:** Mipmaps, Proctex (Einheit 3). |
+
+Ohne Vertex-Programm (0x2CB/0x2CC) zeichnet der Port nichts mehr; der frühere
+Attribut-Fallback (Attribut 0 als Position, 1 als UV) und der Schreibpfad in
+den linearen RGB8-Host-Puffer `g_fb` ohne konfiguriertes Farbziel (0x11D) sind
+entfernt (2026-11-24). Damit gibt es keinen Pfad mehr, der ein Bild ohne
+GSP/PICA-Kommandos erzeugt.
+
 
 Entfernt 2026-11-24 (Fälschungen nach Azahar). Jeder Punkt wurde einzeln
 gebaut und mit `tools/frontier.py` gemessen; der Stand blieb **9/10
@@ -132,6 +141,12 @@ VBlank (Host-Takt 16 ms) über die InterruptRelayQueue an das registrierte
 Event; P3D/PPF/PSC0/PSC1/DMA werden von den GX-Kommandos ausgelöst
 (`gsp_process_cmdqueue`). Beleg: Frontier 4 → 9 Dienste (Divergenz boss:U)
 mit identischen 23 Patches.
+
+Seit dem PICA-Parser-Paket meldet der Kommandostrom P3D selbst: Register
+`0x010` (Finalize) vergleicht `irq_request` mit `irq_compare` und signalisiert
+über `gpu_pica_set_irq_handler` das GSP-Relay; `0x23C/0x23D` lösen
+Kanal-Sprünge aus. `gsp_process_cmdqueue` sendet P3D nur noch bei ungültiger
+Liste (Azahar `GPU::SubmitCmdList`), nicht mehr pauschal nach jeder Liste.
 
 Seit dem Kernel-Sync-Paket sind auch `wa-wait-handle0` und
 `wa-thread-exit-unsignaled` entfernt. `hle_svc` fuehrt Mutex, Semaphore,
