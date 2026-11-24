@@ -1107,3 +1107,65 @@ den Originalbytes ab dem Port-Speicherabbild las genau 1.108 Byte;
 in der Azahar-Referenz (Gap 112/312). Der Y2R-Ausgabepuffer enthaelt die
 echten Filmbilder (8x8-Kacheln, RGB24, 512x240). Offen: das Spiel zeichnet
 die Textur noch nicht (keine PICA-Draws), der Bildschirm bleibt einfarbig.
+
+### Nach dem Intro-Film: zweite Wiedergabe ohne Praesentation; Savedata-Hypothese ausgeschlossen – Befund 2026-11-24
+
+**Auftragshypothese (fs/Savedata) ist widerlegt.** Die IPC-/fs-Antworten der
+Titel-/Savedata-Initialisierung sind vollstaendig und entsprechen Azahar; sie
+sind nicht die Ursache fuer die fehlenden Draws. Belege aus zwei 900-Frame-
+Laeufen (`HLE_LOG=1`, je einmal mit vorhandenem und mit geloeschtem
+`out/savedata`):
+
+* Vorhandener Spielstand: `OpenArchive 4 -> 0`, `GetFormatInfo -> 0`,
+  `OpenFile /head.lt6 -> 0`, `Read` liefert die vollen `0x9768` Byte.
+* Frischer Start (kein `out/savedata`): `OpenArchive 4 -> C8A04554`
+  (`NotFormatted`). Das Spiel formatiert selbst und zwar erfolgreich:
+  `0x084C FormatSaveData -> 0`, `OpenArchive -> 0`, `ControlArchive -> 0`,
+  `OpenFile -> C8804470` (NotFound), `CreateFile size=38760 -> 0`,
+  `OpenFile -> 0`, `WriteFile 38760 Byte -> 0`, `ControlArchive -> 0`.
+  Danach laeuft es in exakt denselben Zustand wie mit vorhandenem Stand.
+* `CreateFile "/gamecoin.dat" -> C8A044B4` ist `FileAlreadyExists` und damit
+  korrekt: Azahar protokolliert an derselben Stelle
+  (`reports/azahar_trace.txt:365`, `savedata_archive.cpp:229`) ebenfalls
+  "already exists" und liefert den Fehler; das anschliessende
+  `OpenFile mode=3` gelingt in beiden Laeufen.
+
+**Was nach dem Film tatsaechlich passiert:** Nach der 520. `StartConversion`
+liest das Spiel die komplette `m999.moflex` erneut (neun Reads
+`0x26B10510` … `0x26BA0510`, zusammen `0x912A4` Byte, alle mit voller Laenge)
+und beginnt eine zweite Wiedergabe. Diese praesentiert aber kein Bild mehr:
+
+* `fn_0031282C` (Movie-Presenter, Zustand 4/8) wird im 900-Frame-Lauf
+  1.201x betreten, der Y2R-Treiber `fn_00218660` jedoch genau **520x** – nur
+  waehrend der ersten Wiedergabe. In der zweiten Wiedergabe wird der
+  Frame-Zweig (`0x312A84..0x312BC8`) nicht mehr erreicht; die
+  Frame-Bereitschaftspruefung in `fn_00218660` (frueher Ausstieg ueber
+  `0x21868C`/`0x218698`/`0x2186AC`/`0x2186BC`) schlaegt fehl.
+* Die Decoder-Threads laufen dabei weiter (Perfmap: Thread 0 15,5 M Bloecke,
+  Huffman-Loop `0x16E4A8/B4` ~0,8 M; Thread 14 1,6 M im Bit-Reader
+  `0x270D20..0x270D78`), es entsteht also kein "Haenger", sondern eine
+  Decodierung ohne Ausgabe.
+* Im 40-s-Frontier-Lauf bleibt es bei 520 `StartConversion`; ein dritter
+  oder weiterer Zyklus beginnt nicht. Der Bildschirm bleibt schwarz
+  (`--shot`, 900 Frames: genau eine Farbe `000000`).
+
+**Draw-Pfad:** `0x27B34C` und der Builder `0x1323FC` werden nie ausgefuehrt
+(Perfmap: 0 Treffer). Auch keiner der fuenf Wrapper (`fn_0011AD4C`,
+`fn_00250FE8`, `fn_00256E40`, `fn_0027B6CC`, `fn_002812EC`) laeuft. Die 14
+pro Frame eingereichten Listen (`0x1686E8xx`/`0x168B58xx`) werden per
+`fn_001ED4B8` aus einer Vorlage kopiert (Schreiber `0x1ED6C8`/`0x28EEE8`,
+`ARM_MEMWATCHRANGE`), enthalten nur Setup und kein `0x22E/0x22F`. Sie werden
+also auch ohne die zweite Filmwiedergabe nicht zu Draws.
+
+**Nebenbefund (nicht geaendert):** `boss:U 0x000E GetTaskIdList` und
+`0x0016 ReceiveProperty(0x35/0x36)` sind im Port noch generisch
+(„UNIMPLEMENTIERT“, Result 0 ohne Daten); Azahar liefert dort `TotalTasks`
+(u16) bzw. die Task-ID-Liste. Ein Zusammenhang mit dem Draw-Gate ist nicht
+belegt.
+
+**Naechster Schritt:** Die Frame-Bereitschaft in der zweiten Wiedergabe
+untersuchen: Argumente von `fn_00218660` an `0x312B60..0x312B88`
+(`[sp+4]`, `s18`, Geometrie aus `[movie+4/8/0xC]`) und die Praesentations-
+Queue (`[movie+0x158]`/`[movie+0x15c]`, Ring `+0x34/+0x38/+0x3c`). Erst
+wenn dort wieder ein dekodiertes Frame anliegt, kann der Video-Quad
+gezeichnet werden. Kein Workaround eingebaut.
