@@ -8,6 +8,7 @@
 #include "hle.h"
 #include "gpu.h"
 #include "gsp_fb.h"
+#include "y2r.h"
 
 static uint32_t g_hle_gsp_handle;
 /* Von generiertem Code (gen_boot.c) lesbarer gsp-Handle. */
@@ -135,12 +136,15 @@ static void guest_lock_reacquire(void) {
 static volatile unsigned g_pump_count = 0;
 static int gsp_process_cmdqueue(ArmCpu *c);
 static void hid_poll(void);
+/* Y2R-Fertigmeldung (StartConversion -> TransferEnd-Event) faellig? */
+static void y2r_poll(void);
 
 /* Pro Gast-Block: CPU-gebundene Gastschleifen ohne SVC duerfen den
  * kooperativen Lock nicht dauerhaft halten. Alle 0x4000 Bloecke abgeben. */
 void hle_pump(void) {
     if ((++g_pump_count & 0x3FFFu) != 0) return;
     hid_poll();
+    y2r_poll();
     if (!g_guest_lock_init || g_no_lock) return;
     if (!t_lock_owned) return;
     guest_lock_leave();
@@ -638,6 +642,7 @@ static int hs_wait(ArmCpu *c, Handle **objs, int cnt, int wait_all,
         int hit = -1;
         kernel_poll_timers();
         hid_poll();
+        y2r_poll();
         if (wait_all) {
             int ok = 1;
             for (int k = 0; k < cnt; k++) {
@@ -3153,14 +3158,25 @@ static void gsp_command(Ipc *r, uint32_t *p) {
     }
 }
 
-/* Y2R-Layouts nach Azahar src/core/hle/service/cam/y2r_u.cpp:
- *  - GetTransferEndEvent liefert das eine completion_event (OneShot) und
- *    signalisiert es nicht vorab.
- *  - StartConversion plant die Fertigmeldung (MinY2RDelay = 50000 Zyklen,
- *    hier ~186 us), danach Event-Signal und is_busy_conversion = false.
- *  - IsFinished* spiegeln den Fertigzustand (Azahar stubbt sie auf 1). */
+/* Y2R: vollstaendige Konfiguration wie Azahar src/core/hle/service/cam/y2r_u.*,
+ * Umwandlung in runtime/platform/y2r.h (Azahar core/hw/y2r.cpp).
+ *  - DriverInitialize setzt die Azahar-Startwerte (YUV422_Indiv8, RGBA8,
+ *    keine Rotation, Linear, Koeffizienten 0, 1024 Zeilen/Spalten, alpha 0)
+ *    und loescht das completion_event (OneShot).
+ *  - StartConversion rechnet synchron in die per SetSendingY/U/V/YUYV und
+ *    SetReceiving gesetzten Gast-Puffer und plant danach die Fertigmeldung
+ *    (Azahar MinY2RDelay = 50000 Zyklen ≈ 186 us bei 268 MHz).
+ *  - IsFinished* sind wie in Azahar mit 1 belegt (stub).
+ *  - GetPackageParameter liefert die 12-Byte-ConversionParameters
+ *    (MakeBuilder(4,0)); Azahar selbst schiebt dort versehentlich die ganze
+ *    Struktur in den Kommandopuffer. */
+static Y2rConversion g_y2r;
 static uint32_t g_y2r_event = 0;
 static int g_y2r_interrupt_enabled = 0;
+static int g_y2r_spacial_dithering = 0;
+static int g_y2r_temporal_dithering = 0;
+static uint16_t g_y2r_dither[16];
+static uint8_t g_y2r_std_coefficient = 0;
 static int g_y2r_busy = 0;
 static uint64_t g_y2r_due_us = 0;
 
@@ -3174,26 +3190,251 @@ static void y2r_poll(void) {
     }
 }
 
+static void y2r_put_coefficients(Ipc *r) {
+    int i;
+    for (i = 0; i < 8; i += 2)
+        ipc_put(r, (uint32_t)(uint16_t)g_y2r.coefficients[i] |
+                    ((uint32_t)(uint16_t)g_y2r.coefficients[i + 1] << 16));
+}
+
+static void y2r_set_sending(Y2rBuffer *buf, const uint32_t *p) {
+    buf->address = p[0];
+    buf->image_size = p[1];
+    buf->transfer_unit = (uint16_t)p[2];
+    buf->gap = (uint16_t)p[3];
+}
+
+static uint32_t y2r_set_line_width(uint32_t width) {
+    if (width == 0 || width > 1024u || (width % 8u) != 0)
+        return 0xE0E053FD;      /* OutOfRange/CAM/InvalidArgument/Usage */
+    g_y2r.input_line_width = (uint16_t)width;
+    return 0;
+}
+
+static uint32_t y2r_set_lines(uint32_t lines) {
+    if (lines == 0 || lines > 1024u)
+        return 0xE0E053FD;
+    /* Azahar-Bug der camera-Moduls: 1024 setzt das Register nicht. */
+    if (lines != 1024u) g_y2r.input_lines = (uint16_t)lines;
+    return 0;
+}
+
+static uint32_t y2r_set_standard_coefficient(uint32_t index) {
+    if (index >= (uint32_t)Y2R_STD_COUNT)
+        return 0xE0E053ED;      /* InvalidEnumValue/CAM/InvalidArgument/Usage */
+    memcpy(g_y2r.coefficients, y2r_standard_coefficients[index],
+           sizeof(g_y2r.coefficients));
+    g_y2r_std_coefficient = (uint8_t)index;
+    return 0;
+}
+
 static void y2r_command(Ipc *r, uint32_t *p) {
     y2r_poll();
     switch (r->cmd) {
-        case 0x0002: case 0x0004: case 0x0006: case 0x0008:
-        case 0x000A: case 0x000C: { /* Get*: Result + Wert */
+        case 0x0001: g_y2r.input_format = (int)(p[0] & 0xFFu); goto result1;
+        case 0x0003: g_y2r.output_format = (int)(p[0] & 0xFFu); goto result1;
+        case 0x0005: g_y2r.rotation = (int)(p[0] & 0xFFu); goto result1;
+        case 0x0007: g_y2r.block_alignment = (int)(p[0] & 0xFFu); goto result1;
+        case 0x0009: g_y2r_spacial_dithering = (r->normal >= 1 && p[0] != 0); goto result1;
+        case 0x000B: g_y2r_temporal_dithering = (r->normal >= 1 && p[0] != 0); goto result1;
+        case 0x000D:
+            g_y2r_interrupt_enabled = (r->normal >= 1 && p[0] != 0);
+            goto result1;
+        case 0x0010: case 0x0011: case 0x0012: case 0x0013: case 0x0018: {
+            Y2rBuffer *b = r->cmd == 0x0010 ? &g_y2r.src_y
+                         : r->cmd == 0x0011 ? &g_y2r.src_u
+                         : r->cmd == 0x0012 ? &g_y2r.src_v
+                         : r->cmd == 0x0013 ? &g_y2r.src_yuyv : &g_y2r.dst;
+            y2r_set_sending(b, p);
+            if (g_log) {
+                printf("[y2r] cmd 0x%04X addr=%08X size=%08X unit=%u gap=%u\n",
+                       r->cmd, b->address, b->image_size,
+                       (unsigned)b->transfer_unit, (unsigned)b->gap);
+                fflush(stdout);
+            }
+            goto result1;
+        }
+        case 0x001E: { /* SetCoefficient: 8 x s16 in 4 Woertern */
+            int i;
+            for (i = 0; i < 8; i += 2) {
+                g_y2r.coefficients[i] = (int16_t)(p[i / 2] & 0xFFFFu);
+                g_y2r.coefficients[i + 1] = (int16_t)(p[i / 2] >> 16);
+            }
+            goto result1;
+        }
+        case 0x0020: {
+            uint32_t res = y2r_set_standard_coefficient(p[0]);
+            ipc_begin(r, r->cmd, 1, 0);
+            ipc_put(r, res);
+            break;
+        }
+        case 0x0021: { /* GetStandardCoefficient: gueltiger Index -> 4 Woerter */
+            uint32_t index = p[0];
+            if (index >= (uint32_t)Y2R_STD_COUNT) {
+                ipc_begin(r, r->cmd, 1, 0);
+                ipc_put(r, 0xE0E053ED);
+            } else {
+                ipc_begin(r, r->cmd, 5, 0);
+                put_result(r);
+                ipc_put(r, (uint32_t)(uint16_t)y2r_standard_coefficients[index][0] |
+                            ((uint32_t)(uint16_t)y2r_standard_coefficients[index][1] << 16));
+                ipc_put(r, (uint32_t)(uint16_t)y2r_standard_coefficients[index][2] |
+                            ((uint32_t)(uint16_t)y2r_standard_coefficients[index][3] << 16));
+                ipc_put(r, (uint32_t)(uint16_t)y2r_standard_coefficients[index][4] |
+                            ((uint32_t)(uint16_t)y2r_standard_coefficients[index][5] << 16));
+                ipc_put(r, (uint32_t)(uint16_t)y2r_standard_coefficients[index][6] |
+                            ((uint32_t)(uint16_t)y2r_standard_coefficients[index][7] << 16));
+            }
+            break;
+        }
+        case 0x0022: g_y2r.alpha = (uint16_t)p[0]; goto result1;
+        case 0x0024: { /* SetDitheringWeightParams: 16 x u16 */
+            int i;
+            for (i = 0; i < 16; ++i)
+                g_y2r_dither[i] = (uint16_t)(i & 1 ? (p[i / 2] >> 16) : (p[i / 2] & 0xFFFFu));
+            goto result1;
+        }
+        case 0x001A: { /* SetInputLineWidth */
+            uint32_t res = y2r_set_line_width(p[0]);
+            ipc_begin(r, r->cmd, 1, 0);
+            ipc_put(r, res);
+            break;
+        }
+        case 0x001C: { /* SetInputLines */
+            uint32_t res = y2r_set_lines(p[0]);
+            ipc_begin(r, r->cmd, 1, 0);
+            ipc_put(r, res);
+            break;
+        }
+        case 0x0029: { /* SetPackageParameter: 12 Byte = 3 Woerter */
+            uint32_t res;
+            g_y2r.input_format = (int)(p[0] & 0xFFu);
+            g_y2r.output_format = (int)((p[0] >> 8) & 0xFFu);
+            g_y2r.rotation = (int)((p[0] >> 16) & 0xFFu);
+            g_y2r.block_alignment = (int)((p[0] >> 24) & 0xFFu);
+            res = y2r_set_line_width(p[1] & 0xFFFFu);
+            if (res == 0) res = y2r_set_lines(p[1] >> 16);
+            if (res == 0) res = y2r_set_standard_coefficient(p[2] & 0xFFu);
+            if (res == 0) {
+                g_y2r.padding = (uint8_t)((p[2] >> 8) & 0xFFu);
+                g_y2r.alpha = (uint16_t)(p[2] >> 16);
+            }
+            ipc_begin(r, r->cmd, 1, 0);
+            ipc_put(r, res);
+            break;
+        }
+        case 0x0026: { /* StartConversion */
+            Y2rMemory mem;
+            mem.mem = g_cpu != NULL ? g_cpu->mem : NULL;
+            mem.size = g_cpu != NULL ? g_cpu->mem_size : 0;
+            if (mem.mem == NULL) {
+                ipc_begin(r, r->cmd, 1, 0);
+                put_result(r);
+                break;
+            }
+            {
+                int conv = y2r_perform_conversion(&mem, &g_y2r);
+                if (conv != 0) {
+                    /* Azahar-ASSERT-Faelle; die Hardware meldet dort kein
+                     * Completion-Interrupt. */
+                    printf("[y2r] ungueltige Konfiguration (%d): fmt=%d/%d rot=%d "
+                           "align=%d %ux%u\n", conv, g_y2r.input_format,
+                           g_y2r.output_format, g_y2r.rotation, g_y2r.block_alignment,
+                           (unsigned)g_y2r.input_line_width, (unsigned)g_y2r.input_lines);
+                    fflush(stdout);
+                    g_y2r_busy = 0;
+                } else {
+                    g_y2r_busy = 1;
+                    g_y2r_due_us = host_us() + 186;
+                }
+            }
+            ipc_begin(r, r->cmd, 1, 0);
+            put_result(r);
+            break;
+        }
+        case 0x0027: { /* StopConversion */
+            if (g_y2r_busy) g_y2r_busy = 0;
+            ipc_begin(r, r->cmd, 1, 0);
+            put_result(r);
+            break;
+        }
+        case 0x002A: { /* PingProcess: Result + u8 0 */
             ipc_begin(r, r->cmd, 2, 0);
             put_result(r);
             ipc_put(r, 0);
             break;
         }
-        case 0x000D: { /* SetTransferEndInterrupt: Result */
-            g_y2r_interrupt_enabled = (r->normal >= 1 && p[0] != 0);
-            ipc_begin(r, 0x000D, 1, 0);
+        case 0x002B: { /* DriverInitialize */
+            Handle *hh = get_handle(g_y2r_event);
+            g_y2r.input_format = Y2R_IN_YUV422_INDIV8;
+            g_y2r.output_format = Y2R_OUT_RGBA8;
+            g_y2r.rotation = Y2R_ROT_NONE;
+            g_y2r.block_alignment = Y2R_ALIGN_LINEAR;
+            memset(g_y2r.coefficients, 0, sizeof(g_y2r.coefficients));
+            y2r_set_line_width(1024);
+            y2r_set_lines(1024);
+            g_y2r.alpha = 0;
+            memset(&g_y2r.src_y, 0, sizeof(g_y2r.src_y));
+            memset(&g_y2r.src_u, 0, sizeof(g_y2r.src_u));
+            memset(&g_y2r.src_v, 0, sizeof(g_y2r.src_v));
+            memset(&g_y2r.dst, 0, sizeof(g_y2r.dst));
+            if (hh != NULL) hh->signaled = 0;
+            break;
+        }
+        case 0x002C: { /* DriverFinalize */
+            g_y2r_busy = 0;
+            ipc_begin(r, r->cmd, 1, 0);
             put_result(r);
             break;
         }
-        case 0x000E: { /* GetTransferEndInterrupt: Result + bool */
-            ipc_begin(r, 0x000E, 2, 0);
+        case 0x002D: { /* GetPackageParameter: Result + 12 Byte */
+            ipc_begin(r, r->cmd, 4, 0);
             put_result(r);
-            ipc_put(r, (uint32_t)g_y2r_interrupt_enabled);
+            ipc_put(r, (uint32_t)g_y2r.input_format |
+                        ((uint32_t)g_y2r.output_format << 8) |
+                        ((uint32_t)g_y2r.rotation << 16) |
+                        ((uint32_t)g_y2r.block_alignment << 24));
+            ipc_put(r, (uint32_t)g_y2r.input_line_width |
+                        ((uint32_t)g_y2r.input_lines << 16));
+            ipc_put(r, (uint32_t)g_y2r_std_coefficient |
+                        ((uint32_t)g_y2r.padding << 8) |
+                        ((uint32_t)g_y2r.alpha << 16));
+            break;
+        }
+        case 0x0002: case 0x0004: case 0x0006: case 0x0008:
+        case 0x000A: case 0x000C: case 0x000E: case 0x001B: case 0x001D:
+        case 0x0023: { /* Get*: Result + Wert */
+            uint32_t v = 0;
+            switch (r->cmd) {
+                case 0x0002: v = (uint32_t)g_y2r.input_format; break;
+                case 0x0004: v = (uint32_t)g_y2r.output_format; break;
+                case 0x0006: v = (uint32_t)g_y2r.rotation; break;
+                case 0x0008: v = (uint32_t)g_y2r.block_alignment; break;
+                case 0x000A: v = (uint32_t)g_y2r_spacial_dithering; break;
+                case 0x000C: v = (uint32_t)g_y2r_temporal_dithering; break;
+                case 0x000E: v = (uint32_t)g_y2r_interrupt_enabled; break;
+                case 0x001B: v = (uint32_t)g_y2r.input_line_width; break;
+                case 0x001D: v = (uint32_t)g_y2r.input_lines; break;
+                default: v = (uint32_t)g_y2r.alpha; break;
+            }
+            ipc_begin(r, r->cmd, 2, 0);
+            put_result(r);
+            ipc_put(r, v);
+            break;
+        }
+        case 0x001F: { /* GetCoefficient */
+            ipc_begin(r, r->cmd, 5, 0);
+            put_result(r);
+            y2r_put_coefficients(r);
+            break;
+        }
+        case 0x0025: { /* GetDitheringWeightParams */
+            int i;
+            ipc_begin(r, r->cmd, 9, 0);
+            put_result(r);
+            for (i = 0; i < 16; i += 2)
+                ipc_put(r, (uint32_t)g_y2r_dither[i] |
+                            ((uint32_t)g_y2r_dither[i + 1] << 16));
             break;
         }
         case 0x000F: { /* GetTransferEndEvent: Result + CopyHandle(Event) */
@@ -3206,52 +3447,31 @@ static void y2r_command(Ipc *r, uint32_t *p) {
             break;
         }
         case 0x0014: case 0x0015: case 0x0016: case 0x0017:
-        case 0x0019: { /* IsFinished*: Result + bool (Fertigzustand) */
+        case 0x0019: { /* IsFinished*: Azahar-Stub liefert immer 1 */
             ipc_begin(r, r->cmd, 2, 0);
             put_result(r);
-            ipc_put(r, g_y2r_busy ? 0u : 1u);
+            ipc_put(r, 1);
             break;
         }
-        case 0x0026: { /* StartConversion: Result; Fertigmeldung planen */
-            g_y2r_busy = 1;
-            g_y2r_due_us = host_us() + 186;
-            ipc_begin(r, 0x0026, 1, 0);
-            put_result(r);
-            break;
-        }
-        case 0x0027: { /* StopConversion: Result */
-            g_y2r_busy = 0;
-            ipc_begin(r, 0x0027, 1, 0);
-            put_result(r);
-            break;
-        }
-        case 0x0028: { /* IsBusyConversion: Result + bool */
-            ipc_begin(r, 0x0028, 2, 0);
+        case 0x0028: { /* IsBusyConversion */
+            ipc_begin(r, r->cmd, 2, 0);
             put_result(r);
             ipc_put(r, (uint32_t)g_y2r_busy);
             break;
         }
-        case 0x002B: { /* DriverInitialize: Result; completion_event->Clear() */
-            Handle *hh = get_handle(g_y2r_event);
-            if (hh != NULL) hh->signaled = 0;
-            ipc_begin(r, 0x002B, 1, 0);
-            put_result(r);
-            break;
-        }
-        case 0x002C: { /* DriverFinalize: Result */
-            g_y2r_busy = 0;
-            ipc_begin(r, 0x002C, 1, 0);
-            put_result(r);
-            break;
-        }
         default: {
-            /* Setter (Result) bzw. nicht implementierte Kommandos. */
+            /* Unbekanntes Kommando laut melden (Azahar
+             * ReportUnimplementedFunction), Antwort bleibt Result 0. */
             ipc_begin(r, r->cmd, 1, 0);
             put_result(r);
-            if (g_log) printf("[y2r] cmd 0x%04X -> 0\n", r->cmd);
+            if (g_log) printf("[y2r] UNIMPLEMENTIERT cmd 0x%04X\n", r->cmd);
             break;
         }
     }
+    return;
+result1:
+    ipc_begin(r, r->cmd, 1, 0);
+    put_result(r);
 }
 
 static void generic_command(Ipc *r, int service) {

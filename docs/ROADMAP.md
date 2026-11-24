@@ -73,3 +73,4 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | 2026-11-24 | review-faelschungen | 9/10 | boss:U | 0 |
 | 2026-11-24 | hid-shared-memory | 9/10 | boss:U | 0 |
 | 2026-11-24 | bildausgabe | 9/10 | boss:U | 0 |
+| 2026-11-24 | y2r-umwandlung | 9/10 | boss:U | 0 |

@@ -177,6 +177,54 @@ Assets: 3 × Level-5-`ARC0` (`lt6_*.fa`), 566 × BCSTM, 34 × MOFLEX. Texturen
   little-endian). Aufhellung nach 8 Bit wie Azahar `common/color.h`:
   5→8 `v<<3|v>>2`, 6→8 `v<<2|v>>4`, 4→8 `v<<4|v`, 1→8 `v*255`.
 
+## Y2R (YUV-Nach-RGB-Konverter, y2r:u)
+
+Quelle: Azahar `core/hle/service/cam/y2r_u.{h,cpp}`, `core/hw/y2r.cpp`.
+
+* Kommandos (y2r:u, Session `1`): `0x0001/2` Set/GetInputFormat,
+  `0x0003/4` OutputFormat, `0x0005/6` Rotation, `0x0007/8` BlockAlignment,
+  `0x0009/A` SpacialDithering, `0x000B/C` TemporalDithering,
+  `0x000D/E` TransferEndInterrupt, `0x000F` GetTransferEndEvent (CopyHandle),
+  `0x0010` SetSendingY, `0x0011` SetSendingU, `0x0012` SetSendingV,
+  `0x0013` SetSendingYUYV, `0x0014`–`0x0017`/`0x0019` IsFinished* (Stub 1),
+  `0x0018` SetReceiving, `0x001A`–`0x001D` Set/GetInputLineWidth/Lines,
+  `0x001E/1F` Set/GetCoefficient (8×s16), `0x0020/21` Set/GetStandardCoefficient
+  (4 Sätze), `0x0022/23` Set/GetAlpha, `0x0024/25`
+  Set/GetDitheringWeightParams (16×u16), `0x0026` StartConversion,
+  `0x0027` StopConversion, `0x0028` IsBusyConversion, `0x0029`
+  SetPackageParameter (12 Byte: input_format, output_format, rotation,
+  block_alignment, input_line_width u16, input_lines u16,
+  standard_coefficient u8, padding u8, alpha u16), `0x002A` PingProcess,
+  `0x002B` DriverInitialize, `0x002C` DriverFinalize, `0x002D`
+  GetPackageParameter (Result + die 12 Byte).
+* Sende-/Empfangspuffer (`SetSending*`/`SetReceiving`) sind je
+  `{address u32, image_size u32, transfer_unit u16, gap u16}` + Prozess-Handle.
+  `transfer_unit` ist die DMA-Einheit, `gap` die Lücke danach.
+* InputFormat: 0 YUV422_Indiv8, 1 YUV420_Indiv8, 2 YUV422_Indiv16 (nur LSB),
+  3 YUV420_Indiv16, 4 YUYV422_Interleaved (ein Strom `Y0 U Y1 V`).
+  OutputFormat: 0 RGBA8, 1 RGB8, 2 RGB5A1, 3 RGB565.
+  Rotation: 0/90/180/270 Grad **je 8×8-Kachel** (bei 180/270 zusätzlich
+  umgekehrte Kachelreihenfolge im Streifen). BlockAlignment: 0 linear,
+  1 PICA-8×8 (Morton-Order); Breite immer durch 8, bei Block8×8 auch Höhe.
+* Ablauf: 8 Zeilen hohe Streifen; je Streifen Y/U/V per DMA lesen
+  (U/V bei 4:2:2 halb so viele Bytes wie Y, bei 4:2:0 ein Viertel),
+  YUV→RGB, Rotation, Ausgabe linear oder gekachelt, DMA-Ausgabe.
+* Koeffizienten (2.8-Festkomma c0..c4, 11.5-Offsets c5..c7):
+  `R=(c0*Y+c1*V)>>3+c5+0x18`, `G=(c0*Y-c2*V-c3*U)>>3+c6+0x18`,
+  `B=(c0*Y+c4*U)>>3+c7+0x18`, jeweils `>>5` und auf 0..255 begrenzen
+  (bit-exakt zur Hardware nach Azahar). Standards: Rec601
+  `100,166,B6,58,1C5,-166F,10EE,-1C5B`, Rec709, Rec601_Scaling, Rec709_Scaling.
+* `StartConversion` rechnet synchron und plant die Fertigmeldung als
+  `MinY2RDelay = 50000` Zyklen (≈186 µs) danach: Event signalisieren,
+  `is_busy_conversion=false`. `DriverInitialize` setzt YUV422_Indiv8/RGBA8/
+  keine Rotation/Linear/Koeffizienten 0/1024×1024/alpha 0 und löscht das
+  OneShot-Event.
+* Das Spiel nutzt es für Video: 400×240, YUV420_Indiv8, RGB8, Block8×8,
+  Rec601_Scaling, alpha 255 (Azahar-Referenzspur). Umsetzung in
+  `runtime/platform/y2r.h` (reine Funktionen), Anbindung in
+  `runtime/kernel/hle.c`; Test `tests/y2r_test.py` mit synthetischen Bildern
+  (alle Formate, Rotation, Morton, DMA-Lücken).
+
 ## HID (hid:USER / hid:SPVR)
 
 * Beide Dienste teilen **ein** Modul: ein Shared-Memory-Block (0x1000 Byte,

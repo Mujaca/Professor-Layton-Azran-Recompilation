@@ -121,6 +121,19 @@ Getestet mit synthetischen Puffern in `tests/framebuffer_test.py`; das Spiel
 selbst ruft `SetBufferSwap` im natuerlichen Boot noch nicht auf (M2 offen).
 
 
+**Y2R (kein Workaround):** `runtime/platform/y2r.h` bildet die echte
+YUV→RGB-Umwandlung nach (Azahar `core/hw/y2r.cpp`): YUV422/YUV420 in 8/16 Bit
+und YUYV, Ausgabe RGBA8/RGB8/RGB5A1/RGB565, Rotation je 8×8-Kachel, lineare
+oder PICA-8×8-Ausgabe, Koeffizientensätze inkl. `SetCoefficient`,
+`transfer_unit`/`gap` als DMA-Einheiten, Alpha. Alle Konfigurationskommandos
+werden gespeichert; `StartConversion` rechnet in die von
+`SetSendingY/U/V/YUYV` und `SetReceiving` gemeldeten Gast-Puffer und
+signalisiert danach das `GetTransferEndEvent`-Event nach `MinY2RDelay`
+(≈186 µs). Getestet mit synthetischen Bildern in `tests/y2r_test.py`; das
+Spiel nutzt den Konverter erst bei der Video-Wiedergabe, im natürlichen Boot
+werden nur `DriverInitialize`, `SetTransferEndInterrupt` und
+`GetTransferEndEvent` erreicht.
+
 Offen (dokumentierte Abweichung): srv-`GetServiceHandle` mit `flags`-Bit0 == 0
 müsste in Azahar auf eine spätere Registrierung warten; der Port hat keinen
 Dienst-Registrierungsdienst und meldet sofort den Fehler. Ein zweiter
