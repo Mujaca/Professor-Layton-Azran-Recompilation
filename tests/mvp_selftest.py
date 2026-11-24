@@ -209,6 +209,54 @@ CASES = [
         "expect": {"r0": 13, "r13": 0x8000},
     },
     {
+        # ARM-Switch `ldrls pc, [pc, rN, lsl #2]; b default; .word ...`:
+        # PC liest als +8, bei +4 steht der Default-Zweig. Frueher wurde der
+        # Default nie dekodiert (Fallthrough hinter die Tabelle), z. B. der
+        # Erfolgspfad von 0x38FBB0 (vstmia der Y2R-Bildbeschreibung).
+        "name": "arm_switch_default_zweig",
+        "asm": """
+            cmp r1, #2
+            ldrls pc, [pc, r1, lsl #2]
+            b 0x100030
+            .word 0x100018
+            .word 0x100020
+            .word 0x100028
+            mov r0, #10
+            bx lr
+            mov r0, #11
+            bx lr
+            mov r0, #12
+            bx lr
+            mov r0, #99
+            bx lr
+        """,
+        "regs": {"r1": 7},
+        "expect": {"r0": 99},
+    },
+    {
+        "name": "arm_switch_fall",
+        "asm": """
+            cmp r1, #2
+            ldrls pc, [pc, r1, lsl #2]
+            b 0x100030
+            .word 0x100018
+            .word 0x100020
+            .word 0x100028
+            mov r0, #10
+            bx lr
+            mov r0, #11
+            bx lr
+            mov r0, #12
+            bx lr
+            mov r0, #99
+            bx lr
+        """,
+        "regs": {"r1": 1},
+        # Der Harness legt nur Code ab; die Tabelle muss lesbar im Gastspeicher stehen.
+        "mem_bytes": [(0x10000C, bytes.fromhex("18001000" "20001000" "28001000"))],
+        "expect": {"r0": 11},
+    },
+    {
         "name": "push_pop_cond",
         "asm": """
             push {r4, lr}

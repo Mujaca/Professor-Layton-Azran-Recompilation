@@ -977,8 +977,12 @@ den Originalbytes ab dem Port-Speicherabbild las genau 1.108 Byte;
 4. Zweistufige LR-Bildung `add lr, pc, #hi; add lr, lr, #lo`
    (`berechneter_aufruf_lr_zweischritt`).
 
-**Ergebnis:** 520/520 y2r `StartConversion` (vorher 41). Offen: die
-Y2R-Quelladressen sind falsch (`SetSendingY 0x003EC9FD`, `SetSendingV
-0x41F00000`, Gap 0xFE70 statt 112), weil die Bildbeschreibung auf dem Stack
-(`fn_0031282C`, `vldr s0-s2, [r5]`) nicht befuellt wird – der Bildschirm
-bleibt einfarbig.
+5. ARM-Switch `ldr<cond> pc, [pc, rN, lsl #2]; b default; .word ...`: der
+   Default-Zweig bei +4 wurde nie dekodiert (Fallthrough hinter die
+   Tabelle). Betroffen war der Erfolgspfad von 0x38FBB0, der die
+   Y2R-Bildbeschreibung per `vstmia` kopiert (`arm_switch_default_zweig`).
+
+**Ergebnis:** 520/520 y2r `StartConversion` (vorher 41), Quellparameter wie
+in der Azahar-Referenz (Gap 112/312). Der Y2R-Ausgabepuffer enthaelt die
+echten Filmbilder (8x8-Kacheln, RGB24, 512x240). Offen: das Spiel zeichnet
+die Textur noch nicht (keine PICA-Draws), der Bildschirm bleibt einfarbig.

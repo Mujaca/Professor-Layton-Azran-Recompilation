@@ -490,9 +490,13 @@ def decode_function(data, fn, visited):
                 fall = nxt
                 extra = []
                 if ins.id == A.ARM_INS_LDR and op0_is_pc(ins):
-                    # Sprungtabelle steht direkt hinter der Instruktion.
+                    # Sprungtabelle ab pc+8 (ARM) bzw. Align(pc+4) (Thumb).
+                    # Beim bedingten ARM-Switch `ldrls pc, [pc, rN, lsl #2]`
+                    # steht bei +4 der Default-Zweig (meist `b default`), der
+                    # bei falscher Bedingung ausgefuehrt wird: dort weiter
+                    # dekodieren, nicht hinter der Tabelle.
                     extra, table_end = ldr_pc_table(data, ins, fn.thumb)
-                    if table_end is not None:
+                    if table_end is not None and not (cond and not fn.thumb):
                         fall = table_end
                 elif ins.id in TBB_IDS:
                     extra, table_end = tbb_table(data, ins)
