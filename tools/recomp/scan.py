@@ -45,6 +45,58 @@ def reg_operand(ins, idx=0) -> bool:
         return False
 
 
+def pc_relative_const(ins, addr, thumb):
+    """(Zielregister, Wert) fuer `add/sub rN, pc, #imm` bzw. `adr rN, #imm`.
+
+    ARM nutzt PC = addr + 8; Thumb Align(addr + 4, 4) (REFERENCE.md, ADR).
+    """
+    try:
+        if ins.id == A.ARM_INS_ADR and len(ins.operands) >= 2:
+            d, i = ins.operands[0], ins.operands[1]
+            if d.type == A.ARM_OP_REG and i.type == A.ARM_OP_IMM:
+                return d.reg, i.imm & 0xFFFFFFFF
+        if ins.id in (A.ARM_INS_ADD, A.ARM_INS_SUB) and len(ins.operands) >= 3:
+            d, s, i = ins.operands[0], ins.operands[1], ins.operands[2]
+            if (d.type == A.ARM_OP_REG and s.type == A.ARM_OP_REG
+                    and s.reg == A.ARM_REG_PC and i.type == A.ARM_OP_IMM):
+                base = addr + (4 if thumb else 8)
+                if thumb:
+                    base &= ~3
+                if ins.id == A.ARM_INS_SUB:
+                    return d.reg, (base - i.imm) & 0xFFFFFFFF
+                return d.reg, (base + i.imm) & 0xFFFFFFFF
+    except Exception:
+        return None
+    return None
+
+
+def pc_literal_target(ins, addr, thumb, data, image_base=0x100000):
+    """Wert eines statischen `ldr pc, [pc, #imm]`-Stubs (ARM/Thumb).
+
+    Solche Stubs legt der Linker als Sprungtabelle an (z. B.
+    0x24CCEC: `ldr pc,[pc,#-4]`, Literal 0x00100373). Nur der reine
+    PC-Basis-Fall ohne Indexregister; `ldr pc,[pc,rN,lsl#2]` behandelt
+    cli.py als Switch-Tabelle.
+    """
+    try:
+        if ins.id != A.ARM_INS_LDR or len(ins.operands) < 2:
+            return None
+        d, m = ins.operands[0], ins.operands[1]
+        if d.type != A.ARM_OP_REG or d.reg != A.ARM_REG_PC:
+            return None
+        if m.type != A.ARM_OP_MEM or m.mem.base != A.ARM_REG_PC or m.mem.index != 0:
+            return None
+        base = addr + (4 if thumb else 8)
+        if thumb:
+            base &= ~3
+        off = base + m.mem.disp - image_base
+        if off < 0 or off + 4 > len(data):
+            return None
+        return int.from_bytes(data[off:off + 4], "little")
+    except Exception:
+        return None
+
+
 def is_terminator(ins) -> bool:
     if ins.id == A.ARM_INS_B:
         return True
@@ -99,16 +151,38 @@ def decode_function(data, fn, visited):
         blk = Block(addr=baddr)
         fn.blocks.append(blk)
         cur = baddr
+        # PC-relative Konstanten im Block (Interworking-Veneer):
+        #   add rN, pc, #imm  /  adr rN, #imm   ->  rN = Zieladresse
+        pc_const = {}
         while True:
             ins = isa.decode(data, cur, thumb=fn.thumb)
             if ins is None:
                 break
             blk.insns.append(ins)
             visited[cur] = ins.size
+            value = pc_relative_const(ins, cur, fn.thumb)
+            if value is not None:
+                pc_const[value[0]] = value[1]
             if ins.id in (A.ARM_INS_BL, A.ARM_INS_BLX):
                 tgt = direct_target(ins)
                 if tgt is not None:
                     fn.calls.add((tgt, call_target_thumb(ins, fn.thumb)))
+            if ins.id in (A.ARM_INS_BX, A.ARM_INS_BLX) and reg_operand(ins):
+                # Sprung ueber eine berechnete PC-Konstante: Die Adresse steht
+                # statisch fest. Der Linker baut so ARM->Thumb-Veneeren
+                # (`add r12, pc, #1; bx r12`); das Thumb-Ziel braucht einen
+                # eigenen Funktions-Seed, sonst landet der Aufruf im No-op.
+                val = pc_const.get(ins.operands[0].reg)
+                if val is not None and (val & ~1) >= isa.ARM_BASE:
+                    fn.calls.add((val & ~1, bool(val & 1)))
+            if ins.id == A.ARM_INS_LDR and op0_is_pc(ins):
+                # Linker-Stub `ldr pc, [pc, #imm]`: Literal steht daneben.
+                # Ein ungerades Ziel ist Thumb-Code (0x24CCEC -> 0x100373) und
+                # braucht einen eigenen Funktions-Seed, weil der Emitter es
+                # ueber arm_call_guest ausfuehrt.
+                lit = pc_literal_target(ins, cur, fn.thumb, data)
+                if lit is not None and (lit & 1) and (lit & ~1) >= isa.ARM_BASE:
+                    fn.calls.add((lit & ~1, True))
             nxt = cur + ins.size
             if is_terminator(ins):
                 tgt = direct_target(ins)

@@ -2853,6 +2853,39 @@ typedef struct {
     uint32_t jump_size;
 } PicaCtx;
 
+/* Diagnose (HLE_PICA_DIAG): Histogramm der geschriebenen Register-IDs je
+ * Liste plus Rohdump. Reines Lesen/Log, veraendert keinen Gastzustand. */
+static uint32_t g_diag_hist[PICA_NREGS];
+static int g_diag_jumps;
+
+static int p_diag_mode(void)
+{
+    static int mode = -1;
+    if (mode < 0) {
+        const char *e = getenv("HLE_PICA_DIAG");
+        mode = (e && *e) ? atoi(e) : 0;
+    }
+    return mode;
+}
+
+static void p_diag_dump(ArmCpu *c, uint32_t addr, uint32_t size)
+{
+    char path[128];
+    FILE *f;
+    uint32_t i, words = size / 4u;
+
+    snprintf(path, sizeof(path), "scratch/pica/list_%08X_%X.bin", addr, size);
+    f = fopen(path, "wb");
+    if (!f) return;
+    for (i = 0; i < words; i++) {
+        uint32_t v = p_read32(c, addr + i * 4u);
+        unsigned char b[4] = { (unsigned char)v, (unsigned char)(v >> 8),
+                               (unsigned char)(v >> 16), (unsigned char)(v >> 24) };
+        fwrite(b, 1, 4, f);
+    }
+    fclose(f);
+}
+
 static int p_any_byte_match(uint32_t a, uint32_t b)
 {
     return ((a & 0xFFu) == (b & 0xFFu)) ||
@@ -2872,6 +2905,7 @@ static void p_write_reg(ArmCpu *c, uint32_t id, uint32_t value, uint32_t mask,
             old = (old & ~(0xFFu << (b * 8))) | (value & (0xFFu << (b * 8)));
     p_regs[id] = old;
     ctx->ops++;
+    if (p_diag_mode()) g_diag_hist[id]++;
 
     p_vs_reg_write(c, id, value);
     if (id >= 0xE8u && id <= 0xEFu) p_fog_lut_write(value);
@@ -2909,6 +2943,7 @@ static void p_write_reg(ArmCpu *c, uint32_t id, uint32_t value, uint32_t mask,
         }
         ctx->jump_addr = paddr;
         ctx->jump_size = sz;
+        if (p_diag_mode()) g_diag_jumps++;
     }
 }
 
@@ -2960,9 +2995,29 @@ static void p_run_list(ArmCpu *c, uint32_t addr, uint32_t size, PicaCtx *ctx,
 int gpu_run_pica_list(ArmCpu *c, uint32_t addr, uint32_t size)
 {
     PicaCtx ctx;
+    int diag = p_diag_mode();
+    unsigned long long draws0 = g_pica_draws;
 
     memset(&ctx, 0, sizeof(ctx));
+    if (diag) {
+        memset(g_diag_hist, 0, sizeof(g_diag_hist));
+        g_diag_jumps = 0;
+    }
     p_run_list(c, gpu_pica_phys_to_guest(addr), size, &ctx, 0);
     g_pica_lists++;
+    if (diag) {
+        int i, first = 1;
+        printf("[picadiag] list addr=%08X size=%u ops=%d jumps=%d draws=%d ids:",
+               addr, size, ctx.ops, g_diag_jumps,
+               (int)(g_pica_draws - draws0));
+        for (i = 0; i < PICA_NREGS; i++) {
+            if (!g_diag_hist[i]) continue;
+            printf("%s%03X=%u", first ? " " : ",", i, g_diag_hist[i]);
+            first = 0;
+        }
+        printf("\n");
+        fflush(stdout);
+        p_diag_dump(c, gpu_pica_phys_to_guest(addr), size);
+    }
     return ctx.ops;
 }

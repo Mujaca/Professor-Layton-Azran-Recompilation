@@ -161,7 +161,17 @@ int main(int argc, char **argv) {
             snprintf(line, sizeof(line), "frames=%d  block=0x%08X  halted=%d  lists=%llu draws=%llu",
                      frames, arm_last_block, g_halt, gpu_pica_list_count(), gpu_pica_draw_count());
             win_status(line, 1);
-            if (frames % 300 == 0) printf("[port] %s\n", line);
+            if (frames % 300 == 0) {
+                printf("[port] %s\n", line);
+                /* Diagnose (HLE_STALLDUMP): letzte Bloecke je Gast-Thread,
+                   um einen Haenger ohne IPC zu lokalisieren. */
+                if (getenv("HLE_STALLDUMP")) {
+                    int ti;
+                    for (ti = 0; ti < 16; ti++)
+                        if (arm_thread_last_pc[ti] != 0u)
+                            arm_trace_thread_dump(ti, 12);
+                }
+            }
         }
         frames++;
         Sleep(16);

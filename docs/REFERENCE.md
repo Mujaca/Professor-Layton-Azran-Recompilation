@@ -444,6 +444,13 @@ Quelle: Azahar `renderer_software/sw_rasterizer.cpp`, `sw_clipper.cpp`,
   CPSR.T genuegen nicht.
 * **ADR in Thumb** ist PC-relativ mit `Align(PC, 4)` (PC = addr + 4); im
   Recompiler bereits so umgesetzt.
+* **ARM/Thumb-Interworking-Stubs**: `add rN, pc, #imm` (ARM PC = addr + 8,
+  `imm` enthält das Thumb-Bit, z. B. `0x292264: add r12, pc, #1; bx r12` ->
+  `0x29226C`) bzw. `adr rN, #imm` + `bx rN`. Ebenso `ldr pc, [pc, #imm]` mit
+  einem Literal `ziel|1` (`0x24CCEC: ldr pc,[pc,#-4]` -> `0x100373`). Die
+  Ziele sind eigenständige Thumb-Code-Einstiege (auch mitten in einer anderen
+  ARM-Funktion) und müssen als Thumb-Funktion geseedet werden; sonst findet
+  `arm_call_guest` sie nicht und der Aufruf wird ein No-op.
 
 ## Quellen
 * https://www.3dbrew.org/wiki/IPC, /RomFS, /GSP_Shared_Memory, /GPU/Internal_Registers
