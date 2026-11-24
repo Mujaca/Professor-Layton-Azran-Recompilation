@@ -1038,3 +1038,42 @@ und dem naechsten Paketanfang (Datei `0x2065 + 6390 = 0x3943`) vergleichen;
 danach Funktion-Differenztest (Unicorn) fuer den Parser. Kein Workaround, kein
 Recompiler-Fehler bisher belegt.
 
+### Decode-Queue: Commit endet 2548 Byte vor dem Frame-Ende – Befund 2026-11-24
+
+**Befund (nur Diagnose, kein Gastzustand):** Die Praesentations-/Decode-Queue
+ist ein echter Ring; ihre Felder sind jetzt vollstaendig belegt. Der
+Ringzustand wurde je `fn_0037E6D4` (Peek) ueber `ARM_WATCH=0x37E6D4`
+ausgelesen (die 8 Woerter ab `r0` = Queue-Objekt, im Lauf `0x0CFFFE14`):
+
+| Feld | Wert im Stall | Bedeutung |
+|---|---|---|
+| `+0x08` | `0x0CABDF28` | Basis des Byte-Rings |
+| `+0x0c` | `0x1000` | Kapazitaet (4 KiB) |
+| `+0x10` | `0x0FD0` | vom Produzenten **committetes Ende** |
+| `+0x14` | `0x05DC` | Leseposition des Konsumenten |
+| `+0x18` | `0x0FD0` | Schreibposition |
+| `+0x1c` | `0x09F4` | verfuegbar = Ende − Leseposition |
+
+**Ablauf:** Vor dem Intra-Frame wird der Ring umgesetzt (Ende `0x0F44`,
+Lesepos `0x08F8`, verfuegbar `0x60`), dann steht `Ende = Schreibpos = 0x0FD0`
+und die Leseposition beginnt bei 0. Frame #62 (Intra) beginnt damit bei
+Offset 0 und wird mit exakt `0x5DC` (1500) Byte dekodiert; seine Daten
+entsprechen Datei `0x1A85..0x2065`. Frame #63 beginnt korrekt bei
+Offset `0x5DC` (Inhalt = Datei `0x2065`, `97 13 E8 0F …`).
+
+**Widerspruch:** Im Ring sind ab `0x5DC` nur noch `0x0FD0 - 0x5DC = 0x9F4`
+(2548) Byte committet. Der Decoder verbraucht fuer #63 aber `0x18F6` (6390)
+Byte (`r1` endet bei `0x0CABFDFA` = Basis + `0x1ED2`) und liest damit 3842
+Byte hinter dem Commit bzw. 5342 Byte hinter der Ringkapazitaet. Da ein
+Frame nicht ueber das Ringende laufen kann (der Bit-Refill `0x16C568` ist
+`ldrh [r1],#2` ohne Grenzpruefung) und #62 exakt an der Dateigrenze endet,
+ist die Grenze fuer #63 entweder falsch berechnet/zu wenig committet, oder
+der P-Frame-Parser liest ueber sein Frame-Ende hinaus (Zustand aus dem
+Intra-Frame).
+
+**Naechster Schritt:** Laenge des Frames #63 aus dem Demuxer-Deskriptor
+(`[stream+0x34]`-Ring, Eintrag `+4` = Zeiger, `0x37E6D4`) protokollieren und
+mit 2548 vergleichen: ist sie groesser, ist der Commit zu kurz (Produzent);
+ist sie kleiner/gleich, ist der P-Frame-Parse falsch (Recompiler/Decoder-
+Zustand, dann Differenztest des Decoders). Kein Workaround eingebaut.
+
