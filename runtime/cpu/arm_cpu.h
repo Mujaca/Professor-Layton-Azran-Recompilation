@@ -76,7 +76,17 @@ void vfp_set_s(ArmCpu *c, int s, float v);
 double vfp_get_d(ArmCpu *c, int d);
 void vfp_set_d(ArmCpu *c, int d, double v);
 void vfp_op(ArmCpu *c, int op, int dbl, int dest, int a, int b);
+void vfp_muladd(ArmCpu *c, int dbl, int dest, int n, int m, int mode);
 void vfp_cmp(ArmCpu *c, int dbl, int a, int b, int to_zero);
+void vfp_set_fpscr(ArmCpu *c, uint32_t value);
+void vfp_apply_rounding(uint32_t fpscr);
+void vfp_cvt_f2i(ArmCpu *c, int src_dbl, int is_signed, int dst_s, int src);
+void vfp_cvt_f2i_fixed(ArmCpu *c, int src_dbl, int is_signed, int dst_s, int src,
+                       int fbits);
+void vfp_cvt_i2f(ArmCpu *c, int dst_dbl, int is_signed, int dst, int src_s);
+void vfp_cvt_i2f_fixed(ArmCpu *c, int dst_dbl, int is_signed, int dst, int src_s,
+                       int fbits);
+void vfp_cvt_fp(ArmCpu *c, int to_dbl, int dst, int from_dbl, int src);
 void vfp_fpscr_to_flags(ArmCpu *c);
 void vfp_flags_to_fpscr(ArmCpu *c);
 

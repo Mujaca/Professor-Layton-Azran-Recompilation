@@ -354,6 +354,202 @@ CASES = [
         "regs": {"r0": 7, "r1": 5},
         "expect": {"r0": 12},
     },
+    {
+        # VCMP: gleich -> Z=1,C=1 (vorher fehlte C). Vergleich ueber VMRS.
+        "name": "vfp_vcmp_equal",
+        "asm": """
+            vmov s0, r0
+            vmov s1, r1
+            vcmp.f32 s0, s1
+            vmrs APSR_nzcv, fpscr
+            bx lr
+        """,
+        "regs": {"r0": 0x3FC00000, "r1": 0x3FC00000},
+        "expect": {"n": 0, "z": 1, "c": 1, "v": 0},
+    },
+    {
+        # VCMP: groesser -> C=1 (vorher fehlte C).
+        "name": "vfp_vcmp_greater",
+        "asm": """
+            vmov s0, r0
+            vmov s1, r1
+            vcmp.f32 s0, s1
+            vmrs APSR_nzcv, fpscr
+            bx lr
+        """,
+        "regs": {"r0": 0x40000000, "r1": 0x3FC00000},
+        "expect": {"n": 0, "z": 0, "c": 1, "v": 0},
+    },
+    {
+        # VCMP: kleiner -> N=1, C=0.
+        "name": "vfp_vcmp_less",
+        "asm": """
+            vmov s0, r0
+            vmov s1, r1
+            vcmp.f32 s0, s1
+            vmrs APSR_nzcv, fpscr
+            bx lr
+        """,
+        "regs": {"r0": 0x3FC00000, "r1": 0x40000000},
+        "expect": {"n": 1, "z": 0, "c": 0, "v": 0},
+    },
+    {
+        # VCMP: NaN -> unordered (C=1,V=1).
+        "name": "vfp_vcmp_unordered",
+        "asm": """
+            vmov s0, r0
+            vmov s1, r1
+            vcmp.f32 s0, s1
+            vmrs APSR_nzcv, fpscr
+            bx lr
+        """,
+        "regs": {"r0": 0x7FC00000, "r1": 0x3FC00000},
+        "expect": {"n": 0, "z": 0, "c": 1, "v": 1},
+    },
+    {
+        # Default-FPSCR des 3DS rundet ganzzahlig->f32 Richtung Null:
+        # 16777219 -> 16777218.0 (0x4B800001), nicht 16777220 (nearest).
+        "name": "vfp_vcvt_i2f_round_zero",
+        "asm": """
+            vmov s0, r0
+            vcvt.f32.s32 s0, s0
+            vmov r0, s0
+            bx lr
+        """,
+        "regs": {"r0": 16777219},
+        "expect": {"r0": 0x4B800001},
+    },
+    {
+        # f32->s32 rundet immer Richtung Null (auch bei FPSCR=nearest).
+        "name": "vfp_vcvt_f2i_trunc",
+        "asm": """
+            vmov s0, r0
+            vcvt.s32.f32 s0, s0
+            vmov r0, s0
+            bx lr
+        """,
+        "regs": {"r0": 0xC02CCCCD},  # -2.7f
+        "expect": {"r0": 0xFFFFFFFE},
+    },
+    {
+        # Ueberlauf/NaN bei f32->s32 saettigt: 3e9 -> INT_MAX, NaN -> 0.
+        "name": "vfp_vcvt_f2i_sat",
+        "asm": """
+            vmov s0, r0
+            vcvt.s32.f32 s0, s0
+            vmov r0, s0
+            vmov s1, r1
+            vcvt.s32.f32 s1, s1
+            vmov r1, s1
+            bx lr
+        """,
+        "regs": {"r0": 0x4F32D05E, "r1": 0x7FC00000},  # 3e9f, NaN
+        "expect": {"r0": 0x7FFFFFFF, "r1": 0},
+    },
+    {
+        # Flush-to-zero (Default-FPSCR): denormale Ergebnisse werden zu
+        # Null mit erhaltenem Vorzeichen.
+        "name": "vfp_ftz_signed_zero",
+        "asm": """
+            vmov s0, r0
+            vmov s1, r0
+            vadd.f32 s2, s0, s1
+            vmov r0, s2
+            vmov s3, r1
+            vmul.f32 s4, s3, s3
+            vmov r1, s4
+            bx lr
+        """,
+        "regs": {"r0": 0x80000001, "r1": 0x00000001},
+        "expect": {"r0": 0x80000000, "r1": 0x00000000},
+    },
+    {
+        # Default-NaN-Modus (FPSCR.DN): NaN-Ergebnis wird kanonisch 0x7FC00000.
+        "name": "vfp_default_nan",
+        "asm": """
+            vmov s0, r0
+            vadd.f32 s2, s0, s0
+            vmov r0, s2
+            bx lr
+        """,
+        "regs": {"r0": 0x7FC00001},
+        "expect": {"r0": 0x7FC00000},
+    },
+    {
+        # VMOV zwischen Kern- und Doppelregister (zwei Worte).
+        "name": "vfp_vmov_d_pair",
+        "asm": """
+            vmov d0, r0, r1
+            vmov r2, r3, d0
+            bx lr
+        """,
+        "regs": {"r0": 0x11223344, "r1": 0x55667788},
+        "expect": {"r2": 0x11223344, "r3": 0x55667788},
+    },
+    {
+        # VMLA rundet das Produkt vor der Addition (VFPv2/Unicorn):
+        # -1 + (1+2^-12)^2 -> 2^-11 = 0x3A000000.
+        "name": "vfp_vmla_separate_round",
+        "asm": """
+            vmov s0, r0
+            vmov s1, r1
+            vmov s3, r2
+            vmla.f32 s3, s0, s1
+            vmov r0, s3
+            bx lr
+        """,
+        "regs": {"r0": 0x3F800800, "r1": 0x3F800800, "r2": 0xBF800000},
+        "expect": {"r0": 0x3A000000},
+    },
+    {
+        # Festkomma-Varianten: s32 -> f32 mit #16 und zurueck.
+        "name": "vfp_vcvt_fixed",
+        "asm": """
+            vmov s0, r0
+            vcvt.f32.s32 s0, s0, #16
+            vmov r0, s0
+            vcvt.s32.f32 s0, s0, #16
+            vmov r1, s0
+            bx lr
+        """,
+        "regs": {"r0": 0x18000},
+        "expect": {"r0": 0x3FC00000, "r1": 0x18000},
+    },
+    {
+        # VPush/VPOP und VSTR/VLDR mit Doppelregister.
+        "name": "vfp_stack_mem",
+        "asm": """
+            vmov d0, r0, r1
+            vpush {d0}
+            vpop {d1}
+            vmov r2, r3, d1
+            vstr d1, [r4]
+            vldr d2, [r4]
+            vmov r0, r1, d2
+            bx lr
+        """,
+        "regs": {"r0": 0xDEADBEEF, "r1": 0x12345678, "r4": 0x2000},
+        "expect": {"r2": 0xDEADBEEF, "r3": 0x12345678,
+                   "r0": 0xDEADBEEF, "r1": 0x12345678},
+    },
+    {
+        # f64: vadd, vsqrt, vneg/vabs und f64->s32.
+        "name": "vfp_double_ops",
+        "asm": """
+            vmov d0, r0, r1
+            vadd.f64 d1, d0, d0
+            vmov r2, r3, d1
+            vsqrt.f64 d2, d0
+            vmov r0, r1, d2
+            vcvt.s32.f64 s0, d1
+            vmov r4, s0
+            bx lr
+        """,
+        # d0 = 9.0
+        "regs": {"r0": 0x00000000, "r1": 0x40220000},
+        "expect": {"r2": 0x00000000, "r3": 0x40320000,
+                   "r0": 0x00000000, "r1": 0x40080000, "r4": 18},
+    },
 ]
 
 

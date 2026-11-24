@@ -239,6 +239,36 @@ einen **Vertex-Shader-Interpreter/Übersetzer** und **TEV**.
   Byte-/Halbwort-Offsets ab `Align(pc+4,4)`. Der Scanner legt diese Ziele als
   Bloecke an (`scan.ldr_pc_table`/`tbb_table`).
 
+### VFP / Float (verifiziert mit Unicorn, 2026-11-24)
+
+* **FPSCR-Startwert** des 3DS: `0x03C00010` = Default-NaN (Bit 25),
+  Flush-to-Zero (Bit 24), Rundung Richtung Null (Bits 22..23 = 3),
+  Inexact-Cumulative (Bit 4). Azahar setzt ihn beim Thread-Erzeugen
+  (`kernel/thread.cpp`, `svc.cpp`); der Port macht das in `arm_cpu_init`.
+  Die Rundung wird auf den Host uebernommen (`fesetround`).
+* **Rundung**: `vcvt.<s32|u32>.<f32|f64>` rundet immer Richtung Null
+  (unabhaengig von FPSCR), saettigt bei Ueberlauf (INT_MAX/INT_MIN bzw.
+  UINT_MAX/0) und liefert fuer NaN 0. `vcvt.<f32|f64>.<s32|u32>`,
+  `vcvt.f32.f64`, `vcvt.f64.f32` folgen FPSCR.RMode. Festkomma-Varianten
+  skalieren vor/nach der Konvertierung mit `2^fbits`.
+* **FTZ**: denormalisierte Eingaben werden als Null mit Vorzeichen gelesen,
+  denormalisierte Ergebnisse als Null mit Vorzeichen geschrieben. **DN**:
+  NaN-Ergebnisse werden zu `0x7FC00000` bzw. `0x7FF8000000000000`.
+* **NaN**: eine ungueltige Operation (0/0, inf-inf, inf*0, sqrt(negativ))
+  liefert den positiven Default-qNaN; VNMUL negiert danach das Vorzeichen,
+  VMLS/VNMLA behandeln das negierte Produkt wie eine Subtraktion (DN
+  kanonisiert am Ende der Add/Sub-Operation).
+* **VCMP/VCMPE** setzen FPSCR.NZCV: gleich `Z=1,C=1`; kleiner `N=1`;
+  groesser `C=1`; unordered (NaN) `C=1,V=1`. `vmrs APSR_nzcv, fpscr`
+  kopiert Bits 31..28 nach CPSR; `vmrs Rt, fpscr` liest den rohen FPSCR.
+* **VMLA/VMLS/VNMLA/VNMLS/VNMUL** runden das Produkt vor der Addition
+  (nicht fusioniert; Unicorn/ARM11-VFPv2). `VNMLA: -d - n*m`,
+  `VNMLS: -d + n*m`, `VNMUL: -(n*m)`.
+* **VMOV** zwischen Kern- und Doppelregister geht nur als Wortpaar:
+  `vmov dN, Rt, Rt2` / `vmov Rt, Rt2, dN` (niedriges Wort zuerst).
+* VNEG/VABS sind Bitoperationen (Vorzeichen invertieren/loeschen) und
+  unterliegen weder FTZ noch der NaN-Kanonisierung.
+
 ## Quellen
 * https://www.3dbrew.org/wiki/IPC, /RomFS, /GSP_Shared_Memory, /GPU/Internal_Registers
 * libctru: `source/services/{apt,gsp,srv,fs}.c`, `source/ndsp/ndsp.c`

@@ -22,6 +22,7 @@ python -m recomp.cli scan --in out/exefs/code_decomp.bin --prologues --json repo
 python -m recomp.cli gen  --in out/exefs/code_decomp.bin --out build/gen_boot.c --prologues --seed-pointers --trace --seed-file tools/recomp/seeds.txt
 python tests/mvp_selftest.py      # Instruktionssemantik (keystone + zig cc)
 python tools/recomp_difftest.py   # Differenztest gegen Unicorn (ARM + Thumb-2)
+python tools/vfp_difftest.py      # Differenztest VFP/Float gegen Unicorn
 ```
 
 `tools/recomp_difftest.py`: erzeugt systematische und zufaellige
@@ -49,6 +50,24 @@ Verglichen werden r0-r14, NZCVQ/GE und der Daten-Digest.
 
 Neue Semantikfehler zuerst hier reproduzieren und dann als festen Fall in
 `tests/mvp_selftest.py` aufnehmen.
+
+`tools/vfp_difftest.py`: prueft die VFP-/Float-Semantik gegen Unicorn.
+Erzeugt Arithmetik (f32/f64: add/sub/mul/div, abs/neg/sqrt), die
+Multiply-Accumulate-Familie, alle VCVT-Richtungen inkl. Festkomma (`#fbits`),
+VCMP/VCMPE + `vmrs APSR_nzcv`, `vmov` zwischen Kern- und VFP-Registern sowie
+`vldr`/`vstr`/`vldm`/`vstm`/`vpush`/`vpop`. Jeder Fall laeuft mit mehreren
+FPSCR-Varianten (3DS-Default `0x03C00010`: Default-NaN, FTZ, Rundung Richtung
+Null; sowie IEEE-nearest, `+inf`/`-inf`, ohne FTZ/DN). Verglichen werden alle
+s32/s64-Register, Kernregister, SP, FPSCR.NZCV und der Speicher-Digest.
+
+```powershell
+python tools/vfp_difftest.py --seed 7 --count 400
+python tools/vfp_difftest.py --filter vcvt --count 200
+```
+
+NaN-Weitergabe der VMLA-Familie ist architektonisch
+implementierungsabhaengig; der Generator verwendet dort keine NaN-Eingaben
+(VCMP/VCVT/Arithmetik decken NaN-Faelle ab).
 
 `tools/recomp/seeds.txt`: zusätzliche Funktionseinstiege (z. B. aus
 `out/missing_calls.txt`).

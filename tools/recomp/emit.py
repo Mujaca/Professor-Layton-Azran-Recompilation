@@ -582,16 +582,30 @@ class Emitter:
                         raise Unsupported(ins.op_str)
                     if a[0] == "s":
                         return ["c->sreg[%d] = c->r[%d];" % (a[1], rn)]
-                    return ["c->sreg[%d] = c->r[%d];" % (a[1] * 2, rn),
-                            "c->sreg[%d] = 0;" % (a[1] * 2 + 1)]
+                    raise Unsupported(ins.op_str)
                 if b and a is None:
                     rd = isa.reg_num(ops[0])
                     if rd is None:
                         raise Unsupported(ins.op_str)
                     if b[0] == "s":
                         return ["c->r[%d] = c->sreg[%d];" % (rd, b[1])]
-                    return ["c->r[%d] = c->sreg[%d];" % (rd, b[1] * 2),
-                            "c->r[%d] = 0;" % (rd,)]
+                    raise Unsupported(ins.op_str)
+            if len(ops) == 3:
+                # vmov dN, rX, rY  bzw.  vmov rX, rY, dN (64 Bit als zwei Worte)
+                a = isa.vfp_reg(ops[0])
+                b = isa.vfp_reg(ops[2])
+                if a and a[0] == "d":
+                    r1, r2 = isa.reg_num(ops[1]), isa.reg_num(ops[2])
+                    if r1 is None or r2 is None:
+                        raise Unsupported(ins.op_str)
+                    return ["c->sreg[%d] = c->r[%d];" % (a[1] * 2, r1),
+                            "c->sreg[%d] = c->r[%d];" % (a[1] * 2 + 1, r2)]
+                if b and b[0] == "d":
+                    r1, r2 = isa.reg_num(ops[0]), isa.reg_num(ops[1])
+                    if r1 is None or r2 is None:
+                        raise Unsupported(ins.op_str)
+                    return ["c->r[%d] = c->sreg[%d];" % (r1, b[1] * 2),
+                            "c->r[%d] = c->sreg[%d];" % (r2, b[1] * 2 + 1)]
             raise Unsupported(ins.op_str)
 
         if base in VFP_ARITH:
@@ -625,12 +639,15 @@ class Emitter:
             return ["vfp_cmp(c, %d, %d, %d, 0);" % (dbl, a[1], b[1])]
 
         if base == "vmrs":
+            rd = isa.reg_num(ops[0]) if ops else None
+            if rd is not None and "fpscr" in ins.op_str.lower():
+                return ["c->r[%d] = c->fpscr;" % rd]
             return ["vfp_fpscr_to_flags(c);"]
         if base == "vmsr":
             rd = isa.reg_num(ops[1])
             if rd is None:
                 raise Unsupported(ins.op_str)
-            return ["c->fpscr = c->r[%d];" % rd]
+            return ["vfp_set_fpscr(c, c->r[%d]);" % rd]
 
         if base in ("vpush", "vpop"):
             regs = isa.vfp_reg_list(ops[0])
@@ -674,12 +691,13 @@ class Emitter:
             regs = [isa.vfp_reg(o) for o in ops]
             if len(regs) != 3 or any(r is None for r in regs):
                 raise Unsupported(ins.op_str)
-            d, n, m = regs[0][1], regs[1][1], regs[2][1]
-            if base == "vnmla":
-                return ["vfp_set_s(c, %d, vfp_get_s(c, %d) - vfp_get_s(c, %d) * vfp_get_s(c, %d));"
-                        % (d, d, n, m)]
-            return ["vfp_set_s(c, %d, -(vfp_get_s(c, %d) * vfp_get_s(c, %d)) - vfp_get_s(c, %d));"
-                    % (d, n, m, d)]
+            dbl = 1 if regs[0][0] == "d" else 0
+            if any(r[0] != regs[0][0] for r in regs):
+                raise Unsupported(ins.op_str)
+            # VNMLA: d = -d - n*m, VNMLS: d = -d + n*m
+            mode = 3 if base == "vnmla" else 4
+            return ["vfp_muladd(c, %d, %d, %d, %d, %d);"
+                    % (dbl, regs[0][1], regs[1][1], regs[2][1], mode)]
 
         if base in ("nop", "hint", "pld", "pldw", "clrex", "dbg", "sev", "wfe", "wfi",
                     "it", "cdp", "cdp2", "ldc", "stc", "mcrr", "mrrc") or base.startswith(("ldc", "stc")):
@@ -904,42 +922,55 @@ class Emitter:
             regs = [isa.vfp_reg(o) for o in ops]
             if len(regs) != 3 or any(r is None for r in regs):
                 raise Unsupported(ins.op_str)
-            dbl = 1 if regs[0][0] == "d" else 0
-            if dbl:
+            if any(r[0] != regs[0][0] for r in regs):
                 raise Unsupported(ins.op_str)
-            d, n, mm = regs[0][1], regs[1][1], regs[2][1]
-            prod = "vfp_get_s(c, %d) * vfp_get_s(c, %d)" % (n, mm)
-            if base == "vmla":
-                return ["vfp_set_s(c, %d, vfp_get_s(c, %d) + %s);" % (d, d, prod)]
-            if base == "vmls":
-                return ["vfp_set_s(c, %d, vfp_get_s(c, %d) - %s);" % (d, d, prod)]
-            return ["vfp_set_s(c, %d, -(%s));" % (d, prod)]
+            dbl = 1 if regs[0][0] == "d" else 0
+            mode = {"vmla": 0, "vmls": 1, "vnmul": 2}[base]
+            return ["vfp_muladd(c, %d, %d, %d, %d, %d);"
+                    % (dbl, regs[0][1], regs[1][1], regs[2][1], mode)]
 
         if base == "vcvt":
-            parts = m.split(".")
+            types = [p for p in m.split(".") if p in ("s32", "u32", "f32", "f64")]
             dst = isa.vfp_reg(ops[0])
             src = isa.vfp_reg(ops[1])
-            if dst is None or src is None or len(parts) < 3:
+            if dst is None or src is None or len(types) != 2:
                 raise Unsupported(ins.op_str)
-            to, from_ = parts[1], parts[2]
-            d, s = dst[1], src[1]
-            if to == "f32" and from_ == "s32":
-                return ["vfp_set_s(c, %d, (float)(int32_t)c->sreg[%d]);" % (d, s)]
-            if to == "f32" and from_ == "u32":
-                return ["vfp_set_s(c, %d, (float)c->sreg[%d]);" % (d, s)]
-            if to == "s32" and from_ == "f32":
-                return ["c->sreg[%d] = (uint32_t)(int32_t)vfp_get_s(c, %d);" % (d, s)]
-            if to == "u32" and from_ == "f32":
-                return ["c->sreg[%d] = (uint32_t)vfp_get_s(c, %d);" % (d, s)]
-            if to == "f64" and from_ == "s32":
-                return ["vfp_set_d(c, %d, (double)(int32_t)c->sreg[%d]);" % (d, s)]
-            if to == "f32" and from_ == "f64":
-                return ["vfp_set_s(c, %d, (float)vfp_get_d(c, %d));" % (d, s)]
-            if to == "f64" and from_ == "f32":
-                return ["vfp_set_d(c, %d, (double)vfp_get_s(c, %d));" % (d, s)]
-            if to == "s32" and from_ == "f64":
-                return ["c->sreg[%d] = (uint32_t)(int32_t)vfp_get_d(c, %d);" % (d, s)]
-            raise Unsupported(ins.op_str)
+            to, from_ = types
+            fbits = None
+            if len(ops) >= 3:
+                fbits = isa.imm_value(ops[2])
+                if fbits is None:
+                    raise Unsupported(ins.op_str)
+            if to in ("s32", "u32"):
+                if dst[0] != "s" or from_ not in ("f32", "f64"):
+                    raise Unsupported(ins.op_str)
+                signed = 1 if to == "s32" else 0
+                src_dbl = 1 if from_ == "f64" else 0
+                if fbits is None:
+                    return ["vfp_cvt_f2i(c, %d, %d, %d, %d);"
+                            % (src_dbl, signed, dst[1], src[1])]
+                return ["vfp_cvt_f2i_fixed(c, %d, %d, %d, %d, %d);"
+                        % (src_dbl, signed, dst[1], src[1], fbits)]
+            if from_ in ("s32", "u32"):
+                if src[0] != "s":
+                    raise Unsupported(ins.op_str)
+                dst_dbl = 1 if to == "f64" else 0
+                if dst[0] != ("d" if dst_dbl else "s"):
+                    raise Unsupported(ins.op_str)
+                signed = 1 if from_ == "s32" else 0
+                if fbits is None:
+                    return ["vfp_cvt_i2f(c, %d, %d, %d, %d);"
+                            % (dst_dbl, signed, dst[1], src[1])]
+                return ["vfp_cvt_i2f_fixed(c, %d, %d, %d, %d, %d);"
+                        % (dst_dbl, signed, dst[1], src[1], fbits)]
+            if fbits is not None:
+                raise Unsupported(ins.op_str)
+            if dst[0] != ("d" if to == "f64" else "s") or \
+               src[0] != ("d" if from_ == "f64" else "s"):
+                raise Unsupported(ins.op_str)
+            return ["vfp_cvt_fp(c, %d, %d, %d, %d);"
+                    % (1 if to == "f64" else 0, dst[1],
+                       1 if from_ == "f64" else 0, src[1])]
 
         if base in ("vldmia", "vldmdb", "vstmia", "vstmdb"):
             regs = isa.vfp_reg_list(ops[1])
@@ -973,12 +1004,15 @@ class Emitter:
             return lines
 
         if base == "vmrs":
+            rd = isa.reg_num(ops[0]) if ops else None
+            if rd is not None and "fpscr" in ins.op_str.lower():
+                return ["c->r[%d] = c->fpscr;" % rd]
             return ["vfp_fpscr_to_flags(c);"]
         if base == "vmsr":
             rd = isa.reg_num(ops[1])
             if rd is None:
                 raise Unsupported(ins.op_str)
-            return ["c->fpscr = c->r[%d];" % rd]
+            return ["vfp_set_fpscr(c, c->r[%d]);" % rd]
 
         raise Unsupported(ins.mnemonic)
 
