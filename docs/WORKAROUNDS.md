@@ -1121,3 +1121,65 @@ Szene keinen Layer (0x13657C verlangt `[renderer+0x2b44]&1` und einen
 gesetzten `[ctx+0x24]`)? Das ist Szenen-/Zustandslogik des Spiels
 (0x13657C, 0x26A84C, 0x1ED65C), keine HLE-Frage. Die Filmtextur selbst
 liegt korrekt in `0x15E3DE00` vor.
+
+### Renderer-Ressourcen-Registry 0x4088A8: Schreiber fehlt, Schluessel sind CRC32-Namen – Befund 2026-11-24
+
+**Aufbau (statisch + Laufzeitdump):** `0x4088A8` (= `0x408808+0xa0`,
+Grafikobjekt) ist eine Ressourcen-Gruppe mit vtable `0x3C6010`, konstruiert
+von `0x1FB3C4` ueber `0x238D1C`. Sie enthaelt zehn Paare aus Objekt-Pool und
+Zeiger-Tabelle; jeder Container ist `0xC` Byte (`[0]=Feld`, `[4]=Elementgroesse`,
+`[8]=Anzahl u16`, `[0xa]=Kapazitaet u16`). Die vom Frame-Treiber benutzte
+Tabelle liegt bei `+0x70` = `0x408918` (Elemente 4-Byte-Zeiger), Anzahl
+`0x408920`.
+
+**Schluessel:** `fn_0027BC50(reg, key)` binaersucht `[reg+0x70]`/`[reg+0x78]`
+mit Comparator `fn_00134900` (vergleicht `entry+0xc`); bei Misserfolg wird in
+`[reg+0x10]` (Parent) rekursiert. Der String-Weg ist `fn_002461D8(reg, name)`:
+`fn_00288500` ist CRC32 (zlib-Polynom, `~state`), danach dieselbe Suche.
+**Beleg:** `0x2D2F398D` = CRC32(`"#FIX_CLR"`). Weitere Namen im Image:
+`"#FIX_IMG"`, `"#FIX_FNT"`, `"#FIX_2D"`, `"#LT6_SES"`. Die Eintraege sind
+also benannte, eingebaute Renderer-Ressourcen (Fonts/Bilder/Passes), keine
+Szenen-Hashes.
+
+**Kein Schreiber im Boot:** `ARM_MEMWATCH=408920`/`=408918` (30 s und 90 s)
+zeigt ausschliesslich die BSS-Nullung (`pc=0x100030`) und die
+Konstruktor-Initialisierung (`fn_00288398`, `lr=0x238DB8`: Groesse 4, Anzahl
+0). Ein Dump `0x408800..0x408B00` am Laufende zeigt **alle** Container der
+Gruppe leer. Die 5 Aufrufer von `fn_0025618C` (Kommando-Verarbeiter
+`0x2B9368/0x2DA160/0x2DA380/0x2DAA68/0x2EF3DC`) geben `0x4088A8` nur als
+Argument an `fn_00249EB8` (Archiv-/Font-Load) bzw. `fn_00277B84` weiter.
+
+**Korrektur des frueheren Befunds:** `fn_0026F924` ist **kein**
+Resource-Lookup, sondern eine Archiv-Magic-Pruefung: es vergleicht `[obj]`
+mit `[0x3D9458]`=`"XPCK"` bzw. `[0x3D945C]`=`"XFSP"` (Laufzeitdump der
+Globals). Alle fuenf beobachteten `fn_00277B84`-Aufrufe kommen **ueber** die
+Magiepruefung und ueber `fn_0026F8BC`/`0x26B904` hinaus: der Ausgang
+`0x277DB0` (= Abbruch vor dem Oeffnen) hat in 15 s **0** Treffer, der
+Erfolgsblock `0x277C14` **5**. Die geoeffneten Archiveintraege haben die
+Groessen `0xA58` (das ist `seq/menu_logo.xq`), `0x4F8`, `0x8B0`, `0x139C`,
+`0x1A38`. Der fruehere Befund „bricht nach dem Ressourcen-Lookup ab“ ist
+damit widerlegt; der Pfad laeuft weiter und endet erst spaeter.
+`fn_00249EB8` (Font-Load) verlangt vor dem Laden, dass `"#FIX_FNT"` bereits
+in der Gruppe steht – die eingebauten Ressourcen muessen also vorher von
+einer anderen Stelle erzeugt werden.
+
+**RomFS-Lookup (Pruefung der entfernten Patches):** Der NotFound-Fall
+(`0x212E24`, `r0=0xC880446F`) ist der Verzeichnis-/Datei-Lookup des Namens
+`"stream"` (UTF-16, Laenge 12) in `lt6/snd/uk`. Der Pfad-Walker erkennt
+genau diesen Code (Modul 17, Desc 0x6F) bei `0x2055A0` als "weiter
+probieren"; anschliessend werden Dateien aus `.../stream/` gelesen
+(`MOV_999.dspadpcm.bcstm`). Der Fehlschlag ist normales Probing, kein
+Boot-Blocker; ein Wiederauftreten der Ursachen von `0x212F3C`/`0x399244` ist
+nicht belegt.
+
+**90-s-Lauf (Vollspeed):** 520/520 `StartConversion` (Film komplett),
+42.736 PICA-Listen, 7.226 `SetBufferSwap`, `seq/prog_common.xq` und
+`seq/menu_title.xq` werden aus `lt6_a.fa` gelesen (`0x48EE24` bzw.
+`0x473AE0`) – die Skriptebene laeuft, die Ressourcen-Gruppe bleibt trotzdem
+leer.
+
+**Naechster Schritt:** Die Erzeuger der eingebauten Ressourcen
+(`"#FIX_CLR"`, `"#FIX_IMG"`, `"#FIX_FNT"`, ...) suchen; Kandidat ist der
+Ressourcen-Set-Manager um `0x1FBxxx`/`0x23Dxxx` (vtable `0x3C6010`). Erst
+wenn ein *Schreibversuch* auf `0x408918`/`0x408920` existiert und
+fehlschlaegt, ist eine Runtime-Korrektur belegbar.
