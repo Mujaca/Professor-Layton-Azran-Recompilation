@@ -28,4 +28,17 @@ void hle_gsp_fb_layout(int screen, uint32_t *stride, uint32_t *format);
 void hle_gpu_write_reg(uint32_t addr, uint32_t value);
 void hle_gpu_command_list(const uint8_t *data, uint32_t size, uint32_t flags);
 
+/* Host-Eingabe fuer hid:USER/hid:SPVR (runtime/main.c setzt sie je Frame aus
+ * runtime/platform/window.c). Bitfelder: 1 = gedrueckt. Circle-Pad-Werte in
+ * Rohkoordinaten -0x9A..0x9A (Azahar MAX_CIRCLEPAD_POS), Touch in Pixeln des
+ * unteren Bildschirms (0..319 / 0..239). */
+typedef struct {
+    uint32_t a, b, x, y, l, r, start, select;
+    uint32_t up, down, left, right;      /* Steuerkreuz */
+    int16_t circle_x, circle_y;          /* Circle-Pad */
+    int touch_pressed;
+    uint16_t touch_x, touch_y;
+} HleHidInput;
+
+void hle_hid_set_input(const HleHidInput *in);
 #endif

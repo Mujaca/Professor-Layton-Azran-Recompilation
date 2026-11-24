@@ -147,6 +147,10 @@ int main(int argc, char **argv) {
         printf("Fenster konnte nicht geoeffnet werden\n");
         return 3;
     }
+    /* Unterer Screen als Touchflaeche; Tastenbelegung siehe window.h. */
+    win_set_touch_rect(BOT_X, BOT_Y, 320, 240);
+    win_status("A=X B=Z X=S Y=A L=Q R=W Start=Enter Select=Backspace", 2);
+    win_status("DPad=Pfeile CirclePad=I/J/K/L Touch=Maus unten", 3);
     if (!CreateThread(NULL, 0, game_thread, NULL, 0, NULL)) {
         printf("Thread fehlgeschlagen\n");
         return 3;
@@ -155,6 +159,23 @@ int main(int argc, char **argv) {
     int frames = 0;
     while (win_pump()) {
         char line[128];
+        WinInput wi;
+        HleHidInput hi;
+        /* Host-Eingabe je Frame; hid_poll() im Runtime verteilt sie auf die
+           Ringpuffer im Takt von Azahars pad_update_ticks. */
+        win_input_poll(&wi);
+        memset(&hi, 0, sizeof(hi));
+        hi.a = (uint32_t)wi.a; hi.b = (uint32_t)wi.b;
+        hi.x = (uint32_t)wi.x; hi.y = (uint32_t)wi.y;
+        hi.l = (uint32_t)wi.l; hi.r = (uint32_t)wi.r;
+        hi.start = (uint32_t)wi.start; hi.select = (uint32_t)wi.select;
+        hi.up = (uint32_t)wi.up; hi.down = (uint32_t)wi.down;
+        hi.left = (uint32_t)wi.left; hi.right = (uint32_t)wi.right;
+        hi.circle_x = wi.circle_x; hi.circle_y = wi.circle_y;
+        hi.touch_pressed = wi.touch_pressed;
+        hi.touch_x = (uint16_t)wi.touch_x; hi.touch_y = (uint16_t)wi.touch_y;
+        hle_hid_set_input(&hi);
+
         compose_frame();
         win_blit(g_rgb, FB_W, FB_H);
         if ((frames % 30) == 0) {

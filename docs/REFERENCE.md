@@ -144,6 +144,37 @@ Assets: 3 × Level-5-`ARC0` (`lt6_*.fa`), 566 × BCSTM, 34 × MOFLEX. Texturen
   signalisierte Events (RegisterInterruptRelayQueue-Event) hängt der
   Render-Task.
 
+## HID (hid:USER / hid:SPVR)
+
+* Beide Dienste teilen **ein** Modul: ein Shared-Memory-Block (0x1000 Byte,
+  `CreateSharedMemory(..., 0x1000)`) und fuenf OneShot-Events (PadOrTouch1,
+  PadOrTouch2, Accelerometer, Gyroscope, DebugPad). `GetIPCHandles`
+  (`0x000A`) liefert per `MakeBuilder(1,7)` Result + `CopyHandleDesc(6)` und
+  die sechs Handle-Werte. Azahar signalisiert DebugPad nie; die uebrigen
+  Events werden bei jedem Update des jeweiligen Rings signalisiert.
+* Layout (Azahar `hid.h`, `ASSERT_REG_POSITION` belegt pad 0x00/touch 0x2A
+  in Worten): Pad ab `0x000` (Ticks 0/8, Index 0x10, Slider 0x18, aktueller
+  Zustand 0x1C, 8 Eintraege ab 0x28 je 16 Byte), Touch ab `0x0A8`
+  (8 Eintraege ab 0xC8 je 8 Byte: x u16, y u16, valid u32), Accelerometer ab
+  `0x108` (8 Eintraege ab 0x128 je 6 Byte), Gyroscope ab `0x158`
+  (32 Eintraege ab 0x178 je 6 Byte). Die Ringindizes sind absolut; der
+  Vorgaenger eines Eintrags ist `(index - 1) % anzahl` (u32-Arithmetik).
+* `index_reset_ticks`/`_previous` werden nur beim Schreiben von Index 0
+  aktualisiert, in Systemticks (`svcGetSystemTick`, ARM11 268.111856 MHz,
+  Azahar `BASE_CLOCK_RATE_ARM11`).
+* Takt (Azahar `hid.h`): Pad alle `BASE_CLOCK_RATE_ARM11 / 234` Ticks
+  (~4,27 ms), Accelerometer `/ 104`, Gyroscope `/ 101`. Das Pad-Event laeuft
+  ab dem Modulaufbau; Accelerometer/Gyroscope erst nach `0x0011`/`0x0013`
+  (Zaehler, `0x0012`/`0x0014` dekrementieren).
+* Pad-Bits: 0 A, 1 B, 2 Select, 3 Start, 4 rechts, 5 links, 6 oben, 7 unten,
+  8 R, 9 L, 10 X, 11 Y; 28 Circle-Right, 29 Circle-Left, 30 Circle-Up,
+  31 Circle-Down. Circle-Pad-Rohwerte -0x9A..0x9A, Azahar mittelt drei
+  Abtastungen; Richtungsbits ab Radius 40 (tan30/tan60).
+* Command-Antworten: `0x0015` f32 `14.375` (gyroscope_coef), `0x0016`
+  `{0,+6700,-6700}` je Achse, `0x0017` `(u8)(0x3F * Lautstaerke)`.
+* Shared Memory wird im Port per `svcMapMemoryBlock` (SVC 0x1F) zugeordnet;
+  das Spiel mappt HID nach `0x10000000`, GSP nach `0x10002000`.
+
 ## PICA200 (Kommandostrom)
 
 Paare `(value, header)`. Header: `id` Bits 0..15, `mask` Bits 16..19, `extra`

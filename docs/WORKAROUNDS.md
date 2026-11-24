@@ -103,6 +103,13 @@ gebaut und mit `tools/frontier.py` gemessen; der Stand blieb **9/10
 | `SleepThread` 50-ms-Deckel | volle Schlafzeit, `ns <= 0` = Yield | `kernel/svc.cpp` |
 | `DuplicateHandle` kopierte nur den Namen | Alias-Slot/Refcount auf dasselbe Objekt; Pseudo-Handles `0xFFFF8000/1` sind echte Slots | `kernel/handle_table.cpp` |
 | APT `GetLockHandle`/`Initialize` neue Objekte | liefern dasselbe Lock/Notification-/Parameter-Event | `apt/applet_manager.cpp` |
+| HID `GetIPCHandles` legte bei jedem Aufruf neue Handles an; Shared Memory blieb leer, Events wurden nie signalisiert | ein Modul je Prozess (0x1000 Shared Memory + 5 OneShot-Events); Pad-/Touch-/Accel-/Gyro-Ringe mit Azahar-Takt und Systemticks, `svcMapMemoryBlock` blendet den Block ein | `hid/hid.cpp`, `hid/hid.h`; Beleg `[map] MapMemoryBlock h=2 addr=10000000`, `[hid] pads=N ticks=...` |
+
+**Host-Eingabe (kein Workaround):** `runtime/platform/window.c` bildet Tastatur
+(A/B/X/Y, L/R, Start/Select, Steuerkreuz, Circle-Pad) und die Maus ueber dem
+unteren Screen auf `HleHidInput` ab; ohne Eingabe schreibt HID weiter den
+neutralen Zustand mit fortlaufenden Zeitstempeln.
+
 
 Offen (dokumentierte Abweichung): srv-`GetServiceHandle` mit `flags`-Bit0 == 0
 müsste in Azahar auf eine spätere Registrierung warten; der Port hat keinen
