@@ -530,6 +530,7 @@ def generate(res, path, max_funcs=None, trace=False, data=None):
             out.append("%s:" % em.label(blk.addr))
             labeled.add(blk.addr)
             em.ret_bx = return_bx_in_block(blk) | lr_ret
+            em.pseudo_calls = scanmod.pseudo_call_info(blk, fn.thumb)
             em.ret_mov = lr_ret
             em.it_cond = emit.it_conditions(blk.insns) if fn.thumb else {}
             for ln in BLOCK_HOOKS.get(u32(blk.addr), ()):
