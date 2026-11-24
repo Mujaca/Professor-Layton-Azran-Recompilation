@@ -302,6 +302,62 @@ Gast-Lock wird in `hle_pump()` nur alle 16384 Bloecke abgegeben, ein langer
 Decoder-Lauf verzoegert den Producer also stark; nach dem Stall laufen
 weitere Daten ein, der Loop prueft sie aber nie wieder.
 
+### Bilddecoder hing in der Huffman-Schleife: Ruecksprung in die Funktionsmitte – behoben 2026-11-24
+
+**Befund:** Der natuerliche Boot blieb nach dem Dsp-Setup (~2,5 s Referenzzeit)
+in `fn_0016E4A0` stehen. `HLE_PERFMAP` zeigte fuer Gast-Thread 0 nur noch die
+beiden PCs `0x0016E4A8`/`0x0016E4B4` (19 M Bloecke in 10 s, 182 M in 60 s,
+sonst nichts). Das ist die Huffman-/Codebook-Schleife des Bilddecoders
+(`ldrh [tab+idx]; tst #1; beq`), die bei einer Tabelle aus Nullen nie endet.
+
+**Ursache (Recompiler, nicht Spiel):** Die IDCT-Helfer werden per
+`add lr, pc, #4; add pc, rN, rM` angesprungen (Tabelle `0x16A510` →
+`0x16EF20`… `0x16FB04`) und kehren mit `mov pc, lr` **mitten in die aufrufende
+Funktion** `fn_0016A590` zurueck (LR `0x0016A600`). `Emitter.dynamic_pc` hat
+ein Fremdziel als `arm_call_guest(c, t); return;` behandelt: der
+C-Aufruf kehrte zum Direktaufrufer zurueck, der Epilog `0x16A680`
+(`pop {r0-r6, fp, ip, pc}`) lief nie. Damit blieben r0/r1 als fortgeschriebener
+Koeffizientenzeiger stehen (0x1010/0x1012, danach 0x2010/0x2014), und der
+naechste Decoder-Schritt las seine Huffman-Tabelle aus `[0x2010+0x3B8] = 0`
+→ Endlosschleife.
+
+**Belege:**
+
+* `ARM_WATCH=16A798`: r0 = 0x0CA92AE8 (gueltiges Decoder-Objekt), r3 = 0.
+* `ARM_WATCH=16AFB4`: 2. Aufruf (lr 0x16A7A8) hat r0 = 0x00001010.
+* `ARM_WATCH=16E4A0`: r0 = 0x00002010, lr = 0x0016C520, r2 = 0xFFFFFF9E.
+* `ARM_WATCH=16A680`: **0 Treffer** – der Epilog lief nie.
+* `ARM_MEMWATCH=1667FC44`: `push {r0-r3}` schreibt zuerst 0x0CA92AE8, spaeter
+  0x00001010 (2. Aufruf) – der Wert wird also gar nicht zurueckgeladen.
+* `[sp]`-Korrekturen bei `blk=0x0016EF38 lr=0x0016A600` zeigten den
+  Tail-Ruecksprung zusaetzlich.
+
+**Korrektur (`tools/recomp/emit.py`, `dynamic_pc`):** Nach
+`arm_call_guest(c, t)` fuer ein Fremdziel wird `c->r[15]` gegen die
+Blockanfaenge der *aktuellen* Funktion geprueft und per `goto` fortgesetzt
+(sonst `return`). Das ist echte ARM-Semantik: `mov pc, lr` springt an die
+Adresse im LR, auch wenn sie in der Funktionsmitte liegt. Nur Blockanfaenge
+sind anspringbar; jede `bl`-Rueckkehradresse ist ein Block. Test:
+`tools/selftest_tools.py::test_dynamic_pc_resume`.
+
+**Folge:** Der Decoder laeuft durch, der Boot erreicht den Y2R-Introvideo-Zyklus
+wie die Referenz (im 40-s-Frontier-Lauf 41x `StartConversion` samt
+`SetInputFormat`/`SetSending*`/`SetReceiving`, dazu 0x4000-Byte-Videohaeds und
+DSP-Pipe-Writes). Frontier bleibt 10/10 (M1/M2 ja); M3 haengt jetzt nur
+noch an der Spieldauer (Titelbildschirm nach dem Film), nicht mehr an einem
+Haenger. Der aeltere Abschnitt „Stall nach der zweiten PICA-Liste“ ist damit
+ueberholt.
+
+**Offen (nächster Blocker, belegt 2026-11-24):** Ab dem 42. Videoframe fallen
+Tabellenziele im Decoder an, die als Block in einer bereits dekodierten Funktion
+liegen, aber kein Funktionsanfang sind: `0x16E70C` (72x), `0x16AF84` (42x),
+`0x16E8BC` (33x), `0x16E9E0` (27x), `0x16AA20` (27x), `0x16AF9C` (24x),
+`0x16EB68` (15x), `0x16AA08` (15x), `0x16C254` (6x), `0x16C27C` (3x)
+(`out/missing_calls.txt`, 150-s-Lauf). `dynamic_pc` deckt nur Bloecke der
+*aktuellen* Funktion ab, `arm_call_guest` nur Funktionsanfaenge. Entweder
+diese Ziele im Scanner als Funktionsanfang behalten (Funktion splitten) oder im
+Emitter ein globales Block-Dispatch (Blockadresse → Label) einfuehren. Danach
+den 150-s-Lauf wiederholen (aktuell bleibt der Film nach 41 Y2R-Frames stehen).
 
 ### Y2R-Videopfad fehlt: Movie-Player bleibt in Zustand 5 – offen 2026-11-24
 
@@ -749,6 +805,61 @@ je Liste, `docs/TOOLS.md`) zeigt fuer alle Listen nur Setup-Register
 (Rasterizer, Texturen, TEV, Attribut-Loader 0x200..0x229, Shader-Uploads,
 Finalize 0x010), keine 0x22E/0x22F und keine Kanal-Spruenge.
 
+### Videodecoder: Handler dekodiert, Ringpuffer-Stall nach 41 Frames – offen 2026-11-24
+
+**Behoben (Recompiler, eigene Ursache):** Beim Dekodieren ab dem 42.
+Videoframe landeten Tabellenziele im No-op. Zwei Ursachen in
+`tools/recomp/scan.py` (der 41-Frame-Stall selbst blieb danach bestehen,
+siehe unten):
+
+* Die Offset-Tabellen `0x16A958`/`0x16AED4` haben zwei Selbstverweis-Slots
+  (Index 6/7 -> Tabellenbasis) vor den Handlern `0x16AA08`/`0x16AA20` bzw.
+  `0x16AF84`/`0x16AF9C`. `offset_table_targets()` brach beim ersten
+  Selbstverweis ab; er wird jetzt uebersprungen.
+* Die Handler `0x16E70C`/`0x16E8BC`/`0x16E9E0`/`0x16EB68` werden ueber zwei
+  Schritte adressiert (`add r4, pc, #hi; add r4, r4, #lo; movle pc, r4` in
+  `0x16C390..0x16C530`). Der Scanner schrieb nur die PC-relative erste
+  Addition in `const_reg` fort; die zweite Stufe wird jetzt ebenfalls
+  fortgeschrieben.
+
+Belege: `out/missing_calls.txt` (vorher) `0x16E70C` (192x), `0x16AF84`
+(112x), `0x16E8BC` (88x), `0x16E9E0` (72x), `0x16AA20` (72x), `0x16AF9C`
+(64x), `0x16EB68` (40x), `0x16AA08` (40x); nach dem Fix sind diese Ziele 0,
+`ARM_WATCH` belegt ihre Ausfuehrung (z. B. `0x16E70C` 65 Treffer,
+`0x16AF84` 78, `0x16E8BC` 98 in 5 s). Selbsttests:
+`tools/selftest_tools.py` (Offset-Tabelle mit Selbstverweisen,
+Zwei-Schritt-PC-Adresse), 19/19 gruen; `tests/mvp_selftest.py` 45/45.
+
+**Weiter offen (Ursache des 41-Frame-Stalls):** Der Decoder-Thread 0 laeuft
+nach 41 `StartConversion` in den Huffman-Loop, weil sein Eingabepuffer nur
+Nullen liefert: `HLE_STALLDUMP` zeigt dauerhaft `pc=0x16E4A8/0x16E4B4`;
+`ARM_WATCH=16E4A0` zeigt `r1=0x0C683Axx` (Ringpuffer) und der Bit-Refill
+`0x16C568` liest dort 0. Der I/O-Thread `F89` hat anfangs nur 4x `0x4000`
+Byte (64 KiB) gelesen (`off=0x379F1BE0..0x379FDBE0`); die naechsten
+Datei-Reads (`0x37A05BE0...`) kommen erst nach dem Stall. Der Decoder laeuft
+also ueber das Pufferende hinaus, statt auf Nachschub zu warten. Naechster
+Schritt: die Ringpuffer-/Event-Wartestelle des Decoders (Thread 0) gegen
+Azahar pruefen; der 1-ms-Poll (`svc 0x19 ClearEvent / 0x18 / 0x0A`) des
+I/O-Threads ist das Gegenstueck. `HLE_PERFMAP_FILE` zeigt, dass der
+I/O-Thread (thread 10) waehrend des Stalls 1,27 M Bloecke ausfuehrt, also
+nicht vom kooperativen Scheduler ausgehungert wird; die Warte-/Bedingungs-
+logik des Ringpuffers selbst ist falsch.
+
+**Nebenbefund (Recompiler, offen):** `fn_0020E250` kehrt mit
+`ldr pc,[sp],#0x14` (Post-Index-SP) zurueck. Der Emitter behandelt das als
+dynamischen Sprung und loggt die Rueckkehradresse `0x0035649C` als
+"unbekanntes call-Ziel" (576x). Fuer direkte `bl`-Aufrufe ist der No-op
+wirkungslos (die C-Funktion kehrt danach zum Aufrufer zurueck), aber die
+Semantik sollte wie `pop {pc}` als `return` emittiert werden. Ebenso werden
+Return-Adressen aus `mov pc, rN` (z. B. `0x16C254`) als Missing-Call geloggt.
+
+**Korrektur zur frueheren Annahme:** Y2R schreibt das RGB8-Bild (400x240,
+`SetReceiving` size `0x46500`) in den **linearen Heap** (`0x15E3DE00`), nicht
+in die VRAM-Framebuffer (`0x1F300000`/`0x1F346500`). Im 60-s-Lauf gibt es
+weiterhin **keinen** GX-DisplayTransfer/MemoryFill und keine Draws; der
+Bildschirm bleibt einfarbig. Der Videopfad braucht nach Y2R noch einen
+Transfer/Render, der ohne den Ringpuffer-Fix nicht erreicht wird.
+
 ### PICA-Listen-Ausreisser (415-430 vs. 15.738 in 40 s): Host-Last, kein Gastfehler – 2026-11-24
 
 **Befund:** Die Zahl der `[gpu] list`-Zeilen ist nur ein Mass fuer die
@@ -798,3 +909,93 @@ den kooperativen Scheduler und wurde ohne Not (Boot ist 10/10) nicht gemacht.
 **Diagnose:** neuer Schalter `HLE_YSTAT=1` (`docs/TOOLS.md`) zaehlt Yields,
 Wandzeit in den Lock-Abgaben und die Zeit, in der der Gast-Lock frei lag –
 reine Zaehler, kein Gastzustand.
+
+### 41-Frame-Stall: Videodaten sind vollstaendig geladen, Decoder liest ueber das Paketende – Befund 2026-11-24
+
+**Korrektur der Auftragsannahme (belegt):** Der I/O-Thread hungert nicht und
+die Datei-Reads fehlen nicht. Im 30-s-Frontier-Lauf liegen vor der 41.
+`StartConversion` (Zeile 3612) bereits 87 `[file] Read`-Aufrufe; die
+komplette `m999.moflex` wurde in neun 64-KiB-Happen
+(`0x26B10510` … `0x26BA0510`, inkl. 0x12A4 am Ende) nach `0x0D0007C0`
+am Stueck geladen. Die `0x4000`-Reads von `th=F89` sind die **Audiospur**
+(jedem Read folgen zwei `dsp::DSP 0x0013`-Pipe-Writes), nicht das Video. Alle
+87 Reads liefern `done == len` (kein Teilread). Ein Datei-/fs-Fehler ist damit
+als Ursache des Decoder-Stalls ausgeschlossen.
+
+**Neue Belege mit `HLE_STALLDUMP` (Register/Stack) und `ARM_MEMWATCH`
+(nur Diagnose, kein Gastzustand):**
+
+* Register des haengenden Threads: `r0=0C682378`, `r1=0CABFDFA`, `r2=3..9`,
+  `r3=0`, `sp=1667FC48`; Stack enthaelt die Decoder-Rueckkehrkette
+  `0016C520 → 0016C400/0016C41C → 0016BFCC → 0016A7B0`, darunter
+  `00390338` (`0x3902E0` Queue-Push) und `0033C9FC` (`0x33C9E4`).
+* `ARM_MEMWATCH=0CABFDF8` und `=0CABFE00`: **0 Schreibzugriffe**. Der
+  Bitstromzeiger `r1` liegt also hinter dem beschriebenen Bereich; ab `r1`
+  stehen Nullen, `r1-0x200` enthaelt noch gueltige Koeffizienten
+  (`FFFFFFFF 7FFF0000 FFFFFFFF …`). Der Decoder liest ueber das Paketende
+  hinaus.
+* `ARM_WATCH=16BD1C` zeigt: die Codebook-Auswahl laeuft (2x) und schreibt
+  eine gueltige statische Huffman-Tabelle (`0x003C1E2C` bzw. `0x003BFD2C`)
+  nach `[obj+0x3b8]`. `ARM_MEMWATCH=0C682730` (=`obj+0x3b8`) belegt danach
+  zusaetzliche Stores von `003BFD2C` aus `0x16BC1C` (normale Paketauswahl).
+* Erst der Huffman-Loop selbst ueberschreibt `[obj+0x3b8]` mit 0: bei
+  `r3=0` liefert die Tabelle `0x0001`, der Pfad setzt `r6=0, r5=0`, und
+  `str r7,[obj+0x1b8+r5*4]` schreibt mit dem aus den Nullbytes
+  gewonnenen `r5=0x80` auf `obj+0x3b8`. Der bei der Stichprobe beobachtete
+  Null-Zeiger ist also **Folge**, nicht Ursache des Haengers.
+* Kernel-Primitive geprueft: `ArbitrateAddress` Typ 1 vergleicht vorzeichen-
+  richtig (`mem=-1 < 0` blockiert), Events (OneShot/Sticky/Pulse-Acquire)
+  und Semaphoren entsprechen Azahar; kein Kernel-Fehler ist als Ursache
+  belegt.
+
+**Naechster Schritt:** Die Kopierstelle Paket→Decode-Puffer identifizieren
+(Byte-Kopien aus `pc=0x20D2CC` bzw. `0x358FA8`) und Laenge/Quelle gegen den
+Moflex-Paketkopf pruefen. Faellt die Kopierlaenge zu kurz aus oder laeuft der
+Praesentations-Event dem Kopierer davon, liegt die Ursache dort (Event-Kette
+`0x218xxx`/`0x3902E0`); andernfalls ist es der parallele Decoder-Differenztest.
+
+### Decoder wird pro 96-Byte-Chunk gerufen; der 64. Aufruf (nach Frame 41) liest 6,4 KiB – Befund 2026-11-24
+
+**Befund (nur Diagnose, kein Gastzustand):** Der Haenger ist der **64.** Aufruf
+des Frame-Decoders `0x0016A500`, und zwar unmittelbar **nach der 41.
+`StartConversion`** (Korrelation mit `HLE_LOG=1` + `ARM_WATCH=0x0016A500`:
+24 Aufrufe vor Frame 1, danach 1 Aufruf je `StartConversion`, der 64. direkt
+danach). Bis Frame 41 stirbt der Decoder also nicht an einem fehlenden Pfad.
+
+**Neue Belege:**
+
+* `[mw] 0C682378 <- ...` (`ARM_MEMWATCH=0C682378`, Schreiber `pc=0x17A6F8` =
+  `str r1,[r5]` in `fn_0017A6A0`) zeigt die Bitstrom-Zeiger je Decoderaufruf:
+  `0CABDF28`, dann in **0x60-Schritten** `0CABE0E4, 0CABE144, ... 0CABE924,
+  0CABE984, ... 0CABEE04`, Umlauf auf `0CABDF80 ... 0CABE820`, zuletzt
+  `0CABDF28` und `0CABE504`. Der Ring wird also **in 96-Byte-Chunks** an den
+  Decoder uebergeben (0x17A6A0 liest dafuer 6 Referenz-Eintraege, ein
+  16-Bit-Kopfflag `[r1]&0x8000` und ruft je nach `[r4+0x18]` (0x100/0x200/
+  0x400) einen Handler ueber `blx`; der Haenger sitzt im 0x200-Zweig,
+  Rueckkehr `lr=0x0017A788`).
+* Der Stalling-Aufruf startet bei `[obj+0] = 0x0CABE504` und steht bei
+  `r1 = 0x0CABFDFA`, d. h. er hat **0x18F6 = 6390 Byte** verbraucht, waehrend
+  alle vorherigen Chunks 0x60 Byte auseinanderlagen. `[obj+4]=0x190` (400),
+  `[obj+8]=0xF0` (240) bleiben korrekt; `[obj+0xc..0x1c]` zeigen gueltige
+  Referenzebenen (`0C8FA7C8, 0C8CD5A8, 0C8A0388, 0C873168, 0C845F48`).
+  Offenbar beginnt bei diesem Chunk ein **Intra-Frame** (Keyframe), dessen
+  Daten der Ring noch nicht bereitgestellt hat.
+* Der Ring-Schreiber ist `fn_00358958` (Struktur `0x0C680A20`, Datenpuffer
+  u. a. `0x0CAB...`, Quelle `0x0D0007C0` = vollstaendig gelesener Moflex);
+  sein Kopierpfad laeuft ueber `pc=0x358FA8` (Byte-Loop) bzw. `0x20D2CC`
+  (Byte-Kopie, im `0x0CABF000`-Bereich mit 0xFF gefuellt). Der Ringpuffer ist
+  also ein echter Produzent/Verbraucher-Ring, kein fehlender Datei-Read.
+* `HLE_PERFMAP_FILE` (12 s, 900 Host-Frames): Thread 0 95,2 M Bloecke, davon
+  `0x16E4B4`/`0x16E4A8` je 45,8 M (Huffman-Loop); Thread 2 8,7 M (u. a.
+  `0x12B9E8`/`0x12B968` = zweiter Bitstrom-Decoder, laeuft weiter); Thread 10
+  3,7 M (`0x14FF9C`/`0x14FFF0` = GSP). Die Produzenten-Threads sind also
+  **nicht** ausgehungert; es fehlt die Freigabe/Kopfreaktion auf den
+  96-Byte-Chunk des Decoders.
+
+**Naechster Schritt (praezisiert):** Im Chunk-Geber `fn_0017A6A0` und im
+Ring-Schreiber `fn_00358958` die Zaehler „geschrieben/gelesen“ und das
+Freigabe-Event beobachten (`ARM_MEMWATCHRANGE` auf die Ringstruktur
+`0x0C680A20` bzw. den Chunk-Index in `[r4+0xc]`/`[r4+8]`); pruefen, ob der
+Decoder beim Intra-Frame mehr als einen 96-Byte-Chunk anfordern muss und
+welches Event/Semaphor den Kopierer weckt. Erst danach ist eine
+Kernel-/Service-Korrektur belegbar.

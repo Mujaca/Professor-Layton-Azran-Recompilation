@@ -196,8 +196,10 @@ int main(int argc, char **argv) {
                 if (getenv("HLE_STALLDUMP")) {
                     int ti;
                     for (ti = 0; ti < 16; ti++)
-                        if (arm_thread_last_pc[ti] != 0u)
+                        if (arm_thread_last_pc[ti] != 0u) {
                             arm_trace_thread_dump(ti, 12);
+                            arm_trace_thread_regs(ti);
+                        }
                 }
             }
         }
