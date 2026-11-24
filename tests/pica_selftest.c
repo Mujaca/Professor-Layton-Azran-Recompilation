@@ -105,6 +105,20 @@ static void test_gpu_mmio(ArmCpu *c, uint8_t *mem) {
     check(gpu_gsp_read_reg(c, REG + 0x401080u) == 0x1234CC78u,
           "WriteHWRegsWithMask aendert nur maskierte Bytes");
 
+    /* LCD-Seite (0x1ED02000, RegsLcd::NumIds = 0x400 Woerter): ColorFill
+       liegt bei Index 0x81/0x281, Backlight bei 0x90/0x290. */
+    gpu_gsp_set_lcd_color_fill(c, 1);
+    check(gpu_gsp_read_reg(c, REG + 0x202204u) == 0x01000000u &&
+          gpu_gsp_read_reg(c, REG + 0x202A04u) == 0x01000000u,
+          "SetLcdForceBlack schreibt color_fill_top/bottom (is_enabled Bit24)");
+    gpu_gsp_set_lcd_color_fill(c, 0);
+    check(gpu_gsp_read_reg(c, REG + 0x202204u) == 0u &&
+          gpu_gsp_read_reg(c, REG + 0x202A04u) == 0u,
+          "SetLcdForceBlack(0) loescht die ColorFill wieder");
+    gpu_gsp_write_reg(c, REG + 0x202C00u, 0x12345678u);
+    check(gpu_gsp_read_reg(c, REG + 0x202C00u) == 0x12345678u,
+          "LCD-Registerfenster umfasst RegsLcd::NumIds() = 0x400 Woerter");
+
     /* MemoryFill 0 (0x1EF00010..0x1C): 16-Bit-Wert, Trigger, finished, PSC0 */
     gpu_gsp_write_reg(c, REG + 0x400010u, 0x00080000u >> 3);
     gpu_gsp_write_reg(c, REG + 0x400014u, 0x00080008u >> 3);
@@ -3347,6 +3361,162 @@ static int pica_bench(void)
     return 0;
 }
 
+/* Spezialregister-Semantik aus Azahar pica_core.cpp (HandleSpecialReg,
+ * WriteInternalReg, GPU::WriteReg/SubmitCmdList) und PicaCore::InitializeRegs,
+ * die nicht von den Renderpfaden oben abgedeckt wird. */
+static void test_special_regs(ArmCpu *c, unsigned char *mem)
+{
+    const uint32_t REG = 0x1EB00000u;
+    uint32_t *q, size;
+    uint32_t pack[3];
+    unsigned long long draws;
+    int nops;
+
+    /* InitializeRegs: gs.input_buffer_config = max_input_attribute_index 1
+       (Bits0..3) + shader_mode VS (0xA0 in Bits24..31). */
+    gpu_pica_reset();
+    check(gpu_pica_reg(0x289) == 0x000000A1u,
+          "Reset: 0x289 = 0xA1 (gs max_input_attribute_index 1, shader_mode VS)");
+
+    /* irq_autostop ist ein ganzer u32: der Wert 2 stoppt die Liste ebenfalls
+       (Azahar: if (regs.internal.irq_autostop)). */
+    gpu_pica_reset();
+    gpu_pica_set_irq_handler(test_irq);
+    irq_count = 0;
+    q = (uint32_t *)(mem + LIST);
+    q = emit(q, 0x034, 2u);
+    q = emit(q, 0x010, 0x12345678u);       /* matcht irq_compare */
+    q = emit(q, 0x080, 0x55u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    nops = gpu_run_pica_list(c, LIST, size);
+    check(nops == 2 && gpu_pica_reg(0x080) == 0u,
+          "irq_autostop != 0 beendet die Liste (nicht nur Bit0)");
+    check(irq_count == 1, "Finalize mit passendem irq_compare meldet P3D");
+
+    /* vs.output_mask (0x2BD) spiegelt bei geteilter Konfiguration den
+       ROHWERT als BitField<0,16> nach 0x28D (Azahar Assign(value)). */
+    gpu_pica_reset();
+    q = (uint32_t *)(mem + LIST);
+    q = emit(q, 0x2BD, 0xAABBCCDDu);
+    q = emit_h(q, 0x11223344u, 0x2BD, 0x1u);   /* nur Byte0 maskiert */
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    check(gpu_pica_reg(0x28D) == 0x00003344u,
+          "vs.output_mask spiegelt den Rohwert als 16-Bit-Feld nach 0x28D");
+    gpu_pica_reset();
+    q = (uint32_t *)(mem + LIST);
+    q = emit(q, 0x244, 1u);                    /* exclusive configuration */
+    q = emit(q, 0x2BD, 0x1234u);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    check(gpu_pica_reg(0x28D) == 0u,
+          "exclusive GS-Konfiguration verhindert die output_mask-Spiegelung");
+
+    /* 0x232 > 0xF: Azahar verwirft das Attribut (Invalid VS default attribute
+       index) und laesst setup.index stehen; der Port maskierte frueher auf
+       4 Bit und schrieb Attribut 0. */
+    gpu_pica_reset();
+    draws = gpu_pica_draw_count();
+    q = (uint32_t *)(mem + LIST);
+    q = emit(q, 0x232, 0x10u);
+    f24_pack3(1.0f, 2.0f, 3.0f, 4.0f, pack);
+    q = emit(q, 0x233, pack[0]);
+    q = emit(q, 0x233, pack[1]);
+    q = emit(q, 0x233, pack[2]);
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    check(gpu_pica_reg(0x232) == 0x10u && gpu_pica_draw_count() == draws,
+          "0x232 > 0xF: Attribut verworfen, Index bleibt stehen");
+
+    /* Trigger 0x23C aus einer Liste macht immer cmd_list.Reset: die alte
+       Liste endet, auch bei Groesse 0, und es gibt kein P3D. Der Trigger
+       bleibt (anders als beim GSP-MMIO-Pfad) im Register stehen. */
+    gpu_pica_reset();
+    irq_count = 0;
+    q = (uint32_t *)(mem + LIST);
+    q = emit(q, 0x238, 0u);                    /* Groesse 0 */
+    q = emit(q, 0x23A, LIST2 >> 3);
+    q = emit(q, 0x23C, 1u);
+    q = emit(q, 0x080, 0x55u);                 /* darf nicht mehr laufen */
+    size = (uint32_t)((unsigned char *)q - (mem + LIST));
+    gpu_run_pica_list(c, LIST, size);
+    check(gpu_pica_reg(0x080) == 0u,
+          "Trigger mit Groesse 0 beendet die laufende Liste");
+    check(irq_count == 0, "Trigger mit Groesse 0 meldet kein P3D");
+    check(gpu_pica_reg(0x23C) == 1u,
+          "Trigger aus der Kommandoliste bleibt im Register stehen");
+
+    /* Gueltiger Trigger: neue Liste laeuft, alte endet. */
+    gpu_pica_reset();
+    {
+        uint32_t *q2 = (uint32_t *)(mem + LIST2);
+        uint32_t size2;
+        q2 = emit(q2, 0x080, 0x77u);
+        size2 = (uint32_t)((unsigned char *)q2 - (mem + LIST2));
+        q = (uint32_t *)(mem + LIST);
+        q = emit(q, 0x238, size2 >> 3);
+        q = emit(q, 0x23A, LIST2 >> 3);
+        q = emit(q, 0x23C, 1u);
+        q = emit(q, 0x081, 0x66u);             /* darf nicht mehr laufen */
+        size = (uint32_t)((unsigned char *)q - (mem + LIST));
+        gpu_run_pica_list(c, LIST, size);
+        check(gpu_pica_reg(0x080) == 0x77u && gpu_pica_reg(0x081) == 0u,
+              "0x23C springt in die neue Liste und beendet die alte");
+    }
+
+    /* GSP-MMIO-Trigger (GPU::WriteReg -> SubmitCmdList): die Liste laeuft und
+       der Trigger wird danach geloescht. */
+    gpu_pica_reset();
+    {
+        uint32_t *q2 = (uint32_t *)(mem + LIST2);
+        uint32_t size2;
+        q2 = emit(q2, 0x080, 0x99u);
+        size2 = (uint32_t)((unsigned char *)q2 - (mem + LIST2));
+        gpu_gsp_write_reg(c, REG + 0x4018E0u, size2 >> 3);   /* 0x238 */
+        gpu_gsp_write_reg(c, REG + 0x4018E8u, LIST2 >> 3);   /* 0x23A */
+        gpu_gsp_write_reg(c, REG + 0x4018F0u, 1u);           /* 0x23C */
+        check(gpu_pica_reg(0x080) == 0x99u,
+              "MMIO-Trigger fuehrt die Kommandoliste aus");
+        check(gpu_pica_reg(0x23C) == 0u,
+              "MMIO-Trigger wird nach SubmitCmdList geloescht");
+
+        /* Eine Schreibung, deren Maske den Trigger nicht enthaelt, darf die
+           Liste nicht starten (GPU::SubmitCmdList prueft config.trigger). */
+        gpu_pica_reset();
+        q2 = (uint32_t *)(mem + LIST2);
+        q2 = emit(q2, 0x080, 0xBBu);
+        size2 = (uint32_t)((unsigned char *)q2 - (mem + LIST2));
+        gpu_gsp_write_reg(c, REG + 0x4018E0u, size2 >> 3);
+        gpu_gsp_write_reg(c, REG + 0x4018E8u, LIST2 >> 3);
+        gpu_gsp_write_reg_masked(c, REG + 0x4018F0u, 0u, 0x0000FF00u);
+        check(gpu_pica_reg(0x080) == 0u && gpu_pica_reg(0x23C) == 0u,
+              "MMIO-Schreibung ohne Trigger-Bit startet keine Liste");
+    }
+
+    /* GX-Kommando 0x01 (GPU::Execute SubmitCmdList): Adresse/Groesse landen in
+       den Kommandopuffer-Registern, Trigger danach 0. Laenge 0 ist gueltig:
+       keine Ausfuehrung, kein P3D. */
+    gpu_pica_reset();
+    irq_count = 0;
+    {
+        uint32_t *q2 = (uint32_t *)(mem + LIST2);
+        uint32_t size2;
+        q2 = emit(q2, 0x080, 0xAAu);
+        size2 = (uint32_t)((unsigned char *)q2 - (mem + LIST2));
+        nops = gpu_gsp_submit_cmdlist_cmd(c, LIST2, size2);
+        check(nops == 1 && gpu_pica_reg(0x080) == 0xAAu,
+              "GX SubmitCmdList fuehrt die Liste aus");
+        check(gpu_pica_reg(0x238) == (size2 >> 3) &&
+              gpu_pica_reg(0x23A) == (LIST2 >> 3) &&
+              gpu_pica_reg(0x23C) == 0u,
+              "GX SubmitCmdList schreibt addr/size und loescht den Trigger");
+        gpu_pica_reset();
+        nops = gpu_gsp_submit_cmdlist_cmd(c, LIST2, 0u);
+        check(nops == 0 && irq_count == 0,
+              "GX SubmitCmdList mit Laenge 0: keine Ausfuehrung, kein P3D");
+    }
+}
+
 int main(void) {
 
     static unsigned char mem[0x100000];
@@ -3949,6 +4119,7 @@ int main(void) {
     test_gs_output_bank(&c, mem);
     test_gs_immediate(&c, mem);
     test_gpu_mmio(&c, mem);
+    test_special_regs(&c, mem);
 
     printf("ERGEBNIS: %s\n", fails == 0 ? "OK" : "FEHLER");
     {

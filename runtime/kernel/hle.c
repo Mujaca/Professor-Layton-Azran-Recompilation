@@ -3031,16 +3031,20 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
                 gsp_signal_interrupt(GSP_IRQ_DMA);
                 break;
             }
-            case 0x01: { /* ProcessCommandList */
+            case 0x01: { /* SubmitCmdList (Azahar GPU::Execute) */
                 uint32_t addr = w[1], size = w[2];
                 /* GSP reicht eine Virtualadresse; PICA-Register halten wie
                    auf echter Hardware physische Adressen (Azahar
                    GPU::Execute -> VirtualToPhysicalAddress). */
                 uint32_t paddr = gpu_pica_virt_to_phys(addr);
-                if (addr != 0u && size != 0u &&
-                    (uint64_t)gpu_pica_phys_to_guest(paddr) + size <= c->mem_size) {
+                /* Azahar: eine Laenge von 0 ist zulaessig (er schreibt die
+                   Register und fuehrt nichts aus); nur ein nicht abbildbarer
+                   Bereich meldet P3D. */
+                if (addr != 0u &&
+                    (size == 0u ||
+                     (uint64_t)gpu_pica_phys_to_guest(paddr) + size <= c->mem_size)) {
                     unsigned long long d0 = gpu_pica_draw_count();
-                    int nops = gpu_run_pica_list(c, paddr, size);
+                    int nops = gpu_gsp_submit_cmdlist_cmd(c, paddr, size);
                     qops += nops;
                     /* Frontier-M3: Liste mit Draws ([gpu] list ... draws=N). */
                     printf("[gpu] list addr=%08X paddr=%08X size=%X ops=%d draws=%llu\n",
@@ -3269,9 +3273,15 @@ static void gsp_command(Ipc *r, uint32_t *p) {
             put_result(r);
             break;
         }
-        case 0x0008: case 0x0009: case 0x000A:
-        case 0x000B: { /* Cache / Events / LcdForceBlack */
+        case 0x0008: case 0x0009: case 0x000A: { /* Cache / Events */
             ipc_begin(r, r->cmd, 1, 0);
+            put_result(r);
+            break;
+        }
+        case 0x000B: { /* SetLcdForceBlack -> Azahar GPU::SetColorFill */
+            uint32_t enable = (r->normal >= 1) ? p[0] : 0u;
+            gpu_gsp_set_lcd_color_fill(g_cpu, enable != 0u);
+            ipc_begin(r, 0x000B, 1, 0);
             put_result(r);
             break;
         }

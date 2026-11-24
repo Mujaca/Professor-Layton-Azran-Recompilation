@@ -100,6 +100,10 @@ static uint32_t p_regs[PICA_NREGS] = {
     [0x020] = 0x12345678u,  /* irq_compare */
     [0x030] = 0xFFFFFFF0u,  /* irq_mask */
     [0x034] = 0x00000001u,  /* irq_autostop */
+    /* gs.input_buffer_config: max_input_attribute_index = 1 (Bits0..3),
+       shader_mode = VS (Bits24..31). Azahar setzt diesen Default, weil
+       Tales of the Abyss ihn erwartet; GSP initialisiert ihn nicht. */
+    [0x289] = 0x000000A1u,
 };
 
 /* Fog-LUT (0xE8..0xEF schreiben bei 0xE6 % 128, danach Offset++). */
@@ -159,6 +163,7 @@ void gpu_pica_reset(void)
     p_regs[0x020] = 0x12345678u;
     p_regs[0x030] = 0xFFFFFFF0u;
     p_regs[0x034] = 0x00000001u;
+    p_regs[0x289] = 0x000000A1u;   /* gs: max_input_attribute_index 1, VS */
     p_light_draw_invalidate();
     p_proctex_reset();
     p_vs_reset();
@@ -3768,7 +3773,7 @@ static int p_uniform_push(PicaShader *st, uint32_t idxreg, uint32_t word)
 /* Default-Attribute/Immediate: Azahar PicaCore::SubmitImmediate. */
 static void p_vs_submit_immediate(ArmCpu *c, uint32_t word)
 {
-    unsigned idx = p_regs[0x232] & 0xFu;
+    unsigned idx = p_regs[0x232];      /* Azahar: setup.index ist ein voller u32 */
     float a[4];
 
     g_vs_imm_pack[g_vs_imm_pack_n++] = word;
@@ -3776,6 +3781,7 @@ static void p_vs_submit_immediate(ArmCpu *c, uint32_t word)
     p_unpack_f24(g_vs_imm_pack[0], g_vs_imm_pack[1], g_vs_imm_pack[2], a);
     g_vs_imm_pack_n = 0;
 
+    if (idx > 0xFu) return;            /* Azahar: Invalid VS default attribute index */
     if (idx < 0xFu) {
         memcpy(g_vs_def_attr[idx], a, sizeof(a));
         p_regs[0x232] = idx + 1u;
@@ -3877,7 +3883,9 @@ static void p_vs_reg_write(ArmCpu *c, uint32_t id, uint32_t value)
     } else if (id >= 0x2D6u && id <= 0x2DDu) { /* Swizzle-Muster */
         if (n > 0) g_gs.swz[n - 1] = g_vs.swz[n - 1];
     } else if (id == 0x2BDu) {                /* output_mask */
-        p_regs[0x28D] = p_regs[0x2BD];
+        /* Azahar: regs.gs.output_mask.Assign(value) -- BitField<0,16> mit dem
+         * ROHWERT der Schreibung; die oberen Bits von 0x28D bleiben. */
+        p_regs[0x28D] = (p_regs[0x28D] & ~0xFFFFu) | (value & 0xFFFFu);
     }
 }
 
@@ -3920,6 +3928,7 @@ int gpu_pica_last_vertex(float *pos, float *color, float *uv)
 typedef struct {
     int ops;                 /* verarbeitete Register-Schreibungen */
     int stop;                /* 0x010 Finalize mit irq_autostop */
+    int jump_pending;        /* 0x23C/0x23D: aktuelle Liste wurde ersetzt */
     uint32_t jump_addr;      /* physische Adresse des Ziel-Kanals */
     uint32_t jump_size;
 } PicaCtx;
@@ -3988,10 +3997,11 @@ static void p_write_reg(ArmCpu *c, uint32_t id, uint32_t value, uint32_t mask,
 
     if (id == 0x010u) {             /* Finalize / irq_request */
         /* Azahar: every_byte_match(irq_request, irq_compare) -> P3D; bei
-           irq_autostop endet die Liste hier. */
+           irq_autostop endet die Liste hier (irq_autostop ist ein ganzer u32,
+           nicht nur Bit0). */
         if (p_any_byte_match(p_regs[0x010], p_regs[0x020])) {
             if (p_irq_handler) p_irq_handler(5);
-            if (p_regs[0x034] & 1u) ctx->stop = 1;
+            if (p_regs[0x034] != 0u) ctx->stop = 1;
         }
     } else if (id == 0x22Eu) {
         p_draw_arrays(c, 0);
@@ -4004,20 +4014,16 @@ static void p_write_reg(ArmCpu *c, uint32_t id, uint32_t value, uint32_t mask,
         p_prim_reset();
     } else if (id == 0x23Cu || id == 0x23Du) {
         uint32_t ch = id - 0x23Cu;
-        uint32_t paddr, sz;
-        /* Azahar HandleSpecialReg: jeder Schreibzugriff startet die Liste,
-         * unabhaengig vom geschriebenen Wert (auch 0); der Trigger bleibt
-         * im Register stehen. */
-        paddr = (p_regs[0x23Au + ch] & 0x0FFFFFFFu) * 8u;
-        sz = (p_regs[0x238u + ch] & 0x000FFFFFu) * 8u;
-        if (paddr == 0u || sz == 0u
-                || (uint64_t)gpu_pica_phys_to_guest(paddr) + sz > c->mem_size) {
-            /* Azahar GPU::SubmitCmdList: ungueltige Liste meldet P3D. */
-            if (p_irq_handler) p_irq_handler(5);
-            return;
-        }
-        ctx->jump_addr = paddr;
-        ctx->jump_size = sz;
+        /* Azahar HandleSpecialReg: jeder Schreibzugriff macht cmd_list.Reset,
+         * unabhaengig vom geschriebenen Wert und ohne Gueltigkeitspruefung.
+         * Die alte Liste endet also immer; ist die neue Liste leer oder nicht
+         * abbildbar, laeuft nichts weiter (kein P3D -- das meldet nur
+         * GPU::SubmitCmdList fuer den GSP-Trigger). Der Trigger bleibt im
+         * Register stehen, weil hier der Register-Array-Wert nicht
+         * zurueckgesetzt wird. */
+        ctx->jump_addr = (p_regs[0x23Au + ch] & 0x0FFFFFFFu) * 8u;
+        ctx->jump_size = (p_regs[0x238u + ch] & 0x000FFFFFu) * 8u;
+        ctx->jump_pending = 1;
         if (p_diag_mode()) g_diag_jumps++;
     }
 }
@@ -4043,7 +4049,7 @@ static void p_run_list(ArmCpu *c, uint32_t addr, uint32_t size, PicaCtx *ctx,
         group = (hdr >> 31) & 1u;
 
         p_write_reg(c, id, value, mask, ctx);
-        if (ctx->stop || ctx->jump_addr) break;
+        if (ctx->stop || ctx->jump_pending) break;
 
         for (uint32_t k = 0; k < extra; k++) {
             uint32_t ev, eid;
@@ -4052,18 +4058,24 @@ static void p_run_list(ArmCpu *c, uint32_t addr, uint32_t size, PicaCtx *ctx,
             eid = group ? (id + 1u + k) : id;
             i++;
             p_write_reg(c, eid, ev, mask, ctx);
-            if (ctx->stop || ctx->jump_addr) break;
+            if (ctx->stop || ctx->jump_pending) break;
             /* Nach einem ungeraden Record folgt ein Pad-Wort; das erledigt
                die Ausrichtung am Schleifenkopf. */
         }
     }
 
-    if (ctx->jump_addr) {
+    if (ctx->jump_pending) {
         uint32_t ja = ctx->jump_addr;
         uint32_t js = ctx->jump_size;
+        ctx->jump_pending = 0;
         ctx->jump_addr = 0;
         ctx->jump_size = 0;
-        p_run_list(c, gpu_pica_phys_to_guest(ja), js, ctx, depth + 1);
+        /* Azahar cmd_list.Reset: die neue Liste ersetzt die alte. Nur eine
+         * nicht leere, abbildbare Liste wird ausgefuehrt; sonst endet die
+         * Verarbeitung hier (kein P3D, siehe p_write_reg). */
+        if (js != 0u
+                && (uint64_t)gpu_pica_phys_to_guest(ja) + js <= c->mem_size)
+            p_run_list(c, gpu_pica_phys_to_guest(ja), js, ctx, depth + 1);
     }
 }
 
@@ -4360,7 +4372,9 @@ static void p_texture_copy_run(ArmCpu *c, uint32_t src, uint32_t dst, uint32_t s
  */
 #define GPU_MMIO_VADDR   0x1EF00000u
 #define GPU_MMIO_LCD     0x1ED02000u
-#define GPU_MMIO_LCD_W   0x2A4u    /* RegsLcd::NumIds() */
+/* RegsLcd::NumIds(): 0x81 + 1 + 0xE + 1 + 0x1F0 + 1 + 0xE + 1 + 0x16F
+ * = 0x400 Woerter (die LCD-Seite ist genau 4 KiB). */
+#define GPU_MMIO_LCD_W   0x400u
 #define GPU_MMIO_EXT_W   0x400u    /* 0x1EF00000..0x1EF00FFF */
 
 static uint32_t p_ext_regs[GPU_MMIO_EXT_W];
@@ -4462,18 +4476,37 @@ static void p_ext_transfer(ArmCpu *c)
     if (p_irq_handler) p_irq_handler(4);   /* PPF */
 }
 
-/* Azahar GPU::SubmitCmdList ueber die Register (Trigger 0x23C/0x23D). */
-static void p_ext_submit_cmdlist(ArmCpu *c, uint32_t ch)
+/* Azahar GPU::SubmitCmdList ueber die Register (Trigger 0x23C/0x23D).
+ * Gueltigkeitspruefung wie GPU::SubmitCmdList: Laenge 0 ist zulaessig und
+ * fuehrt nichts aus, sonst muss der Bereich im Gast-Speicher liegen (P3D).
+ * Adresse 0 ist physisch gueltiger FCRAM. */
+static int p_ext_submit_cmdlist(ArmCpu *c, uint32_t ch)
 {
     uint32_t paddr = (p_regs[0x23Au + ch] & 0x0FFFFFFFu) * 8u;
     uint32_t size = (p_regs[0x238u + ch] & 0x000FFFFFu) * 8u;
 
-    if (paddr == 0u ||
-        (uint64_t)gpu_pica_phys_to_guest(paddr) + size > c->mem_size) {
+    if (size != 0u
+            && (uint64_t)gpu_pica_phys_to_guest(paddr) + size > c->mem_size) {
         if (p_irq_handler) p_irq_handler(5);   /* ungueltige Liste -> P3D */
-        return;
+        return 0;
     }
-    gpu_run_pica_list(c, paddr, size);
+    return gpu_run_pica_list(c, paddr, size);
+}
+
+/* Azahar GPU::Execute CommandId::SubmitCmdList: Adresse/Groesse in die
+ * Kommandopuffer-Register schreiben, Trigger setzen, ausfuehren und den
+ * Trigger wieder loeschen (GPU::SubmitCmdList). */
+int gpu_gsp_submit_cmdlist_cmd(ArmCpu *c, uint32_t paddr, uint32_t size)
+{
+    int ops;
+
+    p_mmio_init();
+    p_regs[0x238] = (size >> 3) & 0x000FFFFFu;
+    p_regs[0x23A] = (paddr >> 3) & 0x0FFFFFFFu;
+    p_regs[0x23C] = 1u;
+    ops = p_ext_submit_cmdlist(c, 0);
+    p_regs[0x23C] = 0u;
+    return ops;
 }
 
 
@@ -4527,9 +4560,15 @@ void gpu_gsp_write_reg_masked(ArmCpu *c, uint32_t addr, uint32_t value,
         p_regs[i] = p_merge(p_regs[i], value, mask);
         if (i >= 0x140u && i <= 0x1D9u) p_light_draw_invalidate();
         /* GPU::WriteReg behandelt nur den Kommandopuffer-Trigger als
-         * Aktion; Draws/Finalize bleiben Kommandolisten vorbehalten. */
-        if (i == 0x23Cu) p_ext_submit_cmdlist(c, 0);
-        else if (i == 0x23Du) p_ext_submit_cmdlist(c, 1);
+         * Aktion; Draws/Finalize bleiben Kommandolisten vorbehalten.
+         * GPU::SubmitCmdList prueft den Triggerwert und loescht ihn danach. */
+        if (i == 0x23Cu) {
+            if (p_regs[0x23C] != 0u) p_ext_submit_cmdlist(c, 0);
+            p_regs[0x23C] = 0u;
+        } else if (i == 0x23Du) {
+            if (p_regs[0x23D] != 0u) p_ext_submit_cmdlist(c, 1);
+            p_regs[0x23D] = 0u;
+        }
         return;
     }
     /* Andere Seiten: Azahar UNREACHABLE, im Port ignorieren. */
@@ -4538,6 +4577,19 @@ void gpu_gsp_write_reg_masked(ArmCpu *c, uint32_t addr, uint32_t value,
 void gpu_gsp_write_reg(ArmCpu *c, uint32_t addr, uint32_t value)
 {
     gpu_gsp_write_reg_masked(c, addr, value, 0xFFFFFFFFu);
+}
+
+/* Azahar GPU::SetColorFill (GSP 0x000B SetLcdForceBlack): beide Screens
+ * bekommen dieselbe ColorFill, Farbe 0 und is_enabled in Bit24
+ * (Pica::ColorFill, regs_lcd.h). */
+void gpu_gsp_set_lcd_color_fill(ArmCpu *c, int enable_black)
+{
+    uint32_t raw = enable_black ? 0x01000000u : 0u;   /* is_enabled = Bit24 */
+
+    p_mmio_init();
+    p_lcd_regs[0x81] = raw;    /* color_fill_top */
+    p_lcd_regs[0x281] = raw;   /* color_fill_bottom */
+    (void)c;
 }
 
 /* GX-Kommando 0x02 (Azahar GPU::Execute CommandId::MemoryFill): schreibt die

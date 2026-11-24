@@ -159,7 +159,7 @@ Die Maske wird byteweise angewandt (`Azahar ExpandBitsToBytes`, z. B. `0x5`
 
 | Register | Bedeutung |
 |---|---|
-| `0x010` | `irq_request` (Finalize): bei Byte-Treffer gegen `irq_compare` (`0x020`) P3D-Interrupt; `irq_autostop` (`0x034`, Default 1) beendet die Liste. GSP-Defaults: `irq_compare=0x12345678`, `irq_mask=0xFFFFFFF0`, `irq_autostop=1`. |
+| `0x010` | `irq_request` (Finalize): bei Byte-Treffer gegen `irq_compare` (`0x020`) P3D-Interrupt; `irq_autostop` (`0x034`, Default 1, jeder Wert ungleich 0) beendet die Liste. GSP-Defaults: `irq_compare=0x12345678`, `irq_mask=0xFFFFFFF0`, `irq_autostop=1`. |
 | `0x080` | `main_config`: Bit0..2 Textur 0..2 enable, Bit10 Textur 3, Bit13 `texture2_use_coord1`, Bit16 `clear_texture_cache` |
 | `0x081`/`0x091`/`0x099` | Textureinheit 0/1/2: `+0` border_color, `+1` Größe (h Bits 0..10, w 16..26), `+2` Wrap (`wrap_t` Bits 8..10, `wrap_s` 12..14), Filter (mag Bit 1, min Bit 2, mip Bit 24), Typ Bits 28..30 (0 = 2D, 5 = disabled), `+3` LOD, `+4` Adresse>>3. **Nur Einheit 0 beachtet den Typ** (3dbrew; Azahar `TextureColor`); Einheit 3 ist die prozedurale Textur (0xA8..0xB7), kein adressiertes Bild. |
 | `0x08E`/`0x096`/`0x09E` | Texturformat 0..13: RGBA8, RGB8, RGB5A1, RGB565, RGBA4, IA8, RG8 (HILO8), I8, A8, IA4, I4, A4, ETC1, ETC1A4 |
@@ -176,9 +176,12 @@ Die Maske wird byteweise angewandt (`Azahar ExpandBitsToBytes`, z. B. `0x5`
 | `0x0AF` | Proctex-LUT-Index (Bits0..7) und Tabelle (Bits8..11) |
 | `0x0B0`–`0x0B7` | Proctex-LUT-Daten; jedes Wort schreibt bei `index` und erhöht ihn |
 
-Ein Schreibzugriff auf `0x23C`/`0x23D` startet die Liste des Kanals und
-**ersetzt** die laufende Liste (Azahar `cmd_list.Reset`): der Rest der alten
-Liste wird nicht mehr ausgeführt. Ungültige Adresse/Größe meldet P3D.
+Ein Schreibzugriff auf `0x23C`/`0x23D` **in einer Kommandoliste** startet die
+Liste des Kanals und **ersetzt** die laufende Liste (Azahar
+`HandleSpecialReg` -> `cmd_list.Reset`): der Rest der alten Liste wird nicht
+mehr ausgeführt; eine Größe 0 beendet die Verarbeitung. Anders als beim
+GSP-Pfad gibt es dabei keine Gültigkeitsprüfung und kein P3D, und der Trigger
+bleibt im Register stehen.
 
 ### PICA-Adressen
 
@@ -1105,8 +1108,11 @@ einen **Vertex-Shader-Interpreter/Übersetzer** und **TEV**.
     Interrupt, Puffer 1 PSC0.
   * `0xC18` `trigger.bit0` -> DisplayTransfer (Flags Bit3 = TextureCopy),
     danach PPF.
-  * `0x123C`/`0x123D` -> Kommandoliste Kanal 0/1 (`SubmitCmdList`);
-    ungueltige Liste -> P3D.
+  * `0x123C`/`0x123D` -> Kommandoliste Kanal 0/1 (`SubmitCmdList`); der
+    Trigger wird nur bei Wert != 0 ausgefuehrt und danach auf 0 gesetzt. Eine
+    Laenge von 0 ist gueltig (fuehrt nichts aus); ein nicht abbildbarer
+    Bereich meldet P3D. GX-Kommando 0x01 schreibt Adresse/Groesse vorher in
+    `0x238`/`0x23A` (dieselben Register wie ein WriteHWRegs).
 * **Kommandopuffer-Header** (`gsp_command.h`, `TriggerCmdReqQueue`):
   `index:8`, `number_commands:8`, `status:8`, `should_stop:8`; Kommandos je
   `0x20` Byte ab `+0x20`, Index laeuft modulo 15. `status=0x1` STOPPED,
