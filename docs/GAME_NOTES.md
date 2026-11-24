@@ -22,6 +22,26 @@ und MemoryFill/DisplayTransfer werden nur zurückgesetzt
 Daten ausgelöst. Offen ist damit die Objekt-/Szenenquelle (Asset-/Thread-
 Strang), nicht der PICA-Parser.
 
+**Nachtrag Ereignisprüfung (2026-11-24):** Ein 25-s- und ein 200-s-Lauf mit
+`HLE_PICA_DIAG=1`, `HLE_KLOG=1` belegen, dass der Gast **nicht** auf GPU-
+Ereignisse wartet. AcquireRight (`0x0016`) und
+RegisterInterruptRelayQueue (Event 31) kommen je einmal; der GSP-Handler
+(Thread 6, LR `0x00142620`) wird ~114x/s aus Event 31 geweckt und drainiert
+die RelayQueue (PDC0/PDC1 je VBlank plus P3D der Listen). Die
+FrameBufferInfo wird im VBlank übernommen (2522 `SetBufferSwap`-Latches in
+25 s, Pufferwechsel `1F300000/1F000000` <-> `1F346500/1F038400`). Thread 0
+läuft durchgehend im Software-Videodecoder `fn_0016E4A0` (~29 M Bloecke in
+12 s), während die 14 Setup-Listen/Frame weiterlaufen. Die fehlenden Draws
+sind also die noch laufende Video-/Szenenphase, kein verschluckter
+Interrupt. Der Draw-Builder `0x001323FC` bleibt unbetreten.
+
+**Dabei behoben:** `runtime/gpu/gpu.c` schrieb die TextureCopy-Felder nach
+0x307/0x308/0x309; Azahar (`regs_external.h`, `DisplayTransferConfig`) legt
+`texture_copy.size`/`input_size`/`output_size` nach 0x308/0x309/0x30A
+(0x306 Trigger, 0x307 Pad). Die bisherige Belegung machte jede TextureCopy
+zum No-op (size im Pad). Test: `tests/pica_selftest.c::test_gpu_mmio`
+(Registerablage, 16-Byte-Zeilen mit Gap, PPF-Trigger).
+
 ## Software-Rasterizer: Performance-Stand (2026-11-24)
 
 Ziel: beide Bildschirme (400x240 oben, 320x240 unten) mit 60 fps schaffen,

@@ -4461,12 +4461,15 @@ static void p_ext_transfer(ArmCpu *c)
     out_p = p_ext_regs[0x301] * 8u;
     flags = p_ext_regs[0x304];
     if (flags & 8u) {                   /* is_texture_copy */
+        /* Azahar regs_external.h DisplayTransferConfig: flags@0x304,
+           trigger@0x306, texture_copy.size@0x308, input_size@0x309,
+           output_size@0x30A. */
         p_texture_copy_run(c, gpu_pica_phys_to_guest(in_p),
-                           gpu_pica_phys_to_guest(out_p), p_ext_regs[0x307],
-                           p_ext_regs[0x308] & 0xFFFFu,
-                           (p_ext_regs[0x308] >> 16) & 0xFFFFu,
+                           gpu_pica_phys_to_guest(out_p), p_ext_regs[0x308],
                            p_ext_regs[0x309] & 0xFFFFu,
-                           (p_ext_regs[0x309] >> 16) & 0xFFFFu);
+                           (p_ext_regs[0x309] >> 16) & 0xFFFFu,
+                           p_ext_regs[0x30A] & 0xFFFFu,
+                           (p_ext_regs[0x30A] >> 16) & 0xFFFFu);
     } else {
         p_display_transfer_run(c, gpu_pica_phys_to_guest(in_p),
                                gpu_pica_phys_to_guest(out_p),
@@ -4646,9 +4649,11 @@ void gpu_gsp_texture_copy_cmd(ArmCpu *c, const uint32_t *w)
     p_mmio_init();
     p_ext_regs[0x300] = in_p >> 3;
     p_ext_regs[0x301] = out_p >> 3;
-    p_ext_regs[0x307] = w[3];              /* texture_copy.size */
-    p_ext_regs[0x308] = w[4];              /* input width/gap */
-    p_ext_regs[0x309] = w[5];              /* output width/gap */
+    /* Azahar regs_external.h: texture_copy beginnt bei Config-Offset 0x08
+       (Register 0x308), nach trigger@0x306 und einem Pad-Wort@0x307. */
+    p_ext_regs[0x308] = w[3];              /* texture_copy.size */
+    p_ext_regs[0x309] = w[4];              /* input width/gap */
+    p_ext_regs[0x30A] = w[5];              /* output width/gap */
     p_ext_regs[0x304] = w[6];              /* flags (Bit3 = texture copy) */
     p_ext_regs[0x306] = 1u;
     p_ext_transfer(c);

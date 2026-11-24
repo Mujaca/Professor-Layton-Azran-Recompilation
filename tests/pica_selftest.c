@@ -160,6 +160,40 @@ static void test_gpu_mmio(ArmCpu *c, uint8_t *mem) {
         memcpy(&v, mem + 0x81028, 4);
         check(v == 0x55667788u, "GX MemoryFill 1 schreibt 32-Bit-Wert");
     }
+
+    /* GX-Kommando 4 (TextureCopy): Azahar regs_external.h legt
+       texture_copy.size/input/output bei 0x308/0x309/0x30A ab (nach
+       trigger@0x306 und einem Pad-Wort@0x307); 0x307 bleibt unbenutzt. */
+    {
+        uint32_t w[8];
+        int i;
+        for (i = 0; i < 0x100; i++) mem[0x82000 + i] = (uint8_t)(i + 1);
+        memset(mem + 0x83000, 0, 0x100);
+        memset(w, 0, sizeof(w));
+        w[0] = 0x04u;                       /* TextureCopy */
+        w[1] = 0x00082000u;                 /* Quelle (Gast, ungemappt) */
+        w[2] = 0x00083000u;                 /* Ziel */
+        w[3] = 0x40u;                       /* size */
+        w[4] = 0x00040001u;                 /* input_width 1*16, gap 4*16 */
+        w[5] = 0x00040001u;                 /* output_width 1*16, gap 4*16 */
+        w[6] = 8u;                          /* flags: is_texture_copy */
+        mmio_irq_count = 0;
+        gpu_gsp_texture_copy_cmd(c, w);
+        check(gpu_gsp_read_reg(c, REG + 0x400C20u) == 0x40u &&
+              gpu_gsp_read_reg(c, REG + 0x400C24u) == 0x00040001u &&
+              gpu_gsp_read_reg(c, REG + 0x400C28u) == 0x00040001u,
+              "GX TextureCopy schreibt 0x308/0x309/0x30A");
+        check(gpu_gsp_read_reg(c, REG + 0x400C1Cu) == 0u,
+              "GX TextureCopy laesst das Pad-Register 0x307 leer");
+        check(memcmp(mem + 0x83000, mem + 0x82000, 16) == 0 &&
+              mem[0x83010] == 0 &&
+              memcmp(mem + 0x83050, mem + 0x82050, 16) == 0,
+              "TextureCopy kopiert 16-Byte-Zeilen und respektiert den Gap");
+        check(mmio_irq_count == 1 && mmio_irq_last == 4,
+              "TextureCopy meldet PPF");
+        check(gpu_gsp_read_reg(c, REG + 0x400C18u) == 0u,
+              "TextureCopy loescht den Trigger");
+    }
 }
 
 

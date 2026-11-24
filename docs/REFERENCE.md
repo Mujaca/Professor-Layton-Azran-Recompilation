@@ -143,6 +143,11 @@ Assets: 3 × Level-5-`ARC0` (`lt6_*.fa`), 566 × BCSTM, 34 × MOFLEX. Texturen
   Bit1 input_linear, Bit2 crop_input_lines, Bit5 dont_swizzle, Bits8..10
   bzw. 12..14 Pixelformat, Bits24..25 Scaling. Gekachelt wird in 8x8-Morton-
   Reihenfolge (`VideoCore::GetMortonOffset`).
+  Registerfeld (`regs_external.h`, `DisplayTransferConfig` ab 0x1EF00C00):
+  0x300 input_address, 0x301 output_address, 0x302 output_size,
+  0x303 input_size, 0x304 flags, 0x306 trigger, 0x308 texture_copy.size,
+  0x309 input_width/input_gap (je u16), 0x30A output_width/output_gap.
+  Fuer TextureCopy zaehlt `size & ~0xF`; die unteren 4 Bit werden ignoriert.
 * Spiele warten im Render-Loop auf PDC0/P3D-Interrupts. Ohne korrekt
   signalisierte Events (RegisterInterruptRelayQueue-Event) hängt der
   Render-Task.
@@ -754,6 +759,11 @@ Assets: 3 × Level-5-`ARC0` (`lt6_*.fa`), 566 × BCSTM, 34 × MOFLEX. Texturen
   Bit1 input_linear, Bit2 crop_input_lines, Bit5 dont_swizzle, Bits8..10
   bzw. 12..14 Pixelformat, Bits24..25 Scaling. Gekachelt wird in 8x8-Morton-
   Reihenfolge (`VideoCore::GetMortonOffset`).
+  Registerfeld (`regs_external.h`, `DisplayTransferConfig` ab 0x1EF00C00):
+  0x300 input_address, 0x301 output_address, 0x302 output_size,
+  0x303 input_size, 0x304 flags, 0x306 trigger, 0x308 texture_copy.size,
+  0x309 input_width/input_gap (je u16), 0x30A output_width/output_gap.
+  Fuer TextureCopy zaehlt `size & ~0xF`; die unteren 4 Bit werden ignoriert.
 * Spiele warten im Render-Loop auf PDC0/P3D-Interrupts. Ohne korrekt
   signalisierte Events (RegisterInterruptRelayQueue-Event) hängt der
   Render-Task.
