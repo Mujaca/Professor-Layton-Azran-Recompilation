@@ -290,6 +290,47 @@ def test_veneer_thumb_seed():
          % sorted("%08X" % a for a in res.functions))
 
 
+def test_offset_table_seed():
+    """`add pc,rX,rB` ueber eine Offset-Tabelle seedet die Handler.
+
+    Der Bilddecoder im Spiel springt so auf Format-Handler, die VOR dem
+    Funktionsanfang liegen (0x16A6F8 ...). Ohne Seed landete der Sprung im
+    No-op und SP wurde unbalanciert.
+    """
+    import struct
+    from recomp import isa, scan
+
+    code = bytearray(0x48)
+    code[0x00:0x04] = bytes.fromhex("10608fe2")   # add r6, pc, #0x10
+    code[0x04:0x08] = bytes.fromhex("055196e7")   # ldr r5,[r6,r5,lsl #2]
+    code[0x08:0x0C] = bytes.fromhex("06f085e0")   # add pc, r5, r6
+    code[0x18:0x1C] = struct.pack("<I", 0x18)     # Offset -> 0x100030
+    code[0x1C:0x20] = struct.pack("<I", 0x0)      # zeigt in die Tabelle: Ende
+    code[0x30:0x34] = bytes.fromhex("00402de9")   # push {lr}
+    code[0x34:0x38] = bytes.fromhex("0000a0e3")   # mov r0,#0
+    code[0x38:0x3C] = bytes.fromhex("0080bde8")   # pop {pc}
+    res = scan.scan(bytes(code), [(isa.ARM_BASE, "entry", False)])
+    need(0x00100030 in res.functions,
+         "Offset-Tabellen-Ziel nicht geseedet: %s"
+         % sorted("%08X" % a for a in res.functions))
+
+    # Zweite Form: Index bereits in Bytes (`ldr rX,[rB,rI]`) und negatives
+    # Offset auf ein Ziel VOR der Tabelle (wie 0x16CF48 -> 0x16CEE4).
+    code = bytearray(0x48)
+    code[0x00:0x04] = bytes.fromhex("34608fe2")   # add r6, pc, #0x34
+    code[0x04:0x08] = bytes.fromhex("085096e7")   # ldr r5,[r6,r8]
+    code[0x08:0x0C] = bytes.fromhex("05f086e0")   # add pc, r6, r5
+    code[0x10:0x14] = bytes.fromhex("00402de9")   # push {lr}
+    code[0x14:0x18] = bytes.fromhex("0000a0e3")   # mov r0,#0
+    code[0x18:0x1C] = bytes.fromhex("0080bde8")   # pop {pc}
+    code[0x3C:0x40] = struct.pack("<I", 0xFFFFFFD4)  # -> 0x100010
+    code[0x40:0x44] = struct.pack("<I", 0)           # zeigt in die Tabelle: Ende
+    res = scan.scan(bytes(code), [(isa.ARM_BASE, "entry", False)])
+    need(0x00100010 in res.functions,
+         "Offset-Tabelle ohne lsl#2/negativ nicht geseedet: %s"
+         % sorted("%08X" % a for a in res.functions))
+
+
 TESTS = [
     ("guest-refs 0x40B4C4", test_guest_refs),
     ("trace-diff boss:U", test_trace_diff),
@@ -307,6 +348,7 @@ TESTS = [
     ("BLX-Zielmodus im Scan", test_call_mode),
     ("ldr-pc-Veneer-Ziel im Scan", test_ldrpc_veneer),
     ("Veneer-Seed Thumb", test_veneer_thumb_seed),
+    ("Offset-Tabelle Seed", test_offset_table_seed),
 ]
 
 

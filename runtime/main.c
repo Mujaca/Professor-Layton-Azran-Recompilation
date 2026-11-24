@@ -16,6 +16,7 @@
  */
 #include "arm_cpu.h"
 #include "arm_trace.h"
+#include "frame_clock.h"
 #include "framebuffer.h"
 #include "gpu.h"
 #include "hle.h"
@@ -121,14 +122,21 @@ int main(int argc, char **argv) {
     }
     /* Unterer Screen als Touchflaeche; Tastenbelegung siehe window.h. */
     win_set_touch_rect(BOT_X, BOT_Y, 320, 240);
-    win_status("A=X B=Z X=S Y=A L=Q R=W Start=Enter Select=Backspace", 2);
-    win_status("DPad=Pfeile CirclePad=I/J/K/L Touch=Maus unten", 3);
+    win_status("Tasten: port.ini neben port.exe (Standard siehe docs/FRONTEND.md)", 2);
+    win_status("F11=Vollbild  Touch=Maus ueber dem unteren Screen", 3);
     if (!CreateThread(NULL, 0, game_thread, NULL, 0, NULL)) {
         printf("Thread fehlgeschlagen\n");
         return 3;
     }
 
     int frames = 0;
+    unsigned guest_frames = 0;
+    FrameClock clock;
+    uint64_t fps_t0;
+    int fps_frames0 = 0;
+    double host_fps = 0.0;
+    frame_clock_start(&clock);
+    fps_t0 = frame_clock_now_qpc();
     while (win_pump()) {
         char line[160];
         WinInput wi;
@@ -156,13 +164,30 @@ int main(int argc, char **argv) {
         win_blit(g_rgb, FB_W, FB_H);
         if ((frames % 30) == 0) {
             HleGspFrame top, bottom;
+            char title[160];
+            uint64_t now = frame_clock_now_qpc();
+            uint64_t elapsed = now - fps_t0;
             hle_gsp_frame(0, &top);
             hle_gsp_frame(1, &bottom);
+            if (elapsed > 0) {
+                host_fps = (double)(frames - fps_frames0) * (double)clock.freq /
+                           (double)elapsed;
+            }
+            fps_t0 = now;
+            fps_frames0 = frames;
+            guest_frames = hle_gsp_guest_frames();
+            snprintf(title, sizeof(title),
+                     "Professor Layton and the Azran Legacy  |  fps=%.1f  |  "
+                     "Gast-Frames=%u  |  F11=Vollbild",
+                     host_fps, guest_frames);
+            win_set_title(title);
             snprintf(line, sizeof(line),
-                     "frames=%d  block=0x%08X  halted=%d  fb0=%d:0x%08X/%u/%X fb1=%d:0x%08X/%u/%X",
-                     frames, arm_last_block, g_halt,
+                     "frames=%d  fps=%.1f gast=%u  block=0x%08X  halted=%d  "
+                     "fb0=%d:0x%08X/%u/%X fb1=%d:0x%08X/%u/%X",
+                     frames, host_fps, guest_frames, arm_last_block, g_halt,
                      top.valid, top.address, top.stride, top.format & 7u,
-                     bottom.valid, bottom.address, bottom.stride, bottom.format & 7u);
+                     bottom.valid, bottom.address, bottom.stride,
+                     bottom.format & 7u);
             win_status(line, 1);
             if (frames % 300 == 0) {
                 printf("[port] %s\n", line);
@@ -177,8 +202,9 @@ int main(int argc, char **argv) {
             }
         }
         frames++;
-        Sleep(16);
+        frame_clock_wait(&clock);
     }
+    frame_clock_stop(&clock);
     if (shot != NULL && frames_limit < 0) save_shot(shot);
     win_close();
     hle_report();
