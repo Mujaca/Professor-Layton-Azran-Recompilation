@@ -124,6 +124,10 @@ static uint64_t host_us(void);
  * Zeit, in der der Gast-Lock zwischen zwei Gast-Abschnitten frei lag.
  * Reine Zaehler, kein Gastzustand. */
 static int g_ystat = 0;
+/* Diagnose (HLE_GTIME): Wandzeit der PICA-Kommandolisten-Ausfuehrung
+ * (Software-Rasterizer) gegen die Gesamtlaufzeit. Reine Zaehler. */
+static int g_gtime = 0;
+static unsigned long long g_gtime_us, g_gtime_lists;
 static unsigned long long g_yield_n, g_yield_us, g_pump_rel_n, g_pump_rel_us;
 static unsigned long long g_lock_idle_us;
 static volatile unsigned long long g_lock_free_us = 0;
@@ -3329,7 +3333,12 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
                 if (addr != 0u && size != 0u &&
                     (uint64_t)gpu_pica_phys_to_guest(paddr) + size <= c->mem_size) {
                     unsigned long long d0 = gpu_pica_draw_count();
+                    uint64_t gt0 = g_gtime ? host_us() : 0;
                     int nops = gpu_run_pica_list(c, paddr, size);
+                    if (g_gtime) {
+                        g_gtime_us += host_us() - gt0;
+                        g_gtime_lists++;
+                    }
                     qops += nops;
                     /* Frontier-M3: Liste mit Draws ([gpu] list ... draws=N). */
                     printf("[gpu] list addr=%08X paddr=%08X size=%X ops=%d draws=%llu\n",
@@ -4186,6 +4195,13 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     snprintf(g_romfs, sizeof(g_romfs), "%s", romfs_dir ? romfs_dir : "out/romfs");
     g_log = getenv("HLE_LOG") != NULL;
     g_ystat = getenv("HLE_YSTAT") != NULL;
+    g_gtime = getenv("HLE_GTIME") != NULL;
+    {
+        /* Paralleles Rasterisieren grosser Dreiecke (Ergebnis pixelgleich).
+         * HLE_RASTER_THREADS=0 schaltet es fuer Messungen ab. */
+        const char *rt = getenv("HLE_RASTER_THREADS");
+        gpu_pica_set_raster_threads(rt ? atoi(rt) : 3);
+    }
     /* Diagnose-Laeufe werden per Timeout beendet; ungepufferte Ausgabe
        verhindert, dass die letzten Zeilen im stdio-Puffer verloren gehen. */
     if (getenv("HLE_ARB_LOG") || getenv("HLE_KLOG")) setvbuf(stdout, NULL, _IONBF, 0);
@@ -4255,6 +4271,18 @@ void hle_tick_stats(int *calls, unsigned long long *tick) {
 
 void hle_report(void) {
     printf("[hle] ipc=%d ticks=%llu tickcalls=%d\n", g_ipc_count, (unsigned long long)g_tick, g_tick_calls);
+    if (g_gtime) {
+        unsigned long long wall_ms = (host_us() - g_boot_ns / 1000ull) / 1000ull;
+        unsigned long long frag = 0, tex = 0, lit = 0, fb = 0;
+        unsigned long long pc = 0, sc = 0, pr = 0, sr = 0;
+        gpu_pica_work_stats(&frag, &tex, &lit, &fb);
+        gpu_pica_par_stats(&pc, &sc, &pr, &sr);
+        printf("[gtime] lists=%llu raster_ms=%llu wall_ms=%llu (%.1f%%) "
+               "frag=%llu tex=%llu lit=%llu fb=%llu par=%llu/%llu ser=%llu/%llu\n",
+               g_gtime_lists, g_gtime_us / 1000ull, wall_ms,
+               wall_ms ? 100.0 * (double)g_gtime_us / 1000.0 / (double)wall_ms : 0.0,
+               frag, tex, lit, fb, pc, pr, sc, sr);
+    }
     if (g_log) printf("[audio] frames=%llu\n", audio_dsp_frames());
     arm_perfmap_report();
     printf("[hle] letzte Ereignisse:\n");

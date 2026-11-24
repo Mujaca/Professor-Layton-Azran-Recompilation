@@ -46,5 +46,16 @@ int gpu_pica_texture_bound(void);
    sich auf einen Frame-Zeitpunkt zu verlassen (Determinismus). */
 unsigned long long gpu_pica_list_count(void);
 unsigned long long gpu_pica_draw_count(void);
+/* Diagnose (HLE_GTIME): Arbeitsvolumen des Software-Rasterizers. */
+void gpu_pica_work_stats(unsigned long long *frag, unsigned long long *tex,
+                         unsigned long long *lit, unsigned long long *fb);
+
+/* Paralleles Rasterisieren grosser Dreiecke: n Worker-Threads anlegen bzw.
+ * abschalten (0 = seriell, fuer Vergleichsmessungen). Das Ergebnis ist
+ * pixelgleich; nur die Laufzeit aendert sich. */
+void gpu_pica_set_raster_threads(int n);
+/* Diagnose: Anzahl paralleler/serieller Dreiecke und Pixelzeilen. */
+void gpu_pica_par_stats(unsigned long long *pc, unsigned long long *sc,
+                        unsigned long long *pr, unsigned long long *sr);
 
 #endif

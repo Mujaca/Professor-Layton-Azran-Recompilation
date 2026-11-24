@@ -1202,3 +1202,59 @@ Drei weitere Fehler verhinderten nach dem Film jedes Bild:
 
 **Ergebnis:** M3 = ja (Draws), M4 = ja: `reports/port_intro_frame300.png`
 (Intro-Film, oberer Bildschirm), `reports/port_frame1800.png`.
+
+### Hauptmenue: Ablauf sauber, Engpass ist der Software-Rasterizer – Messung 2026-11-24
+
+**Auftrag:** Den Spielablauf nach dem Intro-Film bis Titel/Hauptmenue verfolgen
+und die erste Ursache finden, die ihn blockiert oder verlangsamt.
+
+**Ablauf (belegt mit `HLE_LOG`, 4500 Host-Frames = 75 s):** Nach dem letzten
+Y2R-Frame (520/520, Ende von `m999.moflex`) folgen keine Fehler: `head.lt6`
+wird aus dem SaveData-Archiv gelesen, `res/lt6_gmp.xb`, `res/lt6_naz.xb`,
+`res/lt6_nkl.xb`, `res/qst/uk/word_param.xs` und `seq/menu_title.xq` werden
+geladen (jeder Read `done == len`, kein `[fs]`-Fehler, kein `err:f`). Der
+Titelbildschirm laeuft: ~10-14 PICA-Listen je Gast-Frame mit Draws,
+`SetBufferSwap` fuer beide Bildschirme, der Streaming-Leser holt die
+Titel-BGM in 16-KiB-Haeppchen, `boss:U` initialisiert (0x0001/0x000E/0x0016;
+die beiden `UNIMPLEMENTIERT`-Zeilen sind wie bei Azahar wirkungslos).
+APT/hid/ptm antworten wie in der Referenz; nach dem Film ruft der Gast diese
+Dienste gar nicht mehr (0 IPC-Zeilen in 4500 Frames), der Frame-Loop besteht
+nur aus `gsp::Gpu 0x000C/0x0008` und `dsp::DSP 0x0013`. Kein Dienst- oder
+Kernelwert blockiert, kein Gast-Thread haengt.
+
+**Eingabe:** Der Titel wartet auf eine Taste. `--press a@1800:120,start@2100:120`
+fuehrt in die naechste Szene/ins Menue: der obere Bildschirm zeigt danach die
+Szene mit Logo-Band, der untere ein Menue-Panel (Beleg:
+`scratch/m5/press3600.bmp`; Layout vergleichbar mit
+`reports/azahar_bottomscreen.png`). Ohne Eingabe bleibt das Bild dunkel – das
+ist der wartende Spielzustand, kein Fehler.
+
+**Gemessener Engpass (`HLE_GTIME`, 3600 Host-Frames = 60 s, ohne `HLE_LOG`):**
+* Wandzeit 60,19 s, davon **42,65 s (70,8 %) in `gpu_run_pica_list`**.
+* 351 M Fragmente, 335 M Textursamples, Fragment-Lighting aus, 351 M
+  Farbziel-Zugriffe -> **8,2 M Fragmente/s** (122 ns/Fragment).
+* Gast-Bildrate im Titel/Menue **7,0 fps** (35 Buffer-Swaps in 5 s), waehrend
+  der Host mit 59,8 fps laeuft. Der Gast-Lock liegt nur 0,8 % der Zeit frei
+  (`HLE_YSTAT`), die Zeit steckt also in der Rasterisierung, nicht in Warten
+  oder IPC.
+
+**Ursache der 122 ns/Fragment:** Pro Pixel laufen sechs TEV-Stufen
+(Azahar-Semantik), bis zu drei Textursamples, Tiefen-/Stencil-Test und
+Farbziel-Lesen/-Schreiben; jeder Zugriff dekodiert Register und 8x8-Morton neu.
+
+**Korrektur (kein Workaround):** `runtime/gpu` rasterisiert grosse Dreiecke
+zeilenweise parallel (`gpu_pica_set_raster_threads`; 3 Worker, ab 48
+Pixelzeilen). Innerhalb eines Dreiecks sind die Pixel disjunkt und der
+PICA-Zustand ist waehrend der Liste konstant, das Ergebnis bleibt pixelgleich
+(Beleg: `tests/pica_selftest.c` laeuft mit aktivem Pool und allen 116
+Erwartungswerten; der untere Bildschirm ist seriell/parallel byte-identisch).
+Messung: 351 M -> 533 M Fragmente in 60 s, 8,2 -> 14,4 M Fragmente/s,
+Titel/Menue 7,0 -> **10,6 fps** (+52 %). `HLE_RASTER_THREADS=0` schaltet den
+Pool fuer Messungen ab.
+
+**Offen:** Der Weg ins Hauptmenue ist nicht blockiert, nur langsam. Der
+Restfaktor ~5,6 bis 60 fps liegt in der seriellen Software-Pipeline (viele
+duenne Dreiecke: 62 % der Pixelzeilen liegen unter der Parallelschwelle).
+Echte Abhilfe ist M9 (Hardware-Rasterizer); Zwischenschritte waeren Early-Z
+(nach Azahar erst nach TEV), ein schnellerer TEV-Pfad und eine
+Draw-Parallelisierung ohne Ordnungswechsel.
