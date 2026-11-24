@@ -244,6 +244,25 @@ def test_call_mode():
              "%s: Zielmodus %s statt %s" % (raw, got, want_thumb))
 
 
+def test_ldrpc_veneer():
+    """ARM-Veneer `ldr pc,[pc,#-4]` + Thumb-Ziel wird als Thumb-Funktion geseedet."""
+    import struct
+    from recomp import isa, scan
+    base = isa.ARM_BASE
+    data = bytearray(0x40)
+    struct.pack_into("<I", data, 0x00, 0xE51FF004)   # ldr pc, [pc, #-4]
+    struct.pack_into("<I", data, 0x04, base + 0x11)  # Thumb-Ziel 0x100010 | 1
+    data[0x10:0x12] = b"\x70\x47"                    # bx lr
+    res = scan.scan(bytes(data), [(base, "entry", False)])
+    fn = res.functions.get(base)
+    need(fn is not None, "Einstiegsfunktion fehlt")
+    need((base + 0x10, True) in fn.calls,
+         "Veneer-Ziel fehlt/Modus falsch: %s" % sorted(fn.calls))
+    target = res.functions.get(base + 0x10)
+    need(target is not None and target.thumb,
+         "Thumb-Ziel nicht als Thumb-Funktion angelegt")
+
+
 TESTS = [
     ("guest-refs 0x40B4C4", test_guest_refs),
     ("trace-diff boss:U", test_trace_diff),
@@ -259,6 +278,7 @@ TESTS = [
     ("PICA-Registermap", test_pica_regs),
     ("IMGC ETC1/linear", test_imgc_decoder),
     ("BLX-Zielmodus im Scan", test_call_mode),
+    ("ldr-pc-Veneer-Ziel im Scan", test_ldrpc_veneer),
 ]
 
 

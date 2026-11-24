@@ -72,6 +72,37 @@ def direct_target(ins):
     return None
 
 
+def ldrpc_literal_target(ins, caller_thumb, data):
+    """Statisches Ziel eines `ldr pc, [pc, #imm]` (Veneer/Tail-Branch).
+
+    Die geladene Adresse ist ein Sprungziel; Bit 0 waehlt wie bei bx den
+    Instruktionssatz (z. B. ARM-Veneer 0x24CCEC -> Thumb 0x100373).
+    Rueckgabe: (ziel, thumb) oder None.
+    """
+    if ins.id != A.ARM_INS_LDR or not ins.operands:
+        return None
+    if (ins.operands[0].type != A.ARM_OP_REG
+            or ins.operands[0].reg != A.ARM_REG_PC):
+        return None
+    if len(ins.operands) < 2 or ins.operands[1].type != A.ARM_OP_MEM:
+        return None
+    mem = ins.operands[1].mem
+    if mem.base != A.ARM_REG_PC or mem.index != 0:
+        return None
+    pc = (ins.address + 4) & ~3 if caller_thumb else ins.address + 8
+    off = pc + mem.disp - isa.ARM_BASE
+    if off < 0 or off + 4 > len(data):
+        return None
+    value = int.from_bytes(data[off:off + 4], "little")
+    target = value & ~1
+    thumb = bool(value & 1)
+    if target < isa.ARM_BASE or target - isa.ARM_BASE >= len(data):
+        return None
+    if isa.decode(data, target, thumb=thumb) is None:
+        return None
+    return target, thumb
+
+
 def call_target_thumb(ins, caller_thumb):
     """Modus des Aufrufziels: BL behaelt den Modus, BLX wechselt ihn.
 
@@ -105,6 +136,9 @@ def decode_function(data, fn, visited):
                 break
             blk.insns.append(ins)
             visited[cur] = ins.size
+            ldrpc = ldrpc_literal_target(ins, fn.thumb, data)
+            if ldrpc is not None:
+                fn.calls.add(ldrpc)
             if ins.id in (A.ARM_INS_BL, A.ARM_INS_BLX):
                 tgt = direct_target(ins)
                 if tgt is not None:
