@@ -74,6 +74,60 @@ void arm_trace_thread_dump(int ti, unsigned n) {
 }
 
 uint32_t arm_thread_last_lr[16];
+/* Letzter Registerstand je Gast-Thread (nur Diagnose HLE_STALLDUMP). */
+uint32_t arm_thread_last_regs[16][16];
+static ArmCpu *g_t_cpu[16];
+static int g_t_regs_on = -1;
+
+void arm_trace_thread_regs(int ti) {
+    if (ti < 0 || ti > 15) return;
+    ArmCpu *c = g_t_cpu[ti];
+    uint32_t *r = arm_thread_last_regs[ti];
+    if (c == NULL) return;
+    fprintf(stderr, "[tdump]   regs r0=%08X r1=%08X r2=%08X r3=%08X r4=%08X "
+                    "r5=%08X r6=%08X r7=%08X\n", r[0], r[1], r[2], r[3], r[4],
+            r[5], r[6], r[7]);
+    fprintf(stderr, "[tdump]   regs r8=%08X r9=%08X r10=%08X r11=%08X "
+                    "r12=%08X sp=%08X lr=%08X\n", r[8], r[9], r[10], r[11],
+            r[12], r[13], r[14]);
+    /* Speicher an den haeufig interessanten Basisregistern (r0/r1/r12). */
+    uint32_t obj = r[0];
+    uint32_t tbl = 0, tbl2 = 0;
+    if ((uint64_t)obj + 0x3BCu <= c->mem_size) {
+        memcpy(&tbl, c->mem + obj + 0x3B8u, 4);
+        if ((uint64_t)tbl + 4u <= c->mem_size) memcpy(&tbl2, c->mem + tbl, 4);
+    }
+    struct { const char *name; uint32_t addr; } spots[11] = {
+        {"r0", r[0]}, {"r0+78", r[0] + 0x78u}, {"r0+1e0", r[0] + 0x1E0u},
+        {"r0+3b8", r[0] + 0x3B8u}, {"r1", r[1]},
+        {"r1-40", r[1] - 0x40u}, {"r1-200", r[1] - 0x200u}, {"r12", r[12]},
+        {"tbl", tbl}, {"r0+38", r[0] + 0x38u}, {"r0+40", r[0] + 0x40u}};
+    fprintf(stderr, "[tdump]   ptbl=%08X [tbl]=%08X\n", tbl, tbl2);
+    for (int k = 0; k < 11; k++) {
+      uint32_t a = spots[k].addr;
+      if ((uint64_t)a + 32u <= c->mem_size) {
+        fprintf(stderr, "[tdump]   mem %s:", spots[k].name);
+        for (int i = 0; i < 8; i++) {
+            uint32_t v;
+            memcpy(&v, c->mem + a + (uint32_t)i * 4u, 4);
+            fprintf(stderr, " %08X", v);
+        }
+        fprintf(stderr, "\n");
+      }
+    }
+    /* Stackwoerter: Rueckkehrkette der aufrufenden Funktionen. */
+    uint32_t sp = r[13];
+    if ((uint64_t)sp + 160u <= c->mem_size) {
+        fprintf(stderr, "[tdump]   stack:");
+        for (int i = 0; i < 40; i++) {
+            uint32_t v;
+            memcpy(&v, c->mem + sp + (uint32_t)i * 4u, 4);
+            fprintf(stderr, " %08X", v);
+        }
+        fprintf(stderr, "\n");
+    }
+    fflush(stderr);
+}
 
 void arm_trace_pc_ring_dump(unsigned count) {
     unsigned n = count > PC_RING ? PC_RING : count;
@@ -338,6 +392,14 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
         uint32_t ti = (c->tpidruro >> 12) & 0xFu;
         arm_thread_last_pc[ti] = pc;
         arm_thread_last_lr[ti] = c->r[14];
+        /* Registerstand nur fuer HLE_STALLDUMP mitschreiben (Hot Path). */
+        if (g_t_regs_on < 0)
+            g_t_regs_on = (getenv("HLE_STALLDUMP") != NULL) ? 1 : 0;
+        if (g_t_regs_on) {
+            g_t_cpu[ti] = c;
+            memcpy(arm_thread_last_regs[ti], c->r,
+                   sizeof(arm_thread_last_regs[ti]));
+        }
         g_t_ring[ti][g_t_pos[ti] & 63u] = pc;
         g_t_ring_lr[ti][g_t_pos[ti] & 63u] = c->r[14];
         g_t_pos[ti]++;

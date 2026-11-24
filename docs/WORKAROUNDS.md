@@ -865,3 +865,47 @@ den kooperativen Scheduler und wurde ohne Not (Boot ist 10/10) nicht gemacht.
 **Diagnose:** neuer Schalter `HLE_YSTAT=1` (`docs/TOOLS.md`) zaehlt Yields,
 Wandzeit in den Lock-Abgaben und die Zeit, in der der Gast-Lock frei lag –
 reine Zaehler, kein Gastzustand.
+
+### 41-Frame-Stall: Videodaten sind vollstaendig geladen, Decoder liest ueber das Paketende – Befund 2026-11-24
+
+**Korrektur der Auftragsannahme (belegt):** Der I/O-Thread hungert nicht und
+die Datei-Reads fehlen nicht. Im 30-s-Frontier-Lauf liegen vor der 41.
+`StartConversion` (Zeile 3612) bereits 87 `[file] Read`-Aufrufe; die
+komplette `m999.moflex` wurde in neun 64-KiB-Happen
+(`0x26B10510` … `0x26BA0510`, inkl. 0x12A4 am Ende) nach `0x0D0007C0`
+am Stueck geladen. Die `0x4000`-Reads von `th=F89` sind die **Audiospur**
+(jedem Read folgen zwei `dsp::DSP 0x0013`-Pipe-Writes), nicht das Video. Alle
+87 Reads liefern `done == len` (kein Teilread). Ein Datei-/fs-Fehler ist damit
+als Ursache des Decoder-Stalls ausgeschlossen.
+
+**Neue Belege mit `HLE_STALLDUMP` (Register/Stack) und `ARM_MEMWATCH`
+(nur Diagnose, kein Gastzustand):**
+
+* Register des haengenden Threads: `r0=0C682378`, `r1=0CABFDFA`, `r2=3..9`,
+  `r3=0`, `sp=1667FC48`; Stack enthaelt die Decoder-Rueckkehrkette
+  `0016C520 → 0016C400/0016C41C → 0016BFCC → 0016A7B0`, darunter
+  `00390338` (`0x3902E0` Queue-Push) und `0033C9FC` (`0x33C9E4`).
+* `ARM_MEMWATCH=0CABFDF8` und `=0CABFE00`: **0 Schreibzugriffe**. Der
+  Bitstromzeiger `r1` liegt also hinter dem beschriebenen Bereich; ab `r1`
+  stehen Nullen, `r1-0x200` enthaelt noch gueltige Koeffizienten
+  (`FFFFFFFF 7FFF0000 FFFFFFFF …`). Der Decoder liest ueber das Paketende
+  hinaus.
+* `ARM_WATCH=16BD1C` zeigt: die Codebook-Auswahl laeuft (2x) und schreibt
+  eine gueltige statische Huffman-Tabelle (`0x003C1E2C` bzw. `0x003BFD2C`)
+  nach `[obj+0x3b8]`. `ARM_MEMWATCH=0C682730` (=`obj+0x3b8`) belegt danach
+  zusaetzliche Stores von `003BFD2C` aus `0x16BC1C` (normale Paketauswahl).
+* Erst der Huffman-Loop selbst ueberschreibt `[obj+0x3b8]` mit 0: bei
+  `r3=0` liefert die Tabelle `0x0001`, der Pfad setzt `r6=0, r5=0`, und
+  `str r7,[obj+0x1b8+r5*4]` schreibt mit dem aus den Nullbytes
+  gewonnenen `r5=0x80` auf `obj+0x3b8`. Der bei der Stichprobe beobachtete
+  Null-Zeiger ist also **Folge**, nicht Ursache des Haengers.
+* Kernel-Primitive geprueft: `ArbitrateAddress` Typ 1 vergleicht vorzeichen-
+  richtig (`mem=-1 < 0` blockiert), Events (OneShot/Sticky/Pulse-Acquire)
+  und Semaphoren entsprechen Azahar; kein Kernel-Fehler ist als Ursache
+  belegt.
+
+**Naechster Schritt:** Die Kopierstelle Paket→Decode-Puffer identifizieren
+(Byte-Kopien aus `pc=0x20D2CC` bzw. `0x358FA8`) und Laenge/Quelle gegen den
+Moflex-Paketkopf pruefen. Faellt die Kopierlaenge zu kurz aus oder laeuft der
+Praesentations-Event dem Kopierer davon, liegt die Ursache dort (Event-Kette
+`0x218xxx`/`0x3902E0`); andernfalls ist es der parallele Decoder-Differenztest.
