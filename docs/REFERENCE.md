@@ -170,8 +170,53 @@ Das Titelbild ist ein 3D-Render (`title.xc`): korrekte Darstellung braucht
 einen **Vertex-Shader-Interpreter/Übersetzer** und **TEV**.
 `runtime/gpu.c` hat beides noch nicht.
 
-## Quellen
+## ARM11-Instruktionssemantik (verifiziert mit Unicorn/Azahar, 2026-11-24)
 
+* **SBC/RSC**: `Rd = Rn - Rm - NOT(C)`, nicht `- C`. Das Ergebnisflag ist
+  "kein Borrow" (`Rn >= Rm + cin`). ADC rechnet dagegen `+ C`.
+  (Differenztest `tools/recomp_difftest.py`; `arm_dp`.)
+* **LSR #32 / ASR #32**: Die Kodierung nutzt `imm5 = 0` als Sonderfall; ein
+  Assembler druckt `#32`. Der Shifter muss `amount == 0` (und defensiv
+  `>= 32`) als #32 behandeln, sonst wird um 32 Bit (undefiniert) geshiftet.
+* **RRX** ist `(C << 31) | (Rm >> 1)`, Carry-Ausgang ist `Rm[0]`. Der
+  Shifter-Carry ist reiner Ausgabeparameter; das eingehende C-Flag muss
+  separat gelesen werden (`arm_rrx`).
+* **PKHBT**: `Rn[15:0] | (Rm LSL shift)[31:16]`; `shift = 0` bedeutet LSL #0.
+  **PKHTB**: `Rn[31:16] | (Rm ASR shift)[15:0]`; die Kodierung `imm5 = 0`
+  bedeutet ASR #32 (Vorzeichen füllen). Azahar/dyncom approximiert das mit
+  ASR #31 (`pkh_inst->imm ? imm : 31`).
+* **SXTAB/UXTAB** extendieren 8 Bit, **SXTAH/UXTAH** 16 Bit; optional folgt
+  `ROR #8/#16/#24` vor der Extension. SXTB16/UXTB16 rotieren in 8-Bit-Schritten
+  (`rot8 * 8`).
+* **UBFX/SBFX/BFI/BFC**: Feld `lsb, width`; SBFX sign-extendiert das Feld,
+  BFI ersetzt die Feldbits, BFC loescht sie.
+* **SSAT/USAT** saettigen den (ggf. geshifteten) 32-Bit-Wert und setzen CPSR.Q
+  bei Saettigung; USAT klemmt Negative auf 0.
+* **Parallel-/Medienbefehle (ARMv6 SIMD)**:
+  - `UADD8/16`: GE = Carry je Lane, `USUB8/16`: GE = kein Borrow je Lane.
+  - `SADD8/16`, `SSUB8/16`: GE = 1, wenn die *mathematische* signed Summe bzw.
+    Differenz `>= 0` ist (nicht "kein Overflow").
+  - Bei 16-Bit-Lanes belegen die GE-Bits Paare: `GE[2i] == GE[2i+1]`.
+  - `UHADD8/16` = `(a+b) >> 1`, `UHSUB8/16` = arithmetische Halbierung der
+    Differenz (negative Differenz wird nicht auf 0 geklemmt).
+  - `QADD/QSUB/QDADD/QDSUB`, `SSAT16/USAT16`, `SMLAxy/SMULxy` setzen CPSR.Q
+    bei Saettigung.
+* **Thumb-2-IT-Bloecke**: Instruktionen innerhalb eines IT-Blocks sind ohne
+  Bedingungsfeld kodiert; der Dekoder muss den ITSTATE
+  (`firstcond:mask`, `ITAdvance`: `ITSTATE = (ITSTATE & 0xE0) | ((ITSTATE << 1) & 0x1F)`)
+  mitfuehren. Einzeldekodierung ohne den IT-Kontext liefert AL und wuerde die
+  Instruktion unbedingt ausfuehren. `it/itt/ite/...` selbst ist ein No-op.
+  (Recompiler: `emit.it_conditions`, gesetzt in `cli.generate`.)
+* **capstone 5.0.7** setzt `update_flags` fuer `adc/sbc/rsc` immer auf True
+  (C-Flag als impliziter Eingang). Das S-Bit muss aus der Kodierung gelesen
+  werden: ARM Bit 20, 32-Bit-Thumb Bit 4 des ersten Halfwords.
+* **Unicorn 2.1.4 (Testwerkzeug)**: Thumb wird nur ueber Bit 0 der
+  Startadresse gewaehlt (`emu_start(addr | 1)`); `UC_MODE_THUMB` allein und
+  CPSR.T genuegen nicht.
+* **ADR in Thumb** ist PC-relativ mit `Align(PC, 4)` (PC = addr + 4); im
+  Recompiler bereits so umgesetzt.
+
+## Quellen
 * https://www.3dbrew.org/wiki/IPC, /RomFS, /GSP_Shared_Memory, /GPU/Internal_Registers
 * libctru: `source/services/{apt,gsp,srv,fs}.c`, `source/ndsp/ndsp.c`
 * Azahar: `src/core/hle/service/**`, `src/video_core/pica/**`

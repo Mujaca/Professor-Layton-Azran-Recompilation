@@ -448,6 +448,7 @@ def generate(res, path, max_funcs=None, trace=False, data=None):
         for blk in fn.blocks:
             out.append("%s:" % em.label(blk.addr))
             em.ret_bx = return_bx_in_block(blk)
+            em.it_cond = emit.it_conditions(blk.insns) if fn.thumb else {}
             for ln in BLOCK_HOOKS.get(u32(blk.addr), ()):
                 out.append("  " + ln)
             if trace:
