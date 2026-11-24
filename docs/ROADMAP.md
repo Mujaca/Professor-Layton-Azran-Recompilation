@@ -39,7 +39,8 @@ Azahar-Referenz (`reports/azahar_trace.txt`) und meldet:
 | M10 | Ton klingt korrekt: Titelmusik ohne Aussetzer und Verzerrung | Hörtest + Vergleich mit einer Azahar-Aufnahme derselben Szene |
 | M11 | Neues Spiel startet: Namenseingabe → erste Spielszene | Screenshots aus dem natürlichen Boot (nur echte Host-Eingabe) |
 | M12 | Titel und Hauptmenü laufen mit ≥ 30 fps (Gast-Frames) | fps-Anzeige im Fenstertitel bzw. `[port] gast=`-Log |
-| M13 | Erstes Rätsel spielbar: Eingabe, Lösung, Speichern | manueller Test + Speicherstand lädt erneut |
+| M13 | Bild flackert nicht: jeder angezeigte Frame ist vollständig (kein Wechsel zwischen halbfertigen/alten Puffern) | Sichttest im Fenster + Frame-Folge ohne Ausreißer |
+| M14 | Erstes Rätsel spielbar: Eingabe, Lösung, Speichern | manueller Test + Speicherstand lädt erneut |
 
 Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 
