@@ -377,6 +377,25 @@ def _merge_ldrpc_fragments(funcs, res, data):
         print("ldr-pc-Fragmente gemerged: %d" % len(drop))
     return funcs
 
+def has_pc_relative_lr(fn):
+    """True, wenn die Funktion LR aus PC berechnet (`add lr, pc, #imm`).
+
+    Damit ruft der Code Tabellen-Handler wie Unterprogramme auf; deren
+    `mov pc, lr` kehrt mitten in diese Funktion zurueck. Der Emitter muss
+    dieses Rueckkehrziel nach `arm_call_guest` als lokalen Block fortsetzen,
+    sonst bricht der Gastpfad ab (SP-Drift, arm_restore_sp korrigiert).
+    """
+    for blk in fn.blocks:
+        for ins in blk.insns:
+            v = scanmod.pc_relative_const(ins, ins.address, fn.thumb)
+            if v is None:
+                continue
+            ops = isa.split_operands(ins.op_str)
+            if ops and isa.reg_num(ops[0]) == 14:
+                return True
+    return False
+
+
 def has_indirect_pc(fn):
     """True, wenn die Funktion PC aus einem Register/Speicher setzt.
 
@@ -515,6 +534,7 @@ def generate(res, path, max_funcs=None, trace=False, data=None):
         fn.blocks = [uniq[a] for a in sorted(uniq)]
         em = emit.Emitter(fn.addr, fn.thumb)
         em.block_labels = set(b.addr for b in fn.blocks)
+        em.cont_after_call = has_pc_relative_lr(fn)
         if has_indirect_pc(fn):
             em.pc_targets = set(i.address for b in fn.blocks for i in b.insns)
         out.append("void fn_%08X(ArmCpu *c) {" % u32(fn.addr))

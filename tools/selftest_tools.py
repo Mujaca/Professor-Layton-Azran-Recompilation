@@ -331,6 +331,60 @@ def test_offset_table_seed():
          % sorted("%08X" % a for a in res.functions))
 
 
+def test_ldr_pc_stack_return():
+    """`ldr pc,[sp],#imm` ist ein Epilog (Rueckkehr), kein indirekter Aufruf.
+
+    Der ARM-Epilog `add sp,#n; pop {callee-saved}; ldr pc,[sp],#m` laedt die
+    Rueckkehradresse dieses C-Aufrufs. Ein arm_call_guest an dieser Adresse
+    startet eine Gastfunktion mitten in der Aufruferfunktion (bzw. landet als
+    No-op in out/missing_calls.txt); richtig ist die Rueckkehr (`return`).
+    """
+    from recomp import isa, emit
+    ins = isa.decode(bytes.fromhex("14f09de4"), isa.ARM_BASE)  # ldr pc,[sp],#0x14
+    need(ins is not None, "ldr pc,[sp],#4 nicht dekodiert")
+    em = emit.Emitter(isa.ARM_BASE)
+    em.block_labels = {isa.ARM_BASE}
+    lines = em.mem(ins)
+    text = "\n".join(lines)
+    need("return;" in text, "Epilog ohne Rueckkehr: %s" % text)
+    need("arm_call_guest" not in text,
+         "Epilog geht ueber arm_call_guest: %s" % text)
+
+    # Rueckkehr aus dem Stack muss die SP-Schreibweise ausfuehren (Epilog
+    # popt damit die Argumente); danach folgt `return`.
+    need("c->r[13] = a + o" in text, "SP-Writeback fehlt: %s" % text)
+
+    # Gegenprobe: `ldr pc,[sp]` (ohne Writeback) ist ebenfalls Rueckkehr.
+    ins2 = isa.decode(bytes.fromhex("00f09de5"), isa.ARM_BASE)  # ldr pc,[sp]
+    need(ins2 is not None, "ldr pc,[sp] nicht dekodiert")
+    text2 = "\n".join(em.mem(ins2))
+    need("arm_call_guest" not in text2,
+         "ldr pc,[sp] geht ueber arm_call_guest: %s" % text2)
+
+
+def test_pc_relative_lr_continuation():
+    """`add lr, pc, #imm` markiert Tabellen-Handler als Pseudounterprogramm.
+
+    Der Handler kehrt per `mov pc, lr` mitten in die aufrufende Funktion
+    zurueck (0x16A5F4 -> 0x16A600, 0x16EF38). Nur solche Funktionen brauchen
+    die Fortsetzungspruefung nach arm_call_guest; das haelt den generierten
+    Code klein.
+    """
+    from recomp import isa, scan, cli
+    code = bytearray(0x40)
+    code[0x00:0x04] = bytes.fromhex("04e08fe2")   # add lr, pc, #4
+    code[0x04:0x08] = bytes.fromhex("010000eb")   # bl 0x100010
+    code[0x08:0x0C] = bytes.fromhex("1eff2fe1")   # bx lr
+    code[0x10:0x14] = bytes.fromhex("0000a0e3")   # mov r0, #0
+    code[0x14:0x18] = bytes.fromhex("1eff2fe1")   # bx lr
+    res = scan.scan(bytes(code), [(isa.ARM_BASE, "entry", False)])
+    fn = res.functions[isa.ARM_BASE]
+    need(cli.has_pc_relative_lr(fn), "add lr,pc nicht erkannt")
+    plain = res.functions.get(isa.ARM_BASE + 0x10)
+    need(plain is not None and not cli.has_pc_relative_lr(plain),
+         "Funktion ohne PC-LR faelschlich markiert")
+
+
 TESTS = [
     ("guest-refs 0x40B4C4", test_guest_refs),
     ("trace-diff boss:U", test_trace_diff),
@@ -349,6 +403,8 @@ TESTS = [
     ("ldr-pc-Veneer-Ziel im Scan", test_ldrpc_veneer),
     ("Veneer-Seed Thumb", test_veneer_thumb_seed),
     ("Offset-Tabelle Seed", test_offset_table_seed),
+    ("ldr pc aus SP = Rueckkehr", test_ldr_pc_stack_return),
+    ("pc-relative LR = Fortsetzung", test_pc_relative_lr_continuation),
 ]
 
 

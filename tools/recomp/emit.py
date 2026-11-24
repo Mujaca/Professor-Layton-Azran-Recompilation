@@ -218,6 +218,7 @@ class Emitter:
         self.pc_targets = None     # alle Instruktionsadressen (indirekte PC-Ziele)
         self.ret_bx = set()        # bx-Adressen mit Rueckkehrziel aus dem Stack
         self.it_cond = {}          # id(ins) -> Bedingung aus einem IT-Block
+        self.cont_after_call = False  # Rueckkehrung in einen lokalen Block pruefen
 
     def pc_value(self, pc):
         if self.thumb:
@@ -284,7 +285,24 @@ class Emitter:
             lines.append("  switch (c->r[15]) {")
             for a in labs:
                 lines.append("    case 0x%08Xu: goto %s;" % (u32(a), self.label(a)))
-            lines.append("    default: arm_call_guest(c, t); return;")
+            if self.cont_after_call:
+                # Tabelle/Handler als Pseudounterprogramm: Der Handler kehrt
+                # ueber `mov pc,lr` zu einer Adresse INNERHALB dieser
+                # Funktion zurueck (LR wurde per `add lr,pc,#imm` gesetzt).
+                # Nach arm_call_guest steht dieses Ziel in c->r[15]; es muss
+                # als lokaler Block fortgesetzt werden, sonst bricht der
+                # Gastpfad ab und SP driftet (arm_restore_sp korrigiert).
+                lines.append("    default:")
+                lines.append("      arm_call_guest(c, t);")
+                lines.append("      c->t = %du;" % (1 if self.thumb else 0))
+                lines.append("      switch (c->r[15]) {")
+                for a in labs:
+                    lines.append("        case 0x%08Xu: goto %s;"
+                                 % (u32(a), self.label(a)))
+                lines.append("        default: return;")
+                lines.append("      }")
+            else:
+                lines.append("    default: arm_call_guest(c, t); return;")
             lines.append("  }")
         else:
             lines.append("  arm_call_guest(c, t); return;")
@@ -515,6 +533,14 @@ class Emitter:
             # Label springen (sonst wird der Epilog uebersprungen und SP
             # bleibt unbalanciert). Nur echte Fremd-Eintraege via
             # arm_call_guest ausfuehren.
+            #
+            # Ausnahme: laedt der Befehl PC aus dem Stack, ist die geladene
+            # Adresse die Rueckkehradresse dieses Funktionsaufrufs (ARM-
+            # Epilog `add sp,#n; pop {callee-saved}; ldr pc,[sp],#m`). Ein
+            # arm_call_guest an dieser Adresse startet eine Gastfunktion
+            # mitten im C-Aufrufer bzw. endet als No-op; die richtige
+            # Semantik ist die Rueckkehr in den C-Aufrufer (`return`).
+            from_stack = base_reg == 13
             lines.append("if (arm_ldrpc_log_on()) arm_ldrpc_log(c->r[15]);")
             lines.append("{ uint32_t t = c->r[15]; c->r[15] = t & ~1u;")
             lines.append("  c->t = t & 1u;")
@@ -528,10 +554,12 @@ class Emitter:
                 for a in labs:
                     lines.append("    case 0x%08Xu: goto %s;"
                                  % (u32(a), self.label(a)))
-                lines.append("    default: arm_call_guest(c, t); return;")
+                lines.append("    default: return;" if from_stack
+                             else "    default: arm_call_guest(c, t); return;")
                 lines.append("  }")
             else:
-                lines.append("  arm_call_guest(c, t); return;")
+                lines.append("  return;" if from_stack
+                             else "  arm_call_guest(c, t); return;")
             lines.append("}")
             lines.append("return;")
         return lines

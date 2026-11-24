@@ -299,6 +299,26 @@ einen reinen Instruktionssemantikfehler auf dem *ausgefuehrten* Pfad aus.
 
 ### Dekoder-Kette: dynamischer Sprung + `mov pc,lr` verliert den Gast-PC – offen 2026-11-24
 
+**Teilweise behoben (2026-11-24, Recompiler-Abdeckung):** Zwei Klassen sind
+generisch im Emitter behoben:
+
+* `ldr pc, [sp...]` ist ein ARM-Epilog (Rueckkehr aus dem C-Aufruf), kein
+  indirekter Gastaufruf. Vorher landeten die Rueckkehradressen als
+  `unbekanntes call-Ziel` in `out/missing_calls.txt` (2x `0x0035649C` aus
+  `fn_0020E250`); jetzt 0.
+* Funktionen, die per `add lr, pc, #imm` LR auf eine eigene Fortsetzung
+  setzen (Tabellen-Handler als Pseudounterprogramm), pruefen nach
+  `arm_call_guest` das Rueckkehrziel `c->r[15]` und setzen auf einem lokalen
+  Block fort (`has_pc_relative_lr` in `tools/recomp/cli.py`). Damit faellt
+  die `[sp]`-Korrektur bei `0x16CEE4` (LR `0x16C340`) weg und
+  `0x16EF38`/LR `0x16A600` von 3x auf 1x.
+
+**Weiter offen:** 1x `[sp] blk=0x0016E708 lr=0x0CA91AE8` (LR ist eine
+Heap-Adresse, SP -0x3C). Der Decoder laeuft damit weiter, liefert aber
+weiterhin kein Bild; M3 (`draws>0`) bleibt offen. Frontier unveraendert
+10/10, M1/M2 ja, Patches 0.
+
+
 **Werkzeug:** neuer Funktions-Differenztest `tools/func_difftest.py`
 (Schnappschuss per `ARM_DUMP` aus einem Port-Lauf, Originalbytes in Unicorn,
 Port-Code aus `build/gen_boot.o`). Dokumentation in `docs/TOOLS.md`.
