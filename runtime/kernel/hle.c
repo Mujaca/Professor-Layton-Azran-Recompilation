@@ -6,7 +6,12 @@
  *   bits 16-31 : command_id
  */
 #include "hle.h"
+#include "fs_archive.h"
 #include "gpu.h"
+#include "gsp_fb.h"
+#include "dsp_hle.h"
+#include "hid_ring.h"
+#include "y2r.h"
 
 static uint32_t g_hle_gsp_handle;
 /* Von generiertem Code (gen_boot.c) lesbarer gsp-Handle. */
@@ -28,6 +33,7 @@ static void gsp_pica_irq(int id);
 void arm_call_guest_pub(ArmCpu *c, uint32_t addr);   /* gen_boot.c */
 
 #include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,18 +47,39 @@ static CRITICAL_SECTION g_guest_lock;
 static int g_guest_lock_init = 0;
 static ArmCpu *g_main_cpu = NULL;
 
-/* Von SetBufferSwap (gsp 0x0005) gesetzte Framebuffer-Adressen. Screen 0 =
-   oben (400x240), Screen 1 = unten (320x240). Getter fuer den Port-Host. */
-static uint32_t g_gsp_fb_addr[3] = {0x1F000000u, 0x1F060000u, 0x1F0C0000u};
-static uint32_t g_gsp_fb_stride[3] = {0, 0, 0};
-static uint32_t g_gsp_fb_format[3] = {1, 1, 1};   /* 1 = BGR8 */
-uint32_t hle_gsp_fb_addr(int screen) {
-    return (screen >= 0 && screen < 3) ? g_gsp_fb_addr[screen] : 0u;
+/* GSP-Framebuffer-Zustand. Die Register (GspFbRegs) werden durch
+ * SetBufferSwap (gsp 0x0005) und die dirty-FrameBufferInfo im GSP-Shared-
+ * Memory gesetzt; die Anzeige liest den beim VBlank uebernommenen Stand
+ * (g_gsp_display). Damit wechselt das Bild genau im VBlank und nicht mitten
+ * im Frame (Azahar GPU::SetBufferSwap + Renderer-Latch, siehe gsp_fb.h).
+ * Screen 0 = oben (400x240), Screen 1 = unten (320x240). */
+static GspFbRegs g_gsp_fb_regs[2];
+static HleGspFrame g_gsp_display[2];
+static SRWLOCK g_gsp_fb_srw = SRWLOCK_INIT;
+static int g_gsp_fb_init_done = 0;
+
+static void gsp_fb_init(void) {
+    if (g_gsp_fb_init_done) return;
+    /* Startwerte wie Azahar PicaCore::InitializeRegs, Adressen im Port-VRAM. */
+    gsp_fb_regs_reset(&g_gsp_fb_regs[0], 0x1F000000u, 0x1F060000u, 3u * 240u, 1u);
+    gsp_fb_regs_reset(&g_gsp_fb_regs[1], 0x1F0C0000u, 0x1F120000u, 3u * 240u, 1u);
+    memset(g_gsp_display, 0, sizeof(g_gsp_display));
+    g_gsp_fb_init_done = 1;
 }
-void hle_gsp_fb_layout(int screen, uint32_t *stride, uint32_t *format) {
-    if (screen < 0 || screen > 2) screen = 0;
-    if (stride) *stride = g_gsp_fb_stride[screen];
-    if (format) *format = g_gsp_fb_format[screen];
+
+int hle_gsp_frame(int screen, HleGspFrame *out) {
+    int ok;
+    if (screen < 0 || screen > 1 || out == NULL) return 0;
+    AcquireSRWLockShared(&g_gsp_fb_srw);
+    *out = g_gsp_display[screen];
+    ok = out->valid;
+    ReleaseSRWLockShared(&g_gsp_fb_srw);
+    return ok;
+}
+
+/* Uebernimmt den sichtbaren Registerstand in die Anzeige (VBlank-Latch). */
+static void gsp_fb_latch_locked(int screen) {
+    gsp_fb_latch(&g_gsp_fb_regs[screen], &g_gsp_display[screen]);
 }
 
 static int g_no_lock = 0;
@@ -112,12 +139,17 @@ static void guest_lock_reacquire(void) {
  * dauerhaft halten und andere Threads aushungern. */
 static volatile unsigned g_pump_count = 0;
 static int gsp_process_cmdqueue(ArmCpu *c);
+static void hid_poll(void);
+/* Y2R-Fertigmeldung (StartConversion -> TransferEnd-Event) faellig? */
+static void y2r_poll(void);
 
 /* Pro Gast-Block: CPU-gebundene Gastschleifen ohne SVC duerfen den
  * kooperativen Lock nicht dauerhaft halten. Alle 0x4000 Bloecke abgeben. */
 void hle_pump(void) {
-    if (!g_guest_lock_init || g_no_lock) return;
     if ((++g_pump_count & 0x3FFFu) != 0) return;
+    hid_poll();
+    y2r_poll();
+    if (!g_guest_lock_init || g_no_lock) return;
     if (!t_lock_owned) return;
     guest_lock_leave();
     Sleep(0);
@@ -222,6 +254,7 @@ typedef struct {
     char path[256];
     FILE *fp;
     uint32_t size;
+    int fixed_size;  /* ExtSaveData: Groesse bleibt fest (Azahar FixSizeDiskFile) */
 } FileSlot;
 
 static FileSlot g_files[MAX_FILES];
@@ -245,6 +278,7 @@ typedef struct {
     int used;
     int service;     /* ServiceId */
     int file;        /* Index in g_files oder -1 */
+    int dir;         /* Directory-Stream (fs_archive.c) oder -1 */
     int alias;       /* >0: Slot verweist auf dieses kanonische Objekt */
     int refs;        /* kanonisch: lebende Handle-Slots (Azahar HandleTable) */
     volatile int signaled;   /* Event/Timer/Thread: Signalzustand */
@@ -323,6 +357,7 @@ static int service_from_name(const char *name) {
     if (strcmp(name, "gsp::Gpu") == 0) return SVC_GSP_GPU;
     if (strcmp(name, "gsp::Lcd") == 0) return SVC_GSP_LCD;
     if (strcmp(name, "hid:USER") == 0) return SVC_HID_USER;
+    if (strcmp(name, "hid:SPVR") == 0) return SVC_HID_USER;   /* gleiches Modul */
     if (strcmp(name, "APT:U") == 0) return SVC_APT_U;
     if (strcmp(name, "cfg:u") == 0) return SVC_CFG_U;
     if (strcmp(name, "ptm:u") == 0) return SVC_PTM_U;
@@ -359,6 +394,7 @@ static int alloc_handle(int service, const char *name) {
             g_handles[i].used = 1;
             g_handles[i].service = service;
             g_handles[i].file = -1;
+            g_handles[i].dir = -1;
             g_handles[i].alias = 0;
             g_handles[i].refs = 1;
             snprintf(g_handles[i].name, sizeof(g_handles[i].name), "%s", name ? name : "?");
@@ -424,6 +460,7 @@ static void close_handle_slot(uint32_t h) {
         int canon = s->alias;
         memset(s, 0, sizeof(*s));
         s->file = -1;
+        s->dir = -1;
         if (canon > 0 && canon < MAX_HANDLES && g_handles[canon].used &&
             g_handles[canon].refs > 1)
             g_handles[canon].refs--;
@@ -447,6 +484,7 @@ static void close_handle_slot(uint32_t h) {
             }
             memset(s, 0, sizeof(*s));
             s->file = -1;
+            s->dir = -1;
             return;
         }
     }
@@ -455,8 +493,13 @@ static void close_handle_slot(uint32_t h) {
         g_files[s->file].used = 0;
         g_files[s->file].fp = NULL;
     }
+    if (s->dir >= 0) {
+        fs_archive_dir_close(s->dir);
+        s->dir = -1;
+    }
     memset(s, 0, sizeof(*s));
     s->file = -1;
+    s->dir = -1;
 }
 
 /* Typisierte Kernel-Objekte fuer HLE-Dienste (Azahar legt sie ebenfalls als
@@ -499,6 +542,17 @@ static uint64_t host_us(void) {
     if (freq.QuadPart == 0) QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&t);
     return (uint64_t)((t.QuadPart * 1000000ull) / (uint64_t)freq.QuadPart);
+}
+
+/* Systemticks wie svcGetSystemTick: ARM11-Kern 268.111856 MHz
+ * (Azahar core_timing.h BASE_CLOCK_RATE_ARM11). QPC liefert die noetige
+ * Aufloesung; GetTickCount64 (~15,6 ms) ist fuer HID-Zeitstempel zu grob. */
+#define SYSCLOCK_ARM11 268111856ull
+static uint64_t host_system_ticks(void) {
+    static uint64_t base_us = 0;
+    uint64_t us = host_us();
+    if (base_us == 0) base_us = us;
+    return (us - base_us) * SYSCLOCK_ARM11 / 1000000ull;
 }
 
 /* Thread-Id des aktuell laufenden Gast-Threads (0 = Hauptthread). */
@@ -601,6 +655,8 @@ static int hs_wait(ArmCpu *c, Handle **objs, int cnt, int wait_all,
     for (;;) {
         int hit = -1;
         kernel_poll_timers();
+        hid_poll();
+        y2r_poll();
         if (wait_all) {
             int ok = 1;
             for (int k = 0; k < cnt; k++) {
@@ -956,44 +1012,289 @@ static void apt_command(Ipc *r, uint32_t *p) {
     }
 }
 
+/* ---------- HID (hid:USER / hid:SPVR) ----------
+ * Layout und reine Ringpuffer-Logik stehen in runtime/platform/hid_ring.h
+ * (Azahar core/hle/service/hid/hid.h bzw. hid.cpp). Die Ringpuffer werden in
+ * einem Host-Schattenpuffer gefuehrt. Sobald der Gast den Shared-Memory-Block
+ * per svcMapMemoryBlock einblendet, werden nach jedem Update nur die von
+ * Azahar geschriebenen Ringbereiche (HID_RING_RANGES) dorthin kopiert. */
+/* Azahar hid.h: BASE_CLOCK_RATE_ARM11 / 234, /104, /101 (empirisch). */
+#define HID_PAD_TICKS_PERIOD   (SYSCLOCK_ARM11 / 234u)
+#define HID_ACC_TICKS_PERIOD   (SYSCLOCK_ARM11 / 104u)
+#define HID_GYRO_TICKS_PERIOD  (SYSCLOCK_ARM11 / 101u)
+
+/* Ruhelage des Motion-Emulators (Azahar input_common/motion_emu.cpp: gravity
+ * (0,-1,0) in 3DS-Koordinaten, hid.cpp multipliziert mit accelerometer_coef
+ * 512). Ohne Bewegungseingabe liegt das Geraet flach, also y = -512. */
+#define HID_ACCEL_REST_X  (0)
+#define HID_ACCEL_REST_Y  (-512)
+#define HID_ACCEL_REST_Z  (0)
+
+typedef struct {
+    int initialized;
+    uint32_t shmem;                 /* Handle des Shared-Memory-Blocks */
+    uint32_t events[5];             /* Pad0, Pad1, Accel, Gyro, DebugPad */
+    HidRing ring;                   /* Indizes/Ticks/Mittelung (hid_ring.h) */
+    uint64_t pad_due, acc_due, gyro_due;
+    int enable_acc, enable_gyro;
+    int guest_mapped;
+    uint32_t guest_addr;
+    uint64_t pad_updates;
+    uint8_t shadow[HID_SHMEM_SIZE];
+} HidState;
+
+static HidState g_hid;
+static SRWLOCK g_hid_srw = SRWLOCK_INIT;
+/* Eigener Mutex nur fuer den Host-Eingabepuffer: Fenster-/Hauptthread
+ * schreiben hier, hid_poll liest ihn unter dem Gast-Lock. */
+static SRWLOCK g_hid_in_srw = SRWLOCK_INIT;
+static HleHidInput g_hid_input;
+static int g_hid_log = -1;
+
+static uint32_t hid_rd32(const HidState *s, uint32_t off) {
+    uint32_t v = 0;
+    memcpy(&v, s->shadow + off, 4);
+    return v;
+}
+
+static void hid_signal_event(int which) {
+    Handle *hh = get_handle(g_hid.events[which]);
+    if (hh != NULL) hh->signaled = 1;
+}
+
+/* Signalisiert die Ereignisse, die ein Ring-Update gemeldet hat. */
+static void hid_signal_events(uint32_t ev) {
+    if (ev & HID_RING_EV_PAD0) hid_signal_event(0);
+    if (ev & HID_RING_EV_PAD1) hid_signal_event(1);
+    if (ev & HID_RING_EV_ACCEL) hid_signal_event(2);
+    if (ev & HID_RING_EV_GYRO) hid_signal_event(3);
+}
+
+static void hid_update_pad_locked(uint64_t tick) {
+    HidRingInput in;
+    AcquireSRWLockShared(&g_hid_in_srw);
+    in = g_hid_input;
+    ReleaseSRWLockShared(&g_hid_in_srw);
+    g_hid.pad_updates++;
+    hid_signal_events(hid_ring_write_pad(&g_hid.ring, g_hid.shadow,
+                                        &in, (int64_t)tick));
+}
+
+static void hid_update_acc_locked(uint64_t tick) {
+    /* Ohne Bewegungseingabe: Erdbeschleunigung in Ruhelage (Azahar). */
+    hid_signal_events(hid_ring_write_accel(&g_hid.ring, g_hid.shadow,
+                                           HID_ACCEL_REST_X, HID_ACCEL_REST_Y,
+                                           HID_ACCEL_REST_Z, (int64_t)tick));
+}
+
+static void hid_update_gyro_locked(uint64_t tick) {
+    hid_signal_events(hid_ring_write_gyro(&g_hid.ring, g_hid.shadow,
+                                          0, 0, 0, (int64_t)tick));
+}
+
+/* Kopiert genau die Ringbereiche, die Azahar im Shared Memory aktualisiert.
+ * Der Aufrufer haelt den Gast-Lock und g_hid_srw: Gast-Speicher wird nur
+ * unter dem Gast-Lock geschrieben. */
+static void hid_copy_to_guest_locked(void) {
+    uint32_t off;
+    if (!g_hid.guest_mapped || g_cpu == NULL) return;
+    off = g_hid.guest_addr & 0x1FFFFFFFu;
+    if ((uint64_t)off + HID_SHMEM_SIZE > g_cpu->mem_size) return;
+    for (size_t i = 0; i < HID_RING_RANGE_COUNT; i++) {
+        uint32_t o = HID_RING_RANGES[i].offset;
+        memcpy(g_cpu->mem + off + o, g_hid.shadow + o, HID_RING_RANGES[i].length);
+    }
+}
+
+/* Regelt die Update-Zeitpunkte (Azahar CoreTiming: pad_update_ticks usw.).
+ * Wird aus hle_pump, den Warteschleifen und dem VBlank-Thread aufgerufen;
+ * verpasste Perioden werden nachgeholt. Der Gast-Lock wird hier genommen,
+ * falls der Aufrufer ihn nicht schon haelt, weil der Schatten in den
+ * Gast-Shared-Memory kopiert wird. */
+static void hid_poll(void) {
+    uint64_t now;
+    int guard;
+    int had_lock;
+    if (!g_hid.initialized) return;
+    now = host_system_ticks();
+
+    /* Der Lock ist nicht rekursiv: nur abgeben, wenn hid_poll ihn selbst
+       genommen hat (VBlank-Thread nimmt ihn bereits aussen). */
+    had_lock = t_lock_owned;
+    if (!had_lock) guest_lock_enter();
+    AcquireSRWLockExclusive(&g_hid_srw);
+    guard = 0;
+    while (now >= g_hid.pad_due && guard++ < 64) {
+        hid_update_pad_locked(g_hid.pad_due);
+        g_hid.pad_due += HID_PAD_TICKS_PERIOD;
+    }
+    if (g_hid.pad_due < now) g_hid.pad_due = now + HID_PAD_TICKS_PERIOD;
+
+    guard = 0;
+    while (g_hid.enable_acc > 0 && now >= g_hid.acc_due && guard++ < 64) {
+        hid_update_acc_locked(g_hid.acc_due);
+        g_hid.acc_due += HID_ACC_TICKS_PERIOD;
+    }
+    if (g_hid.acc_due < now) g_hid.acc_due = now + HID_ACC_TICKS_PERIOD;
+
+    guard = 0;
+    while (g_hid.enable_gyro > 0 && now >= g_hid.gyro_due && guard++ < 64) {
+        hid_update_gyro_locked(g_hid.gyro_due);
+        g_hid.gyro_due += HID_GYRO_TICKS_PERIOD;
+    }
+    if (g_hid.gyro_due < now) g_hid.gyro_due = now + HID_GYRO_TICKS_PERIOD;
+
+    hid_copy_to_guest_locked();
+    if (g_hid_log < 0) g_hid_log = getenv("HLE_HID_LOG") ? 1 : 0;
+    if (g_hid_log && g_hid.pad_updates != 0u && (g_hid.pad_updates % 234u) == 0u) {
+        static uint64_t last_logged = 0;
+        if (g_hid.pad_updates != last_logged) {
+            uint32_t ti = hid_rd32(&g_hid, HID_TOUCH_INDEX) % HID_TOUCH_ENTRIES;
+            uint32_t te = HID_TOUCH_ENTRIES_OFF + ti * 8u;
+            uint32_t vx = hid_rd32(&g_hid, te + 4u);
+            uint16_t tx = 0, ty = 0;
+            last_logged = g_hid.pad_updates;
+            memcpy(&tx, g_hid.shadow + te, 2);
+            memcpy(&ty, g_hid.shadow + te + 2, 2);
+            printf("[hid] pads=%llu pad_idx=%u state=%08X pad_ticks=%lld touch_idx=%u "
+                   "valid=%u pos=(%u,%u) acc_idx=%u gyro_idx=%u\n",
+                   (unsigned long long)g_hid.pad_updates,
+                   hid_rd32(&g_hid, HID_PAD_INDEX), hid_rd32(&g_hid, HID_PAD_CURRENT),
+                   (long long)g_hid.ring.pad_ticks, ti, vx & 1u, tx, ty,
+                   hid_rd32(&g_hid, HID_ACC_INDEX), hid_rd32(&g_hid, HID_GYRO_INDEX));
+            fflush(stdout);
+        }
+    }
+    ReleaseSRWLockExclusive(&g_hid_srw);
+    if (!had_lock) guest_lock_leave();
+}
+
+/* Host-Threads (Fenster/Hauptthread) schreiben nur in diesen Host-Puffer,
+ * nie in Gast-Speicher. Angewendet wird er ausschliesslich in hid_poll unter
+ * dem Gast-Lock. */
+void hle_hid_set_input(const HleHidInput *in) {
+    if (in == NULL) return;
+    AcquireSRWLockExclusive(&g_hid_in_srw);
+    g_hid_input = *in;
+    ReleaseSRWLockExclusive(&g_hid_in_srw);
+}
+
+static void hid_map_guest(uint32_t addr) {
+    AcquireSRWLockExclusive(&g_hid_srw);
+    g_hid.guest_addr = addr;
+    g_hid.guest_mapped = 1;
+    hid_copy_to_guest_locked();
+    ReleaseSRWLockExclusive(&g_hid_srw);
+    if (getenv("HLE_MAP_LOG"))
+        printf("[hid] Shared-Memory gemappt auf 0x%08X\n", addr);
+}
+
+static void hid_unmap_guest(uint32_t addr) {
+    AcquireSRWLockExclusive(&g_hid_srw);
+    if (g_hid.guest_mapped && (g_hid.guest_addr & 0x1FFFFFFFu) == (addr & 0x1FFFFFFFu))
+        g_hid.guest_mapped = 0;
+    ReleaseSRWLockExclusive(&g_hid_srw);
+}
+
+/* Azahar legt Shared-Memory und die fuenf Events beim Modulaufbau an; alle
+ * hid-Sessions (hid:USER und hid:SPVR) teilen sie. */
+static void hid_init_once(void) {
+    static const char *names[5] = {
+        "hid-pad0", "hid-pad1", "hid-accel", "hid-gyro", "hid-debugpad"
+    };
+    uint64_t now;
+    if (g_hid.initialized) return;
+    memset(&g_hid, 0, sizeof(g_hid));
+    g_hid.shmem = (uint32_t)alloc_handle(SVC_OTHER, "hid-shmem");
+    for (int i = 0; i < 5; i++) g_hid.events[i] = new_event_handle(names[i], 0);
+    now = host_system_ticks();
+    g_hid.pad_due = now + HID_PAD_TICKS_PERIOD;
+    g_hid.acc_due = now + HID_ACC_TICKS_PERIOD;
+    g_hid.gyro_due = now + HID_GYRO_TICKS_PERIOD;
+    g_hid.initialized = 1;
+}
+
 static void hid_command(Ipc *rp, uint32_t *p) {
     (void)p;
     switch (rp->cmd) {
         case 0x000A: { /* GetIPCHandles: Result, CopyHandle(SharedMem + 5 Events) */
             /* Azahar (hid.cpp): MakeBuilder(1,7), PushCopyObjects(shared_mem,
                event_pad_or_touch_1, event_pad_or_touch_2, event_accelerometer,
-               event_gyroscope, event_debug_pad). */
-            uint32_t shmem = (uint32_t)alloc_handle(SVC_OTHER, "hid-shmem");
-            uint32_t h[5];
-            for (int i = 0; i < 5; i++) h[i] = new_event_handle("hid-ev", 0);
+               event_gyroscope, event_debug_pad). Die Objekte existieren
+               einmal pro HID-Modul; jede Session bekommt dieselben Handles. */
+            hid_init_once();
             ipc_begin(rp, 0x000A, 1, 7);
             put_result(rp);
             ipc_put(rp, (5u << 26));       /* CopyHandle-Deskriptor, 6 Handles */
-            ipc_put(rp, shmem);
-            for (int i = 0; i < 5; i++) ipc_put(rp, h[i]);
+            ipc_put(rp, g_hid.shmem);
+            for (int i = 0; i < 5; i++) ipc_put(rp, g_hid.events[i]);
+            if (g_log) printf("[hid] GetIPCHandles -> shm=%u ev=%u/%u/%u/%u/%u\n",
+                              g_hid.shmem, g_hid.events[0], g_hid.events[1],
+                              g_hid.events[2], g_hid.events[3], g_hid.events[4]);
             break;
         }
-        case 0x0011: case 0x0012: case 0x0013: case 0x0014: { /* Accelerometer/Gyro enable/disable */
+        case 0x0011: { /* EnableAccelerometer (Azahar: Zaehler, ab 1 geplant) */
+            hid_init_once();
             ipc_begin(rp, rp->cmd, 1, 0);
             put_result(rp);
+            AcquireSRWLockExclusive(&g_hid_srw);
+            if (g_hid.enable_acc++ == 0)
+                g_hid.acc_due = host_system_ticks() + HID_ACC_TICKS_PERIOD;
+            ReleaseSRWLockExclusive(&g_hid_srw);
+            break;
+        }
+        case 0x0012: { /* DisableAccelerometer */
+            ipc_begin(rp, rp->cmd, 1, 0);
+            put_result(rp);
+            AcquireSRWLockExclusive(&g_hid_srw);
+            if (g_hid.enable_acc > 0) g_hid.enable_acc--;
+            ReleaseSRWLockExclusive(&g_hid_srw);
+            break;
+        }
+        case 0x0013: { /* EnableGyroscopeLow */
+            hid_init_once();
+            ipc_begin(rp, rp->cmd, 1, 0);
+            put_result(rp);
+            AcquireSRWLockExclusive(&g_hid_srw);
+            if (g_hid.enable_gyro++ == 0)
+                g_hid.gyro_due = host_system_ticks() + HID_GYRO_TICKS_PERIOD;
+            ReleaseSRWLockExclusive(&g_hid_srw);
+            break;
+        }
+        case 0x0014: { /* DisableGyroscopeLow */
+            ipc_begin(rp, rp->cmd, 1, 0);
+            put_result(rp);
+            AcquireSRWLockExclusive(&g_hid_srw);
+            if (g_hid.enable_gyro > 0) g_hid.enable_gyro--;
+            ReleaseSRWLockExclusive(&g_hid_srw);
             break;
         }
         case 0x0015: { /* GetGyroscopeLowRawToDpsCoefficient: Result + f32 */
+            float coef = 14.375f;   /* Azahar hid.cpp gyroscope_coef */
+            uint32_t bits;
+            memcpy(&bits, &coef, 4);
             ipc_begin(rp, 0x0015, 2, 0);
             put_result(rp);
-            ipc_put(rp, 0);        /* 0.0f */
+            ipc_put(rp, bits);
             break;
         }
-        case 0x0016: { /* GetGyroscopeLowCalibrateParam: Result + 5 Woerter */
+        case 0x0016: { /* GetGyroscopeLowCalibrateParam: 3x {0,+6700,-6700} */
+            /* Azahar hid.h GyroscopeCalibrateParam, param_unit = 6700. */
+            uint16_t pos = (uint16_t)6700, neg = (uint16_t)(int16_t)-6700;
             ipc_begin(rp, 0x0016, 6, 0);
             put_result(rp);
-            for (int i = 0; i < 5; i++) ipc_put(rp, 0);
+            ipc_put(rp, ((uint32_t)pos << 16) | 0u);   /* x.zero, x.pos */
+            ipc_put(rp, ((uint32_t)0u << 16) | neg);   /* x.neg, y.zero */
+            ipc_put(rp, ((uint32_t)neg << 16) | pos);  /* y.pos, y.neg */
+            ipc_put(rp, ((uint32_t)pos << 16) | 0u);   /* z.zero, z.pos */
+            ipc_put(rp, (uint32_t)neg);                /* z.neg + Padding */
             break;
         }
         case 0x0017: { /* GetSoundVolume: Result + u8 */
+            /* Azahar: (u8)(0x3F * Settings::volume) = 0x3F bei voller Lautstaerke. */
             ipc_begin(rp, 0x0017, 2, 0);
             put_result(rp);
-            ipc_put(rp, 0x3F);     /* volle Lautstaerke */
+            ipc_put(rp, 0x3F);
             break;
         }
         default:
@@ -1116,19 +1417,64 @@ static int open_guest_file(const char *guest_path, FileSlot **slot_out) {
     return 0;
 }
 
+/* Pfadpuffer in fs:USER-Requests. Das SDK dieses Spiels legt FS_Path in den
+ * Translate-Bereich (zwei Woerter {flags, adresse}); Azahar liest dieselben
+ * Bytes ueber PopStaticBuffer. Fallback: StaticBuffer-Deskriptor bei 0x40. */
+static uint32_t fs_req_buffer_addr(uint32_t *p, int normal, int translate, int index) {
+    int off = normal + index * 2 + 1;
+    if (index * 2 + 1 < translate) {
+        uint32_t a = p[off];
+        if (a >= 0x00100000u && a < 0x20000000u) return a;
+    }
+    {
+        uint32_t a = p[0x10 + index * 2];
+        if (a >= 0x00100000u && a < 0x20000000u) return a;
+    }
+    return 0;
+}
+
+static int fs_req_path(uint32_t *p, int normal, int translate, int index, uint32_t type,
+                       uint32_t size, uint8_t *out, size_t cap) {
+    uint32_t addr = fs_req_buffer_addr(p, normal, translate, index);
+    if (addr == 0) {
+        if (cap) out[0] = 0;
+        return 0;
+    }
+    return fs_archive_decode_path(g_cur_mem, g_cpu ? g_cpu->mem_size : 0, type, size, addr,
+                                  out, cap);
+}
+
+static int fs_open_host_file(const char *host, const char *label, FileSlot **slot_out) {
+    FILE *fp = fopen(host, "r+b");
+    long sz;
+    if (fp == NULL) fp = fopen(host, "rb");
+    if (fp == NULL) return 0;
+    fseek(fp, 0, SEEK_END);
+    sz = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (!g_files[i].used) {
+            g_files[i].used = 1;
+            snprintf(g_files[i].path, sizeof(g_files[i].path), "%s", label);
+            g_files[i].fp = fp;
+            g_files[i].size = (uint32_t)sz;
+            *slot_out = &g_files[i];
+            return 1;
+        }
+    }
+    fclose(fp);
+    return 0;
+}
+
+static void fs_reply_result(Ipc *r, uint32_t cmd, uint32_t res) {
+    ipc_begin(r, cmd, 1, 0);
+    ipc_put(r, res);
+}
+
 static void fs_command(Ipc *r, uint32_t *p) {
     if (getenv("HLE_FS_PATHS")) {
         printf("[fscmd] cmd=0x%04X n=%d t=%d", r->cmd, r->normal, r->translate);
-        for (int i = 0; i < r->normal && i < 8; i++) printf(" p%d=%08X", i, p[i]);
-        for (int q = 0; q + 1 < r->translate; q += 2) {
-            uint32_t fl = p[r->normal + q];
-            uint32_t ad = p[r->normal + q + 1];
-            printf(" | b%d fl=%08X a=%08X:", q / 2, fl, ad);
-            if (ad >= 0x08000000u && ad < 0x20000000u) {
-                const uint8_t *bb = g_cur_mem + (ad & 0x1FFFFFFFu);
-                for (int k = 0; k < 20; k++) printf(" %02X", bb[k]);
-            }
-        }
+        for (int i = 0; i < r->normal && i < 10; i++) printf(" p%d=%08X", i, p[i]);
         printf("\n");
     }
     switch (r->cmd) {
@@ -1137,229 +1483,373 @@ static void fs_command(Ipc *r, uint32_t *p) {
             ipc_put(r, 0);
             break;
         }
-        case 0x0802: case 0x0803: { /* OpenFile / OpenFileDirectly */
-            char path[256];
+        case 0x0802: { /* OpenFile */
+            uint64_t archive = (uint64_t)p[1] | ((uint64_t)p[2] << 32);
+            uint32_t type = p[3], size = p[4], mode = p[5], attrs = p[6];
+            uint8_t raw[FS_ARCHIVE_PATH_MAX];
+            char path[FS_ARCHIVE_PATH_MAX];
+            char host[FS_ARCHIVE_PATH_MAX];
+            FileSlot *slot = NULL;
+            uint32_t h = 0;
+            int fixed = 0;
+            uint32_t res = FS_RESULT_INVALID_PATH;
+            int len = fs_req_path(p, r->normal, r->translate, 0, type, size, raw, sizeof(raw));
+
             path[0] = 0;
-            /* Translate-Bereich: pro Puffer {size_flags, adresse}, Groesse = flags >> 4. */
-            uint32_t ftype, fsize;
-            if (r->cmd == 0x0802) {
-                ftype = (r->normal >= 5) ? p[3] : 3;
-                fsize = (r->normal >= 5) ? p[4] : 0;
-            } else {
-                ftype = (r->normal >= 6) ? p[4] : 3;
-                fsize = (r->normal >= 6) ? p[5] : 0;
-            }
-            uint32_t addr = 0, len = 0;
-            if (r->normal >= 5 && r->translate >= 2) {
-                int idx = (r->cmd == 0x0803 && r->translate >= 4) ? 2 : 0;
-                uint32_t flags = p[r->normal + idx];
-                addr = p[r->normal + idx + 1];
-                len = flags >> 4;
+            if (len > 0 && (type == 3 || type == 4)) snprintf(path, sizeof(path), "%s", raw);
+            if (archive != 0 && path[0]) {
+                res = fs_archive_open_file(archive, path, mode, attrs, host, sizeof(host), &fixed);
+                if (res == FS_RESULT_SUCCESS) {
+                    if (fs_open_host_file(host, host, &slot)) {
+                        slot->fixed_size = fixed;
+                        h = (uint32_t)alloc_handle(SVC_FILE, "file");
+                        if (h && h < MAX_HANDLES) g_handles[h].file = (int)(slot - g_files);
+                    } else {
+                        res = FS_RESULT_FILE_NOT_FOUND;
+                    }
+                }
+            } else if (archive == 0) {
+                if (path[0] && open_guest_file(path, &slot)) {
+                    res = FS_RESULT_SUCCESS;
+                    h = (uint32_t)alloc_handle(SVC_FILE, "file");
+                    if (h && h < MAX_HANDLES) g_handles[h].file = (int)(slot - g_files);
+                }
             }
             if (g_log) {
-                printf("[fsdbg-raw] cmd=%04X p:", r->cmd);
-                for (int i = 0; i < r->normal && i < 10; i++) printf(" %08X", p[i]);
-                printf("\n");
-                printf("[fsdbg] cmd=%04X n=%d t=%d type=%u size=%u addr=%08X len=%u",
-                       r->cmd, r->normal, r->translate, ftype, fsize, addr, len);
-                if (addr) {
-                    const uint8_t *dbg = g_cur_mem + (addr & 0x1FFFFFFFu);
-                    printf(" bytes:");
-                    for (int i = 0; i < 32; i++) printf(" %02X", dbg[i]);
-                }
-                /* Alle Translate-Paare mitschreiben, um den echten Pfadpuffer zu finden. */
-                for (int q = 0; q + 1 < r->translate; q += 2) {
-                    uint32_t f2 = p[r->normal + q];
-                    uint32_t a2 = p[r->normal + q + 1];
-                    printf(" | t%d flags=%08X addr=%08X:", q / 2, f2, a2);
-                    if (a2 >= 0x08000000u && a2 < 0x20000000u) {
-                        const uint8_t *b2 = g_cur_mem + (a2 & 0x1FFFFFFFu);
-                        for (int k = 0; k < 24; k++) printf(" %02X", b2[k]);
-                    }
-                }
-                printf("\n");
+                printf("[fs] OpenFile \"%s\" archive=%llu result=%08X handle=%u\n",
+                       path, (unsigned long long)archive, res, h);
             }
-            /* Pfadpuffer liegen auch im .data-Bereich (z. B. 0x3CF74A),
-               nicht nur im Heap ab 0x08000000. */
-            if (addr >= 0x00100000u && addr < 0x20000000u) {
-                const uint8_t *src = g_cur_mem + (addr & 0x1FFFFFFFu);
-                uint32_t limit = len ? len : fsize;
-                if (limit > 250 || limit < 2) limit = 250;
-                int n = 0;
-                /* Robuste Erkennung: Wchar, wenn das zweite Byte 0 ist. */
-                if (src[1] == 0) {
-                    for (uint32_t i = 0; i + 1 < limit && n < 250; i += 2) {
-                        if (src[i] == 0) break;
-                        path[n++] = (char)src[i];
-                    }
-                } else {
-                    for (uint32_t i = 0; i < limit && n < 250; i++) {
-                        if (src[i] == 0) break;
-                        path[n++] = (char)src[i];
-                    }
-                }
-                path[n] = 0;
-            }
-            if (getenv("HLE_FS_PATHS")) {
-                printf("[fspath] n=%d t=%d ftype=%u fsize=%u",
-                       r->normal, r->translate, p[4], p[5]);
-                for (int q = 0; q + 1 < r->translate; q += 2) {
-                    uint32_t fl = p[r->normal + q];
-                    uint32_t ad = p[r->normal + q + 1];
-                    printf(" | b%d fl=%08X a=%08X:", q / 2, fl, ad);
-                    if (ad >= 0x08000000u && ad < 0x20000000u) {
-                        const uint8_t *bb = g_cur_mem + (ad & 0x1FFFFFFFu);
-                        for (int k = 0; k < 24; k++) printf(" %02X", bb[k]);
-                    }
-                }
-                printf("\n");
-            }
+            ipc_begin(r, 0x0802, 1, 2);
+            ipc_put(r, res);
+            ipc_put_handle(r, h);
+            break;
+        }
+        case 0x0803: { /* OpenFileDirectly */
+            uint32_t aid = p[1];
+            uint32_t atype = p[2], asize = p[3], ftype = p[4], fsize = p[5];
+            uint32_t mode = p[6], attrs = p[7];
+            uint8_t araw[FS_ARCHIVE_PATH_MAX];
+            uint8_t fraw[FS_ARCHIVE_PATH_MAX];
+            char fpath[FS_ARCHIVE_PATH_MAX];
+            char host[FS_ARCHIVE_PATH_MAX];
             FileSlot *slot = NULL;
-            int opened = 0;
-            /* SelfNCCH (Archive-ID 3): das Spiel oeffnet sein eigenes RomFS
-               direkt. Wir liefern das extrahierte Image (IVFC-Header + Daten). */
-            if (r->cmd == 0x0803 && r->normal >= 2 && p[1] == 3) {
-                FILE *img = fopen("out/romfs_image.bin", "rb");
-                if (img != NULL) {
-                    fseek(img, 0, SEEK_END);
-                    long isz = ftell(img);
-                    fseek(img, 0, SEEK_SET);
-                    for (int i = 0; i < MAX_FILES; i++) {
-                        if (!g_files[i].used) {
-                            g_files[i].used = 1;
-                            g_files[i].fp = img;
-                            g_files[i].size = (uint32_t)isz;
-                            snprintf(g_files[i].path, sizeof(g_files[i].path),
-                                     "out/romfs_image.bin");
-                            slot = &g_files[i];
-                            opened = 1;
-                            if (g_log) printf("[fs] SelfNCCH-Image geoeffnet (%ld Byte)\n", isz);
-                            break;
-                        }
-                    }
-                    if (!opened) fclose(img);
-                }
-            }
-            if (!opened && path[0]) opened = open_guest_file(path, &slot);
-            if (!opened) {
-                /* Kein/leerer Pfad: als Archiv-Wurzel (Sentinel) bedienen. */
-                for (int i = 0; i < MAX_FILES; i++) {
-                    if (!g_files[i].used) {
-                        g_files[i].used = 1;
-                        g_files[i].fp = NULL;
-                        g_files[i].size = (path[0] == 0) ? 0u : 0x400u;
-                        snprintf(g_files[i].path, sizeof(g_files[i].path), "out/savedata/save_%d.sav", i);
-                        slot = &g_files[i];
-                        opened = 1;
-                        if (g_log) printf("[fs] Sentinel-Slot %d (path=\"%s\" size=%u)\n",
-                                         i, path, g_files[i].size);
-                        break;
-                    }
-                }
-            }
             uint32_t h = 0;
-            if (opened) {
+            int fixed = 0;
+            uint32_t res = FS_RESULT_INVALID_PATH;
+            int alen = fs_req_path(p, r->normal, r->translate, 0, atype, asize, araw, sizeof(araw));
+            int flen = fs_req_path(p, r->normal, r->translate, 1, ftype, fsize, fraw, sizeof(fraw));
+
+            fpath[0] = 0;
+            if (aid == 3) {
+                uint32_t kind = 0;
+                if (flen >= 4) memcpy(&kind, fraw, 4);
+                if (kind == 0 || kind == 5) {
+                    if (fs_open_host_file("out/romfs_image.bin", "out/romfs_image.bin", &slot))
+                        res = FS_RESULT_SUCCESS;
+                } else if (kind == 2) {
+                    char nm[9];
+                    memcpy(nm, fraw + 4, 8);
+                    nm[8] = 0;
+                    snprintf(host, sizeof(host), "out/exefs/%s.bin", nm);
+                    if (fs_open_host_file(host, host, &slot)) res = FS_RESULT_SUCCESS;
+                }
+            } else {
+                int64_t ah = fs_archive_open(aid, araw, (uint32_t)(alen > 0 ? alen : 0),
+                                             fs_archive_program_id(), &res);
+                if (ah > 0) {
+                    if (flen > 0 && (ftype == 3 || ftype == 4))
+                        snprintf(fpath, sizeof(fpath), "%s", fraw);
+                    res = fs_archive_open_file((uint64_t)ah, fpath, mode, attrs, host, sizeof(host),
+                                               &fixed);
+                    fs_archive_close((uint64_t)ah);
+                    if (res == FS_RESULT_SUCCESS && !fs_open_host_file(host, host, &slot))
+                        res = FS_RESULT_FILE_NOT_FOUND;
+                    if (res == FS_RESULT_SUCCESS && slot != NULL) slot->fixed_size = fixed;
+                }
+            }
+            if (res == FS_RESULT_SUCCESS && slot != NULL) {
                 h = (uint32_t)alloc_handle(SVC_FILE, "file");
                 if (h && h < MAX_HANDLES) g_handles[h].file = (int)(slot - g_files);
             }
             if (g_log) {
-                printf("[fs] dump:");
-                for (int i = 0; i < 24; i++) printf(" %08X", p[i]);
-                printf("\n     ascii:");
-                for (int i = 0; i < 96; i++) {
-                    uint8_t ch = ((const uint8_t *)p)[i];
-                    printf("%c", (ch >= 0x20 && ch < 0x7F) ? ch : '.');
-                }
-                printf("\n");
-                if (g_log) {
-                    for (int k = r->normal; k + 1 < r->normal + r->translate; k += 2) {
-                        uint32_t a2 = p[k + 1];
-                        if (a2 >= 0x08000000u && a2 < 0x20000000u) {
-                            printf("[fs] mem 0x%08X:", a2);
-                            for (int b = 0; b < 20; b++) {
-                                printf(" %02X", g_cur_mem[(a2 & 0x1FFFFFFFu) + b]);
-                            }
-                            printf("\n");
-                        }
-                    }
-                }
-                if (addr >= 0x08000000u && addr < 0x20000000u) {
-                    printf("[fs] buf@0x%08X len=%u bytes:", addr, len);
-                    for (uint32_t i = 0; i < (len < 16 ? len : 16); i++) {
-                        printf(" %02X", g_cur_mem[(addr & 0x1FFFFFFFu) + i]);
-                    }
-                    printf("\n");
-                }
-                printf("[fs] %s \"%s\" -> %s (handle %u, %u KiB)\n",
-                       r->cmd == 0x0802 ? "OpenFile" : "OpenFileDirectly", path,
-                       opened ? "ok" : "FEHLER", h, opened ? slot->size / 1024 : 0);
+                printf("[fs] OpenFileDirectly id=%u result=%08X handle=%u\n", aid, res, h);
             }
-            /* Azahar (fs_user.cpp): MakeBuilder(1,2)
-               Push(file_res.Code()), PushMoveObjects(file). */
-            ipc_begin(r, r->cmd, 1, 2);
-            ipc_put(r, 0);          /* ResultSuccess */
-            ipc_put_handle(r, h);   /* MoveHandle(file) */
+            ipc_begin(r, 0x0803, 1, 2);
+            ipc_put(r, res);
+            ipc_put_handle(r, h);
             break;
         }
-        case 0x0861: case 0x0862: { /* InitializeWithSdkVersion / SetPriority: Result */
+        case 0x0804: { /* DeleteFile */
+            uint64_t a = (uint64_t)p[1] | ((uint64_t)p[2] << 32);
+            uint8_t raw[FS_ARCHIVE_PATH_MAX];
+            char path[FS_ARCHIVE_PATH_MAX];
+            int len = fs_req_path(p, r->normal, r->translate, 0, p[3], p[4], raw, sizeof(raw));
+            uint32_t res = FS_RESULT_INVALID_PATH;
+            path[0] = 0;
+            if (len > 0 && (p[3] == 3 || p[3] == 4)) snprintf(path, sizeof(path), "%s", raw);
+            if (path[0]) res = fs_archive_delete_file(a, path);
+            if (g_log) printf("[fs] DeleteFile \"%s\" -> %08X\n", path, res);
+            fs_reply_result(r, 0x0804, res);
+            break;
+        }
+        case 0x0805: { /* RenameFile */
+            uint64_t src = (uint64_t)p[1] | ((uint64_t)p[2] << 32);
+            uint64_t dst = (uint64_t)p[5] | ((uint64_t)p[6] << 32);
+            uint8_t sraw[FS_ARCHIVE_PATH_MAX], draw[FS_ARCHIVE_PATH_MAX];
+            char sp[FS_ARCHIVE_PATH_MAX], dp[FS_ARCHIVE_PATH_MAX];
+            uint32_t res = FS_RESULT_INVALID_PATH;
+            int slen = fs_req_path(p, r->normal, r->translate, 0, p[3], p[4], sraw, sizeof(sraw));
+            int dlen = fs_req_path(p, r->normal, r->translate, 1, p[7], p[8], draw, sizeof(draw));
+            sp[0] = dp[0] = 0;
+            if (slen > 0 && (p[3] == 3 || p[3] == 4)) snprintf(sp, sizeof(sp), "%s", sraw);
+            if (dlen > 0 && (p[7] == 3 || p[7] == 4)) snprintf(dp, sizeof(dp), "%s", draw);
+            if (sp[0] && dp[0]) res = fs_archive_rename_file(src, sp, dst, dp);
+            if (g_log) printf("[fs] RenameFile \"%s\" -> \"%s\" : %08X\n", sp, dp, res);
+            fs_reply_result(r, 0x0805, res);
+            break;
+        }
+        case 0x0806: case 0x0807: { /* DeleteDirectory */
+            uint64_t a = (uint64_t)p[1] | ((uint64_t)p[2] << 32);
+            uint8_t raw[FS_ARCHIVE_PATH_MAX];
+            char path[FS_ARCHIVE_PATH_MAX];
+            int len = fs_req_path(p, r->normal, r->translate, 0, p[3], p[4], raw, sizeof(raw));
+            uint32_t res = FS_RESULT_INVALID_PATH;
+            path[0] = 0;
+            if (len > 0 && (p[3] == 3 || p[3] == 4)) snprintf(path, sizeof(path), "%s", raw);
+            if (path[0]) res = fs_archive_delete_directory(a, path, r->cmd == 0x0807);
+            if (g_log) printf("[fs] DeleteDirectory \"%s\" rec=%d -> %08X\n", path,
+                              r->cmd == 0x0807, res);
+            fs_reply_result(r, r->cmd, res);
+            break;
+        }
+        case 0x0808: { /* CreateFile */
+            uint64_t a = (uint64_t)p[1] | ((uint64_t)p[2] << 32);
+            uint64_t fsize = (uint64_t)p[6] | ((uint64_t)p[7] << 32);
+            uint8_t raw[FS_ARCHIVE_PATH_MAX];
+            char path[FS_ARCHIVE_PATH_MAX];
+            int len = fs_req_path(p, r->normal, r->translate, 0, p[3], p[4], raw, sizeof(raw));
+            uint32_t res = FS_RESULT_INVALID_PATH;
+            path[0] = 0;
+            if (len > 0 && (p[3] == 3 || p[3] == 4)) snprintf(path, sizeof(path), "%s", raw);
+            if (path[0]) res = fs_archive_create_file(a, path, fsize, p[5]);
+            if (g_log) printf("[fs] CreateFile \"%s\" size=%llu -> %08X\n", path,
+                              (unsigned long long)fsize, res);
+            fs_reply_result(r, 0x0808, res);
+            break;
+        }
+        case 0x0809: { /* CreateDirectory */
+            uint64_t a = (uint64_t)p[1] | ((uint64_t)p[2] << 32);
+            uint8_t raw[FS_ARCHIVE_PATH_MAX];
+            char path[FS_ARCHIVE_PATH_MAX];
+            int len = fs_req_path(p, r->normal, r->translate, 0, p[3], p[4], raw, sizeof(raw));
+            uint32_t res = FS_RESULT_INVALID_PATH;
+            path[0] = 0;
+            if (len > 0 && (p[3] == 3 || p[3] == 4)) snprintf(path, sizeof(path), "%s", raw);
+            if (path[0]) res = fs_archive_create_directory(a, path, p[5]);
+            if (g_log) printf("[fs] CreateDirectory \"%s\" -> %08X\n", path, res);
+            fs_reply_result(r, 0x0809, res);
+            break;
+        }
+        case 0x080A: { /* RenameDirectory */
+            uint64_t src = (uint64_t)p[1] | ((uint64_t)p[2] << 32);
+            uint64_t dst = (uint64_t)p[5] | ((uint64_t)p[6] << 32);
+            uint8_t sraw[FS_ARCHIVE_PATH_MAX], draw[FS_ARCHIVE_PATH_MAX];
+            char sp[FS_ARCHIVE_PATH_MAX], dp[FS_ARCHIVE_PATH_MAX];
+            uint32_t res = FS_RESULT_INVALID_PATH;
+            int slen = fs_req_path(p, r->normal, r->translate, 0, p[3], p[4], sraw, sizeof(sraw));
+            int dlen = fs_req_path(p, r->normal, r->translate, 1, p[7], p[8], draw, sizeof(draw));
+            sp[0] = dp[0] = 0;
+            if (slen > 0 && (p[3] == 3 || p[3] == 4)) snprintf(sp, sizeof(sp), "%s", sraw);
+            if (dlen > 0 && (p[7] == 3 || p[7] == 4)) snprintf(dp, sizeof(dp), "%s", draw);
+            if (sp[0] && dp[0]) res = fs_archive_rename_directory(src, sp, dst, dp);
+            if (g_log) printf("[fs] RenameDirectory \"%s\" -> \"%s\" : %08X\n", sp, dp, res);
+            fs_reply_result(r, 0x080A, res);
+            break;
+        }
+        case 0x080B: { /* OpenDirectory */
+            uint64_t a = (uint64_t)p[0] | ((uint64_t)p[1] << 32);
+            uint8_t raw[FS_ARCHIVE_PATH_MAX];
+            char path[FS_ARCHIVE_PATH_MAX];
+            char host[FS_ARCHIVE_PATH_MAX];
+            uint32_t h = 0;
+            uint32_t res;
+            int slot = -1;
+            int len = fs_req_path(p, r->normal, r->translate, 0, p[2], p[3], raw, sizeof(raw));
+            path[0] = 0;
+            if (len > 0 && (p[2] == 3 || p[2] == 4)) snprintf(path, sizeof(path), "%s", raw);
+            res = path[0] ? fs_archive_open_directory(a, path, host, sizeof(host))
+                          : FS_RESULT_INVALID_PATH;
+            if (res == FS_RESULT_SUCCESS) slot = fs_archive_dir_open(host, &res);
+            if (slot >= 0) {
+                h = (uint32_t)alloc_handle(SVC_FILE, "dir");
+                if (h && h < MAX_HANDLES) {
+                    g_handles[h].dir = slot;
+                    g_handles[h].file = -1;
+                }
+                res = FS_RESULT_SUCCESS;
+            }
+            if (g_log) printf("[fs] OpenDirectory \"%s\" -> %08X handle=%u\n", path, res, h);
+            ipc_begin(r, 0x080B, 1, 2);
+            ipc_put(r, res);
+            ipc_put_handle(r, h);
+            break;
+        }
+        case 0x080C: { /* OpenArchive */
+            uint32_t id = p[0];
+            uint8_t raw[FS_ARCHIVE_PATH_MAX];
+            uint32_t res = FS_RESULT_SUCCESS;
+            int64_t ah;
+            int len = fs_req_path(p, r->normal, r->translate, 0, p[1], p[2], raw, sizeof(raw));
+            ah = fs_archive_open(id, raw, (uint32_t)(len > 0 ? len : 0), fs_archive_program_id(),
+                                 &res);
+            if (g_log) {
+                printf("[fs] OpenArchive id=0x%08X type=%u size=%u len=%d -> %08X handle=%lld\n",
+                       id, p[1], p[2], len, res, (long long)ah);
+            }
+            ipc_begin(r, 0x080C, 3, 0);
+            ipc_put(r, res);
+            ipc_put(r, ah > 0 ? (uint32_t)(uint64_t)ah : 0u);
+            ipc_put(r, ah > 0 ? (uint32_t)((uint64_t)ah >> 32) : 0u);
+            break;
+        }
+        case 0x080D: { /* ControlArchive */
+            uint64_t a = (uint64_t)p[0] | ((uint64_t)p[1] << 32);
+            uint32_t res = fs_archive_control(a, p[2], p[3], p[4]);
+            if (g_log) printf("[fs] ControlArchive h=%llu action=%u -> %08X\n",
+                              (unsigned long long)a, p[2], res);
+            fs_reply_result(r, 0x080D, res);
+            break;
+        }
+        case 0x080E: { /* CloseArchive */
+            uint64_t a = (uint64_t)p[0] | ((uint64_t)p[1] << 32);
+            uint32_t res = fs_archive_close(a);
+            if (g_log) printf("[fs] CloseArchive h=%llu -> %08X\n", (unsigned long long)a, res);
+            fs_reply_result(r, 0x080E, res);
+            break;
+        }
+        case 0x080F: { /* FormatThisUserSaveData */
+            FsFormatInfo info;
+            info.total_size = p[0] * 512u;
+            info.number_directories = p[1];
+            info.number_files = p[2];
+            info.duplicate_data = (uint8_t)p[5];
+            if (g_log) printf("[fs] FormatThisUserSaveData\n");
+            fs_reply_result(r, 0x080F,
+                            fs_archive_format(4, NULL, 0, fs_archive_program_id(), &info));
+            break;
+        }
+        case 0x0812: { /* GetFreeBytes */
+            uint64_t a = (uint64_t)p[0] | ((uint64_t)p[1] << 32);
+            uint64_t bytes = 0;
+            uint32_t res = fs_archive_get_free_bytes(a, &bytes);
+            ipc_begin(r, 0x0812, 3, 0);
+            ipc_put(r, res);
+            ipc_put(r, (uint32_t)bytes);
+            ipc_put(r, (uint32_t)(bytes >> 32));
+            break;
+        }
+        case 0x0813: case 0x0821: {
+            ipc_begin(r, r->cmd, 2, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x0817: case 0x0818: {
+            ipc_begin(r, r->cmd, 2, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 1);
+            break;
+        }
+        case 0x0814: {
+            ipc_begin(r, 0x0814, 5, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 512);
+            ipc_put(r, 0x8000);
+            ipc_put(r, 0x100000);
+            ipc_put(r, 0x080000);
+            break;
+        }
+        case 0x0831: { /* CreateSharedExtSaveData: in Azahar ohne Handler
+                         (fs_user.cpp CommandInfo 0x0831 = nullptr). */
+            generic_command(r, SVC_FS_USER);
+            break;
+        }
+        case 0x0851: { /* CreateExtSaveData: Info, dirs, files, size u64, icon */
+            uint32_t media = p[0] & 0xFFu;
+            uint8_t bin[12];
+            FsFormatInfo info;
+            uint32_t res;
+            memcpy(bin + 0, &p[0], 4);
+            memcpy(bin + 4, &p[1], 4);
+            memcpy(bin + 8, &p[2], 4);
+            info.number_directories = p[3];
+            info.number_files = p[4];
+            info.total_size = p[5];
+            info.duplicate_data = 0;
+            if (g_log) printf("[fs] CreateExtSaveData cmd=%04X low=%08X high=%08X media=%u\n",
+                              r->cmd, p[1], p[2], media);
+            res = fs_archive_create_ext(6u, bin, sizeof(bin), &info, fs_archive_program_id());
+            ipc_begin(r, r->cmd, 1, 2);
+            ipc_put(r, res);
+            ipc_put(r, (r->translate >= 2) ? p[r->normal] : 0u);
+            ipc_put(r, (r->translate >= 2) ? p[r->normal + 1] : 0u);
+            break;
+        }
+        case 0x0845: { /* GetFormatInfo */
+            FsFormatInfo info;
+            uint8_t raw[FS_ARCHIVE_PATH_MAX];
+            uint32_t res;
+            int len = fs_req_path(p, r->normal, r->translate, 0, p[1], p[2], raw, sizeof(raw));
+            memset(&info, 0, sizeof(info));
+            res = fs_archive_get_format_info(p[0], raw, (uint32_t)(len > 0 ? len : 0),
+                                             fs_archive_program_id(), &info);
+            if (g_log) printf("[fs] GetFormatInfo id=%u -> %08X\n", p[0], res);
+            ipc_begin(r, 0x0845, 5, 0);
+            ipc_put(r, res);
+            ipc_put(r, res == FS_RESULT_SUCCESS ? info.total_size : 0u);
+            ipc_put(r, res == FS_RESULT_SUCCESS ? info.number_directories : 0u);
+            ipc_put(r, res == FS_RESULT_SUCCESS ? info.number_files : 0u);
+            ipc_put(r, res == FS_RESULT_SUCCESS ? (uint32_t)info.duplicate_data : 0u);
+            break;
+        }
+        case 0x084C: { /* FormatSaveData */
+            FsFormatInfo info;
+            uint8_t raw[FS_ARCHIVE_PATH_MAX];
+            uint32_t res;
+            int len = fs_req_path(p, r->normal, r->translate, 0, p[1], p[2], raw, sizeof(raw));
+            (void) len;
+            info.total_size = p[3] * 512u;
+            info.number_directories = p[4];
+            info.number_files = p[5];
+            info.duplicate_data = (uint8_t)p[8];
+            if (p[0] != 4 || p[1] != 1) {
+                res = FS_RESULT_INVALID_PATH;
+            } else {
+                res = fs_archive_format(4, NULL, 0, fs_archive_program_id(), &info);
+            }
+            if (g_log) printf("[fs] FormatSaveData id=%u type=%u -> %08X\n", p[0], p[1], res);
+            fs_reply_result(r, 0x084C, res);
+            break;
+        }
+        case 0x0856: { /* CreateSystemSaveData */
+            FsFormatInfo info;
+            info.total_size = p[2];
+            info.number_directories = p[4];
+            info.number_files = p[5];
+            info.duplicate_data = (uint8_t)p[8];
+            if (g_log) printf("[fs] CreateSystemSaveData high=%08X low=%08X\n", p[0], p[1]);
+            fs_reply_result(r, 0x0856, fs_archive_create_system(p[0], p[1], &info));
+            break;
+        }
+        case 0x0861: case 0x0862: {
             ipc_begin(r, r->cmd, 1, 0);
             put_result(r);
             break;
         }
-        case 0x0863: { /* GetPriority: Result + Priority */
+        case 0x0863: {
             ipc_begin(r, 0x0863, 2, 0);
             put_result(r);
-            ipc_put(r, 0);          /* priority (noch nicht gesetzt) */
-            break;
-        }
-        case 0x080C: { /* OpenArchive: Result + u64 ArchiveHandle */
-            char path[256];
-            find_path(p, path, sizeof(path));
-            uint32_t h = (uint32_t)alloc_handle(SVC_FS_USER, "archive");
-            if (g_log) printf("[fs] OpenArchive id=0x%08X type=%u size=%u path=\"%s\" -> handle %u\n",
-                              p[0], p[1], p[2], path, h);
-            /* Azahar: MakeBuilder(3,0), Push(result), PushRaw<u64>(handle). */
-            ipc_begin(r, 0x080C, 3, 0);
-            put_result(r);
-            ipc_put(r, h);          /* handle low  */
-            ipc_put(r, 0);          /* handle high */
-            break;
-        }
-        case 0x0808: { /* CreateFile -> MakeBuilder(1,0) */
-            char cpath[256];
-            find_path(p, cpath, sizeof(cpath));
-            ipc_begin(r, 0x0808, 1, 0);
             ipc_put(r, 0);
-            if (g_log) printf("[fs] CreateFile \"%s\" -> ok\n", cpath);
-            break;
-        }
-        case 0x080D: { /* ControlArchive */
-            ipc_begin(r, 0x080D, 1, 0);
-            ipc_put(r, 0);
-            break;
-        }
-        case 0x080E: { /* CloseArchive */
-            ipc_begin(r, 0x080E, 1, 0);
-            ipc_put(r, 0);
-            break;
-        }
-        case 0x0812: { /* GetFreeBytes */
-            ipc_begin(r, 0x0812, 3, 0);
-            ipc_put(r, 0);
-            ipc_put(r, 0x10000000u);
-            ipc_put(r, 0);
-            break;
-        }
-        case 0x0813: case 0x0821: { /* GetCardType / CardSlotIsInserted: Result + bool */
-            ipc_begin(r, r->cmd, 2, 0);
-            put_result(r);
-            ipc_put(r, 0);
-            break;
-        }
-        case 0x0817: case 0x0818: { /* IsSdmcDetected / IsSdmcWriteable: Result + bool */
-            ipc_begin(r, r->cmd, 2, 0);
-            put_result(r);
-            ipc_put(r, 1);          /* virtuelle SD vorhanden/schreibbar */
             break;
         }
         default:
@@ -1387,6 +1877,44 @@ static uint32_t ipc_out_buffer(uint32_t *p, int normal, int translate) {
 
 static void file_command(Ipc *r, uint32_t *p) {
     Handle *h = get_handle(g_cur_handle);
+    if (h != NULL && h->dir >= 0) {
+        /* Directory-Objekt (Azahar service/fs/directory.cpp): 0x0801 Read,
+         * 0x0802 Close.  Der Puffer ist ein MappedBuffer im Translate-Teil. */
+        switch (r->cmd) {
+            case 0x0801: {
+                uint32_t count = p[0];
+                uint32_t addr = (r->translate >= 2) ? p[r->normal + 1] : 0u;
+                uint32_t got = 0;
+                uint32_t res;
+                int in_range = count == 0 ||
+                    (addr != 0 && g_cpu != NULL &&
+                     (uint64_t)(addr & 0x1FFFFFFFu) + (uint64_t)count * 0x228u <=
+                         (uint64_t)g_cpu->mem_size);
+                res = in_range ? fs_archive_dir_read(h->dir,
+                                                     addr ? g_cur_mem + (addr & 0x1FFFFFFFu) : NULL,
+                                                     count, &got)
+                               : FS_RESULT_INVALID_PATH;
+                if (g_log) printf("[fs] DirRead count=%u -> %08X got=%u\n", count, res, got);
+                ipc_begin(r, 0x0801, 2, 2);
+                ipc_put(r, res);
+                ipc_put(r, got);
+                ipc_put(r, (r->translate >= 2) ? p[r->normal] : 0u);
+                ipc_put(r, (r->translate >= 2) ? p[r->normal + 1] : 0u);
+                break;
+            }
+            case 0x0802: {
+                fs_archive_dir_close(h->dir);
+                h->dir = -1;
+                ipc_begin(r, 0x0802, 1, 0);
+                ipc_put(r, 0);
+                break;
+            }
+            default:
+                generic_command(r, SVC_FILE);
+                break;
+        }
+        return;
+    }
     if (h == NULL || h->file < 0) {
         /* Richtige Reply-Form auch ohne Datei, sonst wertet die SDK
            "0 Bytes gelesen" als Fehler (F96047A2). */
@@ -1460,6 +1988,27 @@ static void file_command(Ipc *r, uint32_t *p) {
             /* Translate-Deskriptor: {size|flags, adresse} -> Adresse ist das ZWEITE Wort. */
             if (r->translate >= 2) addr = p[r->normal + 1];
             uint32_t done = 0;
+            if (addr && length && f->fixed_size) {
+                /* Azahar FixSizeDiskFile::Write: offset > size -> WriteBeyondEnd,
+                 * offset == size -> 0 Bytes, sonst auf die Groesse kappen. */
+                if (offset > f->size) {
+                    ipc_begin(r, 0x0803, 2, 2);
+                    ipc_put(r, FS_RESULT_WRITE_BEYOND_END);
+                    ipc_put(r, 0);
+                    ipc_put(r, p[r->normal]);
+                    ipc_put(r, p[r->normal + 1]);
+                    break;
+                }
+                if (offset == f->size) {
+                    ipc_begin(r, 0x0803, 2, 2);
+                    ipc_put(r, 0);
+                    ipc_put(r, 0);
+                    ipc_put(r, p[r->normal]);
+                    ipc_put(r, p[r->normal + 1]);
+                    break;
+                }
+                if (offset + length > f->size) length = (uint32_t)(f->size - offset);
+            }
             if (addr && length) {
                 if (f->fp == NULL) f->fp = fopen(f->path, "w+b");
                 if (f->fp) {
@@ -1812,6 +2361,10 @@ static void dsp_signal_events(int type, int pipe) {
     }
 }
 
+static void dsp_interrupt_cb(int type, int pipe) {
+    dsp_signal_events(type, pipe);
+}
+
 static void dsp_pipe_append(int ch, const void *src, uint32_t n) {
     if (ch < 0 || ch >= DSP_NUM_PIPES) return;
     if (n > DSP_PIPE_CAP - g_dsp_pipe_len[ch]) n = DSP_PIPE_CAP - g_dsp_pipe_len[ch];
@@ -1843,32 +2396,32 @@ static void dsp_audio_struct_addresses(void) {
         buf[2 + i * 2] = (uint8_t)(addrs[i] & 0xFF);
         buf[2 + i * 2 + 1] = (uint8_t)(addrs[i] >> 8);
     }
+    /* Azahar AudioPipeWriteStructAddresses haengt an die Pipe an; geleert wird
+     * sie nur bei Initialize/Wakeup (ResetPipes), das macht WriteProcessPipe. */
     dsp_pipe_append(2, buf, sizeof(buf));   /* DspPipe::Audio */
-    dsp_signal_events(2, 2);                /* InterruptType::Pipe, Audio */
-}
+    dsp_signal_events(2, 2);                /* InterruptType::Pipe, Audio */}
 
 static void dsp_command(Ipc *r, uint32_t *p) {
     /* Antwortlayouts nach Azahar src/core/hle/service/dsp/dsp_dsp.cpp. */
     switch (r->cmd) {
-        case 0x0001: { /* RecvData: Result + Wert */
+        case 0x0001: { /* RecvData: Result + Wert (Azahar DspHle::RecvData) */
             ipc_begin(r, 0x0001, 2, 0);
             put_result(r);
-            ipc_put(r, 1);
+            ipc_put(r, audio_dsp_recv_data());
             break;
         }
         case 0x0002: { /* RecvDataIsReady: Result + bool */
             ipc_begin(r, 0x0002, 2, 0);
             put_result(r);
-            ipc_put(r, 1);
+            ipc_put(r, (uint32_t)audio_dsp_recv_data_ready());
             break;
         }
         case 0x0007: { /* SetSemaphore: Result
-                        Der DSP wertet das Semaphor aus und meldet danach den
-                        Pipe-Interrupt (Azahar SignalInterrupt). */
+                          Azahar DspHle::SetSemaphore ist ein No-op; die
+                          Pipe-Interrupts kommen je Audio-Frame aus
+                          runtime/audio/dsp_hle.c. */
             ipc_begin(r, r->cmd, 1, 0);
             put_result(r);
-            for (int pipe = 0; pipe < DSP_NUM_PIPES; pipe++)
-                dsp_signal_events(2, pipe);   /* InterruptType::Pipe */
             break;
         }
         case 0x0017: { /* SetSemaphoreMask: Result */
@@ -1895,11 +2448,15 @@ static void dsp_command(Ipc *r, uint32_t *p) {
             if (addr != 0 && size != 0 && g_cpu != NULL &&
                 (addr & 0x1FFFFFFFu) + size <= g_cpu->mem_size) {
                 const uint8_t *src = g_cur_mem + (addr & 0x1FFFFFFFu);
-                if (ch == 2 && size >= 1 && (src[0] == 0 || src[0] == 2)) {
-                    /* Audio-Pipe: Initialize/Wakeup -> Puffer leeren und die
-                       DSP-Struktur-Adressen liefern (Azahar PipeWrite). */
-                    g_dsp_pipe_len[2] = 0;
-                    dsp_audio_struct_addresses();
+                if (ch == 2) {
+                    /* Audio-Pipe: StateChange (Initialize/Shutdown/Wakeup/
+                       Sleep) an das DSP-HLE-Modul; die Struktur-Adressen
+                       schreibt der Callback (Azahar PipeWrite).  Initialize
+                       und Wakeup leeren alle Pipe-Puffer (ResetPipes). */
+                    if (size == 4 && (src[0] == 0 || src[0] == 2)) {
+                        for (int i = 0; i < DSP_NUM_PIPES; i++) g_dsp_pipe_len[i] = 0;
+                    }
+                    audio_dsp_pipe_write(src, size);
                 } else {
                     dsp_pipe_append((int)ch, src, size);
                     dsp_signal_events(2, (int)ch);
@@ -2021,10 +2578,11 @@ static void dsp_command(Ipc *r, uint32_t *p) {
     }
 }
 
-/* GSP-Service: minimal, damit ein Aufruf des Spiels nicht scheitert.
- * WriteHWRegs (0x0001), SetBufferSwap (0x0004), RegisterInterruptRelayQueue
- * (0x0006), TriggerCmdReqQueue (0x0008), ImportDisplayCaptureInfo (0x0009). */
-static int g_gsp_last_screen = 0;
+/* GSP-Service: Kommandonummern wie auf echter Hardware / in Azahar
+ * (gsp_gpu.cpp): 0x0001-0x0003 WriteHWRegs*, 0x0004 ReadHWRegs,
+ * 0x0005 SetBufferSwap, 0x0006 SetCommandList, 0x0007 RequestDma,
+ * 0x000C TriggerCmdReqQueue, 0x0013 RegisterInterruptRelayQueue,
+ * 0x0018 ImportDisplayCaptureInfo. */
 
 /* ---------- GSP-Interrupts und GX-Kommandos ----------
  * Layout nach 3dbrew "GSP Shared Memory" und Azahar (gsp_gpu.cpp,
@@ -2125,67 +2683,46 @@ static void gsp_pica_irq(int id) {
 static void gsp_vblank_fb_update(ArmCpu *c, int tid) {
     int screen;
     if (c == NULL) return;
+    gsp_fb_init();
     for (screen = 0; screen < 2; screen++) {
         uint32_t base = (GSP_SHMEM_BASE + 0x200u +
                          (uint32_t)(2 * tid + screen) * 0x40u) & 0x1FFFFFFFu;
-        uint32_t info, idx, left = 0, right = 0, st = 0, fmt = 0, shown = 0;
+        uint32_t info, idx, active = 0, left = 0, right = 0, st = 0, fmt = 0, shown = 0;
         uint8_t *fbu;
-        if (base + 0x40u > c->mem_size) return;
+        if (base + 0x40u > c->mem_size) continue;
         fbu = c->mem + base;
         if ((fbu[1] & 1u) == 0u) continue;   /* nicht aktualisiert */
         idx = fbu[0] & 1u;
         info = base + 8u + idx * 0x20u;
+        memcpy(&active, c->mem + info + 0u, 4);
         memcpy(&left, c->mem + info + 4u, 4);
         memcpy(&right, c->mem + info + 8u, 4);
         memcpy(&st, c->mem + info + 0xCu, 4);
         memcpy(&fmt, c->mem + info + 0x10u, 4);
         memcpy(&shown, c->mem + info + 0x14u, 4);
         fbu[1] = 0;
-        (void)right; (void)shown;
-        if (left == 0u || st == 0u) continue;
-        g_gsp_fb_addr[screen] = left;
-        g_gsp_fb_stride[screen] = st;
-        g_gsp_fb_format[screen] = fmt;
-        gpu_set_fb_size(left, (screen == 1) ? 320 : 400, 240);
-        g_gsp_last_screen = screen;
-        printf("[gsp] SetBufferSwap screen=%d fb=0x%08X stride=0x%X fmt=%X (VBlank)\n",
-               screen, left, st, fmt);
+        AcquireSRWLockExclusive(&g_gsp_fb_srw);
+        gsp_fb_regs_apply(&g_gsp_fb_regs[screen], screen, active, left, right,
+                          st, fmt, shown);
+        ReleaseSRWLockExclusive(&g_gsp_fb_srw);
+        if (left != 0u) {
+            gpu_set_fb_size(left, (screen == 1) ? 320 : 400, 240);
+            if (g_log)
+                printf("[gsp] SetBufferSwap screen=%d fb=0x%08X stride=0x%X fmt=%X (VBlank)\n",
+                       screen, left, st, fmt);
+        }
     }
+    /* Anzeige-Wechsel genau im VBlank: der sichtbare Puffer (active_fb aus
+     * shown_fb) wird jetzt uebernommen. */
+    AcquireSRWLockExclusive(&g_gsp_fb_srw);
+    gsp_fb_latch_locked(0);
+    gsp_fb_latch_locked(1);
+    ReleaseSRWLockExclusive(&g_gsp_fb_srw);
 }
+
 
 /* Verarbeitet den GSP-Shared-Memory-Kommandopuffer (Azahar-Layout) und
    fuehrt ProcessCommandList-Eintraege (id 0x01) als PICA-Liste aus. */
-/* Liest die vom Spiel in den GSP-Shared-Memory geschriebene
-   FrameBufferInfo (Azahar gsp_gpu.h):
-     base = GSP-Shmem + 0x200 + (2*thread + screen) * 0x40
-     +0 byte index, +1 dirty, +8 FrameBufferInfo (0x20 je Eintrag)
-     FrameBufferInfo: +0 active_fb, +4 address_left, +0xC stride, +0x10 format.
-   Damit bekommt der Port die echten FB-Adressen beider Screens. */
-static int gsp_fb_info(ArmCpu *c, int screen, uint32_t *addr, uint32_t *stride,
-                       uint32_t *format) {
-    if (c == NULL) return 0;
-    for (int tid = 0; tid < 8; tid++) {
-        uint32_t base = (0x10002000u + 0x200u +
-                         ((uint32_t)(2 * tid + screen) * 0x40u)) & 0x1FFFFFFFu;
-        if (base + 0x40u > c->mem_size) break;
-        uint32_t idx = c->mem[base] & 1u;
-        uint32_t info = base + 8u + idx * 0x20u;
-        uint32_t active = 0, left = 0, right = 0, st = 0, fmt = 0;
-        memcpy(&active, c->mem + info + 0u, 4);
-        memcpy(&left, c->mem + info + 4u, 4);
-        memcpy(&right, c->mem + info + 8u, 4);
-        memcpy(&st, c->mem + info + 0xCu, 4);
-        memcpy(&fmt, c->mem + info + 0x10u, 4);
-        (void)active; (void)right;
-        if (left != 0u && st != 0u) {
-            if (addr) *addr = left;
-            if (stride) *stride = st;
-            if (format) *format = fmt;
-            return 1;
-        }
-    }
-    return 0;
-}
 
 
 
@@ -2620,30 +3157,31 @@ static void gsp_command(Ipc *r, uint32_t *p) {
             break;
         }
         case 0x0005: { /* SetBufferSwap(screen_id, FrameBufferInfo) */
-            /* Azahar: screen_id < 2 -> GPU().SetBufferSwap(screen_id, fb_info),
-               sonst ignoriert; Antwort ist immer ein Result. */
+            /* Azahar (gsp_gpu.cpp SetBufferSwap -> GPU::SetBufferSwap):
+               FrameBufferInfo = {active_fb, address_left, address_right,
+               stride, format, shown_fb, unknown}. Die Register werden sofort
+               gesetzt; sichtbar wird der Puffer (active_fb aus shown_fb) erst
+               beim naechsten VBlank (gsp_fb_latch_locked). Fuer screen_id >= 2
+               gibt es trotzdem ein Result (echte Hardware ignoriert es). */
             uint32_t screen = p[0];
+            uint32_t active = (r->normal >= 2) ? p[1] : 0u;
             uint32_t left = (r->normal >= 3) ? p[2] : 0u;
+            uint32_t right = (r->normal >= 4) ? p[3] : 0u;
             uint32_t st = (r->normal >= 5) ? p[4] : 0u;
             uint32_t fmt = (r->normal >= 6) ? p[5] : 0u;
+            uint32_t shown = (r->normal >= 7) ? p[6] : 0u;
             if (screen < 2u) {
-                if (left == 0u) {
-                    /* Noch keine FB-Adresse im Request: aus der
-                       FrameBufferUpdate-Struktur im GSP-Shared-Memory lesen. */
-                    uint32_t a = 0, s2 = 0, f2 = 0;
-                    if (gsp_fb_info(g_cpu, (int)screen, &a, &s2, &f2)) {
-                        left = a; st = s2; fmt = f2;
-                    } else {
-                        left = g_gsp_fb_addr[screen];
-                    }
+                gsp_fb_init();
+                if (left != 0u) {
+                    AcquireSRWLockExclusive(&g_gsp_fb_srw);
+                    gsp_fb_regs_apply(&g_gsp_fb_regs[screen], (int)screen, active,
+                                      left, right, st, fmt, shown);
+                    ReleaseSRWLockExclusive(&g_gsp_fb_srw);
+                    gpu_set_fb_size(gsp_fb_regs_visible_left(&g_gsp_fb_regs[screen]),
+                                    (screen == 1u) ? 320 : 400, 240);
                 }
-                g_gsp_fb_addr[screen] = left;
-                g_gsp_fb_stride[screen] = st;
-                g_gsp_fb_format[screen] = fmt;
-                gpu_set_fb_size(left, (screen == 1u) ? 320 : 400, 240);
-                g_gsp_last_screen = (int)screen;
-                if (g_log) printf("[gsp] SetBufferSwap screen=%u fb=0x%08X stride=0x%X fmt=%X\n",
-                                  screen, left, st, fmt);
+                if (g_log) printf("[gsp] SetBufferSwap screen=%u fb=0x%08X stride=0x%X fmt=%X active=%u shown=%u\n",
+                                  screen, left, st, fmt, active, shown);
             } else if (g_log) {
                 printf("[gsp] SetBufferSwap screen=%u ungueltig (ignoriert)\n", screen);
             }
@@ -2765,8 +3303,10 @@ static void gsp_command(Ipc *r, uint32_t *p) {
             /* Azahar: MakeBuilder(9,0), PushRaw(top_entry), PushRaw(bottom_entry). */
             ipc_begin(r, 0x0018, 9, 0);
             put_result(r);
-            ipc_put(r, g_gsp_fb_addr[0]); ipc_put(r, 0); ipc_put(r, 0); ipc_put(r, 0);
-            ipc_put(r, g_gsp_fb_addr[1]); ipc_put(r, 0); ipc_put(r, 0); ipc_put(r, 0);
+            ipc_put(r, gsp_fb_regs_visible_left(&g_gsp_fb_regs[0]));
+            ipc_put(r, 0); ipc_put(r, 0); ipc_put(r, 0);
+            ipc_put(r, gsp_fb_regs_visible_left(&g_gsp_fb_regs[1]));
+            ipc_put(r, 0); ipc_put(r, 0); ipc_put(r, 0);
             break;
         }
         default:
@@ -2775,14 +3315,25 @@ static void gsp_command(Ipc *r, uint32_t *p) {
     }
 }
 
-/* Y2R-Layouts nach Azahar src/core/hle/service/cam/y2r_u.cpp:
- *  - GetTransferEndEvent liefert das eine completion_event (OneShot) und
- *    signalisiert es nicht vorab.
- *  - StartConversion plant die Fertigmeldung (MinY2RDelay = 50000 Zyklen,
- *    hier ~186 us), danach Event-Signal und is_busy_conversion = false.
- *  - IsFinished* spiegeln den Fertigzustand (Azahar stubbt sie auf 1). */
+/* Y2R: vollstaendige Konfiguration wie Azahar src/core/hle/service/cam/y2r_u.*,
+ * Umwandlung in runtime/platform/y2r.h (Azahar core/hw/y2r.cpp).
+ *  - DriverInitialize setzt die Azahar-Startwerte (YUV422_Indiv8, RGBA8,
+ *    keine Rotation, Linear, Koeffizienten 0, 1024 Zeilen/Spalten, alpha 0)
+ *    und loescht das completion_event (OneShot).
+ *  - StartConversion rechnet synchron in die per SetSendingY/U/V/YUYV und
+ *    SetReceiving gesetzten Gast-Puffer und plant danach die Fertigmeldung
+ *    (Azahar MinY2RDelay = 50000 Zyklen ≈ 186 us bei 268 MHz).
+ *  - IsFinished* sind wie in Azahar mit 1 belegt (stub).
+ *  - GetPackageParameter liefert die 12-Byte-ConversionParameters
+ *    (MakeBuilder(4,0)); Azahar selbst schiebt dort versehentlich die ganze
+ *    Struktur in den Kommandopuffer. */
+static Y2rConversion g_y2r;
 static uint32_t g_y2r_event = 0;
 static int g_y2r_interrupt_enabled = 0;
+static int g_y2r_spacial_dithering = 0;
+static int g_y2r_temporal_dithering = 0;
+static uint16_t g_y2r_dither[16];
+static uint8_t g_y2r_std_coefficient = 0;
 static int g_y2r_busy = 0;
 static uint64_t g_y2r_due_us = 0;
 
@@ -2796,26 +3347,253 @@ static void y2r_poll(void) {
     }
 }
 
+static void y2r_put_coefficients(Ipc *r) {
+    int i;
+    for (i = 0; i < 8; i += 2)
+        ipc_put(r, (uint32_t)(uint16_t)g_y2r.coefficients[i] |
+                    ((uint32_t)(uint16_t)g_y2r.coefficients[i + 1] << 16));
+}
+
+static void y2r_set_sending(Y2rBuffer *buf, const uint32_t *p) {
+    buf->address = p[0];
+    buf->image_size = p[1];
+    buf->transfer_unit = (uint16_t)p[2];
+    buf->gap = (uint16_t)p[3];
+}
+
+static uint32_t y2r_set_line_width(uint32_t width) {
+    if (width == 0 || width > 1024u || (width % 8u) != 0)
+        return 0xE0E053FD;      /* OutOfRange/CAM/InvalidArgument/Usage */
+    g_y2r.input_line_width = (uint16_t)width;
+    return 0;
+}
+
+static uint32_t y2r_set_lines(uint32_t lines) {
+    if (lines == 0 || lines > 1024u)
+        return 0xE0E053FD;
+    /* Azahar-Bug der camera-Moduls: 1024 setzt das Register nicht. */
+    if (lines != 1024u) g_y2r.input_lines = (uint16_t)lines;
+    return 0;
+}
+
+static uint32_t y2r_set_standard_coefficient(uint32_t index) {
+    if (index >= (uint32_t)Y2R_STD_COUNT)
+        return 0xE0E053ED;      /* InvalidEnumValue/CAM/InvalidArgument/Usage */
+    memcpy(g_y2r.coefficients, y2r_standard_coefficients[index],
+           sizeof(g_y2r.coefficients));
+    g_y2r_std_coefficient = (uint8_t)index;
+    return 0;
+}
+
 static void y2r_command(Ipc *r, uint32_t *p) {
     y2r_poll();
     switch (r->cmd) {
-        case 0x0002: case 0x0004: case 0x0006: case 0x0008:
-        case 0x000A: case 0x000C: { /* Get*: Result + Wert */
+        case 0x0001: g_y2r.input_format = (int)(p[0] & 0xFFu); goto result1;
+        case 0x0003: g_y2r.output_format = (int)(p[0] & 0xFFu); goto result1;
+        case 0x0005: g_y2r.rotation = (int)(p[0] & 0xFFu); goto result1;
+        case 0x0007: g_y2r.block_alignment = (int)(p[0] & 0xFFu); goto result1;
+        case 0x0009: g_y2r_spacial_dithering = (r->normal >= 1 && p[0] != 0); goto result1;
+        case 0x000B: g_y2r_temporal_dithering = (r->normal >= 1 && p[0] != 0); goto result1;
+        case 0x000D:
+            g_y2r_interrupt_enabled = (r->normal >= 1 && p[0] != 0);
+            goto result1;
+        case 0x0010: case 0x0011: case 0x0012: case 0x0013: case 0x0018: {
+            Y2rBuffer *b = r->cmd == 0x0010 ? &g_y2r.src_y
+                         : r->cmd == 0x0011 ? &g_y2r.src_u
+                         : r->cmd == 0x0012 ? &g_y2r.src_v
+                         : r->cmd == 0x0013 ? &g_y2r.src_yuyv : &g_y2r.dst;
+            y2r_set_sending(b, p);
+            if (g_log) {
+                printf("[y2r] cmd 0x%04X addr=%08X size=%08X unit=%u gap=%u\n",
+                       r->cmd, b->address, b->image_size,
+                       (unsigned)b->transfer_unit, (unsigned)b->gap);
+                fflush(stdout);
+            }
+            goto result1;
+        }
+        case 0x001E: { /* SetCoefficient: 8 x s16 in 4 Woertern */
+            int i;
+            for (i = 0; i < 8; i += 2) {
+                g_y2r.coefficients[i] = (int16_t)(p[i / 2] & 0xFFFFu);
+                g_y2r.coefficients[i + 1] = (int16_t)(p[i / 2] >> 16);
+            }
+            goto result1;
+        }
+        case 0x0020: {
+            uint32_t res = y2r_set_standard_coefficient(p[0]);
+            ipc_begin(r, r->cmd, 1, 0);
+            ipc_put(r, res);
+            break;
+        }
+        case 0x0021: { /* GetStandardCoefficient: gueltiger Index -> 4 Woerter */
+            uint32_t index = p[0];
+            if (index >= (uint32_t)Y2R_STD_COUNT) {
+                ipc_begin(r, r->cmd, 1, 0);
+                ipc_put(r, 0xE0E053ED);
+            } else {
+                ipc_begin(r, r->cmd, 5, 0);
+                put_result(r);
+                ipc_put(r, (uint32_t)(uint16_t)y2r_standard_coefficients[index][0] |
+                            ((uint32_t)(uint16_t)y2r_standard_coefficients[index][1] << 16));
+                ipc_put(r, (uint32_t)(uint16_t)y2r_standard_coefficients[index][2] |
+                            ((uint32_t)(uint16_t)y2r_standard_coefficients[index][3] << 16));
+                ipc_put(r, (uint32_t)(uint16_t)y2r_standard_coefficients[index][4] |
+                            ((uint32_t)(uint16_t)y2r_standard_coefficients[index][5] << 16));
+                ipc_put(r, (uint32_t)(uint16_t)y2r_standard_coefficients[index][6] |
+                            ((uint32_t)(uint16_t)y2r_standard_coefficients[index][7] << 16));
+            }
+            break;
+        }
+        case 0x0022: g_y2r.alpha = (uint16_t)p[0]; goto result1;
+        case 0x0024: { /* SetDitheringWeightParams: 16 x u16 */
+            int i;
+            for (i = 0; i < 16; ++i)
+                g_y2r_dither[i] = (uint16_t)(i & 1 ? (p[i / 2] >> 16) : (p[i / 2] & 0xFFFFu));
+            goto result1;
+        }
+        case 0x001A: { /* SetInputLineWidth */
+            uint32_t res = y2r_set_line_width(p[0]);
+            ipc_begin(r, r->cmd, 1, 0);
+            ipc_put(r, res);
+            break;
+        }
+        case 0x001C: { /* SetInputLines */
+            uint32_t res = y2r_set_lines(p[0]);
+            ipc_begin(r, r->cmd, 1, 0);
+            ipc_put(r, res);
+            break;
+        }
+        case 0x0029: { /* SetPackageParameter: 12 Byte = 3 Woerter */
+            uint32_t res;
+            g_y2r.input_format = (int)(p[0] & 0xFFu);
+            g_y2r.output_format = (int)((p[0] >> 8) & 0xFFu);
+            g_y2r.rotation = (int)((p[0] >> 16) & 0xFFu);
+            g_y2r.block_alignment = (int)((p[0] >> 24) & 0xFFu);
+            res = y2r_set_line_width(p[1] & 0xFFFFu);
+            if (res == 0) res = y2r_set_lines(p[1] >> 16);
+            if (res == 0) res = y2r_set_standard_coefficient(p[2] & 0xFFu);
+            if (res == 0) {
+                g_y2r.padding = (uint8_t)((p[2] >> 8) & 0xFFu);
+                g_y2r.alpha = (uint16_t)(p[2] >> 16);
+            }
+            ipc_begin(r, r->cmd, 1, 0);
+            ipc_put(r, res);
+            break;
+        }
+        case 0x0026: { /* StartConversion */
+            Y2rMemory mem;
+            mem.mem = g_cpu != NULL ? g_cpu->mem : NULL;
+            mem.size = g_cpu != NULL ? g_cpu->mem_size : 0;
+            if (mem.mem == NULL) {
+                ipc_begin(r, r->cmd, 1, 0);
+                put_result(r);
+                break;
+            }
+            {
+                int conv = y2r_perform_conversion(&mem, &g_y2r);
+                if (conv != 0) {
+                    /* Azahar-ASSERT-Faelle; die Hardware meldet dort kein
+                     * Completion-Interrupt. */
+                    printf("[y2r] ungueltige Konfiguration (%d): fmt=%d/%d rot=%d "
+                           "align=%d %ux%u\n", conv, g_y2r.input_format,
+                           g_y2r.output_format, g_y2r.rotation, g_y2r.block_alignment,
+                           (unsigned)g_y2r.input_line_width, (unsigned)g_y2r.input_lines);
+                    fflush(stdout);
+                    g_y2r_busy = 0;
+                } else {
+                    g_y2r_busy = 1;
+                    g_y2r_due_us = host_us() + 186;
+                }
+            }
+            ipc_begin(r, r->cmd, 1, 0);
+            put_result(r);
+            break;
+        }
+        case 0x0027: { /* StopConversion */
+            if (g_y2r_busy) g_y2r_busy = 0;
+            ipc_begin(r, r->cmd, 1, 0);
+            put_result(r);
+            break;
+        }
+        case 0x002A: { /* PingProcess: Result + u8 0 */
             ipc_begin(r, r->cmd, 2, 0);
             put_result(r);
             ipc_put(r, 0);
             break;
         }
-        case 0x000D: { /* SetTransferEndInterrupt: Result */
-            g_y2r_interrupt_enabled = (r->normal >= 1 && p[0] != 0);
-            ipc_begin(r, 0x000D, 1, 0);
+        case 0x002B: { /* DriverInitialize: Azahar MakeBuilder(1,0) + Result */
+            Handle *hh = get_handle(g_y2r_event);
+            g_y2r.input_format = Y2R_IN_YUV422_INDIV8;
+            g_y2r.output_format = Y2R_OUT_RGBA8;
+            g_y2r.rotation = Y2R_ROT_NONE;
+            g_y2r.block_alignment = Y2R_ALIGN_LINEAR;
+            memset(g_y2r.coefficients, 0, sizeof(g_y2r.coefficients));
+            y2r_set_line_width(1024);
+            y2r_set_lines(1024);
+            g_y2r.alpha = 0;
+            memset(&g_y2r.src_y, 0, sizeof(g_y2r.src_y));
+            memset(&g_y2r.src_u, 0, sizeof(g_y2r.src_u));
+            memset(&g_y2r.src_v, 0, sizeof(g_y2r.src_v));
+            memset(&g_y2r.dst, 0, sizeof(g_y2r.dst));
+            if (hh != NULL) hh->signaled = 0;
+            ipc_begin(r, r->cmd, 1, 0);
             put_result(r);
             break;
         }
-        case 0x000E: { /* GetTransferEndInterrupt: Result + bool */
-            ipc_begin(r, 0x000E, 2, 0);
+        case 0x002C: { /* DriverFinalize */
+            g_y2r_busy = 0;
+            ipc_begin(r, r->cmd, 1, 0);
             put_result(r);
-            ipc_put(r, (uint32_t)g_y2r_interrupt_enabled);
+            break;
+        }
+        case 0x002D: { /* GetPackageParameter: Result + 12 Byte */
+            ipc_begin(r, r->cmd, 4, 0);
+            put_result(r);
+            ipc_put(r, (uint32_t)g_y2r.input_format |
+                        ((uint32_t)g_y2r.output_format << 8) |
+                        ((uint32_t)g_y2r.rotation << 16) |
+                        ((uint32_t)g_y2r.block_alignment << 24));
+            ipc_put(r, (uint32_t)g_y2r.input_line_width |
+                        ((uint32_t)g_y2r.input_lines << 16));
+            ipc_put(r, (uint32_t)g_y2r_std_coefficient |
+                        ((uint32_t)g_y2r.padding << 8) |
+                        ((uint32_t)g_y2r.alpha << 16));
+            break;
+        }
+        case 0x0002: case 0x0004: case 0x0006: case 0x0008:
+        case 0x000A: case 0x000C: case 0x000E: case 0x001B: case 0x001D:
+        case 0x0023: { /* Get*: Result + Wert */
+            uint32_t v = 0;
+            switch (r->cmd) {
+                case 0x0002: v = (uint32_t)g_y2r.input_format; break;
+                case 0x0004: v = (uint32_t)g_y2r.output_format; break;
+                case 0x0006: v = (uint32_t)g_y2r.rotation; break;
+                case 0x0008: v = (uint32_t)g_y2r.block_alignment; break;
+                case 0x000A: v = (uint32_t)g_y2r_spacial_dithering; break;
+                case 0x000C: v = (uint32_t)g_y2r_temporal_dithering; break;
+                case 0x000E: v = (uint32_t)g_y2r_interrupt_enabled; break;
+                case 0x001B: v = (uint32_t)g_y2r.input_line_width; break;
+                case 0x001D: v = (uint32_t)g_y2r.input_lines; break;
+                default: v = (uint32_t)g_y2r.alpha; break;
+            }
+            ipc_begin(r, r->cmd, 2, 0);
+            put_result(r);
+            ipc_put(r, v);
+            break;
+        }
+        case 0x001F: { /* GetCoefficient */
+            ipc_begin(r, r->cmd, 5, 0);
+            put_result(r);
+            y2r_put_coefficients(r);
+            break;
+        }
+        case 0x0025: { /* GetDitheringWeightParams */
+            int i;
+            ipc_begin(r, r->cmd, 9, 0);
+            put_result(r);
+            for (i = 0; i < 16; i += 2)
+                ipc_put(r, (uint32_t)g_y2r_dither[i] |
+                            ((uint32_t)g_y2r_dither[i + 1] << 16));
             break;
         }
         case 0x000F: { /* GetTransferEndEvent: Result + CopyHandle(Event) */
@@ -2828,52 +3606,31 @@ static void y2r_command(Ipc *r, uint32_t *p) {
             break;
         }
         case 0x0014: case 0x0015: case 0x0016: case 0x0017:
-        case 0x0019: { /* IsFinished*: Result + bool (Fertigzustand) */
+        case 0x0019: { /* IsFinished*: Azahar-Stub liefert immer 1 */
             ipc_begin(r, r->cmd, 2, 0);
             put_result(r);
-            ipc_put(r, g_y2r_busy ? 0u : 1u);
+            ipc_put(r, 1);
             break;
         }
-        case 0x0026: { /* StartConversion: Result; Fertigmeldung planen */
-            g_y2r_busy = 1;
-            g_y2r_due_us = host_us() + 186;
-            ipc_begin(r, 0x0026, 1, 0);
-            put_result(r);
-            break;
-        }
-        case 0x0027: { /* StopConversion: Result */
-            g_y2r_busy = 0;
-            ipc_begin(r, 0x0027, 1, 0);
-            put_result(r);
-            break;
-        }
-        case 0x0028: { /* IsBusyConversion: Result + bool */
-            ipc_begin(r, 0x0028, 2, 0);
+        case 0x0028: { /* IsBusyConversion */
+            ipc_begin(r, r->cmd, 2, 0);
             put_result(r);
             ipc_put(r, (uint32_t)g_y2r_busy);
             break;
         }
-        case 0x002B: { /* DriverInitialize: Result; completion_event->Clear() */
-            Handle *hh = get_handle(g_y2r_event);
-            if (hh != NULL) hh->signaled = 0;
-            ipc_begin(r, 0x002B, 1, 0);
-            put_result(r);
-            break;
-        }
-        case 0x002C: { /* DriverFinalize: Result */
-            g_y2r_busy = 0;
-            ipc_begin(r, 0x002C, 1, 0);
-            put_result(r);
-            break;
-        }
         default: {
-            /* Setter (Result) bzw. nicht implementierte Kommandos. */
+            /* Unbekanntes Kommando laut melden (Azahar
+             * ReportUnimplementedFunction), Antwort bleibt Result 0. */
             ipc_begin(r, r->cmd, 1, 0);
             put_result(r);
-            if (g_log) printf("[y2r] cmd 0x%04X -> 0\n", r->cmd);
+            if (g_log) printf("[y2r] UNIMPLEMENTIERT cmd 0x%04X\n", r->cmd);
             break;
         }
     }
+    return;
+result1:
+    ipc_begin(r, r->cmd, 1, 0);
+    put_result(r);
 }
 
 static void generic_command(Ipc *r, int service) {
@@ -2927,7 +3684,15 @@ static void dispatch_ipc(uint32_t handle) {
     /* 0x08xx IMMER nach Kommandoform routen: das Spiel schickt Datei-
        Kommandos auch auf Handles, die wir anders vergeben haben. */
     if ((cmd & 0xFF00u) == 0x0800u) {
-        if (cmd == 0x080Cu || cmd == 0x080Du || cmd == 0x080Eu || cmd == 0x0812u)
+        int handle_is_fs = (service == SVC_FS_USER || service == SVC_FS_LDR);
+        int handle_is_file = (h != NULL && h->file >= 0);
+        int handle_is_dir = (h != NULL && h->dir >= 0);
+        if (handle_is_dir || handle_is_file) {
+            service = SVC_FILE;
+        } else if (handle_is_fs) {
+            /* Echte fs:USER-Session: 0x0802/0x0803/0x0808 sind hier
+             * OpenFile/OpenFileDirectly/CreateFile, nicht Datei-Kommandos. */
+        } else if (cmd == 0x080Cu || cmd == 0x080Du || cmd == 0x080Eu || cmd == 0x0812u)
             service = SVC_FS_USER;
         /* 0x0803 ist mehrdeutig: als fs:USER-Kommando ist es
            OpenFileDirectly (8 Parameter + 2 Puffer), als Datei-
@@ -3128,17 +3893,30 @@ static DWORD WINAPI vblank_thread(LPVOID p) {
         Sleep(16);
         /* Echte VBlank-Quelle: GSP uebernimmt die FrameBufferInfo aus dem
          * Shared-Memory und meldet PDC0 (oben) / PDC1 (unten) per RelayQueue
-         * und Event (Azahar GPU::VBlankCallback / GSP_GPU::SignalInterrupt). */
+         * und Event (Azahar GPU::VBlankCallback / GSP_GPU::SignalInterrupt).
+         * Lesen + dirty-Flag loeschen und das Schreiben in Gast-Speicher
+         * (RelayQueue) muessen atomar unter dem Gast-Lock passieren; sonst
+         * kann ein Buffer-Swap des Spiels verloren gehen. */
+        guest_lock_enter();
         gsp_vblank_fb_update(g_cpu, g_gsp_thread_id);
         gsp_signal_interrupt(GSP_IRQ_PDC0);
         gsp_signal_interrupt(GSP_IRQ_PDC1);
         kernel_poll_timers();
+        hid_poll();
+        guest_lock_leave();
     }
     return 0;
 }
 
 void hle_init(ArmCpu *c, const char *romfs_dir) {
     ensure_savedata();
+    fs_archive_init("out/savedata");
+    /* SharedExtSaveData ist auf echter Hardware ein vorhandenes Systemarchiv.
+     * Der Host stellt es beim Start bereit (nicht beim OpenArchive, siehe
+     * Azahar ArchiveFactory_ExtSaveData::Open -> NotFormatted).  Die ID stammt
+     * aus der Azahar-Referenzspur (OpenArchive 7, Path 000000000b0000f0...):
+     * 00048000/F000000B, darin /gamecoin.dat. */
+    fs_archive_provision_shared(0xF000000Bu);
     g_cpu = c;
     g_main_cpu = c;
     snprintf(g_romfs, sizeof(g_romfs), "%s", romfs_dir ? romfs_dir : "out/romfs");
@@ -3154,12 +3932,14 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     arm_pump_hook = hle_pump;
     gpu_pica_reset();
     gpu_pica_set_irq_handler(gsp_pica_irq);
-    g_vblank_run = 1;
-    CreateThread(NULL, 0, vblank_thread, NULL, 0, NULL);
+    gsp_fb_init();
 
     memset(g_handles, 0, sizeof(g_handles));
     g_next_handle = 1;
     g_srv_handle = (uint32_t)alloc_handle(SVC_SRV, "srv:");
+    /* Azahar legt das HID-Modul beim Dienstaufbau an: Shared-Memory und die
+       fuenf Events existieren, und der Pad-Update-Takt laeuft ab jetzt. */
+    hid_init_once();
 
     /* Rein lesende Diagnose. */
     if (getenv("ARM_WATCH"))
@@ -3175,6 +3955,18 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
         g_det_sched = getenv("HLE_DET_SCHED") != NULL;
         if (g_det_sched) g_turn = 1;
     }
+    /* VBlank-Thread erst nach Lock- und HID-Initialisierung starten: er
+       nimmt fuer jeden VBlank den Gast-Lock. */
+    g_vblank_run = 1;
+    CreateThread(NULL, 0, vblank_thread, NULL, 0, NULL);
+
+    /* DSP-HLE-Audio: Regionen 0x1FF50000/0x1FF70000 im Gast-Speicher,
+       Gast-Lock fuer den Audio-Thread, Pipe-2-Interrupts je Frame. */
+    audio_dsp_init(c->mem, c->mem_size);
+    audio_dsp_set_lock(guest_lock_enter, guest_lock_leave);
+    audio_dsp_set_interrupt(dsp_interrupt_cb);
+    audio_dsp_set_struct_addresses(dsp_audio_struct_addresses);
+    audio_dsp_start();
     printf("[hle] romfs=%s log=%d srv-handle=%u\n", g_romfs, g_log, g_srv_handle);
 }
 
@@ -3198,6 +3990,7 @@ void hle_tick_stats(int *calls, unsigned long long *tick) {
 
 void hle_report(void) {
     printf("[hle] ipc=%d ticks=%llu tickcalls=%d\n", g_ipc_count, (unsigned long long)g_tick, g_tick_calls);
+    if (g_log) printf("[audio] frames=%llu\n", audio_dsp_frames());
     arm_perfmap_report();
     printf("[hle] letzte Ereignisse:\n");
     for (int i = 0; i < HLE_EV_RING; i++) {
@@ -3525,11 +4318,32 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             hh->signaled = 0;
             return 0;
         }
-        case 0x1E: case 0x1F: case 0x20: /* MemoryBlock */
+        case 0x1E: { /* CreateMemoryBlock(out, addr, size, myperm, otherperm) */
+            uint32_t out = c->r[0], addr = c->r[1], size = c->r[2];
+            uint32_t h = (uint32_t)alloc_handle(SVC_OTHER, "memoryblock");
+            if (out) write_u32(c, out, h);
+            c->r[1] = h;
             if (getenv("HLE_MAP_LOG"))
-                printf("[map] svc=%02X r0=%08X r1=%08X r2=%08X r3=%08X\n",
-                       imm, c->r[0], c->r[1], c->r[2], c->r[3]);
+                printf("[map] CreateMemoryBlock addr=%08X size=%08X -> h=%u\n",
+                       addr, size, h);
             return 0;
+        }
+        case 0x1F: { /* MapMemoryBlock(handle, addr, myperm, otherperm) */
+            uint32_t h = c->r[0], addr = c->r[1];
+            if (g_hid.initialized &&
+                canonical_slot(h) == canonical_slot(g_hid.shmem))
+                hid_map_guest(addr);
+            if (getenv("HLE_MAP_LOG"))
+                printf("[map] MapMemoryBlock h=%u addr=%08X perm=%08X/%08X\n",
+                       h, addr, c->r[2], c->r[3]);
+            return 0;
+        }
+        case 0x20: { /* UnmapMemoryBlock(handle, addr) */
+            if (g_hid.initialized &&
+                canonical_slot(c->r[0]) == canonical_slot(g_hid.shmem))
+                hid_unmap_guest(c->r[1]);
+            return 0;
+        }
         case 0x21: { /* CreateAddressArbiter(out) */
             uint32_t h = (uint32_t)alloc_handle(SVC_OTHER, "arbiter");
             Handle *hh = get_handle(h);
@@ -3705,10 +4519,7 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             return 0;
         }
         case 0x28: { /* GetSystemTick -> 64 Bit in r0:r1 (echte Zeitbasis) */
-            static uint64_t base_ms = 0;
-            uint64_t now = GetTickCount64();
-            if (base_ms == 0) base_ms = now;
-            g_tick = (now - base_ms) * 268111ull;   /* ~268.111 MHz */
+            g_tick = host_system_ticks();
             g_tick_calls++;
             c->r[1] = (uint32_t)(g_tick >> 32);
             return (uint32_t)g_tick;
