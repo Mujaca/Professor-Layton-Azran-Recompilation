@@ -97,7 +97,11 @@ absichtlich nicht zum Commit-Gate.
 `HLE_LOG=1`, `HLE_SRV_NAMES=1`, `HLE_IPC_LOG=<n>`, `HLE_TRACE=1`,
 `ARM_WATCH=<hex>`, `ARM_MEMWATCH=<hex>`, `ARM_MEMWATCHRD=<hex>[,size]`,
 `ARM_MEMWATCHRANGE=<hex>,<size>`, `ARM_STRICT=1`,
-`HLE_PERFMAP_FILE=<pfad>`, `HLE_DET_SCHED=1`.
+`HLE_PERFMAP_FILE=<pfad>`, `HLE_DET_SCHED=1`,
+`HLE_PICA_DIAG=1` (PICA-Register-Histogramm je Liste inkl. Kanal-Spruengen,
+Rohdump nach `scratch/pica/list_<addr>_<size>.bin`),
+`HLE_STALLDUMP=1` (bei jedem 300. Host-Frame die letzten 12 Bloecke je
+Gast-Thread auf stderr, um Haenger ohne IPC zu lokalisieren).
 
 ## Assets
 

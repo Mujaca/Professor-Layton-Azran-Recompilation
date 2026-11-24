@@ -91,3 +91,5 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | 2026-11-24 | audio-ausgabe | 10/10 | None | 0 |
 | 2026-11-24 | speicherstand-archive | 10/10 | None | 0 |
 | 2026-11-24 | io-review-fixes-2 | 10/10 | None | 0 |
+| 2026-11-24 | m3-draws | 10/10 | None | 0 |
+| 2026-11-24 | pica-lighting-fixes | 10/10 | None | 0 |

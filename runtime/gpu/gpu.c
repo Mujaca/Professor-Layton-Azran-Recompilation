@@ -696,9 +696,9 @@ static void p_cube_coord(float u, float v, float w, float *ou, float *ov,
         x = u; z = w;
     }
     *shadow_z = fabsf(z);
-    if (z != 0.0f) { x /= z; y /= z; } else { x = 0.0f; y = 0.0f; }
-    *ou = x * 0.5f + 0.5f;
-    *ov = y * 0.5f + 0.5f;
+    /* Azahar ConvertCubeCoord teilt ohne Sonderfall durch z (z==0 -> inf/NaN). */
+    *ou = x / z * 0.5f + 0.5f;
+    *ov = y / z * 0.5f + 0.5f;
 }
 
 /* Sample einer Textureinheit 0..2 (Azahar sw_rasterizer.cpp TextureColor).
@@ -860,9 +860,6 @@ static void p_apply_fog(float depth, PicaColor *out)
  *   0x1D0 abs_lut_input, 0x1D1 lut_input, 0x1D2 lut_scale,
  *   0x1D9 light_enable (3 Bit je Slot).
  */
-#define LIGHT_LUT_COUNT 24
-static uint32_t g_light_lut[LIGHT_LUT_COUNT][256];
-
 static void p_light_lut_write(uint32_t value)
 {
     uint32_t cfg = p_regs[0x1C5];
@@ -965,6 +962,7 @@ typedef struct {
     const float *tangent;
     float spot_dir[3];
     uint32_t config;
+    uint32_t light_cfg;          /* LightSrc::config (Bit1 = two_sided_diffuse) */
 } LightCtx;
 
 /* Azahar sw_lighting.cpp get_lut_value. */
@@ -1010,7 +1008,13 @@ static float p_light_lut_value(const LightCtx *ctx, uint32_t input, int abs_val,
     }
 
     if (abs_val) {
-        result = (result < 0.0f) ? -result : result;
+        /* Azahar get_lut_value: nur bei two_sided_diffuse fabsf, sonst
+           max(result, 0). */
+        if (ctx->light_cfg & 2u) {
+            result = (result < 0.0f) ? -result : result;
+        } else if (result < 0.0f) {
+            result = 0.0f;
+        }
         {
             float flr = floorf(result * 256.0f);
             if (flr < 0.0f) flr = 0.0f;
@@ -1044,7 +1048,9 @@ static void p_compute_fragments(const PicaColor tex[4], const float quat_in[4],
     const uint32_t config = (config0 >> 4) & 0xFu;
     const uint32_t max_light = p_regs[0x1C2] & 7u;
     float shadow[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-    float surface_normal[3], surface_tangent[3];
+    /* Wie Azahar: ohne gueltigen Bump-Modus bleiben Normal/Tangente 0. */
+    float surface_normal[3] = {0.0f, 0.0f, 0.0f};
+    float surface_tangent[3] = {0.0f, 0.0f, 0.0f};
     float normal[3], tangent[3];
     float quat[4], view[3];
     float diffuse_sum[4] = {0.0f, 0.0f, 0.0f, 1.0f};
@@ -1069,11 +1075,12 @@ static void p_compute_fragments(const PicaColor tex[4], const float quat_in[4],
     }
 
     if (((config0 >> 28) & 3u) != 0u) {       /* bump_mode != None */
+        const uint32_t bump_mode = (config0 >> 28) & 3u;
         uint32_t sel = (config0 >> 22) & 3u;
         float perturbation[3];
         for (i = 0; i < 3u; i++)
             perturbation[i] = (float)tex[sel].c[i] / 127.5f - 1.0f;
-        if (((config0 >> 28) & 3u) == 1u) {   /* NormalMap */
+        if (bump_mode == 1u) {                /* NormalMap */
             if (!(config0 & (1u << 30))) {    /* disable_bump_renorm */
                 float z2 = 1.0f - (perturbation[0] * perturbation[0] +
                                    perturbation[1] * perturbation[1]);
@@ -1085,13 +1092,25 @@ static void p_compute_fragments(const PicaColor tex[4], const float quat_in[4],
             surface_tangent[0] = 1.0f;
             surface_tangent[1] = 0.0f;
             surface_tangent[2] = 0.0f;
-        } else {                              /* TangentMap */
+        } else if (bump_mode == 2u) {         /* TangentMap */
             surface_normal[0] = 0.0f;
             surface_normal[1] = 0.0f;
             surface_normal[2] = 1.0f;
             surface_tangent[0] = perturbation[0];
             surface_tangent[1] = perturbation[1];
             surface_tangent[2] = perturbation[2];
+        } else {
+            /* bump_mode 3 ist wie bei Azahar unbekannt: Normal und Tangente
+               bleiben 0, einmalige Host-Meldung (LOG_ERROR) bei HLE_PICA_LOG. */
+            static int bump3_log = -1, bump3_reported = 0;
+            if (bump3_log < 0) {
+                const char *e = getenv("HLE_PICA_LOG");
+                bump3_log = (e && *e) ? 1 : 0;
+            }
+            if (bump3_log && !bump3_reported) {
+                fprintf(stderr, "[gpu] unbekannter bump_mode 3 -> Normal/Tangente 0\n");
+                bump3_reported = 1;
+            }
         }
     } else {
         surface_normal[0] = 0.0f;
@@ -1164,6 +1183,7 @@ static void p_compute_fragments(const PicaColor tex[4], const float quat_in[4],
             ctx.light_vector = light_vector;
             ctx.tangent = tangent;
             ctx.config = config;
+            ctx.light_cfg = lcfg;
             {
                 int32_t sx = ((int32_t)(p_regs[lb + 6u] << 19)) >> 19;
                 int32_t sy = ((int32_t)((p_regs[lb + 6u] >> 16) << 19)) >> 19;
@@ -1859,6 +1879,16 @@ static float p_dot4(const float a[4], const float b[4])
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
 }
 
+/* Azahar sw_clipper.cpp FlipQuaternionIfOpposite: entgegengesetzte
+   Quaternionen (q und -q beschreiben dieselbe Rotation) vor Clipping und
+   Interpolation gleich orientieren. */
+static void p_flip_quat_if_opposite(float a[4], const float b[4])
+{
+    int i;
+    if (p_dot4(a, b) >= 0.0f) return;
+    for (i = 0; i < 4; i++) a[i] = -a[i];
+}
+
 static void p_clip_lerp(float f, const PicaVertex *a, const PicaVertex *b, PicaVertex *o)
 {
     int i, k;
@@ -2129,6 +2159,9 @@ static void p_raster_tri(ArmCpu *c, const PicaVertex *a, const PicaVertex *b,
     int corner_x, corner_y;
 
     buf_a[0] = *a; buf_a[1] = *b; buf_a[2] = *d;
+    /* Azahar AddTriangle (vor dem Sutherland-Hodgman-Clipping). */
+    p_flip_quat_if_opposite(buf_a[1].quat, buf_a[0].quat);
+    p_flip_quat_if_opposite(buf_a[2].quat, buf_a[0].quat);
 
     for (i = 0; i < 7; i++) {
         int m = p_clip_edge(in, n, out, coeff[i], bias[i]);
@@ -2853,6 +2886,39 @@ typedef struct {
     uint32_t jump_size;
 } PicaCtx;
 
+/* Diagnose (HLE_PICA_DIAG): Histogramm der geschriebenen Register-IDs je
+ * Liste plus Rohdump. Reines Lesen/Log, veraendert keinen Gastzustand. */
+static uint32_t g_diag_hist[PICA_NREGS];
+static int g_diag_jumps;
+
+static int p_diag_mode(void)
+{
+    static int mode = -1;
+    if (mode < 0) {
+        const char *e = getenv("HLE_PICA_DIAG");
+        mode = (e && *e) ? atoi(e) : 0;
+    }
+    return mode;
+}
+
+static void p_diag_dump(ArmCpu *c, uint32_t addr, uint32_t size)
+{
+    char path[128];
+    FILE *f;
+    uint32_t i, words = size / 4u;
+
+    snprintf(path, sizeof(path), "scratch/pica/list_%08X_%X.bin", addr, size);
+    f = fopen(path, "wb");
+    if (!f) return;
+    for (i = 0; i < words; i++) {
+        uint32_t v = p_read32(c, addr + i * 4u);
+        unsigned char b[4] = { (unsigned char)v, (unsigned char)(v >> 8),
+                               (unsigned char)(v >> 16), (unsigned char)(v >> 24) };
+        fwrite(b, 1, 4, f);
+    }
+    fclose(f);
+}
+
 static int p_any_byte_match(uint32_t a, uint32_t b)
 {
     return ((a & 0xFFu) == (b & 0xFFu)) ||
@@ -2872,6 +2938,7 @@ static void p_write_reg(ArmCpu *c, uint32_t id, uint32_t value, uint32_t mask,
             old = (old & ~(0xFFu << (b * 8))) | (value & (0xFFu << (b * 8)));
     p_regs[id] = old;
     ctx->ops++;
+    if (p_diag_mode()) g_diag_hist[id]++;
 
     p_vs_reg_write(c, id, value);
     if (id >= 0xE8u && id <= 0xEFu) p_fog_lut_write(value);
@@ -2909,6 +2976,7 @@ static void p_write_reg(ArmCpu *c, uint32_t id, uint32_t value, uint32_t mask,
         }
         ctx->jump_addr = paddr;
         ctx->jump_size = sz;
+        if (p_diag_mode()) g_diag_jumps++;
     }
 }
 
@@ -2960,9 +3028,29 @@ static void p_run_list(ArmCpu *c, uint32_t addr, uint32_t size, PicaCtx *ctx,
 int gpu_run_pica_list(ArmCpu *c, uint32_t addr, uint32_t size)
 {
     PicaCtx ctx;
+    int diag = p_diag_mode();
+    unsigned long long draws0 = g_pica_draws;
 
     memset(&ctx, 0, sizeof(ctx));
+    if (diag) {
+        memset(g_diag_hist, 0, sizeof(g_diag_hist));
+        g_diag_jumps = 0;
+    }
     p_run_list(c, gpu_pica_phys_to_guest(addr), size, &ctx, 0);
     g_pica_lists++;
+    if (diag) {
+        int i, first = 1;
+        printf("[picadiag] list addr=%08X size=%u ops=%d jumps=%d draws=%d ids:",
+               addr, size, ctx.ops, g_diag_jumps,
+               (int)(g_pica_draws - draws0));
+        for (i = 0; i < PICA_NREGS; i++) {
+            if (!g_diag_hist[i]) continue;
+            printf("%s%03X=%u", first ? " " : ",", i, g_diag_hist[i]);
+            first = 0;
+        }
+        printf("\n");
+        fflush(stdout);
+        p_diag_dump(c, gpu_pica_phys_to_guest(addr), size);
+    }
     return ctx.ops;
 }

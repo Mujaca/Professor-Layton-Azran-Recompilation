@@ -164,7 +164,17 @@ int main(int argc, char **argv) {
                      top.valid, top.address, top.stride, top.format & 7u,
                      bottom.valid, bottom.address, bottom.stride, bottom.format & 7u);
             win_status(line, 1);
-            if (frames % 300 == 0) printf("[port] %s\n", line);
+            if (frames % 300 == 0) {
+                printf("[port] %s\n", line);
+                /* Diagnose (HLE_STALLDUMP): letzte Bloecke je Gast-Thread,
+                   um einen Haenger ohne IPC zu lokalisieren. */
+                if (getenv("HLE_STALLDUMP")) {
+                    int ti;
+                    for (ti = 0; ti < 16; ti++)
+                        if (arm_thread_last_pc[ti] != 0u)
+                            arm_trace_thread_dump(ti, 12);
+                }
+            }
         }
         frames++;
         Sleep(16);
