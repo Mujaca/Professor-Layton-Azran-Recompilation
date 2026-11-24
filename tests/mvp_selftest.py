@@ -222,6 +222,29 @@ CASES = [
         "expect": {"r0": 8, "r13": 0x8000},
     },
     {
+        # PIC-Epilog: Rueckkehr ueber ein Register, das zuvor aus LR geladen
+        # wurde (`mov rN, lr; ... mov pc, rN`). Das ist eine Rueckkehr in den
+        # C-Aufrufer; ein arm_call_guest am Rueckkehrziel startet sonst eine
+        # Gastfunktion an einer Adresse mitten in der Aufruferfunktion
+        # (Mobiclip-Decoder-Kette 0x16C230 -> LR 0x16C340).
+        "name": "mov_pc_lr_rueckkehr_arm",
+        "asm": """
+            mov r0, #2
+            bl 0x100200
+            add r0, r0, #1
+            bx lr
+        """,
+        "extra": {
+            0x100200: """
+                mov r4, lr
+                mov r0, #5
+                mov pc, r4
+            """,
+        },
+        "regs": {},
+        "expect": {"r0": 6},
+    },
+    {
         # Bedingte Terminatoren (bx<cond> lr, pop<cond> {pc}) haben einen
         # Fallthrough. Wurde der Folgeblock nicht angelegt, endete die Funktion
         # nach `bxne lr` sofort; im Boot uebersprang das die FS-Session-Init

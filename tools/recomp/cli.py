@@ -132,13 +132,26 @@ def return_bx_in_block(blk):
         if ins.id == A.ARM_INS_BX:
             ops = isa.split_operands(ins.op_str)
             reg = isa.reg_num(ops[0]) if ops else None
-            if reg is not None and reg not in (14, 15) and last.get(reg) == "sp":
+            if reg is not None and reg not in (14, 15) and last.get(reg) in ("sp", "lr"):
                 out.add(ins.address)
             continue
         try:
             _, written = ins.regs_access()
         except Exception:
             written = ()
+        src_lr = False
+        if ins.id == A.ARM_INS_MOV:
+            ops = isa.split_operands(ins.op_str)
+            if len(ops) >= 2:
+                src = isa.reg_num(ops[1])
+                dst = isa.reg_num(ops[0])
+                if src == 14:
+                    src_lr = True
+                if (dst == 15 and src is not None and src != 15
+                        and last.get(src) == "lr"):
+                    # `mov rN, lr` ... `mov pc, rN` ist eine Rueckkehr in den
+                    # C-Aufrufer (PIC-Epilog), kein indirekter Gastaufruf.
+                    out.add(ins.address)
         is_stack_load = ins.id in stack_load_ids
         if is_stack_load:
             if ins.id == A.ARM_INS_POP:
@@ -150,7 +163,7 @@ def return_bx_in_block(blk):
             rr = regno(r)
             if rr is None or rr in (13, 15):
                 continue
-            last[rr] = "sp" if is_stack_load else "other"
+            last[rr] = "lr" if src_lr else ("sp" if is_stack_load else "other")
     return out
 
 

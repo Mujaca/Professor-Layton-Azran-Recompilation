@@ -105,6 +105,26 @@ tst/teq) emittiert `emit.py::dp_inline` direkt als C-Ausdruck statt als
 `arm_dp()`-Aufruf. Blockrate messen: `HLE_PERF=1 out/port.exe out/romfs
 --frames 600`.
 
+`tools/func_difftest.py`: **Funktions-Differenztest** auf echten
+Gastzustand. `dump` startet den Port mit `ARM_DUMP=0xADDR:datei`; der
+Diagnose-Hook in `runtime/cpu/arm_trace.c` schreibt beim ersten Erreichen
+des Basisblocks Register, Flags und alle nichtleeren 4-KiB-Seiten des
+Gast-Speichers (Codebereich ausgenommen) nach `scratch/`. `diff` laedt den
+Schnappschuss in Unicorn, fuehrt dort die Originalbytes ab derselben
+Adresse aus und ruft im Port-Build dieselbe `fn_XXXX`-Funktion aus
+`build/gen_boot.o` mit identischem Zustand; danach werden Register, Flags
+und Speicher verglichen. `--trace` vergleicht zusaetzlich die
+Blockeingaenge (PC + Register + Flags je Port-Block).
+
+```powershell
+python tools/func_difftest.py dump --watch 0x0016A500 --out scratch/fd/snap.bin
+python tools/func_difftest.py diff --snapshot scratch/fd/snap.bin --trace
+```
+
+Exit-Code 0 = identisch, 1 = Abweichung (oder der Port terminiert nicht,
+wo das Original zurueckkehrt). Das Werkzeug veraendert keinen Gastzustand;
+der Schnappschuss ist reine Diagnose (`ARM_DUMP`).
+
 `tools/recomp/seeds.txt`: zusätzliche Funktionseinstiege (z. B. aus
 `out/missing_calls.txt`).
 

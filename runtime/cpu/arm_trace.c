@@ -21,6 +21,104 @@ uint32_t arm_watch_pc = 0;
 static int g_watch_hits = 0;
 
 /* ------------------------------------------------------------------ *
+ * ARM_DUMP=0xADDR:pfad (reine Diagnose, nur lesend)
+ *
+ * Beim ersten Erreichen des Basisblocks ADDR wird ein vollstaendiger
+ * Gastzustand geschrieben: Register/Flags und alle nichtleeren 4-KiB-
+ * Seiten des Gast-Speichers (Codebereich ausgenommen, den liest das
+ * Werkzeug aus out/exefs/code_decomp.bin). Damit kann dieselbe Funktion
+ * einmal im Port und einmal in Unicorn mit den Originalbytes laufen.
+ * Das Format liest tools/func_difftest.py.
+ * ------------------------------------------------------------------ */
+static uint32_t g_dump_pc = 0;
+static char g_dump_path[600];
+static int g_dump_armed = 0;
+static int g_dump_done = 0;
+
+static void dump_arm(void)
+{
+    const char *p = getenv("ARM_DUMP");
+    char *colon;
+    if (p == NULL || *p == '\0') return;
+    g_dump_armed = 1;
+    g_dump_pc = (uint32_t)strtoul(p, &colon, 0);
+    while (*colon == ' ' || *colon == '\t' || *colon == ':' || *colon == '=')
+        colon++;
+    snprintf(g_dump_path, sizeof g_dump_path, "%s", colon);
+}
+
+static void dump_put32(FILE *f, uint32_t v)
+{
+    unsigned char b[4] = { (unsigned char)v, (unsigned char)(v >> 8),
+                           (unsigned char)(v >> 16), (unsigned char)(v >> 24) };
+    fwrite(b, 1, 4, f);
+}
+
+static int page_nonzero(const unsigned char *p, uint32_t size)
+{
+    uint32_t i = 0;
+    uint64_t acc = 0;
+    for (; i + 8 <= size; i += 8) {
+        uint64_t w;
+        memcpy(&w, p + i, 8);
+        acc |= w;
+    }
+    for (; i < size; i++) acc |= p[i];
+    return acc != 0;
+}
+
+static void dump_state(ArmCpu *c)
+{
+    FILE *f = fopen(g_dump_path, "wb");
+    uint32_t regions[4096][2];
+    unsigned nregions = 0;
+    uint32_t addr;
+    if (f == NULL) {
+        fprintf(stderr, "[dump] kann %s nicht schreiben\n", g_dump_path);
+        return;
+    }
+    fwrite("ARMDMP01", 1, 8, f);
+    dump_put32(f, arm_last_block);
+    for (int i = 0; i < 16; i++) dump_put32(f, c->r[i]);
+    dump_put32(f, c->n);
+    dump_put32(f, c->z);
+    dump_put32(f, c->c);
+    dump_put32(f, c->v);
+    dump_put32(f, c->qflag);
+    dump_put32(f, c->ge);
+    dump_put32(f, c->t);
+    dump_put32(f, c->cpsr_mode);
+    dump_put32(f, c->tpidruro);
+    dump_put32(f, c->fpscr);
+    dump_put32(f, 0);                 /* Platzhalter: Anzahl Regionen */
+    /* Nichtleere Seiten sammeln. Der Codebereich wird ausgelassen. */
+    for (addr = 0; addr + 4096u <= c->mem_size && addr < 0x20000000u;
+         addr += 4096u) {
+        if (addr >= 0x00100000u && addr < 0x00400000u) continue;
+        if (!page_nonzero(c->mem + addr, 4096u)) continue;
+        if (nregions > 0 &&
+            regions[nregions - 1][0] + regions[nregions - 1][1] == addr) {
+            regions[nregions - 1][1] += 4096u;
+        } else if (nregions < 4096u) {
+            regions[nregions][0] = addr;
+            regions[nregions][1] = 4096u;
+            nregions++;
+        }
+    }
+    for (unsigned i = 0; i < nregions; i++) {
+        dump_put32(f, regions[i][0]);
+        dump_put32(f, regions[i][1]);
+        fwrite(c->mem + regions[i][0], 1, regions[i][1], f);
+    }
+    fseek(f, 8 + 4 + 16 * 4 + 10 * 4, SEEK_SET);
+    dump_put32(f, nregions);
+    fclose(f);
+    printf("[dump] 0x%08X: %u Regionen -> %s\n", g_dump_pc, nregions,
+           g_dump_path);
+    fflush(stdout);
+}
+
+/* ------------------------------------------------------------------ *
  * HLE_PERF=1: Blockrate des generierten Codes (reine Diagnose).
  * Zaehlt jeden ausgefuehrten Basisblock und meldet beim Prozessende
  * "[perf] N blocks in M ms (R/s)" (Format von tools/g3ds/runner.py).
@@ -372,6 +470,7 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
     if (!init) {
         init = 1;
         perf_arm();
+        dump_arm();
         if (getenv("HLE_PERFMAP") != NULL || getenv("HLE_PERFMAP_FILE") != NULL)
             perfmap_init();
         /* Ring nur, wenn eine Diagnose ihn auswertet (HLE_STALLDUMP,
@@ -383,6 +482,10 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
     }
     if (g_pm_on && c != NULL) perfmap_sample(c, pc);
     if (arm_pump_hook != NULL) arm_pump_hook();
+    if (g_dump_armed && !g_dump_done && c != NULL && pc == g_dump_pc) {
+        g_dump_done = 1;
+        dump_state(c);
+    }
     if (c != NULL) {
         if (g_ring_on) {
             uint32_t ti = (c->tpidruro >> 12) & 0xFu;

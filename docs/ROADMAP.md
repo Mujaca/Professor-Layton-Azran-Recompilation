@@ -105,3 +105,4 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | 2026-11-24 | kernel-scheduler | 10/10 | None | 0 |
 | 2026-11-24 | recomp-performance | 10/10 | None | 0 |
 | 2026-11-24 | listen-flut | 10/10 | None | 0 |
+| 2026-11-24 | decoder-difftest | 10/10 | None | 0 |

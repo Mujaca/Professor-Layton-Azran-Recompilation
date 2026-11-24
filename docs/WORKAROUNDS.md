@@ -258,6 +258,40 @@ Antwort.
 
 ## 6. Befunde (offene Ursachen, kein Workaround eingebaut)
 
+### Dekoder-Kette: dynamischer Sprung + `mov pc,lr` verliert den Gast-PC – offen 2026-11-24
+
+**Werkzeug:** neuer Funktions-Differenztest `tools/func_difftest.py`
+(Schnappschuss per `ARM_DUMP` aus einem Port-Lauf, Originalbytes in Unicorn,
+Port-Code aus `build/gen_boot.o`). Dokumentation in `docs/TOOLS.md`.
+
+**Befund:** Schnappschuss am Einstieg `0x0016A500` (Mobiclip-Decoder,
+r0=0x0C682378, sp=0x1667FCA0) in einem 40-s-Lauf. Unicorn fuehrt die
+Originalbytes in 177.609 Instruktionen bis zum Ruecksprung aus; der
+Port-Code terminiert ebenfalls, aber mit falschem Endzustand (sp um 0x4C
+zu klein, r0..r14 abweichend, Objekt-/Framestatus an `+0x3D4` und der
+Referenzpuffer `0x0CA90xxx` bleiben auf dem alten `0x80`-Muster statt
+`0x10`).
+
+**Ursache (Recompiler, belegt mit der Blocktrace):** Die Kette
+`0x16BEC8 -> 0x16C170 -> 0x16CF48 -> (add pc,r5,r6) -> 0x16CEE4` wird im
+Gast per dynamischem Sprung/Tail-Jump erreicht; `0x16CEE4` endet mit
+`mov pc,lr`, LR ist dabei `0x16C340` (Rueckkehradresse des aeusseren
+Aufrufers, **keine** Funktion). Der Recompiler emittiert den dynamischen
+Sprung als `arm_call_guest(c, ziel)` und danach `return;`. Der von
+`arm_call_guest` gestartete C-Aufruf von `fn_0016CEE4` kehrt damit aus dem
+C-Stack zum *Aufrufer* zurueck, statt den Gast bei `0x16C340` fortzusetzen
+(Unicorn tut genau das und laeuft weitere ~9.000 Instruktionen bis zum
+echten Funktionsende). Folge: Die Port-Kette bricht nach `0x16CEE4` ab,
+der Decoder liefert kein Bild, der Film-Player bleibt in Zustand 5.
+
+**Naechster Schritt:** Beim dynamischen Sprung (`add pc`, `ldr pc`,
+`mov pc,rN`, `bx rN`) den Rueckkehr-PC des Ziels unterscheiden:
+Rueckkehr zum C-Aufrufer nur, wenn LR der Aufrufstelle entspricht; sonst
+muss `arm_call_guest`/der generierte Code den Gast bei `c->r[14]`
+fortsetzen (Fortsetzungsschleife im Dispatcher). Kein Spielcode-Patch;
+Regressionstest ueber `tools/func_difftest.py diff` mit dem
+`0x0016A500`-Schnappschuss.
+
 ### Stall nach der zweiten PICA-Liste: Futex-Mutex bei `0x0040F120` – offen 2026-11-24
 
 **Befund:** Der natuerliche Boot bleibt nach der zweiten PICA-Liste

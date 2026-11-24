@@ -446,11 +446,13 @@ class Emitter:
                      % (code, rd, rn, o2, sf, sc)]
         if writes and rd == 15:
             src = isa.reg_num(ops[1]) if len(ops) > 1 else None
-            if code == "DP_MOV" and src == 14:
-                # `mov pc, lr` ist eine Rueckkehr in den C-Aufrufer; ein
-                # arm_call_guest am Rueckkehrziel wuerde eine Gastfunktion
-                # an einer Adresse mitten in der Aufruferfunktion starten.
-                lines.append("c->r[15] = c->r[14];")
+            if code == "DP_MOV" and (src == 14 or ins.address in self.ret_bx):
+                # `mov pc, lr` bzw. `mov rN, lr; ... mov pc, rN` ist eine
+                # Rueckkehr in den C-Aufrufer; ein arm_call_guest am
+                # Rueckkehrziel wuerde eine Gastfunktion an einer Adresse
+                # mitten in der Aufruferfunktion starten (SP-Drift,
+                # abgeschnittene Fortsetzung).
+                lines.append("c->r[15] = c->r[%d];" % (src if src is not None else 14))
                 lines.append("return;")
             else:
                 # `mov pc, rN` / `add pc, ...` / Sprungtabellen: dynamisch
