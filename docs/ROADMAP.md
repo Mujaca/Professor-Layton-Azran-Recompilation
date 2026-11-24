@@ -83,3 +83,4 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | 2026-11-24 | naechste-divergenz-1 | 9/10 | boss:U | 0 |
 | 2026-11-24 | recomp-difftest | 9/10 | boss:U | 0 |
 | 2026-11-24 | naechste-divergenz-2 | 10/10 | None | 0 |
+| 2026-11-24 | recomp-kontrollfluss | 9/10 | boss:U | 0 |

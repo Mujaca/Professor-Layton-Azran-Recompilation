@@ -645,16 +645,377 @@ def run_mode(mode, seed, count, filt):
     return len(good_cases), (0 if p.returncode == 0 else 1)
 
 
+# --------------------------------------------------------------------------
+# Kontrollfluss-Suite (eigene Funktionen, Interworking, Tabellen)
+# --------------------------------------------------------------------------
+CF_BASE = ARM_BASE
+CF_STACK = DATA_BASE + 0x800
+CF_CODE = 0x20000
+
+CF_CASES = []
+
+
+def _cf(name, funcs, entry=0, thumb=False, regs=None, mem=None, stack=None,
+        raw=None):
+    CF_CASES.append({"name": name, "funcs": funcs, "entry": entry,
+                     "thumb": thumb, "regs": regs or {}, "mem": mem or [],
+                     "stack": stack or [], "raw": raw or []})
+
+
+def _cf_cases():
+    if CF_CASES:
+        return
+    # --- ARM: bedingte Rueckkehr + Fallthrough -----------------------------
+    _cf("arm_bxeq_fallthrough", [("".join([
+        "push {r4, lr}\n",
+        "mov r4, r0\n",
+        "cmp r1, #0\n",
+        "bxeq lr\n",
+        "add r0, r4, r1\n",
+        "pop {r4, pc}\n"]))],
+        regs={"r0": 7, "r1": 5})
+    _cf("arm_bxeq_taken", [("".join([
+        "push {r4, lr}\n",
+        "mov r4, r0\n",
+        "cmp r1, #0\n",
+        "bxeq lr\n",
+        "add r0, r4, r1\n",
+        "pop {r4, pc}\n"]))],
+        regs={"r0": 7, "r1": 0})
+    _cf("arm_popeq_fallthrough", [("".join([
+        "push {r4, lr}\n",
+        "mov r4, r0\n",
+        "cmp r1, #3\n",
+        "popeq {pc}\n",
+        "add r0, r4, r1\n",
+        "pop {r4, pc}\n"]))],
+        regs={"r0": 100, "r1": 4})
+    _cf("arm_ldreq_pc", [("".join([
+        "push {r4, lr}\n",
+        "mov r4, r0\n",
+        "cmp r1, #9\n",
+        "ldreq pc, [sp], #4\n",
+        "add r0, r4, r1\n",
+        "pop {r4, pc}\n"]))],
+        regs={"r0": 100, "r1": 9})
+    _cf("arm_movne_pc", [("".join([
+        "push {r4, lr}\n",
+        "mov r4, r0\n",
+        "cmp r1, #1\n",
+        "movne pc, lr\n",
+        "add r0, r4, r1\n",
+        "pop {r4, pc}\n"]))],
+        regs={"r0": 100, "r1": 1})
+    _cf("arm_movpc_reg", [("".join([
+        "push {r4, lr}\n",
+        "mov r4, r0\n",
+        "adr r3, target\n",
+        "cmp r1, #0\n",
+        "movne pc, r3\n",
+        "add r0, r4, r1\n",
+        "pop {r4, pc}\n",
+        "target:\n",
+        "add r0, r4, #1000\n",
+        "pop {r4, pc}\n"]))],
+        regs={"r0": 100, "r1": 7})
+
+    # --- ARM: Tail-Call `b` in eine andere Funktion -----------------------
+    _cf("arm_tail_b", [
+        ("push {r4, lr}\nmov r4, r0\nmov r0, r1\nb 0x100200\n"),
+        (0x200, "add r0, r0, #3\nadd r0, r0, r4\npop {r4, pc}\n"),
+    ], regs={"r0": 10, "r1": 5})
+
+    # --- ARM: Sprungtabelle ueber `add pc, pc, rN, lsl #2` ----------------
+    _cf("arm_addpc_table", [("".join([
+        "push {r4, lr}\n",
+        "mov r4, r0\n",
+        "cmp r1, #2\n",
+        "addls pc, pc, r1, lsl #2\n",
+        "b 0x100038\n",
+        "b 0x100020\n",   # index 0
+        "b 0x100028\n",   # index 1
+        "b 0x100030\n",   # index 2
+        "add r0, r4, #10\n",
+        "b 0x100038\n",
+        "add r0, r4, #20\n",
+        "b 0x100038\n",
+        "add r0, r4, #30\n",
+        "b 0x100038\n",
+        "add r0, r4, #99\n",
+        "pop {r4, pc}\n"]))],
+        regs={"r0": 1, "r1": 2})
+
+    # --- ARM: Sprungtabelle ueber `ldrls pc, [pc, rN, lsl #2]` -----------
+    # ldrls bei 0x0C: PC = 0x14 -> Tabelle 0x14..0x1F, Fallthrough 0x10.
+    _cf("arm_ldrls_pc_table", [("".join([
+        "push {r4, lr}\n",
+        "mov r4, r0\n",
+        "cmp r1, #2\n",
+        "ldrls pc, [pc, r1, lsl #2]\n",
+        "b 0x100040\n"])),
+        (0x28, "add r0, r4, #10\nb 0x100040\n"),
+        (0x30, "add r0, r4, #20\nb 0x100040\n"),
+        (0x38, "add r0, r4, #30\nb 0x100040\n"),
+        (0x40, "add r0, r4, #99\npop {r4, pc}\n"),
+    ], raw=[(0x14, (0x100028).to_bytes(4, "little")),
+            (0x18, (0x100030).to_bytes(4, "little")),
+            (0x1c, (0x100038).to_bytes(4, "little"))],
+        regs={"r0": 1, "r1": 1})
+
+    # --- ARM: Rueckkehr ueber ldm sp!, {.., pc} (Tail-epilog) -------------
+    _cf("arm_ldm_pc", [("".join([
+        "push {r4, r5, lr}\n",
+        "mov r4, r0\n",
+        "add r0, r4, r1\n",
+        "ldm sp!, {r4, r5, pc}\n"]))],
+        regs={"r0": 3, "r1": 4})
+
+    # --- Thumb: IT-Bloecke, alle Masken -----------------------------------
+    it_forms = [
+        ("it", "t"), ("itt", "tt"), ("ite", "te"),
+        ("ittt", "ttt"), ("itte", "tte"), ("itet", "tet"), ("itee", "tee"),
+        ("itttt", "tttt"), ("ittte", "ttte"), ("ittet", "ttet"),
+        ("ittee", "ttee"), ("itett", "tett"), ("itete", "tete"),
+        ("iteet", "teet"), ("iteee", "teee"),
+    ]
+    for mn, pat in it_forms:
+        lines = [mn + " eq"]
+        for i, p in enumerate(pat):
+            cc = "eq" if p == "t" else "ne"
+            lines.append("mov%s r%d, #%d" % (cc, 5 + i, i + 1))
+        lines.append("add r0, r4, r5")   # ausserhalb des IT-Blocks
+        lines.append("pop {r4, pc}")
+        _cf("thumb_" + mn, [("\n".join(lines))], thumb=True,
+            regs={"r0": 40})
+
+    # --- Thumb: cbz/cbnz-Schleifen ---------------------------------------
+    _cf("thumb_cbz_loop", [("".join([
+        "push {r4, lr}\n",
+        "movs r0, #0\n",
+        "movs r1, #5\n",
+        "adds r0, r0, r1\n",
+        "subs r1, #1\n",
+        "cbz r1, 0x100012\n",
+        "b 0x100006\n",
+        "cbnz r1, 0x100012\n",
+        "movs r3, #1\n",
+        "pop {r4, pc}\n"]))], thumb=True, regs={})
+
+    # --- Thumb: blx immediate -> ARM-Funktion, Rueckkehr interworking -----
+    _cf("thumb_blx_imm_arm", [
+        ("push {r4, lr}\nmov r4, r0\nmovs r0, #7\nblx 0x100200\nadd r0, r0, r4\npop {r4, pc}\n", True),
+        (0x200, "push {r4, lr}\nadd r0, r0, #5\nldm sp!, {r4, pc}\n", False),
+    ], thumb=True, regs={"r0": 100})
+
+    # --- ARM: blx reg -> Thumb-Funktion, Rueckkehr ueber bx lr ------------
+    _cf("arm_blx_reg_thumb", [
+        ("push {r4, lr}\nmov r4, r0\nmovs r0, #3\n"
+         "movw r3, #0x0201\nmovt r3, #0x0010\nblx r3\n"
+         "add r0, r0, r4\npop {r4, pc}\n"),
+        (0x200, "adds r0, #4\nbx lr\n", True),
+    ], regs={"r0": 10})
+
+    # --- Thumb: tbb/tbh-Sprungtabellen -----------------------------------
+    # tbb bei 0x04 -> Basis Align(0x08,4)=0x08. Tabelle: 2 Byte.
+    _cf("thumb_tbb", [
+        ("push {r4, lr}\nmovs r4, #0\ntbb [pc, r1]\n", True),
+        (0x10, "adds r0, #1\nb 0x100020\n", True),
+        (0x18, "adds r0, #21\nb 0x100020\n", True),
+        (0x20, "pop {r4, pc}\n", True),
+    ], thumb=True, regs={"r0": 5, "r1": 1},
+        raw=[(0x08, bytes([(0x10 - 0x08) // 2, (0x18 - 0x08) // 2]))])
+
+    # tbh bei 0x04 -> Basis 0x08, Halbwort-Tabelle.
+    _cf("thumb_tbh", [
+        ("push {r4, lr}\nmovs r4, #0\ntbh [pc, r1, lsl #1]\n", True),
+        (0x10, "adds r0, #1\nb 0x100020\n", True),
+        (0x18, "adds r0, #21\nb 0x100020\n", True),
+        (0x20, "pop {r4, pc}\n", True),
+    ], thumb=True, regs={"r0": 5, "r1": 1},
+        raw=[(0x08, (4).to_bytes(2, "little")),
+             (0x0a, (8).to_bytes(2, "little"))])
+
+    # --- Thumb: Fallthrough in die naechste Funktion (mehrere Einstiege) --
+    _cf("thumb_fallthrough_multi", [
+        ("movs r0, #62\n", True),
+        (0x2, "adds r0, #1\npop {pc}\n", True),
+    ], thumb=True, regs={})
+
+
+def cf_assemble(case):
+    img = bytearray(CF_CODE)
+    entries = []
+    for spec in case["funcs"]:
+        if isinstance(spec, str):
+            off, text, th = 0, spec, case["thumb"]
+        elif isinstance(spec[0], str):
+            text, th = spec[0], spec[1]
+            off = 0
+        elif len(spec) == 2:
+            off, text = spec
+            th = case["thumb"]
+        else:
+            off, text, th = spec
+        ks = Ks(KS_ARCH_ARM, (KS_MODE_THUMB if th else KS_MODE_ARM)
+                | KS_MODE_LITTLE_ENDIAN)
+        enc, _ = ks.asm(text, CF_BASE + off)
+        if enc is None:
+            raise SystemExit("cf: Assembler-Fehler %s" % case["name"])
+        img[off:off + len(enc)] = bytes(enc)
+        entries.append((CF_BASE + off, th))
+    for off, blob in case["raw"]:
+        img[off:off + len(blob)] = blob
+    return bytes(img), entries
+
+
+def cf_reference(case, img, rng):
+    uc = Uc(UC_ARCH_ARM,
+            (UC_MODE_THUMB if case["thumb"] else UC_MODE_ARM)
+            | UC_MODE_LITTLE_ENDIAN)
+    uc.mem_map(CF_BASE, CF_CODE)
+    uc.mem_map(DATA_BASE, DATA_SIZE)
+    uc.mem_write(CF_BASE, img)
+    for addr, blob in case["mem"]:
+        uc.mem_write(addr, blob)
+    for addr, val in case["stack"]:
+        uc.mem_write(addr, int(val).to_bytes(4, "little"))
+    regs = [0] * 15
+    regs[13] = CF_STACK
+    for k, v in case["regs"].items():
+        regs[int(k[1:])] = v
+    f = {"n": rng.randrange(2), "z": rng.randrange(2),
+         "c": rng.randrange(2), "v": rng.randrange(2)}
+    ge = rng.randrange(16)
+    for i, v in enumerate(regs):
+        uc.reg_write(UREGS[i], v)
+    cpsr = 0x13 | (f["n"] << 31) | (f["z"] << 30) | (f["c"] << 29) | \
+           (f["v"] << 28) | (ge << 16)
+    if case["thumb"]:
+        cpsr |= 0x20
+    uc.reg_write(U.UC_ARM_REG_CPSR, cpsr)
+    start = CF_BASE + case["entry"] + (1 if case["thumb"] else 0)
+    try:
+        uc.emu_start(start, 0, count=200000)
+    except Exception as e:
+        return None, "Unicorn: %s" % e
+    pc = uc.reg_read(U.UC_ARM_REG_PC)
+    if pc != 0:
+        return None, "nicht terminiert (PC=0x%08X)" % pc
+    ref = {
+        "regs": [uc.reg_read(u) for u in UREGS],
+        "cpsr": uc.reg_read(U.UC_ARM_REG_CPSR),
+        "data": bytes(uc.mem_read(DATA_BASE, DATA_SIZE)),
+        "init": {"regs": regs, "flags": f, "ge": ge},
+    }
+    return ref, None
+
+
+def cf_harness(case, img, ref, path):
+    L = ["#include \"arm_cpu.h\"", "#include <stdio.h>", "#include <string.h>",
+         "#include <stdint.h>",
+         "#define DATA_BASE 0x%Xu" % DATA_BASE,
+         "#define DATA_SIZE %du" % DATA_SIZE,
+         "#define CF_STACK 0x%Xu" % CF_STACK,
+         "static uint8_t g_mem[%du];" % MEM_SIZE,
+         "static int g_fail;",
+         "static const unsigned char g_code[%d] = {" % len(img)]
+    for i in range(0, len(img), 24):
+        L.append("  " + ",".join(str(b) for b in img[i:i + 24]) + ",")
+    L.append("};")
+    L.append("static uint32_t mem_digest(void) {")
+    L.append("  uint32_t h = 2166136261u;")
+    L.append("  for (uint32_t i = 0; i < DATA_SIZE; i++)")
+    L.append("    h = (h ^ g_mem[DATA_BASE + i]) * 16777619u;")
+    L.append("  return h;")
+    L.append("}")
+    L.append("static void put32(uint32_t addr, uint32_t v) {")
+    L.append("  g_mem[addr] = (uint8_t)v; g_mem[addr+1] = (uint8_t)(v>>8);")
+    L.append("  g_mem[addr+2] = (uint8_t)(v>>16); g_mem[addr+3] = (uint8_t)(v>>24);")
+    L.append("}")
+    L.append("int main(void) {")
+    L.append("  ArmCpu c;")
+    L.append("  memset(g_mem, 0, sizeof g_mem);")
+    L.append("  memcpy(g_mem + 0x%Xu, g_code, sizeof g_code);" % CF_BASE)
+    for addr, blob in case["mem"]:
+        for i, b in enumerate(blob):
+            L.append("  g_mem[0x%Xu] = %du;" % (addr + i, b))
+    for addr, val in case["stack"]:
+        L.append("  put32(0x%Xu, 0x%08Xu);" % (addr, val))
+    L.append("  arm_cpu_init(&c, g_mem, sizeof g_mem);")
+    for i, v in enumerate(ref["init"]["regs"]):
+        L.append("  c.r[%d] = 0x%08Xu;" % (i, v))
+    f = ref["init"]["flags"]
+    L.append("  c.n=%du; c.z=%du; c.c=%du; c.v=%du; c.ge=0x%Xu;"
+             % (f["n"], f["z"], f["c"], f["v"], ref["init"]["ge"]))
+    L.append("  fn_%08X(&c);" % (CF_BASE + case["entry"]))
+    L.append('  if (c.aborted) { printf("FAIL aborted\\n"); return 1; }')
+    want = "{%s}" % ", ".join("0x%08Xu" % v for v in ref["regs"][:15])
+    L.append("  { static const uint32_t w[15] = %s;" % want)
+    L.append("    for (int i = 0; i < 15; i++) if (c.r[i] != w[i]) {")
+    L.append('      printf("FAIL r%d: 0x%08X (referenz 0x%08X)\\n", i, c.r[i], w[i]);')
+    L.append("      g_fail++; } }")
+    cpsr = ref["cpsr"]
+    for name, field in (("n", "n"), ("z", "z"), ("c", "c"), ("v", "v"),
+                        ("q", "qflag")):
+        bit = {"n": 31, "z": 30, "c": 29, "v": 28, "q": 27}[name]
+        L.append('  if (c.%s != %du) { printf("FAIL %s: %%u (referenz %du)\\n", c.%s); g_fail++; }'
+                 % (field, (cpsr >> bit) & 1, name, (cpsr >> bit) & 1, field))
+    L.append('  if (c.ge != 0x%Xu) { printf("FAIL ge: 0x%%X\\n", c.ge); g_fail++; }'
+             % ((cpsr >> 16) & 0xF))
+    L.append('  if (mem_digest() != 0x%08Xu) { printf("FAIL mem\\n"); g_fail++; }'
+             % mem_digest(ref["data"]))
+    L.append("  return g_fail ? 1 : 0;")
+    L.append("}")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(L))
+
+
+def run_control_flow(seed, filt):
+    _cf_cases()
+    rng = random.Random(seed * 7919 + 3)
+    fails = 0
+    total = 0
+    os.makedirs(OUT, exist_ok=True)
+    for idx, case in enumerate(CF_CASES):
+        if filt and filt.lower() not in case["name"].lower():
+            continue
+        total += 1
+        img, entries = cf_assemble(case)
+        ref, err = cf_reference(case, img, rng)
+        if ref is None:
+            print("[cf] %-28s uebersprungen: %s" % (case["name"], err))
+            continue
+        res = cli.scanmod.scan(img, [(a, "cf", th) for a, th in entries])
+        gen_c = os.path.join(OUT, "cf_gen_%d.c" % idx)
+        cli.generate(res, gen_c, data=img)
+        harness = os.path.join(OUT, "cf_main_%d.c" % idx)
+        cf_harness(case, img, ref, harness)
+        p = compile_and_run(gen_c, harness,
+                            os.path.join(OUT, "cf_test_%d.c" % idx),
+                            os.path.join(OUT, "cf_test_%d.exe" % idx))
+        out = (p.stdout.strip() or p.stderr.strip()).replace("\n", "\n       ")
+        if p.returncode == 0:
+            print("[cf] %-28s OK" % case["name"])
+        else:
+            print("[cf] %-28s FEHLER: %s" % (case["name"], out))
+            fails += 1
+    print("\n[cf] %d Faelle, %d Fehler" % (total, fails))
+    return total, fails
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Differentieller Recompiler-Test")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--count", type=int, default=80, help="zusaetzliche Zufallsfolgen")
-    ap.add_argument("--mode", choices=("arm", "thumb", "both"), default="both")
+    ap.add_argument("--mode", choices=("arm", "thumb", "both", "cf"), default="both")
     ap.add_argument("--quick", action="store_true")
     ap.add_argument("--filter", default=None)
     args = ap.parse_args(argv)
     if args.quick:
         args.count = 5
+    if args.mode == "cf":
+        run_control_flow(args.seed, args.filter)
+        return 0
     total = fails = 0
     modes = ("arm", "thumb") if args.mode == "both" else (args.mode,)
     for mode in modes:

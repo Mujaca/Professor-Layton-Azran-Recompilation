@@ -28,6 +28,66 @@ class ScanResult:
 
 LDM_IDS = (A.ARM_INS_LDM, A.ARM_INS_LDMDA, A.ARM_INS_LDMDB, A.ARM_INS_LDMIB)
 STUB_IDS = (A.ARM_INS_B, A.ARM_INS_BX, A.ARM_INS_BLX, A.ARM_INS_CBZ, A.ARM_INS_CBNZ)
+TBB_IDS = tuple(getattr(A, n) for n in ("ARM_INS_TBB", "ARM_INS_TBH")
+                if getattr(A, n, None) is not None)
+
+
+def _rd32(data, addr):
+    off = addr - isa.ARM_BASE
+    if off < 0 or off + 4 > len(data):
+        return None
+    return int.from_bytes(data[off:off + 4], "little")
+
+
+def _code_ok(data, addr):
+    addr &= ~1
+    if addr < isa.ARM_BASE or addr >= isa.ARM_BASE + len(data):
+        return False
+    return isa.decode(data, addr) is not None
+
+
+def ldr_pc_table(data, ins, thumb):
+    """Ziele und Tabellenende fuer `ldr pc, [pc, rN, lsl #2]`.
+
+    Die Tabelle steht direkt hinter der Instruktion (ARM: pc+8,
+    Thumb: Align(pc+4,4)). Eintraege sind absolute Codezeiger; die Tabelle
+    endet beim ersten Wort, das auf keinen dekodierbaren Code zeigt.
+    """
+    op = ins.op_str.replace(" ", "").lower()
+    if "pc" not in op or "lsl#2" not in op:
+        return [], None
+    base = (ins.address + 8) if not thumb else ((ins.address + 4) & ~3)
+    targets = []
+    end = base
+    for i in range(256):
+        v = _rd32(data, base + 4 * i)
+        if v is None or not _code_ok(data, v):
+            break
+        targets.append((v & ~1, bool(v & 1) if thumb else thumb))
+        end = base + 4 * (i + 1)
+    return (targets, end) if targets else ([], None)
+
+
+def tbb_table(data, ins):
+    """Ziele und Tabellenende fuer Thumb tbb/tbh [pc, rN]."""
+    base = (ins.address + 4) & ~3
+    half = ins.id == getattr(A, "ARM_INS_TBH", -1)
+    unit = 2 if half else 1
+    targets = []
+    end = base
+    for i in range(512):
+        off = base + unit * i
+        o = off - isa.ARM_BASE
+        if o < 0 or o + unit > len(data):
+            break
+        raw = int.from_bytes(data[o:o + unit], "little")
+        tgt = base + 2 * raw
+        if not _code_ok(data, tgt):
+            break
+        targets.append((tgt & ~1, True))
+        end = off + unit
+    return (targets, end) if targets else ([], None)
+
 
 
 def op0_is_pc(ins) -> bool:
@@ -59,14 +119,18 @@ def is_terminator(ins) -> bool:
         return True
     if ins.id in (A.ARM_INS_ADD, A.ARM_INS_SUB) and op0_is_pc(ins):
         return True
+    if ins.id in TBB_IDS:
+        return True
     return False
 
 
 def direct_target(ins):
     if ins.id in (A.ARM_INS_B, A.ARM_INS_BL, A.ARM_INS_BLX, A.ARM_INS_CBZ, A.ARM_INS_CBNZ):
         try:
-            if ins.operands and ins.operands[0].type == A.ARM_OP_IMM:
-                return ins.operands[0].imm
+            # CBZ/CBNZ: Operand 0 ist das Register, Operand 1 das Ziel.
+            idx = 1 if ins.id in (A.ARM_INS_CBZ, A.ARM_INS_CBNZ) else 0
+            if len(ins.operands) > idx and ins.operands[idx].type == A.ARM_OP_IMM:
+                return ins.operands[idx].imm
         except Exception:
             return None
     return None
@@ -130,6 +194,7 @@ def decode_function(data, fn, visited):
         blk = Block(addr=baddr)
         fn.blocks.append(blk)
         cur = baddr
+        const_reg = {}
         while True:
             ins = isa.decode(data, cur, thumb=fn.thumb)
             if ins is None:
@@ -139,6 +204,24 @@ def decode_function(data, fn, visited):
             ldrpc = ldrpc_literal_target(ins, fn.thumb, data)
             if ldrpc is not None:
                 fn.calls.add(ldrpc)
+            try:
+                ops = isa.split_operands(ins.op_str)
+            except Exception:
+                ops = []
+            # `adr rX, ziel` dekodiert capstone je nach Modus als
+            # `add rX, pc, #imm`; fuer `mov pc, rX` ist das Ziel statisch.
+            if (ins.id in (A.ARM_INS_ADD, A.ARM_INS_SUB) and len(ops) >= 3
+                    and isa.reg_num(ops[1]) == 15):
+                rd = isa.reg_num(ops[0])
+                imm = isa.imm_value(ops[2])
+                if rd is not None and imm is not None:
+                    d = imm if ins.id == A.ARM_INS_ADD else -imm
+                    pcbase = ((cur + 4) & ~3) if fn.thumb else (cur + 8)
+                    const_reg[rd] = pcbase + d
+            if ins.id == A.ARM_INS_MOV and len(ops) >= 2 and isa.is_pc(ops[0]):
+                src = isa.reg_num(ops[1])
+                if src in const_reg and const_reg[src] not in seen:
+                    todo.append(const_reg[src])
             if ins.id in (A.ARM_INS_BL, A.ARM_INS_BLX):
                 tgt = direct_target(ins)
                 if tgt is not None:
@@ -153,8 +236,40 @@ def decode_function(data, fn, visited):
                 # fehlt der Folgeblock und die Funktion endet vorzeitig.
                 cond = (ins.id in (A.ARM_INS_CBZ, A.ARM_INS_CBNZ)
                         or ins.cc != A.ARM_CC_AL)
-                if cond and nxt not in seen:
-                    todo.append(nxt)
+                fall = nxt
+                extra = []
+                if ins.id == A.ARM_INS_LDR and op0_is_pc(ins):
+                    # Sprungtabelle steht direkt hinter der Instruktion.
+                    extra, table_end = ldr_pc_table(data, ins, fn.thumb)
+                    if table_end is not None:
+                        fall = table_end
+                elif ins.id in TBB_IDS:
+                    extra, table_end = tbb_table(data, ins)
+                    if table_end is not None:
+                        fall = table_end
+                elif (ins.id in (A.ARM_INS_ADD, A.ARM_INS_SUB)
+                      and op0_is_pc(ins)):
+                    # `add pc, pc, rN, lsl #2`: ab pc+8 folgt eine Tabelle
+                    # aus `b`-Instruktionen (4-Byte-Slots). Jeden Slot als
+                    # eigenen Block anlegen, damit der dynamische Sprung ein
+                    # Ziel per switch/goto findet.
+                    if nxt not in seen:
+                        todo.append(nxt)
+                    slot = nxt + 4
+                    for _ in range(64):
+                        s = isa.decode(data, slot, fn.thumb)
+                        if s is None or s.id != A.ARM_INS_B:
+                            break
+                        if direct_target(s) is None:
+                            break
+                        if slot not in seen:
+                            todo.append(slot)
+                        slot += 4
+                for e, ethumb in extra:
+                    if e not in seen:
+                        todo.append(e)
+                if cond and fall not in seen:
+                    todo.append(fall)
                 break
             cur = nxt
             if len(blk.insns) > 20000:
