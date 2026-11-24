@@ -706,6 +706,61 @@ je Liste, `docs/TOOLS.md`) zeigt fuer alle Listen nur Setup-Register
 (Rasterizer, Texturen, TEV, Attribut-Loader 0x200..0x229, Shader-Uploads,
 Finalize 0x010), keine 0x22E/0x22F und keine Kanal-Spruenge.
 
+### Videodecoder: Handler dekodiert, Ringpuffer-Stall nach 41 Frames – offen 2026-11-24
+
+**Behoben (Recompiler, eigene Ursache):** Beim Dekodieren ab dem 42.
+Videoframe landeten Tabellenziele im No-op. Zwei Ursachen in
+`tools/recomp/scan.py` (der 41-Frame-Stall selbst blieb danach bestehen,
+siehe unten):
+
+* Die Offset-Tabellen `0x16A958`/`0x16AED4` haben zwei Selbstverweis-Slots
+  (Index 6/7 -> Tabellenbasis) vor den Handlern `0x16AA08`/`0x16AA20` bzw.
+  `0x16AF84`/`0x16AF9C`. `offset_table_targets()` brach beim ersten
+  Selbstverweis ab; er wird jetzt uebersprungen.
+* Die Handler `0x16E70C`/`0x16E8BC`/`0x16E9E0`/`0x16EB68` werden ueber zwei
+  Schritte adressiert (`add r4, pc, #hi; add r4, r4, #lo; movle pc, r4` in
+  `0x16C390..0x16C530`). Der Scanner schrieb nur die PC-relative erste
+  Addition in `const_reg` fort; die zweite Stufe wird jetzt ebenfalls
+  fortgeschrieben.
+
+Belege: `out/missing_calls.txt` (vorher) `0x16E70C` (192x), `0x16AF84`
+(112x), `0x16E8BC` (88x), `0x16E9E0` (72x), `0x16AA20` (72x), `0x16AF9C`
+(64x), `0x16EB68` (40x), `0x16AA08` (40x); nach dem Fix sind diese Ziele 0,
+`ARM_WATCH` belegt ihre Ausfuehrung (z. B. `0x16E70C` 65 Treffer,
+`0x16AF84` 78, `0x16E8BC` 98 in 5 s). Selbsttests:
+`tools/selftest_tools.py` (Offset-Tabelle mit Selbstverweisen,
+Zwei-Schritt-PC-Adresse), 19/19 gruen; `tests/mvp_selftest.py` 45/45.
+
+**Weiter offen (Ursache des 41-Frame-Stalls):** Der Decoder-Thread 0 laeuft
+nach 41 `StartConversion` in den Huffman-Loop, weil sein Eingabepuffer nur
+Nullen liefert: `HLE_STALLDUMP` zeigt dauerhaft `pc=0x16E4A8/0x16E4B4`;
+`ARM_WATCH=16E4A0` zeigt `r1=0x0C683Axx` (Ringpuffer) und der Bit-Refill
+`0x16C568` liest dort 0. Der I/O-Thread `F89` hat anfangs nur 4x `0x4000`
+Byte (64 KiB) gelesen (`off=0x379F1BE0..0x379FDBE0`); die naechsten
+Datei-Reads (`0x37A05BE0...`) kommen erst nach dem Stall. Der Decoder laeuft
+also ueber das Pufferende hinaus, statt auf Nachschub zu warten. Naechster
+Schritt: die Ringpuffer-/Event-Wartestelle des Decoders (Thread 0) gegen
+Azahar pruefen; der 1-ms-Poll (`svc 0x19 ClearEvent / 0x18 / 0x0A`) des
+I/O-Threads ist das Gegenstueck. `HLE_PERFMAP_FILE` zeigt, dass der
+I/O-Thread (thread 10) waehrend des Stalls 1,27 M Bloecke ausfuehrt, also
+nicht vom kooperativen Scheduler ausgehungert wird; die Warte-/Bedingungs-
+logik des Ringpuffers selbst ist falsch.
+
+**Nebenbefund (Recompiler, offen):** `fn_0020E250` kehrt mit
+`ldr pc,[sp],#0x14` (Post-Index-SP) zurueck. Der Emitter behandelt das als
+dynamischen Sprung und loggt die Rueckkehradresse `0x0035649C` als
+"unbekanntes call-Ziel" (576x). Fuer direkte `bl`-Aufrufe ist der No-op
+wirkungslos (die C-Funktion kehrt danach zum Aufrufer zurueck), aber die
+Semantik sollte wie `pop {pc}` als `return` emittiert werden. Ebenso werden
+Return-Adressen aus `mov pc, rN` (z. B. `0x16C254`) als Missing-Call geloggt.
+
+**Korrektur zur frueheren Annahme:** Y2R schreibt das RGB8-Bild (400x240,
+`SetReceiving` size `0x46500`) in den **linearen Heap** (`0x15E3DE00`), nicht
+in die VRAM-Framebuffer (`0x1F300000`/`0x1F346500`). Im 60-s-Lauf gibt es
+weiterhin **keinen** GX-DisplayTransfer/MemoryFill und keine Draws; der
+Bildschirm bleibt einfarbig. Der Videopfad braucht nach Y2R noch einen
+Transfer/Render, der ohne den Ringpuffer-Fix nicht erreicht wird.
+
 ### PICA-Listen-Ausreisser (415-430 vs. 15.738 in 40 s): Host-Last, kein Gastfehler – 2026-11-24
 
 **Befund:** Die Zahl der `[gpu] list`-Zeilen ist nur ein Mass fuer die

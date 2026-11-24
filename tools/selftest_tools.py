@@ -300,18 +300,28 @@ def test_offset_table_seed():
     import struct
     from recomp import isa, scan
 
-    code = bytearray(0x48)
+    code = bytearray(0x60)
     code[0x00:0x04] = bytes.fromhex("10608fe2")   # add r6, pc, #0x10
     code[0x04:0x08] = bytes.fromhex("055196e7")   # ldr r5,[r6,r5,lsl #2]
     code[0x08:0x0C] = bytes.fromhex("06f085e0")   # add pc, r5, r6
     code[0x18:0x1C] = struct.pack("<I", 0x18)     # Offset -> 0x100030
-    code[0x1C:0x20] = struct.pack("<I", 0x0)      # zeigt in die Tabelle: Ende
+    code[0x1C:0x20] = struct.pack("<I", 0x0)      # Selbstverweis: Default
+    code[0x20:0x24] = struct.pack("<I", 0x0)      # Selbstverweis: Default
+    code[0x24:0x28] = struct.pack("<I", 0x38)     # Offset -> 0x100050
     code[0x30:0x34] = bytes.fromhex("00402de9")   # push {lr}
     code[0x34:0x38] = bytes.fromhex("0000a0e3")   # mov r0,#0
     code[0x38:0x3C] = bytes.fromhex("0080bde8")   # pop {pc}
+    code[0x50:0x54] = bytes.fromhex("00402de9")   # push {lr}
+    code[0x54:0x58] = bytes.fromhex("0000a0e3")   # mov r0,#0
+    code[0x58:0x5C] = bytes.fromhex("0080bde8")   # pop {pc}
     res = scan.scan(bytes(code), [(isa.ARM_BASE, "entry", False)])
     need(0x00100030 in res.functions,
          "Offset-Tabellen-Ziel nicht geseedet: %s"
+         % sorted("%08X" % a for a in res.functions))
+    # Die beiden Selbstverweise duerfen die Suche nicht beenden (im Spiel
+    # stehen danach die 8-/16-Bit-Handler 0x16AA08/20 bzw. 0x16AF84/9C).
+    need(0x00100050 in res.functions,
+         "Ziel hinter Selbstverweisen nicht geseedet: %s"
          % sorted("%08X" % a for a in res.functions))
 
     # Zweite Form: Index bereits in Bytes (`ldr rX,[rB,rI]`) und negatives
@@ -329,6 +339,32 @@ def test_offset_table_seed():
     need(0x00100010 in res.functions,
          "Offset-Tabelle ohne lsl#2/negativ nicht geseedet: %s"
          % sorted("%08X" % a for a in res.functions))
+
+
+def test_chained_pc_add_seed():
+    """`add rN, pc, #hi` + `add rN, rN, #lo` vor `mov pc, rN` seedet das Ziel.
+
+    Der Bilddecoder bildet die Adresse eines Format-Handlers in zwei Schritten
+    (z. B. 0x16C3B0: `add r4, pc, #0x2000; add r4, r4, #0x354;
+    movle pc, r4` -> 0x16E70C). Ohne Fortschreibung bleibt 0x16E3B8 stehen und
+    der Handler fehlt; ab dem 42. Videoframe endet der Film im No-op.
+    """
+    from recomp import isa, scan
+
+    code = bytearray(0x38)
+    code[0x00:0x04] = bytes.fromhex("10408fe2")   # add r4, pc, #0x10
+    code[0x04:0x08] = bytes.fromhex("104084e2")   # add r4, r4, #0x10
+    code[0x08:0x0C] = bytes.fromhex("000050e3")   # cmp r0, #0
+    code[0x0C:0x10] = bytes.fromhex("04f0a0d1")   # movle pc, r4
+    code[0x10:0x14] = bytes.fromhex("1eff2fe1")   # bx lr (Fallthrough)
+    code[0x28:0x2C] = bytes.fromhex("00402de9")   # push {lr}
+    code[0x2C:0x30] = bytes.fromhex("0000a0e3")   # mov r0,#0
+    code[0x30:0x34] = bytes.fromhex("0080bde8")   # pop {pc}
+    res = scan.scan(bytes(code), [(isa.ARM_BASE, "entry", False)])
+    blocks = {b.addr for f in res.functions.values() for b in f.blocks}
+    need(0x00100028 in blocks,
+         "Zwei-Schritt-PC-Adresse nicht als Block dekodiert: %s"
+         % sorted("%08X" % a for a in blocks))
 
 
 def test_dynamic_pc_resume():
@@ -373,6 +409,7 @@ TESTS = [
     ("ldr-pc-Veneer-Ziel im Scan", test_ldrpc_veneer),
     ("Veneer-Seed Thumb", test_veneer_thumb_seed),
     ("Offset-Tabelle Seed", test_offset_table_seed),
+    ("Zwei-Schritt-PC-Adresse", test_chained_pc_add_seed),
     ("Ruecksprung in Funktionsmitte", test_dynamic_pc_resume),
 ]
 

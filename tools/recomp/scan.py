@@ -88,9 +88,12 @@ def offset_table_targets(data, base, thumb):
         tgt = (base + v) & 0xFFFFFFFF
         if tgt < isa.ARM_BASE or not _code_ok(data, tgt, thumb):
             break
-        # Eintraege, die in die Tabelle selbst zeigen, sind Daten.
+        # Eintraege, die in die Tabelle selbst zeigen, sind Daten (z. B. zwei
+        # Default-Slots vor den eigentlichen Handlern). Sie duerfen die Suche
+        # nicht beenden: im Bilddecoder folgen nach den beiden Selbstverweisen
+        # erst die 8-/16-Bit-Handler 0x16AA08/0x16AA20 bzw. 0x16AF84/0x16AF9C.
         if base <= tgt < base + 4 * i + 4:
-            break
+            continue
         out.append((tgt & ~1, thumb))
     return out
 
@@ -302,6 +305,18 @@ def decode_function(data, fn, visited):
                     d = imm if ins.id == A.ARM_INS_ADD else -imm
                     pcbase = ((cur + 4) & ~3) if fn.thumb else (cur + 8)
                     const_reg[rd] = pcbase + d
+            elif (ins.id in (A.ARM_INS_ADD, A.ARM_INS_SUB) and len(ops) >= 3
+                    and isa.reg_num(ops[0]) is not None
+                    and isa.reg_num(ops[0]) == isa.reg_num(ops[1])):
+                # Adressbildung in zwei Schritten: `add r4, pc, #hi`
+                # gefolgt von `add r4, r4, #lo` (z. B. 0x16C3B0 ->
+                # `movle pc, r4`). Ohne Fortschreibung bleibt das Ziel
+                # 0x16E3B8 statt 0x16E70C und der Handler wird nie dekodiert.
+                rd = isa.reg_num(ops[0])
+                imm = isa.imm_value(ops[2])
+                if rd in const_reg and imm is not None:
+                    d = imm if ins.id == A.ARM_INS_ADD else -imm
+                    const_reg[rd] = (const_reg[rd] + d) & 0xFFFFFFFF
             if ins.id == A.ARM_INS_MOV and len(ops) >= 2 and isa.is_pc(ops[0]):
                 src = isa.reg_num(ops[1])
                 if src in const_reg and const_reg[src] not in seen:
