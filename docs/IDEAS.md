@@ -7,7 +7,7 @@ mit Zeitpunkt.
 
 ## Hardware-Renderer: PICA-Befehle in eine native Grafik-API übersetzen
 
-**Wunsch des Nutzers (2026-11-24).**
+**Offizieller ROADMAP-Meilenstein M9 (vom Nutzer am 2026-11-24 festgelegt).**
 
 Der CPU-Code ist statisch rekompiliert. Der PICA-Software-Rasterizer
 (`runtime/gpu`) und das HLE-DSP (`runtime/audio`) sind dagegen funktional eine
