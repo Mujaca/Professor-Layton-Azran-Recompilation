@@ -410,9 +410,23 @@ void arm_trace_block(ArmCpu *c, uint32_t pc, uint32_t thumb) {
     if (arm_watch_pc != 0 && pc == arm_watch_pc && c != NULL && g_watch_hits < 600) {
         g_watch_hits++;
         fprintf(stderr, "[watch] 0x%08X r0=%08X r1=%08X r2=%08X r3=%08X "
-                        "r4=%08X r5=%08X r6=%08X r7=%08X sp=%08X lr=%08X\n",
+                        "r4=%08X r5=%08X r6=%08X r7=%08X sp=%08X lr=%08X #%d\n",
                 pc, c->r[0], c->r[1], c->r[2], c->r[3], c->r[4], c->r[5], c->r[6],
-                c->r[7], c->r[13], c->r[14]);
+                c->r[7], c->r[13], c->r[14], g_watch_hits - 1);
+        /* Nur Diagnose: je 8 Woerter ab r0, r1 und r5 zeigen (Ring-/Kopfstruktur). */
+        static const int regs[3] = {0, 1, 5};
+        for (int k = 0; k < 3; k++) {
+            uint32_t a = c->r[regs[k]];
+            if ((uint64_t)a + 32u <= c->mem_size) {
+                fprintf(stderr, "[watchmem] #%d r%d=%08X:", g_watch_hits - 1, regs[k], a);
+                for (int i = 0; i < 8; i++) {
+                    uint32_t v;
+                    memcpy(&v, c->mem + a + (uint32_t)i * 4u, 4);
+                    fprintf(stderr, " %08X", v);
+                }
+                fprintf(stderr, "\n");
+            }
+        }
         fflush(stderr);
     }
     if (!g_file) return;

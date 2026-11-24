@@ -955,3 +955,86 @@ Freigabe-Event beobachten (`ARM_MEMWATCHRANGE` auf die Ringstruktur
 Decoder beim Intra-Frame mehr als einen 96-Byte-Chunk anfordern muss und
 welches Event/Semaphor den Kopierer weckt. Erst danach ist eine
 Kernel-/Service-Korrektur belegbar.
+
+### Chunk-Geber vermessen: 96-Byte-Pakete, Intra-Frame liegt in einem 4-KiB-Puffer – Befund 2026-11-24
+
+**Diagnose (nur lesend):** `ARM_WATCH` gibt jetzt je Treffer eine laufende
+Nummer und je 8 Woerter ab `r0`, `r1`, `r5` aus (`[watchmem]`), siehe
+`docs/TOOLS.md`. Damit sind die Eingangswerte der Aufrufe 60-64 belegt.
+
+**Treiberobjekt (r0 von `fn_0017A6A0` = `0x0CFFFA24`), Felder:**
+
+| Feld | Wert | Bedeutung |
+|---|---|---|
+| `+0x00` | `0x0C682378` | Decoderobjekt (`fn_0016A500`) |
+| `+0x04` | `0x0CFFF8A4` | 24-Pointer-Historie der letzten Chunks |
+| `+0x08` | `0x18` | Historiegroesse 24 |
+| `+0x0c` | 0 … 0x17 | Historien-Index (laeuft um) |
+| `+0x10` | 0/1 | `([chunk] & 0x8000) >> 15` des **vorigen** Aufrufs |
+| `+0x14` | 0 | Freigabe-Flag (immer 0 im Stall) |
+| `+0x18` | `0x200` | Modus → Handler `[0x170ABC]` = `fn_0016A500` |
+| `+0x1c` | 1 | Aufruf-Flag (immer 1) |
+
+Die Modi sind Zeiger auf globale Funktionszeiger: `0x100` → `[0x16A4BC]` =
+`0x163F00`, `0x200` → `[0x170ABC]` = **`0x16A500`**, `0x400` → `[0x163EBC]` =
+`0x15D900`.
+
+**Chunk-Folge (64 Aufrufe, `[watch #n] r1`):** `#0 0CABDF28` (+0x1BC),
+`#1…#36` je +0x60, `#37 0CFFEE4C`, `#38 0CABDF80`, `#39…#61` je +0x60,
+`#62 0CABDF28`, `#63 0CABE504`. Die Chunk-Inhalte sind ueberwiegend
+`FFFF7FFF FFFFFFFF …` (Skip-Makrobloecke); `#0`, `#62`, `#63` enthalten echte
+Koeffizienten. Die Woerter im Gast stehen 32-Bit-byte-getauscht zur Datei
+(`0D BE 04 93` → `9304BE0D`), wie der Kopierpfad `0x20D2CC` es macht.
+
+**Zuordnung zur Datei** (`m999.moflex`, 0x912A4 Byte, Suchmuster = 12 Byte
+Chunk-Kopf, 32-Bit-Tausch rueckgaengig): `#0` → Datei `0xC5`, `#1` →
+`0x287` (Δ0x1C2 = 450, Chunk-Δ0x1BC), `#62` → `0x1A85`, `#63` → `0x2065`
+(Δ0x5E0 = 1504, Chunk-Δ0x5DC). Die Datei ist also in **96-Byte-Pakete**
+zerlegt (P-Frames), dazwischen groessere Pakete.
+
+**Frame-Flag richtiggestellt:** Die 16-Bit-Kopfzeile ist das *niedrige*
+Halbwort des ersten Wortes (`[r4+0x10]` beim naechsten Aufruf belegt es):
+`#62` beginnt mit `0xE8C2` (Bit 15 = 1), `#63` mit `0x1397` (Bit 15 = 0).
+Der Intra-/Refresh-Frame ist also `#62` (Datei `0x1A85`), nicht `#63`:
+Aufruf 62 verbraucht 1500 Byte und landet exakt auf dem naechsten
+Paketanfang (Datei `0x2065`). Der stallende Aufruf 63 ist ein
+gewoehnlicher P-Frame (Bit 15 = 0) und verbraucht trotzdem 6390 Byte.
+
+**Warteschlange statt Ring:** Der Puffer, auf den die Chunk-Zeiger zeigen, ist
+ein **wachsender Byte-Puffer** (Stream-Objekt `0x0CFFFE14`):
+`+0x08` Basis `0x0CABDF28`, `+0x0c` Kapazitaet **`0x1000`** (4 KiB).
+`ARM_MEMWATCH=0CFFFE1C`/`=0CFFFE20` zeigt das Wachstum
+`0x1BC → 0x378 → 0x6F0 → 0x800 → 0xC00 → 0x1000` und Umzuege der Basis
+(`0CABDD08 → 0CABDEE4 → 0CABE27C → 0CABE98C → 0CABF1AC → 0CABDF28`), jeweils
+von `0x0020D068+0x2BC` (generisches Puffer-Wachstum). Bei `#63` liegt der
+Zeiger bei Offset `0x5DC`, es sind also nur `0x1000-0x5DC = 0xA24` (2596)
+Byte bis zum Pufferende – der Decoder verbraucht aber **6390** Byte
+(`0x18F6`). Das passt nicht in den Puffer.
+
+**Kein Laengen-/Bounds-Check im Decoder:** `fn_0016BBE4` liest den Bitstrom
+aus `[obj]`; der Refill `0x16C568` ist `ldrh sl,[r1],#2` ohne Grenzpruefung,
+und `0x16BD08..0x16BD18` liefert nur `r1-start-2` als verbrauchte Bytes
+zurueck. Die Entscheidung „genug Daten?“ kann also nur auf der
+Bereitstellungsseite liegen.
+
+**Aufrufkette (belegt, nur ein statischer Aufrufer je Stufe):**
+Presenter `fn_00218248` ruft in Zeile `0x21845C` den VTable-Slot `[obj+0x14]`
+(`r0=[r4+0x188]`, `r1=[sp+0x1c]`); das ist `fn_0033C9E4` →
+`fn_003902E0` (Queue-Push, Grenze `[+0x38] < [+8]`) → `fn_0017A6A0` →
+Handler `fn_0016A500`. Den Zeiger liefert vorher `fn_00218A94`; die
+Peek-Funktion `0x3905E8` gibt `[stream+0x48]` zurueck (nur einen Zeiger,
+**keine Laenge**).
+
+**Folgerung (Hypothese, noch nicht bewiesen):** Fuer den Frame ab Datei
+`0x2065` wird der Decoder mit einem Zeiger in einen Puffer gerufen, der nur
+2596 Byte Restkapazitaet hat. Entweder hat die Paketgroessen-Bestimmung aus
+dem Container fuer dieses Paket nicht 6390 Byte geliefert (dann wurde zu
+wenig angehaengt), oder der Decoder wird gerufen, bevor der Puffer fuer das
+grosse Paket gewachsen ist. **Naechster Schritt:** in `fn_0035737C`
+(Paketkopf-Parser, Byte `[src+idx]`, Flags in Bit 0/1) und `fn_00358958`
+(Index-Lookup, Varint-Reader `0x20D5A8`, Kopierpfad `0x358FA8`) die
+berechnete Paketgroesse fuer den Index protokollieren und mit den 6390 Byte
+und dem naechsten Paketanfang (Datei `0x2065 + 6390 = 0x3943`) vergleichen;
+danach Funktion-Differenztest (Unicorn) fuer den Parser. Kein Workaround, kein
+Recompiler-Fehler bisher belegt.
+
