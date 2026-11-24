@@ -199,6 +199,35 @@ Pfad im Port durchläuft (möglicher Recompiler-/HLE-Unterschied bei
 OS-Init/Syscall-Rückgaben, kein Spielcode-Patch).
 
 
+### Funktionserkennung: Scheinaufrufe aus falschem Dekodermodus – behoben 2026-11-24
+
+**Befund:** Im Frontier-Log standen 52x `unbekanntes call-Ziel 0x0010056D
+(von Block 0x00100280)` plus 4x `0x0010001C`; ein echter Aufruf wurde als
+No-op verschluckt. Ursache war die Funktionserkennung, nicht der Spielcode:
+
+* Eine Thumb-Funktion `blx #imm` springt nach ARM. `scan.decode_function`
+  setzte das Ziel aber immer auf den Modus des Aufrufers. Dadurch wurde
+  `0x00292258` (ARM: `mov r0,r0; mov r0,#0; b 0x26c5c4`) im Thumb-Modus
+  dekodiert; der Scheinblock `0x0029259E` (`movs r0,r0; blx r0` auf
+  Padding) erzeugte den Scheinaufruf.
+* `pointer_seeds` ignorierte das Thumb-Bit des Zeigerworts und uebersprang
+  die ersten 4 KiB (`addr < 0x101000`). `0x0010056C` ist eine echte
+  Thumb-Funktion; ihr Zeiger `0x0010056D` steht im Literalpool `0x1005B8`
+  und wird von ihr in ein Objektfeld (+8) gespeichert. Der Aufrufer
+  `0x00100280` (`ldr r0,[r0,#8]; blx r0`) lief deshalb ins Leere.
+
+**Korrektur:** `call_target_thumb()` (Interworking-Regel), Thumb-Bit und
+voller Codebereich in `pointer_seeds()`, Verwerfen von schwachen Seeds
+mitten in dekodiertem Code (ausser dort steht ein Prolog). Test:
+`tests/mvp_selftest.py::discovery_tests`. Belege/Auswertung:
+`scratch/recomp/analyze.py` (Funktionen 17613 -> 12969, Scheinfunktionen
+weg; 90.64% der Textbytes abgedeckt), Frontier **9/10 -> 10/10**.
+
+**Offen:** `0x0029226D` (ARM-Veneer `add ip,pc,#1; bx ip` auf die
+Thumb-Funktion `0x0029226C`) bleibt ein No-op; der Scanner loest
+`add rN, pc, #imm` + `bx rN` noch nicht als Sprungziel auf. Alle anderen
+Fehlziele des vorherigen Laufs (`0x0010056D`, `0x00123D54`) sind weg.
+
 ### Stack-Drift + frueher Finalize-Zweig: `bx rN`-Rueckkehr – behoben 2026-11-24
 
 **Befund:** `fn_0028F648` (Thumb) kehrt ueber `pop {r3}; add sp,#0x10;

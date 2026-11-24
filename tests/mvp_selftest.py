@@ -740,6 +740,69 @@ int main(void) {
     return False
 
 
+def discovery_tests():
+    """Recompiler-Discovery: Interworking-Modus und Zeiger-Seeds.
+
+    Prueft drei Regeln, die frueher ganze Thumb-Regionen im ARM-Dekoder
+    landen liessen:
+      * Thumb `blx #imm` wechselt nach ARM (und ARM `blx #imm` nach Thumb),
+      * ein Zeigerwort mit Bit 0 wird als Thumb-Funktion geseedet, auch in
+        den ersten 4 KiB (Init-/Konstruktor-Tabellen),
+      * ein Zeiger mitten in eine bereits dekodierte Funktion wird verworfen.
+    """
+    from recomp import scan as scanmod
+    img = bytearray(0x4000)
+    ks_a = Ks(KS_ARCH_ARM, KS_MODE_ARM | KS_MODE_LITTLE_ENDIAN)
+    ks_t = Ks(KS_ARCH_ARM, KS_MODE_THUMB | KS_MODE_LITTLE_ENDIAN)
+
+    def put(ks, addr, text):
+        enc, _ = ks.asm(text, addr)
+        off = addr - isa.ARM_BASE
+        img[off:off + len(enc)] = bytes(enc)
+
+    def word(addr, val):
+        off = addr - isa.ARM_BASE
+        img[off:off + 4] = val.to_bytes(4, "little")
+
+    put(ks_a, 0x100000, "blx 0x100100\nnop\nnop\npush {r4, lr}\nbx lr")
+    put(ks_t, 0x100100, "push {r4, lr}\nblx 0x100200\npop {r4, pc}")
+    put(ks_a, 0x100200, "push {r4, lr}\nbx lr")
+    put(ks_t, 0x100300, "push {r4, lr}\nbx lr")
+    word(0x100400, 0x100301)   # Thumb-Zeiger in die ersten 4 KiB
+    word(0x100404, 0x100008)   # mitten in fn_00100000 (kein Prolog)
+    word(0x100408, 0x10000C)   # linear ueberlaufener Prolog (echter Anfang)
+
+    res = scanmod.scan(bytes(img), [(isa.ARM_BASE, "entry", False)],
+                       seed_pointers=True)
+    fails = []
+
+    def check(cond, msg):
+        if not cond:
+            fails.append(msg)
+
+    f_thumb = res.functions.get(0x100100)
+    check(f_thumb is not None and f_thumb.thumb,
+          "Thumb-Ziel von ARM blx nicht als Thumb geseedet")
+    f_arm = res.functions.get(0x100200)
+    check(f_arm is not None and not f_arm.thumb,
+          "ARM-Ziel von Thumb blx nicht als ARM geseedet")
+    f_ptr = res.functions.get(0x100300)
+    check(f_ptr is not None and f_ptr.thumb
+          and f_ptr.source.startswith("pointer@"),
+          "Thumb-Zeiger in den ersten 4 KiB nicht als Seed benutzt")
+    check(0x100008 not in res.functions,
+          "Zeiger mitten in eine Funktion wurde als Funktion geseedet")
+    f_over = res.functions.get(0x10000C)
+    check(f_over is not None,
+          "ueberlaufener Prolog-Seed (push mit lr) wurde verworfen")
+    if fails:
+        for m in fails:
+            print("[discovery] FAIL %s" % m)
+        return False
+    print("[discovery] OK")
+    return True
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     import ziglang
@@ -769,8 +832,10 @@ def main():
     print("\n%d/%d Tests bestanden" % (len(CASES) - failed, len(CASES)))
     if not exclusive_monitor_test():
         failed += 1
-    total = len(CASES) + 1
-    print("%d/%d Tests inkl. Exklusiv-Monitor bestanden" % (total - failed, total))
+    if not discovery_tests():
+        failed += 1
+    total = len(CASES) + 2
+    print("%d/%d Tests inkl. Exklusiv-Monitor und Discovery bestanden" % (total - failed, total))
     return 1 if failed else 0
 
 

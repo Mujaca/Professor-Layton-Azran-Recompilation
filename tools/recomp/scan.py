@@ -39,11 +39,11 @@ def _rd32(data, addr):
     return int.from_bytes(data[off:off + 4], "little")
 
 
-def _code_ok(data, addr):
+def _code_ok(data, addr, thumb=False):
     addr &= ~1
     if addr < isa.ARM_BASE or addr >= isa.ARM_BASE + len(data):
         return False
-    return isa.decode(data, addr) is not None
+    return isa.decode(data, addr, thumb=thumb) is not None
 
 
 def ldr_pc_table(data, ins, thumb):
@@ -82,7 +82,7 @@ def tbb_table(data, ins):
             break
         raw = int.from_bytes(data[o:o + unit], "little")
         tgt = base + 2 * raw
-        if not _code_ok(data, tgt):
+        if not _code_ok(data, tgt, thumb=True):
             break
         targets.append((tgt & ~1, True))
         end = off + unit
@@ -136,6 +136,20 @@ def direct_target(ins):
     return None
 
 
+def call_target_thumb(ins, caller_thumb):
+    """Modus der Zielfunktion eines direkten Calls (ARM/Thumb-Interworking).
+
+    Innerhalb eines Modus bleibt der Modus erhalten (`bl`), ein `blx #imm`
+    wechselt ihn: Thumb `blx #imm` springt nach ARM, ARM `blx #imm` nach
+    Thumb (bit0 des Ziels ist dort implizit gesetzt). Wird der Modus
+    ignoriert, landet der Scanner in Thumb-Regionen im ARM-Dekoder und
+    erzeugt Scheinbefehle samt Scheinaufrufen.
+    """
+    if caller_thumb:
+        return ins.id == A.ARM_INS_BL
+    return ins.id == A.ARM_INS_BLX
+
+
 def decode_function(data, fn, visited):
     # Modus automatisch erkennen, falls der Seed falsch geraten war
     if isa.decode(data, fn.addr, thumb=fn.thumb) is None:
@@ -179,7 +193,7 @@ def decode_function(data, fn, visited):
             if ins.id in (A.ARM_INS_BL, A.ARM_INS_BLX):
                 tgt = direct_target(ins)
                 if tgt is not None:
-                    fn.calls.add((tgt, ins.id == A.ARM_INS_BLX or fn.thumb))
+                    fn.calls.add((tgt, call_target_thumb(ins, fn.thumb)))
             nxt = cur + ins.size
             if is_terminator(ins):
                 tgt = direct_target(ins)
@@ -231,21 +245,42 @@ def decode_function(data, fn, visited):
 
 
 def pointer_seeds(data, limit=40000):
-    """Alle Woerter im Image, die auf Code zeigen, als Funktionskandidaten."""
+    """Alle Woerter im Image, die auf Code zeigen, als Funktionskandidaten.
+
+    Ein gesetztes Bit 0 bedeutet nach der ARM/Thumb-Interworking-Regel
+    Thumb-Code; der Kandidat wird in genau diesem Modus geprueft. Der
+    gesamte Codebereich (auch die ersten 4 KiB mit crt0/libc) wird
+    durchsucht, da Init-/Konstruktor-Tabellen dort stehen koennen.
+    """
     out = []
     base = isa.ARM_BASE
     end = base + len(data)
     for off in range(0, len(data) - 4, 4):
         v = int.from_bytes(data[off:off + 4], "little")
         addr = v & ~1
-        if addr < base + 0x1000 or addr >= end:
+        if addr < base or addr >= end:
             continue
-        if isa.decode(data, addr) is None:
+        thumb = bool(v & 1)
+        if not _code_ok(data, addr, thumb=thumb):
             continue
-        out.append((addr, "pointer@%06X" % off, False))
+        out.append((addr, "pointer@%06X" % (off + base), thumb))
         if len(out) >= limit:
             break
     return out
+
+
+def looks_like_entry(data, addr, thumb):
+    """Grober Funktionsanfang: Prolog, der LR sichert.
+
+    Nur fuer schwache Seeds (Zeiger/Prolog-Kandidaten) gedacht: liegt ein
+    solcher Kandidat in bereits dekodiertem Code, ist er trotzdem ein echter
+    Funktionsanfang, wenn dort ein Prolog steht (ein linear dekodierter
+    Block kann ueber den Anfang der naechsten Funktion gelaufen sein).
+    """
+    ins = isa.decode(data, addr, thumb=thumb)
+    if ins is None:
+        return False
+    return ins.id in (A.ARM_INS_PUSH, A.ARM_INS_STMDB) and "lr" in ins.op_str
 
 
 def scan(data, entries, follow_prologues=False, seed_pointers=False):
@@ -257,6 +292,13 @@ def scan(data, entries, follow_prologues=False, seed_pointers=False):
         while queue:
             addr, source, thumb = queue.pop(0)
             if addr in functions or addr < isa.ARM_BASE:
+                continue
+            # Zeiger-/Prolog-Seeds sind nur Kandidaten: liegt die Adresse
+            # mitten in bereits dekodiertem Code und beginnt dort kein
+            # Prolog, ist sie kein Funktionsanfang (falscher Seed). Direkte
+            # Call-Ziele (`bl@`) bleiben dagegen autoritativ.
+            weak = source.startswith("pointer@") or source == "prologue"
+            if weak and addr in visited and not looks_like_entry(data, addr, thumb):
                 continue
             fn = Function(addr=addr, thumb=thumb, source=source)
             functions[addr] = fn
@@ -278,7 +320,7 @@ def scan(data, entries, follow_prologues=False, seed_pointers=False):
         seeds = []
         for off in range(0, len(data) - 4, 4):
             addr = isa.ARM_BASE + off
-            if addr in functions:
+            if addr in functions or addr in visited:
                 continue
             ins = isa.decode(data, addr)
             if ins is None:
@@ -287,7 +329,7 @@ def scan(data, entries, follow_prologues=False, seed_pointers=False):
             if (m == "push" or m == "stmdb") and "lr" in ins.op_str:
                 seeds.append(addr)
         for addr in seeds:
-            if addr not in functions:
+            if addr not in functions and addr not in visited:
                 queue.append((addr, "prologue", False))
         drain()
 
