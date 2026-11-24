@@ -110,6 +110,16 @@ gebaut und mit `tools/frontier.py` gemessen; der Stand blieb **9/10
 unteren Screen auf `HleHidInput` ab; ohne Eingabe schreibt HID weiter den
 neutralen Zustand mit fortlaufenden Zeitstempeln.
 
+**Host-Bildausgabe (kein Workaround):** `runtime/platform/framebuffer.h` liest
+die vom Spiel gemeldeten Puffer spaltenweise (`address + x*stride +
+(239-y)*bpp`) und decodiert die fuenf GSP-Pixelformate; Fenster und
+`--shot datei.bmp` zeigen beide Screens untereinander (oben 400x240, unten
+320x240). `runtime/platform/gsp_fb.h` bildet `GPU::SetBufferSwap` nach
+(address_left1/2 nach `active_fb`, Register-`active_fb` aus `shown_fb`), und
+`runtime/kernel/hle.c` uebernimmt den sichtbaren Puffer erst beim VBlank.
+Getestet mit synthetischen Puffern in `tests/framebuffer_test.py`; das Spiel
+selbst ruft `SetBufferSwap` im natuerlichen Boot noch nicht auf (M2 offen).
+
 
 Offen (dokumentierte Abweichung): srv-`GetServiceHandle` mit `flags`-Bit0 == 0
 müsste in Azahar auf eine spätere Registrierung warten; der Port hat keinen

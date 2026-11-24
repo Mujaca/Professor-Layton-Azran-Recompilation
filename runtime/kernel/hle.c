@@ -7,6 +7,7 @@
  */
 #include "hle.h"
 #include "gpu.h"
+#include "gsp_fb.h"
 
 static uint32_t g_hle_gsp_handle;
 /* Von generiertem Code (gen_boot.c) lesbarer gsp-Handle. */
@@ -41,18 +42,39 @@ static CRITICAL_SECTION g_guest_lock;
 static int g_guest_lock_init = 0;
 static ArmCpu *g_main_cpu = NULL;
 
-/* Von SetBufferSwap (gsp 0x0005) gesetzte Framebuffer-Adressen. Screen 0 =
-   oben (400x240), Screen 1 = unten (320x240). Getter fuer den Port-Host. */
-static uint32_t g_gsp_fb_addr[3] = {0x1F000000u, 0x1F060000u, 0x1F0C0000u};
-static uint32_t g_gsp_fb_stride[3] = {0, 0, 0};
-static uint32_t g_gsp_fb_format[3] = {1, 1, 1};   /* 1 = BGR8 */
-uint32_t hle_gsp_fb_addr(int screen) {
-    return (screen >= 0 && screen < 3) ? g_gsp_fb_addr[screen] : 0u;
+/* GSP-Framebuffer-Zustand. Die Register (GspFbRegs) werden durch
+ * SetBufferSwap (gsp 0x0005) und die dirty-FrameBufferInfo im GSP-Shared-
+ * Memory gesetzt; die Anzeige liest den beim VBlank uebernommenen Stand
+ * (g_gsp_display). Damit wechselt das Bild genau im VBlank und nicht mitten
+ * im Frame (Azahar GPU::SetBufferSwap + Renderer-Latch, siehe gsp_fb.h).
+ * Screen 0 = oben (400x240), Screen 1 = unten (320x240). */
+static GspFbRegs g_gsp_fb_regs[2];
+static HleGspFrame g_gsp_display[2];
+static SRWLOCK g_gsp_fb_srw = SRWLOCK_INIT;
+static int g_gsp_fb_init_done = 0;
+
+static void gsp_fb_init(void) {
+    if (g_gsp_fb_init_done) return;
+    /* Startwerte wie Azahar PicaCore::InitializeRegs, Adressen im Port-VRAM. */
+    gsp_fb_regs_reset(&g_gsp_fb_regs[0], 0x1F000000u, 0x1F060000u, 3u * 240u, 1u);
+    gsp_fb_regs_reset(&g_gsp_fb_regs[1], 0x1F0C0000u, 0x1F120000u, 3u * 240u, 1u);
+    memset(g_gsp_display, 0, sizeof(g_gsp_display));
+    g_gsp_fb_init_done = 1;
 }
-void hle_gsp_fb_layout(int screen, uint32_t *stride, uint32_t *format) {
-    if (screen < 0 || screen > 2) screen = 0;
-    if (stride) *stride = g_gsp_fb_stride[screen];
-    if (format) *format = g_gsp_fb_format[screen];
+
+int hle_gsp_frame(int screen, HleGspFrame *out) {
+    int ok;
+    if (screen < 0 || screen > 1 || out == NULL) return 0;
+    AcquireSRWLockShared(&g_gsp_fb_srw);
+    *out = g_gsp_display[screen];
+    ok = out->valid;
+    ReleaseSRWLockShared(&g_gsp_fb_srw);
+    return ok;
+}
+
+/* Uebernimmt den sichtbaren Registerstand in die Anzeige (VBlank-Latch). */
+static void gsp_fb_latch_locked(int screen) {
+    gsp_fb_latch(&g_gsp_fb_regs[screen], &g_gsp_display[screen]);
 }
 
 static int g_no_lock = 0;
@@ -2409,10 +2431,11 @@ static void dsp_command(Ipc *r, uint32_t *p) {
     }
 }
 
-/* GSP-Service: minimal, damit ein Aufruf des Spiels nicht scheitert.
- * WriteHWRegs (0x0001), SetBufferSwap (0x0004), RegisterInterruptRelayQueue
- * (0x0006), TriggerCmdReqQueue (0x0008), ImportDisplayCaptureInfo (0x0009). */
-static int g_gsp_last_screen = 0;
+/* GSP-Service: Kommandonummern wie auf echter Hardware / in Azahar
+ * (gsp_gpu.cpp): 0x0001-0x0003 WriteHWRegs*, 0x0004 ReadHWRegs,
+ * 0x0005 SetBufferSwap, 0x0006 SetCommandList, 0x0007 RequestDma,
+ * 0x000C TriggerCmdReqQueue, 0x0013 RegisterInterruptRelayQueue,
+ * 0x0018 ImportDisplayCaptureInfo. */
 
 /* ---------- GSP-Interrupts und GX-Kommandos ----------
  * Layout nach 3dbrew "GSP Shared Memory" und Azahar (gsp_gpu.cpp,
@@ -2506,67 +2529,45 @@ static void gsp_signal_interrupt(int id) {
 static void gsp_vblank_fb_update(ArmCpu *c, int tid) {
     int screen;
     if (c == NULL) return;
+    gsp_fb_init();
     for (screen = 0; screen < 2; screen++) {
         uint32_t base = (GSP_SHMEM_BASE + 0x200u +
                          (uint32_t)(2 * tid + screen) * 0x40u) & 0x1FFFFFFFu;
-        uint32_t info, idx, left = 0, right = 0, st = 0, fmt = 0, shown = 0;
+        uint32_t info, idx, active = 0, left = 0, right = 0, st = 0, fmt = 0, shown = 0;
         uint8_t *fbu;
-        if (base + 0x40u > c->mem_size) return;
+        if (base + 0x40u > c->mem_size) continue;
         fbu = c->mem + base;
         if ((fbu[1] & 1u) == 0u) continue;   /* nicht aktualisiert */
         idx = fbu[0] & 1u;
         info = base + 8u + idx * 0x20u;
+        memcpy(&active, c->mem + info + 0u, 4);
         memcpy(&left, c->mem + info + 4u, 4);
         memcpy(&right, c->mem + info + 8u, 4);
         memcpy(&st, c->mem + info + 0xCu, 4);
         memcpy(&fmt, c->mem + info + 0x10u, 4);
         memcpy(&shown, c->mem + info + 0x14u, 4);
         fbu[1] = 0;
-        (void)right; (void)shown;
-        if (left == 0u || st == 0u) continue;
-        g_gsp_fb_addr[screen] = left;
-        g_gsp_fb_stride[screen] = st;
-        g_gsp_fb_format[screen] = fmt;
-        gpu_set_fb_size(left, (screen == 1) ? 320 : 400, 240);
-        g_gsp_last_screen = screen;
-        printf("[gsp] SetBufferSwap screen=%d fb=0x%08X stride=0x%X fmt=%X (VBlank)\n",
-               screen, left, st, fmt);
+        AcquireSRWLockExclusive(&g_gsp_fb_srw);
+        gsp_fb_regs_apply(&g_gsp_fb_regs[screen], screen, active, left, right,
+                          st, fmt, shown);
+        ReleaseSRWLockExclusive(&g_gsp_fb_srw);
+        if (left != 0u) {
+            gpu_set_fb_size(left, (screen == 1) ? 320 : 400, 240);
+            printf("[gsp] SetBufferSwap screen=%d fb=0x%08X stride=0x%X fmt=%X (VBlank)\n",
+                   screen, left, st, fmt);
+        }
     }
+    /* Anzeige-Wechsel genau im VBlank: der sichtbare Puffer (active_fb aus
+     * shown_fb) wird jetzt uebernommen. */
+    AcquireSRWLockExclusive(&g_gsp_fb_srw);
+    gsp_fb_latch_locked(0);
+    gsp_fb_latch_locked(1);
+    ReleaseSRWLockExclusive(&g_gsp_fb_srw);
 }
+
 
 /* Verarbeitet den GSP-Shared-Memory-Kommandopuffer (Azahar-Layout) und
    fuehrt ProcessCommandList-Eintraege (id 0x01) als PICA-Liste aus. */
-/* Liest die vom Spiel in den GSP-Shared-Memory geschriebene
-   FrameBufferInfo (Azahar gsp_gpu.h):
-     base = GSP-Shmem + 0x200 + (2*thread + screen) * 0x40
-     +0 byte index, +1 dirty, +8 FrameBufferInfo (0x20 je Eintrag)
-     FrameBufferInfo: +0 active_fb, +4 address_left, +0xC stride, +0x10 format.
-   Damit bekommt der Port die echten FB-Adressen beider Screens. */
-static int gsp_fb_info(ArmCpu *c, int screen, uint32_t *addr, uint32_t *stride,
-                       uint32_t *format) {
-    if (c == NULL) return 0;
-    for (int tid = 0; tid < 8; tid++) {
-        uint32_t base = (0x10002000u + 0x200u +
-                         ((uint32_t)(2 * tid + screen) * 0x40u)) & 0x1FFFFFFFu;
-        if (base + 0x40u > c->mem_size) break;
-        uint32_t idx = c->mem[base] & 1u;
-        uint32_t info = base + 8u + idx * 0x20u;
-        uint32_t active = 0, left = 0, right = 0, st = 0, fmt = 0;
-        memcpy(&active, c->mem + info + 0u, 4);
-        memcpy(&left, c->mem + info + 4u, 4);
-        memcpy(&right, c->mem + info + 8u, 4);
-        memcpy(&st, c->mem + info + 0xCu, 4);
-        memcpy(&fmt, c->mem + info + 0x10u, 4);
-        (void)active; (void)right;
-        if (left != 0u && st != 0u) {
-            if (addr) *addr = left;
-            if (stride) *stride = st;
-            if (format) *format = fmt;
-            return 1;
-        }
-    }
-    return 0;
-}
 
 
 
@@ -2994,30 +2995,31 @@ static void gsp_command(Ipc *r, uint32_t *p) {
             break;
         }
         case 0x0005: { /* SetBufferSwap(screen_id, FrameBufferInfo) */
-            /* Azahar: screen_id < 2 -> GPU().SetBufferSwap(screen_id, fb_info),
-               sonst ignoriert; Antwort ist immer ein Result. */
+            /* Azahar (gsp_gpu.cpp SetBufferSwap -> GPU::SetBufferSwap):
+               FrameBufferInfo = {active_fb, address_left, address_right,
+               stride, format, shown_fb, unknown}. Die Register werden sofort
+               gesetzt; sichtbar wird der Puffer (active_fb aus shown_fb) erst
+               beim naechsten VBlank (gsp_fb_latch_locked). Fuer screen_id >= 2
+               gibt es trotzdem ein Result (echte Hardware ignoriert es). */
             uint32_t screen = p[0];
+            uint32_t active = (r->normal >= 2) ? p[1] : 0u;
             uint32_t left = (r->normal >= 3) ? p[2] : 0u;
+            uint32_t right = (r->normal >= 4) ? p[3] : 0u;
             uint32_t st = (r->normal >= 5) ? p[4] : 0u;
             uint32_t fmt = (r->normal >= 6) ? p[5] : 0u;
+            uint32_t shown = (r->normal >= 7) ? p[6] : 0u;
             if (screen < 2u) {
-                if (left == 0u) {
-                    /* Noch keine FB-Adresse im Request: aus der
-                       FrameBufferUpdate-Struktur im GSP-Shared-Memory lesen. */
-                    uint32_t a = 0, s2 = 0, f2 = 0;
-                    if (gsp_fb_info(g_cpu, (int)screen, &a, &s2, &f2)) {
-                        left = a; st = s2; fmt = f2;
-                    } else {
-                        left = g_gsp_fb_addr[screen];
-                    }
+                gsp_fb_init();
+                if (left != 0u) {
+                    AcquireSRWLockExclusive(&g_gsp_fb_srw);
+                    gsp_fb_regs_apply(&g_gsp_fb_regs[screen], (int)screen, active,
+                                      left, right, st, fmt, shown);
+                    ReleaseSRWLockExclusive(&g_gsp_fb_srw);
+                    gpu_set_fb_size(gsp_fb_regs_visible_left(&g_gsp_fb_regs[screen]),
+                                    (screen == 1u) ? 320 : 400, 240);
                 }
-                g_gsp_fb_addr[screen] = left;
-                g_gsp_fb_stride[screen] = st;
-                g_gsp_fb_format[screen] = fmt;
-                gpu_set_fb_size(left, (screen == 1u) ? 320 : 400, 240);
-                g_gsp_last_screen = (int)screen;
-                if (g_log) printf("[gsp] SetBufferSwap screen=%u fb=0x%08X stride=0x%X fmt=%X\n",
-                                  screen, left, st, fmt);
+                if (g_log) printf("[gsp] SetBufferSwap screen=%u fb=0x%08X stride=0x%X fmt=%X active=%u shown=%u\n",
+                                  screen, left, st, fmt, active, shown);
             } else if (g_log) {
                 printf("[gsp] SetBufferSwap screen=%u ungueltig (ignoriert)\n", screen);
             }
@@ -3139,8 +3141,10 @@ static void gsp_command(Ipc *r, uint32_t *p) {
             /* Azahar: MakeBuilder(9,0), PushRaw(top_entry), PushRaw(bottom_entry). */
             ipc_begin(r, 0x0018, 9, 0);
             put_result(r);
-            ipc_put(r, g_gsp_fb_addr[0]); ipc_put(r, 0); ipc_put(r, 0); ipc_put(r, 0);
-            ipc_put(r, g_gsp_fb_addr[1]); ipc_put(r, 0); ipc_put(r, 0); ipc_put(r, 0);
+            ipc_put(r, gsp_fb_regs_visible_left(&g_gsp_fb_regs[0]));
+            ipc_put(r, 0); ipc_put(r, 0); ipc_put(r, 0);
+            ipc_put(r, gsp_fb_regs_visible_left(&g_gsp_fb_regs[1]));
+            ipc_put(r, 0); ipc_put(r, 0); ipc_put(r, 0);
             break;
         }
         default:
@@ -3527,6 +3531,7 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     }
     setup_config_mem(c);
     arm_pump_hook = hle_pump;
+    gsp_fb_init();
     g_vblank_run = 1;
     CreateThread(NULL, 0, vblank_thread, NULL, 0, NULL);
 

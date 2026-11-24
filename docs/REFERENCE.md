@@ -144,6 +144,39 @@ Assets: 3 × Level-5-`ARC0` (`lt6_*.fa`), 566 × BCSTM, 34 × MOFLEX. Texturen
   signalisierte Events (RegisterInterruptRelayQueue-Event) hängt der
   Render-Task.
 
+### Framebuffer und Anzeige
+
+* FrameBufferInfo (0x1C Byte, Azahar `core/hle/service/gsp/gsp_gpu.h`):
+  `+0x00 active_fb` (0 = Puffer „…1", 1 = „…2"), `+0x04 address_left`,
+  `+0x08 address_right`, `+0x0C stride` (Bytes je Spalte), `+0x10 format`
+  (Bits 0..2 Pixelformat, `(format & 0x70) == 0x20` = stereoskopisch oben),
+  `+0x14 shown_fb` (wird GPU-Register `active_fb`), `+0x18 unknown`.
+* Ein FrameBufferUpdate-Slot (0x40 Byte, GSP-Shared-Memory
+  `+0x200 + (2*thread + screen)*0x40`) enthält `index` (Byte 0, `&1` wählt
+  den Eintrag), `is_dirty` (Byte 1, Bit0) und zwei FrameBufferInfo-Einträge
+  ab `+0x08`/`+0x28`. GSP übernimmt einen Eintrag nur bei `is_dirty` (und
+  löscht das Flag) oder wenn ein Buffer-Swap erzwungen wird.
+* `gsp::Gpu SetBufferSwap` (IPC 0x0005) und der VBlank-Pfad schreiben die
+  GPU-Framebuffer-Register (Azahar `GPU::SetBufferSwap`,
+  `video_core/gpu.cpp`): `address_left1`/`address_left2` werden nach
+  `info.active_fb` getrennt gefüllt, Register-`active_fb` ←
+  `info.shown_fb & 0xFF`, dazu `stride` und `format` (untere 16 Bit). Das
+  rechte Auge (`address_right1/2`) wird nur oben im 3D-Modus und bei
+  `address_right != 0` getrennt geführt, sonst zeigt es auf den linken
+  Puffer. `address_left == 0` wird ignoriert.
+* Die Anzeige liest `address_left1` bzw. `address_left2` je nach Register
+  `active_fb`. Wirksam wird der Wechsel beim VBlank (Renderer-Latch), nicht
+  mitten im Frame.
+* Framebuffer sind spaltenweise gespeichert: Bei `columns` Spalten
+  (400 oben, 320 unten) und `rows` = 240 Zeilen liegt Pixel (x, y) bei
+  `address + x*stride + (rows-1-y)*bpp`; die Zeilen laufen innerhalb der
+  Spalte von unten nach oben. Azahar-Startwerte (`PicaCore::InitializeRegs`):
+  width 240, height 400/320, `stride = 3*240`, RGB8.
+* Pixelformate (`format & 7`): 0 RGBA8 (4 B, gespeichert A,B,G,R), 1 RGB8
+  (3 B, gespeichert B,G,R), 2 RGB565, 3 RGB5A1, 4 RGBA4 (je 2 B
+  little-endian). Aufhellung nach 8 Bit wie Azahar `common/color.h`:
+  5→8 `v<<3|v>>2`, 6→8 `v<<2|v>>4`, 4→8 `v<<4|v`, 1→8 `v*255`.
+
 ## HID (hid:USER / hid:SPVR)
 
 * Beide Dienste teilen **ein** Modul: ein Shared-Memory-Block (0x1000 Byte,

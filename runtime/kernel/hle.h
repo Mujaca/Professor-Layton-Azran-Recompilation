@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "arm_cpu.h"
+#include "gsp_fb.h"
 
 void hle_init(ArmCpu *c, const char *romfs_dir);
 /* Der Gast-Lock gehoert dem Host-Thread, der Gastcode ausfuehrt (bei uns der
@@ -17,12 +18,16 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm);
 void hle_report(void);
 void hle_tick_stats(int *calls, unsigned long long *tick);
 
-/* Framebuffer-Adresse je Screen (0 = oben, 1 = unten), gesetzt durch
-   gsp::Gpu SetBufferSwap (0x0005). */
-uint32_t hle_gsp_fb_addr(int screen);
-/* Zeilenabstand (Bytes) und Pixelformat (GSP: 0 RGBA8, 1 BGR8, 2 RGB565,
-   3 RGB5A1, 4 RGBA4) des zuletzt gemeldeten Framebuffers; stride 0 = unbekannt. */
-void hle_gsp_fb_layout(int screen, uint32_t *stride, uint32_t *format);
+/* Beim VBlank von der GSP uebernommener Framebuffer eines Screens
+ * (0 = oben 400x240, 1 = unten 320x240). Adresse ist der aktive Puffer aus
+ * der FrameBufferInfo (active_fb/shown_fb), stride in Bytes je Spalte,
+ * format = GSP-Formatwort (Bits 0..2 Pixelformat, siehe docs/REFERENCE.md).
+ * 3DS-Framebuffer sind spaltenweise: Pixel (x,y) liegt bei
+ * address + x*stride + (239-y)*bpp. Liefert 1, wenn ein Puffer gesetzt ist.
+ * Typ und VBlank-Latch stehen in runtime/platform/gsp_fb.h. */
+typedef GspFbLatched HleGspFrame;
+
+int hle_gsp_frame(int screen, HleGspFrame *out);
 
 /* Wird vom GPU-Teil aufgerufen */
 void hle_gpu_write_reg(uint32_t addr, uint32_t value);
