@@ -11,6 +11,8 @@
 static uint32_t g_hle_gsp_handle;
 /* Von generiertem Code (gen_boot.c) lesbarer gsp-Handle. */
 uint32_t g_hle_gsp_export;
+/* Interrupt-Event, das der Client bei RegisterInterruptRelayQueue uebergibt. */
+static uint32_t g_gsp_irq_handle;
 static uint32_t g_apt_param_ev = 0;
 static void dispatch_ipc(uint32_t handle);
 static int gsp_process_cmdqueue(ArmCpu *c);
@@ -239,7 +241,6 @@ static Handle g_handles[MAX_HANDLES];
 static int g_next_handle = 1;
 static uint32_t g_srv_handle = 0;
 static FILE *g_trace_file = NULL;
-static int g_srv_layout = 2;
 static uint32_t g_cur_handle = 0;
 static uint8_t *g_cur_mem = NULL;
 /* svc_mutex_hack */
@@ -350,56 +351,81 @@ static void ipc_put_handle_copy(Ipc *r, uint32_t handle) {
     ipc_put(r, handle);
 }
 
+/* Beginnt eine Antwort. Layout wie Azahar IPC::RequestBuilder:
+ *   Wort 0 : Header (wird erst in ipc_finish geschrieben)
+ *   Wort 1 : Result
+ *   danach : Normal-Parameter
+ *   zuletzt: Translate-Parameter (Puffer-/Handle-Deskriptoren)
+ * ipc_begin() reserviert nur das Header-Wort; das erste ipc_put() ist
+ * deshalb bereits der Result-Slot.  `normal`/`translate` sind Sollwerte
+ * (normal inkl. Result, translate inkl. Deskriptor-Woerter). */
 static void ipc_begin(Ipc *r, uint32_t cmd, int normal, int translate) {
     r->cmd = cmd;
     r->normal = normal;
     r->translate = translate;
-    r->written = 0;
+    r->written = 1;
+    r->buf[0] = 0;
 }
 
 static void ipc_finish(Ipc *r) {
-    r->buf[0] = ((r->cmd & 0xFFFFu) << 16) | ((uint32_t)(r->normal & 0x3F) << 6)
+    /* Header aus den tatsaechlich geschriebenen Woertern ableiten, damit
+       Header und Nutzdaten nie auseinanderlaufen. */
+    int normal = r->written - 1 - r->translate;
+    if (normal < 0) normal = 0;
+    if (normal != r->normal && g_log) {
+        static unsigned char warned[4096];
+        unsigned key = (uint32_t)((r->cmd & 0xFFu) << 4) ^ (uint32_t)((r->cmd >> 8) & 0xFu);
+        if (key < sizeof(warned) && !warned[key]) {
+            warned[key] = 1;
+            printf("[ipc] LAYOUT cmd=0x%04X: Header normal=%d, geschrieben=%d (translate=%d)\n",
+                   r->cmd, normal, r->normal, r->translate);
+            fflush(stdout);
+        }
+    }
+    r->buf[0] = ((r->cmd & 0xFFFFu) << 16) | ((uint32_t)(normal & 0x3F) << 6)
                 | (uint32_t)(r->translate & 0x3F);
-    /* Der Reply-Puffer liegt bereits in der TLS-Struktur (TLS+0x80):
-       Wort 1 = Result, Wort 2..n = Normal-Parameter, danach Translate.
-       Keine separaten TLS-Felder ueberschreiben. */
 }
+
+static void put_result(Ipc *r) {
+    ipc_put(r, 0);      /* ResultSuccess */
+}
+
+static void generic_command(Ipc *r, int service);
 
 /* ---------- Services ---------- */
 
 static void srv_command(Ipc *r, uint32_t *p) {
     switch (r->cmd) {
-        case 1: { /* RegisterClient */
+        case 1: { /* RegisterClient: Result (Azahar MakeBuilder(1,0)) */
             ipc_begin(r, 1, 1, 0);
-            ipc_put(r, 0);
+            put_result(r);
             break;
         }
-        case 2: { /* EnableNotification: keine Parameter */
+        case 2: { /* EnableNotification: Result, CopyHandle(Semaphore) */
             uint32_t h = (uint32_t)alloc_handle(SVC_OTHER, "srv:notif");
             if (g_log) printf("[srv] EnableNotification -> %u\n", h);
-            ipc_begin(r, 2, 2, 2);
-            ipc_put(r, 0);
-            ipc_put(r, h);
+            ipc_begin(r, 2, 1, 2);
+            put_result(r);
             ipc_put_handle_copy(r, h);
             break;
         }
-        case 3: { /* RegisterService(name[8], name_len, max_sessions) */
+        case 3: { /* RegisterService(name[8], name_len, max_sessions): Result, MoveHandle */
             char name[9];
             memcpy(name, (const char *)p, 8);
             name[8] = 0;
             int h = alloc_handle(SVC_OTHER, name);
             if (g_log) printf("[srv] RegisterService \"%s\"\n", name);
             ipc_begin(r, 3, 1, 2);
-            ipc_put(r, 0);
+            put_result(r);
             ipc_put_handle(r, (uint32_t)h);
             break;
         }
-        case 4: { /* UnregisterService */
+        case 4: { /* UnregisterService: Result */
             ipc_begin(r, 4, 1, 0);
-            ipc_put(r, 0);
+            put_result(r);
             break;
         }
-        case 5: { /* GetServiceHandle(name[8], name_len, flags) */
+        case 5: { /* GetServiceHandle(name[8], name_len, flags): Result, MoveHandle */
             char name[9];
             memcpy(name, (const char *)p, 8);
             name[8] = 0;
@@ -407,39 +433,19 @@ static void srv_command(Ipc *r, uint32_t *p) {
             if (name_len < 8) name[name_len] = 0;
             int svc = service_from_name(name);
             int h = alloc_handle(svc, name);
-            /* WORKAROUND(wa-fs-client-slot): Spieladresse 0x3D91D0 direkt setzen,
-               weil der Setter im Spiel nie laeuft. Vermutlich Folge eines falschen
-               Reply-Layouts (docs/WORKAROUNDS.md). */
-            if (strcmp(name, "fs:USER") == 0 && g_cpu != NULL) {
-                uint32_t hv = (uint32_t)h;
-                memcpy(g_cpu->mem + 0x3D91D0u, &hv, 4);
-            }
             if (svc == SVC_GSP_GPU) g_hle_gsp_handle = h;
             if (g_log || getenv("HLE_SRV_NAMES")) {
                 printf("[srvname] \"%s\" srvh=%u blk=%08X lr=%08X desc=%08X -> %d (%s)\n",
                        name, g_cur_handle, arm_last_block, g_cpu ? g_cpu->r[14] : 0u,
                        0x003D91E8u, h, SERVICE_NAMES[svc]);
             }
-            if (g_srv_layout == 1) {
-                ipc_begin(r, 5, 2, 0);
-                ipc_put(r, 0);
-                ipc_put(r, (uint32_t)h);
-            } else if (g_srv_layout != 2) {
-                ipc_begin(r, 5, 1, 2);
-                ipc_put(r, 0);
-                ipc_put_handle(r, (uint32_t)h);
-            } else {
-                ipc_begin(r, 5, 2, 2);
-                ipc_put(r, 0);
-                ipc_put(r, (uint32_t)h);
-                ipc_put_handle(r, (uint32_t)h);
-            }
+            ipc_begin(r, 5, 1, 2);
+            put_result(r);
+            ipc_put_handle(r, (uint32_t)h);
             break;
         }
         default:
-            if (g_log) printf("[srv] cmd %u (unbekannt) -> 0\n", r->cmd);
-            ipc_begin(r, r->cmd, 1, 0);
-            ipc_put(r, 0);
+            generic_command(r, SVC_SRV);
             break;
     }
 }
@@ -457,31 +463,27 @@ static uint32_t g_cmdlist_size = 0;
 static void y2r_command(Ipc *r, uint32_t *p);
 
 
-static void put_result(Ipc *r) {
-    ipc_put(r, 0);
-}
-
 static int g_apt_wakeup_sent = 0;
 
 static void apt_command(Ipc *r, uint32_t *p) {
     switch (r->cmd) {
-        case 1: { /* GetLockHandle */
-            uint32_t attrs = p[0];
+        case 1: { /* GetLockHandle: Result, AppletAttributes, State, CopyHandle(Lock) */
+            uint32_t attrs = (r->normal >= 1) ? p[0] : 0u;
             uint32_t lock = (uint32_t)alloc_handle(SVC_OTHER, "apt-lock");
+            /* Azahar (apt.cpp): MakeBuilder(3,2), Push(ResultSuccess,
+               corrected_attributes, state), PushCopyObjects(lock). */
             ipc_begin(r, 1, 3, 2);
             put_result(r);
-            ipc_put(r, attrs);
-            /* VERDACHT (docs/WORKAROUNDS.md §5): Azahar antwortet
-               Result, AppletAttributes, State, CopyHandle. Hier landet attrs
-               im Result-Slot und ein Wort fehlt. */
-            ipc_put(r, 0u);   /* state */
+            ipc_put(r, attrs);      /* corrected AppletAttributes */
+            ipc_put(r, 0u);         /* state */
             ipc_put_handle_copy(r, lock);
             break;
         }
-        case 2: { /* Initialize -> { CopyHandle x2, h1, h2 } */
+        case 2: { /* Initialize: Result, CopyHandle(Notification), CopyHandle(Parameter) */
             uint32_t ev1 = (uint32_t)alloc_handle(SVC_OTHER, "apt-notif");
             uint32_t ev2 = (uint32_t)alloc_handle(SVC_OTHER, "apt-param");
             g_apt_param_ev = ev2;
+            /* Azahar: MakeBuilder(1,3), PushCopyObjects(notif, param). */
             ipc_begin(r, 2, 1, 3);
             put_result(r);
             ipc_put(r, (1u << 26));   /* CopyHandle-Deskriptor, 2 Handles */
@@ -489,43 +491,36 @@ static void apt_command(Ipc *r, uint32_t *p) {
             ipc_put(r, ev2);
             break;
         }
-        case 0x9: { /* NotifyToWait (Azahar: 1 Wort Result) */
-            ipc_begin(r, 0x9, 1, 0);
-            put_result(r);
-            break;
-        }
-        case 0x4B: { /* AppletUtility (Azahar: Result + Ausgabewert) */
-            ipc_begin(r, 0x4B, 2, 0);
-            put_result(r);
-            ipc_put(r, 0);
-            break;
-        }
-        case 0x4F: { /* SetAppCpuTimeLimit */
-            ipc_begin(r, 0x4F, 1, 0);
-            put_result(r);
-            break;
-        }
-        case 0x50: { /* GetAppCpuTimeLimit -> (Result, Limit) */
-            ipc_begin(r, 0x50, 2, 0);
-            put_result(r);
-            ipc_put(r, 0x1Eu);      /* 30 % */
-            break;
-        }
-        case 3: case 4: case 0x28: { /* Enable / Finalize / NotifyToWait */
+        case 3: case 4: case 0x28: { /* Enable / Finalize / CloseLibraryApplet */
             ipc_begin(r, r->cmd, 1, 0);
             put_result(r);
             break;
         }
-        case 5: { /* GetAppletManInfo */
+        case 5: { /* GetAppletManInfo: Result + 4 AppletIDs */
             ipc_begin(r, 5, 5, 0);
             put_result(r);
             ipc_put(r, 1);         /* active applet position */
             ipc_put(r, 0x101);     /* requested applet id */
-            ipc_put(r, 0x101);     /* home menu id */
+            ipc_put(r, 0x101);     /* home menu applet id */
             ipc_put(r, 0x100);     /* active applet id */
             break;
         }
+        case 9: { /* IsRegistered: Result + bool */
+            ipc_begin(r, 9, 2, 0);
+            put_result(r);
+            ipc_put(r, 1);
+            break;
+        }
+        case 0x0B: { /* InquireNotification: Result + SignalType */
+            ipc_begin(r, 0x0B, 2, 0);
+            put_result(r);
+            ipc_put(r, 0);
+            break;
+        }
         case 0x0D: case 0x0E: { /* ReceiveParameter / GlanceParameter */
+            /* Azahar (apt.cpp): MakeBuilder(4,4)
+               Push(ResultSuccess, sender_id, signal, size),
+               PushMoveObjects(object), PushStaticBuffer(buffer, 0). */
             uint32_t dsc_flags = 0, dsc_addr = 0;
             if (r->translate >= 2) {
                 dsc_flags = p[r->normal];
@@ -533,27 +528,25 @@ static void apt_command(Ipc *r, uint32_t *p) {
             }
             /* Hardware-Semantik: GlanceParameter (0x000E) konsumiert den
                Parameter NICHT, ReceiveParameter (0x000D) schon. Der Wakeup
-               wird erst zugestellt, wenn die Main-Loop bereits pollt
-               (HLE_APT_WAKE_AT, Default 40 Aufrufe), danach NoData. */
+               wird erst zugestellt, wenn die Main-Loop bereits pollt, danach
+               NoData. */
             {
                 static unsigned rx_calls = 0;
-                unsigned wake_at = 1u;   /* Referenz: Parameter liegt schon bei Initialize in der Queue */
+                unsigned wake_at = 1u;
                 rx_calls++;
                 if (!g_apt_wakeup_sent && rx_calls >= wake_at) {
                     if (r->cmd == 0x000D) g_apt_wakeup_sent = 1;
-                    /* Referenz: sender=0, signal=1 (Wakeup), Groesse=0.
-                       Der Header belegt cmdbuf[0] -> Dummy-Wort, damit
-                       Result/Sender/Signal/Groesse auf cmdbuf[1..4] liegen. */
-                    ipc_begin(r, r->cmd, 5, r->translate >= 2 ? 2 : 0);
-                    ipc_put(r, 0);          /* Dummy (Header-Slot) */
-                    ipc_put(r, 0);          /* Result   -> cmdbuf[1] */
-                    ipc_put(r, 0u);         /* Sender */
+                    uint32_t obj = (uint32_t)alloc_handle(SVC_OTHER, "apt-parobj");
+                    Handle *oh = get_handle(obj);
+                    if (oh != NULL) oh->signaled = 1;
+                    ipc_begin(r, r->cmd, 4, 4);
+                    put_result(r);
+                    ipc_put(r, 0u);         /* sender id */
                     ipc_put(r, 1u);         /* Signal: Wakeup */
-                    ipc_put(r, 0);          /* Parameter-Groesse -> cmdbuf[4] */
-                    if (r->translate >= 2) {
-                        ipc_put(r, dsc_flags);
-                        ipc_put(r, dsc_addr);
-                    }
+                    ipc_put(r, 0);          /* Parameter-Groesse */
+                    ipc_put_handle(r, obj); /* MoveHandle(Parameter-Objekt) */
+                    ipc_put(r, (2u | (0u << 10) | (0u << 14)));  /* StaticBuffer, 0 Byte */
+                    ipc_put(r, dsc_addr);
                     if (g_apt_param_ev != 0) {
                         Handle *ph = get_handle(g_apt_param_ev);
                         if (ph != NULL) ph->signaled = 1;
@@ -562,15 +555,41 @@ static void apt_command(Ipc *r, uint32_t *p) {
                 } else {
                     ipc_begin(r, r->cmd, 1, 0);
                     /* Result(NoData=1007, Applet=51, InvalidState=5, Status=25) */
-                    ipc_put(r, 0xC8A303EFu);   /* Result(NoData=1007, Applet=51, InvalidState=5, Status=25) */
+                    ipc_put(r, 0xC8A303EFu);
                 }
             }
             break;
         }
-        case 0x0B: case 0x43: { /* InquireNotification / ? */
-            ipc_begin(r, r->cmd, 2, 0);
+        case 0x43: { /* NotifyToWait: Result */
+            ipc_begin(r, 0x43, 1, 0);
             put_result(r);
-            ipc_put(r, 0);
+            break;
+        }
+        case 0x4B: { /* AppletUtility: Result, UtilityResult, StaticBuffer(out) */
+            uint32_t out_size = (r->normal >= 3) ? p[2] : 0u;
+            uint32_t dsc_flags = (r->translate >= 2) ? p[r->normal] : 2u;
+            uint32_t dsc_addr = (r->translate >= 2) ? p[r->normal + 1] : 0u;
+            (void)dsc_flags;
+            if (dsc_addr != 0u && out_size != 0u && g_cpu != NULL) {
+                uint32_t off = dsc_addr & 0x1FFFFFFFu;
+                if (off + out_size <= g_cpu->mem_size) memset(g_cpu->mem + off, 0, out_size);
+            }
+            ipc_begin(r, 0x4B, 2, 2);
+            put_result(r);
+            ipc_put(r, 0);           /* Utility-Funktionsergebnis */
+            ipc_put(r, dsc_flags);   /* StaticBuffer-Deskriptor */
+            ipc_put(r, dsc_addr);
+            break;
+        }
+        case 0x4F: { /* SetAppCpuTimeLimit: Result */
+            ipc_begin(r, 0x4F, 1, 0);
+            put_result(r);
+            break;
+        }
+        case 0x50: { /* GetAppCpuTimeLimit: Result + Limit */
+            ipc_begin(r, 0x50, 2, 0);
+            put_result(r);
+            ipc_put(r, 0x1Eu);      /* 30 % */
             break;
         }
         default:
@@ -582,15 +601,41 @@ static void apt_command(Ipc *r, uint32_t *p) {
 static void hid_command(Ipc *rp, uint32_t *p) {
     (void)p;
     switch (rp->cmd) {
-        case 0x000A: { /* GetIPCHandles: SharedMem + 5 Event-Handles */
+        case 0x000A: { /* GetIPCHandles: Result, CopyHandle(SharedMem + 5 Events) */
+            /* Azahar (hid.cpp): MakeBuilder(1,7), PushCopyObjects(shared_mem,
+               event_pad_or_touch_1, event_pad_or_touch_2, event_accelerometer,
+               event_gyroscope, event_debug_pad). */
             uint32_t shmem = (uint32_t)alloc_handle(SVC_OTHER, "hid-shmem");
             uint32_t h[5];
             for (int i = 0; i < 5; i++) h[i] = (uint32_t)alloc_handle(SVC_OTHER, "hid-ev");
             ipc_begin(rp, 0x000A, 1, 7);
-            ipc_put(rp, 0);
+            put_result(rp);
             ipc_put(rp, (5u << 26));       /* CopyHandle-Deskriptor, 6 Handles */
             ipc_put(rp, shmem);
             for (int i = 0; i < 5; i++) ipc_put(rp, h[i]);
+            break;
+        }
+        case 0x0011: case 0x0012: case 0x0013: case 0x0014: { /* Accelerometer/Gyro enable/disable */
+            ipc_begin(rp, rp->cmd, 1, 0);
+            put_result(rp);
+            break;
+        }
+        case 0x0015: { /* GetGyroscopeLowRawToDpsCoefficient: Result + f32 */
+            ipc_begin(rp, 0x0015, 2, 0);
+            put_result(rp);
+            ipc_put(rp, 0);        /* 0.0f */
+            break;
+        }
+        case 0x0016: { /* GetGyroscopeLowCalibrateParam: Result + 5 Woerter */
+            ipc_begin(rp, 0x0016, 6, 0);
+            put_result(rp);
+            for (int i = 0; i < 5; i++) ipc_put(rp, 0);
+            break;
+        }
+        case 0x0017: { /* GetSoundVolume: Result + u8 */
+            ipc_begin(rp, 0x0017, 2, 0);
+            put_result(rp);
+            ipc_put(rp, 0x3F);     /* volle Lautstaerke */
             break;
         }
         default:
@@ -714,15 +759,6 @@ static int open_guest_file(const char *guest_path, FileSlot **slot_out) {
 }
 
 static void fs_command(Ipc *r, uint32_t *p) {
-    /* WORKAROUND(wa-fs-client-slot): siehe srv_command.
-       Der FS-Client der App prueft [0x003D91D0] auf != 0 und ruft sonst
-       svcBreak (Assertion in 0x2763B8). Wir hinterlegen dort den aktuellen
-       fs:USER-Handle, sobald die App irgendeinen FS-Befehl schickt. */
-    if (g_cpu != NULL && (0x3D91D0u & 0x1FFFFFFFu) + 4 <= g_cpu->mem_size) {
-        uint32_t hv = (uint32_t)g_cur_handle;
-        if (hv == 0) hv = 0x1000u;
-        memcpy(g_cpu->mem + 0x3D91D0u, &hv, 4);
-    }
     if (getenv("HLE_FS_PATHS")) {
         printf("[fscmd] cmd=0x%04X n=%d t=%d", r->cmd, r->normal, r->translate);
         for (int i = 0; i < r->normal && i < 8; i++) printf(" p%d=%08X", i, p[i]);
@@ -900,46 +936,35 @@ static void fs_command(Ipc *r, uint32_t *p) {
                        r->cmd == 0x0802 ? "OpenFile" : "OpenFileDirectly", path,
                        opened ? "ok" : "FEHLER", h, opened ? slot->size / 1024 : 0);
             }
-            /* Die SDK (fn_001078F4) prueft Reply-Wort 2 gegen 0x28; deshalb
-               wird dort die erwartete Groesse geliefert, danach der Handle. */
-            ipc_begin(r, r->cmd, 2, 2);
-            ipc_put(r, 0);
-            ipc_put(r, 0x28u);
-            ipc_put_handle(r, h);
-            /* WORKAROUND(wa-fs-client-slot): Datei-Client-Objekt (0x3D66C0+4) mitversorgen: der zugehoerige
-               Setter im Spiel laeuft nie, sonst werfen Dateizugriffe E0A046DA. */
-            if (h != 0 && g_cpu != NULL && (0x3D66C4u & 0x1FFFFFFFu) + 4 <= g_cpu->mem_size)
-                memcpy(g_cpu->mem + 0x3D66C4u, &h, 4);
+            /* Azahar (fs_user.cpp): MakeBuilder(1,2)
+               Push(file_res.Code()), PushMoveObjects(file). */
+            ipc_begin(r, r->cmd, 1, 2);
+            ipc_put(r, 0);          /* ResultSuccess */
+            ipc_put_handle(r, h);   /* MoveHandle(file) */
             break;
         }
-        case 0x0861: case 0x0862: { /* InitializeWithSdkVersion / SetPriority -> Result */
-            ipc_begin(r, r->cmd, 2, 0);
-            ipc_put(r, 0);
-            ipc_put(r, 0);
+        case 0x0861: case 0x0862: { /* InitializeWithSdkVersion / SetPriority: Result */
+            ipc_begin(r, r->cmd, 1, 0);
+            put_result(r);
             break;
         }
-        case 0x0863: { /* GetPriority -> Result + Priority */
-            ipc_begin(r, 0x0863, 3, 0);
-            ipc_put(r, 0);
-            ipc_put(r, 0);
-            ipc_put(r, 0);
+        case 0x0863: { /* GetPriority: Result + Priority */
+            ipc_begin(r, 0x0863, 2, 0);
+            put_result(r);
+            ipc_put(r, 0);          /* priority (noch nicht gesetzt) */
             break;
         }
-        case 0x080C: { /* OpenArchive */
+        case 0x080C: { /* OpenArchive: Result + u64 ArchiveHandle */
             char path[256];
             find_path(p, path, sizeof(path));
             uint32_t h = (uint32_t)alloc_handle(SVC_FS_USER, "archive");
             if (g_log) printf("[fs] OpenArchive id=0x%08X type=%u size=%u path=\"%s\" -> handle %u\n",
                               p[0], p[1], p[2], path, h);
-            /* WORKAROUND(wa-fs-client-slot): Der FS-Client der App (Objekt 0x3D66C0) braucht den
-               Archiv-Handle in +4, sonst wirft 0x212CC4 E0A046DA. */
-            if (g_cpu != NULL && (0x3D66C4u & 0x1FFFFFFFu) + 4 <= g_cpu->mem_size)
-                memcpy(g_cpu->mem + 0x3D66C4u, &h, 4);
-            /* Azahar: MakeBuilder(3,0) -> result, ArchiveHandle, 0 */
+            /* Azahar: MakeBuilder(3,0), Push(result), PushRaw<u64>(handle). */
             ipc_begin(r, 0x080C, 3, 0);
-            ipc_put(r, 0);
-            ipc_put(r, h);
-            ipc_put(r, 0);
+            put_result(r);
+            ipc_put(r, h);          /* handle low  */
+            ipc_put(r, 0);          /* handle high */
             break;
         }
         case 0x0808: { /* CreateFile -> MakeBuilder(1,0) */
@@ -967,10 +992,16 @@ static void fs_command(Ipc *r, uint32_t *p) {
             ipc_put(r, 0);
             break;
         }
-        case 0x0817: case 0x0818: { /* IsSdmcDetected / Writeable */
+        case 0x0813: case 0x0821: { /* GetCardType / CardSlotIsInserted: Result + bool */
             ipc_begin(r, r->cmd, 2, 0);
+            put_result(r);
             ipc_put(r, 0);
-            ipc_put(r, 0);
+            break;
+        }
+        case 0x0817: case 0x0818: { /* IsSdmcDetected / IsSdmcWriteable: Result + bool */
+            ipc_begin(r, r->cmd, 2, 0);
+            put_result(r);
+            ipc_put(r, 1);          /* virtuelle SD vorhanden/schreibbar */
             break;
         }
         default:
@@ -993,17 +1024,19 @@ static void file_command(Ipc *r, uint32_t *p) {
         /* Richtige Reply-Form auch ohne Datei, sonst wertet die SDK
            "0 Bytes gelesen" als Fehler (F96047A2). */
         if (r->cmd == 0x0802 || r->cmd == 0x0803) {
-            ipc_begin(r, r->cmd, 2, 0);
-            ipc_put(r, 0);
-            ipc_put(r, 0);
+            /* Azahar: MakeBuilder(2,2), Result + Grosse + MappedBuffer-Echo */
+            ipc_begin(r, r->cmd, 2, 2);
+            put_result(r);
+            ipc_put(r, 0);          /* gelesene/geschriebene Bytes */
+            for (int i = 0; i < 2; i++) ipc_put(r, (r->translate >= 2) ? p[r->normal + i] : 0u);
         } else if (r->cmd == 0x0804) {
             ipc_begin(r, r->cmd, 3, 0);
-            ipc_put(r, 0);
+            put_result(r);
             ipc_put(r, 0);
             ipc_put(r, 0);
         } else {
             ipc_begin(r, r->cmd, 1, 0);
-            ipc_put(r, 0);
+            put_result(r);
         }
         return;
     }
@@ -1111,14 +1144,18 @@ static void file_command(Ipc *r, uint32_t *p) {
         }
         default:
             if (g_log) printf("[file] cmd 0x%04X -> 0\n", r->cmd);
-            if (r->cmd == 0x080A) { /* SetPriority -> Result + Priority */
-                ipc_begin(r, 0x080A, 2, 0);
-                ipc_put(r, 0);
+            if (r->cmd == 0x080A) { /* SetPriority: Result */
+                ipc_begin(r, 0x080A, 1, 0);
+                put_result(r);
+                break;
+            }
+            if (r->cmd == 0x080B) { /* GetPriority: Result + Priority */
+                ipc_begin(r, 0x080B, 2, 0);
+                put_result(r);
                 ipc_put(r, 0);
                 break;
             }
-            ipc_begin(r, r->cmd, 1, 0);
-            ipc_put(r, 0);
+            generic_command(r, SVC_FILE);
             break;
     }
 }
@@ -1146,36 +1183,31 @@ static void cfg_command(Ipc *r, uint32_t *p) {
                 }
             }
             if (g_log) printf("[cfg] GetConfig block=0x%08X size=%u buf=0x%08X\n", block, size, addr);
-            ipc_begin(r, 0x0001, 1, r->translate);
-            ipc_put(r, 0);
-            for (int i = 0; i < r->translate; i++) ipc_put(r, p[r->normal + i]);
+            /* Azahar (cfg.cpp): MakeBuilder(1,2), Push(result), PushMappedBuffer. */
+            ipc_begin(r, 0x0001, 1, 2);
+            put_result(r);
+            for (int i = 0; i < 2; i++) ipc_put(r, (r->translate >= 2) ? p[r->normal + i] : 0u);
             break;
         }
-        case 0x0002: { /* GetRegion */
+        case 0x0002: { /* GetRegion: Result + Region-Code */
             ipc_begin(r, 0x0002, 2, 0);
-            ipc_put(r, 0);
+            put_result(r);
             ipc_put(r, 2);      /* EUR */
             break;
         }
-        case 0x0003: { /* GetTransferableId(salt) -> Result + u64 */
-            ipc_begin(r, 0x0003, 4, 0);
-            ipc_put(r, 0);              /* Dummy (Header-Slot) */
-            ipc_put(r, 0);              /* Result */
+        case 0x0003: { /* GetTransferableId(salt): Result + u64 */
+            /* Azahar: MakeBuilder(3,0), Push(result, low, high). */
+            ipc_begin(r, 0x0003, 3, 0);
+            put_result(r);
             ipc_put(r, 0x12345678u);    /* low  */
             ipc_put(r, 0x00000000u);    /* high */
             if (g_log) printf("[cfg] GetTransferableId salt=0x%X -> ok\n", p[0]);
             break;
         }
-        case 0x0005: { /* GetSystemModel */
+        case 0x0005: { /* GetSystemModel: Result + Model */
             ipc_begin(r, 0x0005, 2, 0);
-            ipc_put(r, 0);
-            ipc_put(r, 0);
-            break;
-        }
-        case 0x000B: { /* IsFangateSupported */
-            ipc_begin(r, 0x000B, 2, 0);
-            ipc_put(r, 0);
-            ipc_put(r, 0);
+            put_result(r);
+            ipc_put(r, 0);      /* CTR (Old3DS) */
             break;
         }
         default:
@@ -1187,21 +1219,43 @@ static void cfg_command(Ipc *r, uint32_t *p) {
 static void ndm_command(Ipc *r, uint32_t *p) {
     (void)p;
     switch (r->cmd) {
-        case 0x0006:   /* SuspendDaemons(bit_mask) -> Result */
+        case 0x0001:   /* EnterExclusiveState: Result */
+        case 0x0002:   /* LeaveExclusiveState */
+        case 0x0004:   /* LockState */
+        case 0x0005:   /* UnlockState */
+        case 0x0006:   /* SuspendDaemons */
         case 0x0007:   /* ResumeDaemons */
+        case 0x0008:   /* SuspendScheduler */
+        case 0x0009:   /* ResumeScheduler */
+        case 0x0010:   /* SetScanInterval */
+        case 0x0012:   /* SetRetryInterval */
         case 0x0014:   /* OverrideDefaultDaemons */
         case 0x0015:   /* ResetDefaultDaemons */
-        case 0x0001:   /* EnterExclusiveState */
-        case 0x0002:   /* LeaveExclusiveState */
-        case 0x0004: case 0x0005:   /* LockState / UnlockState */
-        case 0x0008: case 0x0009: { /* SuspendScheduler / ResumeScheduler */
+        case 0x0017: { /* ClearHalfAwakeMacFilter */
+            ipc_begin(r, r->cmd, 1, 0);
+            put_result(r);
+            break;
+        }
+        case 0x0003:   /* QueryExclusiveMode: Result + State */
+        case 0x000D:   /* QueryStatus: Result + Status */
+        case 0x0011:   /* GetScanInterval: Result + Interval */
+        case 0x0013:   /* GetRetryInterval: Result + Interval */
+        case 0x0016: { /* GetDefaultDaemons: Result + Mask */
             ipc_begin(r, r->cmd, 2, 0);
+            put_result(r);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x000E:   /* GetDaemonDisableCount: Result + 2 Counts */
+        case 0x000F: { /* GetSchedulerDisableCount: Result + 2 Counts */
+            ipc_begin(r, r->cmd, 3, 0);
+            put_result(r);
             ipc_put(r, 0);
             ipc_put(r, 0);
             break;
         }
         default:
-            generic_command(r, SVC_OTHER);
+            generic_command(r, SVC_NDM);
             break;
     }
 }
@@ -1209,18 +1263,22 @@ static void ndm_command(Ipc *r, uint32_t *p) {
 static void boss_command(Ipc *r, uint32_t *p) {
     (void)p;
     switch (r->cmd) {
-        case 0x0001:   /* InitializeSession(program_id) -> Result */
-        case 0x0006: { /* RegisterPrivateClientCert -> Result */
-            ipc_begin(r, r->cmd, 2, 0);
-            ipc_put(r, 0);      /* Dummy (Header-Slot) */
-            ipc_put(r, 0);      /* ResultSuccess */
-            if (g_log) printf("[boss] cmd 0x%04X -> ok\n", r->cmd);
+        case 0x0001: { /* InitializeSession: Result */
+            ipc_begin(r, 0x0001, 1, 0);
+            put_result(r);
             break;
         }
-        case 0x000A: { /* GetOptoutFlag -> Result + u8 flag */
-            ipc_begin(r, 0x000A, 3, 0);
-            ipc_put(r, 0);      /* Dummy */
-            ipc_put(r, 0);      /* ResultSuccess */
+        case 0x0006: { /* RegisterPrivateClientCert: Result + 2 MappedBuffer-Echos */
+            /* Azahar (boss.cpp): MakeBuilder(1,4),
+               PushMappedBuffer(buffer1), PushMappedBuffer(buffer2). */
+            ipc_begin(r, 0x0006, 1, 4);
+            put_result(r);
+            for (int i = 0; i < 4; i++) ipc_put(r, (r->translate > i) ? p[r->normal + i] : 0u);
+            break;
+        }
+        case 0x000A: { /* GetOptoutFlag: Result + Flag */
+            ipc_begin(r, 0x000A, 2, 0);
+            put_result(r);
             ipc_put(r, 0);      /* output_flag = 0 */
             break;
         }
@@ -1231,18 +1289,27 @@ static void boss_command(Ipc *r, uint32_t *p) {
 }
 
 static void ptm_command(Ipc *r, uint32_t *p) {
-    (void)p;
     switch (r->cmd) {
-        case 0x000B: { /* GetStepHistory -> Result */
-            ipc_begin(r, 0x000B, 2, 0);
-            ipc_put(r, 0);
+        case 0x0005:   /* GetAdapterState: Result + bool */
+        case 0x0006:   /* GetShellState: Result + bool */
+        case 0x0007:   /* GetBatteryLevel: Result + Level */
+        case 0x0008:   /* GetBatteryChargeState: Result + bool */
+        case 0x0009: { /* GetPedometerState: Result + bool */
+            ipc_begin(r, r->cmd, 2, 0);
+            put_result(r);
             ipc_put(r, 0);
             break;
         }
-        case 0x000C: { /* GetTotalStepCount -> Result + u32 */
-            ipc_begin(r, 0x000C, 3, 0);
-            ipc_put(r, 0);      /* Dummy (Header-Slot) */
-            ipc_put(r, 0);      /* Result */
+        case 0x000B: { /* GetStepHistory: Result + StaticBuffer-Echo */
+            /* Azahar (ptm.cpp): MakeBuilder(1,2), PushStaticBuffer. */
+            ipc_begin(r, 0x000B, 1, 2);
+            put_result(r);
+            for (int i = 0; i < 2; i++) ipc_put(r, (r->translate >= 2) ? p[r->normal + i] : 0u);
+            break;
+        }
+        case 0x000C: { /* GetTotalStepCount: Result + StepCount */
+            ipc_begin(r, 0x000C, 2, 0);
+            put_result(r);
             ipc_put(r, 0);      /* StepCount */
             break;
         }
@@ -1253,8 +1320,65 @@ static void ptm_command(Ipc *r, uint32_t *p) {
 }
 
 static void dsp_command(Ipc *r, uint32_t *p) {
+    /* Antwortlayouts nach Azahar src/core/hle/service/dsp/dsp_dsp.cpp. */
     switch (r->cmd) {
-        case 0x0010: { /* ReadPipeIfPossible(ch, peer, size + StaticBuffer) */
+        case 0x0001: { /* RecvData: Result + Wert */
+            ipc_begin(r, 0x0001, 2, 0);
+            put_result(r);
+            ipc_put(r, 1);
+            break;
+        }
+        case 0x0002: { /* RecvDataIsReady: Result + bool */
+            ipc_begin(r, 0x0002, 2, 0);
+            put_result(r);
+            ipc_put(r, 1);
+            break;
+        }
+        case 0x0007:   /* SetSemaphore: Result */
+        case 0x0017: { /* SetSemaphoreMask: Result */
+            ipc_begin(r, r->cmd, 1, 0);
+            put_result(r);
+            break;
+        }
+        case 0x000C: { /* ConvertProcessAddressFromDspDram: Result + ARM-Adresse */
+            uint32_t dsp_addr = p[0];
+            uint32_t arm = 0x00408800u + (dsp_addr & 0xFFu) * 0x10u;
+            ipc_begin(r, 0x000C, 2, 0);
+            put_result(r);
+            ipc_put(r, arm);
+            if (g_log) printf("[dsp] ConvertProcessAddress 0x%X -> 0x%X\n", dsp_addr, arm);
+            break;
+        }
+        case 0x000D: { /* WriteProcessPipe: Result */
+            uint32_t size = p[1];
+            uint32_t addr = 0;
+            if (r->translate >= 2) addr = p[r->normal + 1];
+            ipc_begin(r, 0x000D, 1, 0);
+            put_result(r);
+            if (g_log) printf("[dsp] WriteProcessPipe ch=%u size=%u addr=%08X\n",
+                              p[0], size, addr);
+            break;
+        }
+        case 0x000E: { /* ReadPipe: Result + StaticBuffer-Echo */
+            uint32_t dsc_flags = 0, dsc_addr = 0;
+            if (r->translate >= 2) {
+                dsc_flags = p[r->normal];
+                dsc_addr = p[r->normal + 1];
+            }
+            ipc_begin(r, 0x000E, 1, 2);
+            put_result(r);
+            ipc_put(r, dsc_flags);
+            ipc_put(r, dsc_addr);
+            if (g_log) printf("[dsp] ReadPipe ch=%u size=%u -> 0\n", p[0], p[1]);
+            break;
+        }
+        case 0x000F: { /* GetPipeReadableSize: Result + u16 */
+            ipc_begin(r, 0x000F, 2, 0);
+            put_result(r);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x0010: { /* ReadPipeIfPossible: Result + Groesse + StaticBuffer-Echo */
             uint32_t dsc_flags = 0, dsc_addr = 0;
             static int rp_calls = 0;
             if (r->translate >= 2) {
@@ -1270,132 +1394,59 @@ static void dsp_command(Ipc *r, uint32_t *p) {
                     (dsc_addr & 0x1FFFFFFFu) + 2u <= g_cpu->mem_size)
                     memcpy(g_cur_mem + (dsc_addr & 0x1FFFFFFFu), &val, 2);
             }
-            /* Dummy + Result + length_read(2) + Buffer-Echo */
-            ipc_begin(r, 0x0010, 3, 2);
-            ipc_put(r, 0);
-            ipc_put(r, 0);
-            ipc_put(r, 2);
+            ipc_begin(r, 0x0010, 2, 2);
+            put_result(r);
+            ipc_put(r, 2);          /* gelesene Bytes */
             ipc_put(r, dsc_flags);
             ipc_put(r, dsc_addr);
             if (g_log) printf("[dsp] ReadPipeIfPossible ch=%u size=%u -> 2\n", p[0], p[2]);
             break;
         }
-        case 0x000C: { /* ConvertProcessAddressFromDspDram(addr) -> Result + ARM-Adresse */
-            uint32_t dsp_addr = p[0];
-            uint32_t arm = 0x00408800u + (dsp_addr & 0xFFu) * 0x10u;
-            ipc_begin(r, 0x000C, 3, 0);
-            ipc_put(r, 0);
-            ipc_put(r, 0);
-            ipc_put(r, arm);
-            if (g_log) printf("[dsp] ConvertProcessAddress 0x%X -> 0x%X\n", dsp_addr, arm);
-            break;
-        }
-        case 0x0011: { /* LoadComponent: (u32 size, u16 prog, u16 data, MappedBuffer) */
+        case 0x0011: { /* LoadComponent: Result + bool + MappedBuffer-Echo */
             uint32_t dsc_flags = 0, dsc_addr = 0;
             if (r->translate >= 2) {
                 dsc_flags = p[r->normal];
                 dsc_addr = p[r->normal + 1];
             }
             ipc_begin(r, 0x0011, 2, 2);
-            ipc_put(r, 0);          /* ResultSuccess */
+            put_result(r);
             ipc_put(r, 1);          /* true = geladen */
             ipc_put(r, dsc_flags);
             ipc_put(r, dsc_addr);
             if (g_log) printf("[dsp] LoadComponent size=0x%X -> ok\n", p[0]);
             break;
         }
-        case 0x000D: { /* WriteProcessPipe(channel, size, buffer) -> Result */
-            uint32_t size = p[1];
-            uint32_t addr = 0;
-            if (r->translate >= 2) addr = p[r->normal + 1];
-            ipc_begin(r, 0x000D, 2, 0);
-            ipc_put(r, 0);
-            ipc_put(r, 0);
-            if (g_log) printf("[dsp] WriteProcessPipe ch=%u size=%u addr=%08X\n",
-                              p[0], size, addr);
+        case 0x0012: { /* UnloadComponent: Result */
+            ipc_begin(r, 0x0012, 1, 0);
+            put_result(r);
             break;
         }
-        case 0x000E: { /* ReadPipe(ch, size, flags, buffer) -> Result + StaticBuffer */
-            uint32_t dsc_flags = 0, dsc_addr = 0;
-            if (r->translate >= 2) {
-                dsc_flags = p[r->normal];
-                dsc_addr = p[r->normal + 1];
-            }
-            ipc_begin(r, 0x000E, 1, 2);
-            ipc_put(r, 0);
-            ipc_put(r, dsc_flags);
-            ipc_put(r, dsc_addr);
-            if (g_log) printf("[dsp] ReadPipe ch=%u size=%u -> 0\n", p[0], p[1]);
-            break;
-        }
-        case 0x0012: { /* UnloadComponent */
-            ipc_begin(r, 0x0012, 2, 0);
-            ipc_put(r, 0);
-            ipc_put(r, 0);
-            break;
-        }
-        case 0x0001: { /* RecvData -> Result + Wert (1 = DSP-Finalize-Quittung) */
-            ipc_begin(r, 0x0001, 3, 0);
-            ipc_put(r, 0);
-            ipc_put(r, 0);
-            ipc_put(r, 1);
-            break;
-        }
-        case 0x0002: case 0x0004: case 0x000B: { /* RecvDataIsReady/IsEmpty/CheckSemaphore */
-            static unsigned dsp_calls = 0;
-            dsp_calls++;
-            ipc_begin(r, r->cmd, 3, 0);
-            ipc_put(r, 0);
-            ipc_put(r, 0);
-            ipc_put(r, 1u);
-            if (getenv("HLE_DSP_DEBUG")) {
-                printf("[dsp2] n=%d t=%d w=%d:", r->normal, r->translate, r->written);
-                for (int i = 0; i < r->written; i++) printf(" %08X", r->buf[i]);
-                printf("\n");
-                fflush(stdout);
-            }
-            break;
-        }
-        case 0x0003: case 0x0005: case 0x0009:
-        case 0x000A: { /* Set/Send/Clear/Mask/… */
+        case 0x0013:   /* FlushDataCache */
+        case 0x0014:   /* InvalidateDataCache */
+        case 0x0015: { /* RegisterInterruptEvents: Result (kein Handle) */
             ipc_begin(r, r->cmd, 1, 0);
-            ipc_put(r, 0);
+            put_result(r);
             break;
         }
-        case 0x0007: case 0x0017: { /* SetSemaphore / SetSemaphoreMask -> Result */
-            ipc_begin(r, r->cmd, 2, 0);
-            ipc_put(r, 0);
-            ipc_put(r, 0);
-            break;
-        }
-        case 0x0006: case 0x0008: { /* RecvFifoEx/GetSemaphore -> Result+Wert */
-            ipc_begin(r, r->cmd, 2, 0);
-            ipc_put(r, 0);
-            ipc_put(r, 0);
-            break;
-        }
-        case 0x0016: { /* GetSemaphoreEventHandle -> Result + MoveHandle(Event) */
+        case 0x0016: { /* GetSemaphoreEventHandle: Result + CopyHandle(Event) */
             uint32_t ev = (uint32_t)alloc_handle(SVC_OTHER, "dsp-ev");
             Handle *hh = get_handle(ev);
             if (hh) hh->signaled = 1;
-            ipc_begin(r, 0x0016, 1, 3);
-            ipc_put(r, 0);          /* Dummy (Header-Slot) */
-            ipc_put(r, 0);          /* Result -> cmdbuf[1] */
-            ipc_put_handle(r, ev);  /* Descriptor+Handle -> cmdbuf[2],[3] */
+            ipc_begin(r, 0x0016, 1, 2);
+            put_result(r);
+            ipc_put_handle(r, ev);
             if (g_log) printf("[dsp] GetSemaphoreEventHandle -> %u\n", ev);
             break;
         }
-        case 0x000F: { /* GetPipeReadableSize */
-            ipc_begin(r, 0x000F, 2, 0);
-            ipc_put(r, 0);
+        case 0x001F: { /* GetHeadphoneStatus: Result + bool */
+            ipc_begin(r, 0x001F, 2, 0);
+            put_result(r);
             ipc_put(r, 0);
             break;
         }
-        case 0x0015: { /* RegisterInterruptEvents */
-            uint32_t h = (uint32_t)alloc_handle(SVC_OTHER, "dsp-ev");
-            ipc_begin(r, 0x0015, 1, 2);
-            ipc_put(r, 0);
-            ipc_put_handle_copy(r, h);
+        case 0x0020: { /* ForceHeadphoneOut: Result */
+            ipc_begin(r, 0x0020, 1, 0);
+            put_result(r);
             break;
         }
         default:
@@ -1520,97 +1571,83 @@ static void gsp_command(Ipc *r, uint32_t *p) {
             ipc_put(r, 0);
             break;
         }
-        case 0x0004: { /* ReadHWRegs -> Result + Wert */
-            ipc_begin(r, 0x0004, 2, 0);
-            ipc_put(r, 0);
-            ipc_put(r, 0);
+        case 0x0004: { /* ReadHWRegs: Result + StaticBuffer-Echo */
+            /* Azahar (gsp_gpu.cpp): MakeBuilder(1,2), Push(result),
+               PushStaticBuffer(buffer, 0). */
+            uint32_t dsc_flags = (r->translate >= 2) ? p[r->normal] : 2u;
+            uint32_t dsc_addr = (r->translate >= 2) ? p[r->normal + 1] : 0u;
+            uint32_t size = (r->normal >= 2) ? p[1] : 0u;
+            if (dsc_addr != 0u && size != 0u && g_cpu != NULL) {
+                uint32_t off = dsc_addr & 0x1FFFFFFFu;
+                if ((size > 0x80u ? 0x80u : size) + off <= g_cpu->mem_size)
+                    memset(g_cpu->mem + off, 0, size > 0x80u ? 0x80u : size);
+            }
+            ipc_begin(r, 0x0004, 1, 2);
+            put_result(r);
+            ipc_put(r, dsc_flags);
+            ipc_put(r, dsc_addr);
             break;
         }
-        case 0x0005: { /* SetBufferSwap(screen, framebuffer_info)
-                           screen=2 bedeutet "beide" und wird als zwei echte
-                           Swaps screen=0/1 mit den FB-Adressen aus dem
-                           GSP-Shared-Memory behandelt. */
+        case 0x0005: { /* SetBufferSwap(screen_id, FrameBufferInfo) */
+            /* Azahar: screen_id < 2 -> GPU().SetBufferSwap(screen_id, fb_info),
+               sonst ignoriert; Antwort ist immer ein Result. */
             uint32_t screen = p[0];
-            uint32_t fb = (r->normal >= 2) ? p[1] : 0u;
-            if (screen == 2u || screen == 3u) {
-                for (uint32_t s = 0; s < 2u; s++) {
-                    uint32_t a = 0, st = 0, fmt = 0;
-                    if (!gsp_fb_info(g_cpu, (int)s, &a, &st, &fmt)) a = g_gsp_fb_addr[s];
-                    else { g_gsp_fb_stride[s] = st; g_gsp_fb_format[s] = fmt; }
-                    g_gsp_fb_addr[s] = a;
-                    gpu_set_fb_size(a, (s == 1u) ? 320 : 400, 240);
-                    if (g_log) printf("[gsp] SetBufferSwap screen=%u fb=0x%08X "
-                                      "stride=0x%X fmt=%X\n", s, a, st, fmt);
-                }
-                g_gsp_last_screen = 1;
-            } else {
-                if (screen < 3u && fb != 0u) g_gsp_fb_addr[screen] = fb;
-                else if (screen < 2u) {
-                    uint32_t a = 0, st = 0, fmt = 0;
-                    if (gsp_fb_info(g_cpu, (int)screen, &a, &st, &fmt)) {
-                        g_gsp_fb_addr[screen] = a;
-                        g_gsp_fb_stride[screen] = st;
-                        g_gsp_fb_format[screen] = fmt;
+            uint32_t left = (r->normal >= 3) ? p[2] : 0u;
+            uint32_t st = (r->normal >= 5) ? p[4] : 0u;
+            uint32_t fmt = (r->normal >= 6) ? p[5] : 0u;
+            if (screen < 2u) {
+                if (left == 0u) {
+                    /* Noch keine FB-Adresse im Request: aus der
+                       FrameBufferUpdate-Struktur im GSP-Shared-Memory lesen. */
+                    uint32_t a = 0, s2 = 0, f2 = 0;
+                    if (gsp_fb_info(g_cpu, (int)screen, &a, &s2, &f2)) {
+                        left = a; st = s2; fmt = f2;
+                    } else {
+                        left = g_gsp_fb_addr[screen];
                     }
                 }
-                gpu_set_fb_size(g_gsp_fb_addr[screen < 2u ? screen : 0],
-                                (screen == 1u) ? 320 : 400, 240);
-                g_gsp_last_screen = (int)(screen & 1);
-                if (g_log) printf("[gsp] SetBufferSwap screen=%u fb=0x%08X\n",
-                                  screen, g_gsp_fb_addr[screen < 3u ? screen : 0]);
+                g_gsp_fb_addr[screen] = left;
+                g_gsp_fb_stride[screen] = st;
+                g_gsp_fb_format[screen] = fmt;
+                gpu_set_fb_size(left, (screen == 1u) ? 320 : 400, 240);
+                g_gsp_last_screen = (int)screen;
+                if (g_log) printf("[gsp] SetBufferSwap screen=%u fb=0x%08X stride=0x%X fmt=%X\n",
+                                  screen, left, st, fmt);
+            } else if (g_log) {
+                printf("[gsp] SetBufferSwap screen=%u ungueltig (ignoriert)\n", screen);
             }
             ipc_begin(r, 0x0005, 1, 0);
-            ipc_put(r, 0);
+            put_result(r);
             break;
         }
-        case 0x0006: { /* SubmitCmdList(addr, size usw.) */
+        case 0x0006: { /* SetCommandList: in dieser Firmware nur Result */
             g_cmdlist_addr = p[0];
             g_cmdlist_size = p[1];
-            /* Azahar (gsp_gpu.cpp, SubmitCmdList): der GSP legt den Eintrag
-               in den Shared-Memory-Ring (shmem+0x800, hier Thread 0) und
-               TriggerCmdReqQueue arbeitet ihn ab. Genau diesen Eintrag
-               schreibt die Firmware - nicht der Gast-Code. */
-            if (g_cpu != NULL) {
-                uint32_t base = 0x10002800u;
-                uint32_t hdr = 1u << 8;          /* index=0, number=1 */
-                uint32_t cb = base + 0x20u;      /* Command[0] */
-                uint8_t id = 0x01u;              /* 1 = SubmitCmdList */
-                uint32_t addr = g_cmdlist_addr, sz = g_cmdlist_size;
-                memcpy(g_cpu->mem + base, &hdr, 4);
-                memcpy(g_cpu->mem + cb, &id, 1);
-                memcpy(g_cpu->mem + cb + 4u, &addr, 4);
-                memcpy(g_cpu->mem + cb + 8u, &sz, 4);
-            }
             if (g_log) printf("[gsp] SetCommandList addr=0x%08X size=0x%X lr=%08X\n",
                               g_cmdlist_addr, g_cmdlist_size,
                               g_cpu ? g_cpu->r[14] : 0);
             ipc_begin(r, 0x0006, 1, 0);
-            ipc_put(r, 0);
+            put_result(r);
             break;
         }
-        case 0x0007: { /* RequestDma(src, dst, size, flags) */
+        case 0x0007: { /* RequestDma(src, dst, size, flags): Result */
             uint32_t s0 = p[0], s1 = p[1], s2 = p[2], s3 = p[3];
-            ipc_begin(r, r->cmd, (r->cmd == 0x0007) ? 2 : 1, 0);
-            ipc_put(r, 0);
-            if (r->cmd == 0x0007) ipc_put(r, 0);
-            if (g_log && r->cmd == 0x0007) {
-                printf("[gsp] RequestDma p0=%08X p1=%08X p2=%08X p3=%08X\n",
-                       s0, s1, s2, s3);
-            }
-            /* Echte DMA ausfuehren, falls die Parameter plausibel sind. */
-            if (r->cmd == 0x0007 && g_cpu != NULL && s2 != 0u &&
-                s2 <= 0x00100000u && s0 + s2 <= g_cpu->mem_size &&
-                s1 + s2 <= g_cpu->mem_size) {
+            if (g_log) printf("[gsp] RequestDma p0=%08X p1=%08X p2=%08X p3=%08X\n",
+                              s0, s1, s2, s3);
+            /* DMA wirklich ausfuehren, falls die Parameter plausibel sind. */
+            if (g_cpu != NULL && s2 != 0u && s2 <= 0x00100000u &&
+                s0 + s2 <= g_cpu->mem_size && s1 + s2 <= g_cpu->mem_size) {
                 memmove(g_cpu->mem + s1, g_cpu->mem + s0, s2);
-                if (g_log) printf("[gsp] DMA copy %08X -> %08X (%u)\n",
-                                  s0, s1, s2);
+                if (g_log) printf("[gsp] DMA copy %08X -> %08X (%u)\n", s0, s1, s2);
             }
+            ipc_begin(r, 0x0007, 1, 0);
+            put_result(r);
             break;
         }
         case 0x0008: case 0x0009: case 0x000A:
         case 0x000B: { /* Cache / Events / LcdForceBlack */
             ipc_begin(r, r->cmd, 1, 0);
-            ipc_put(r, 0);
+            put_result(r);
             break;
         }
         case 0x000C: { /* TriggerCmdReqQueue -> Shared-Memory-Kommandopuffer */
@@ -1625,41 +1662,53 @@ static void gsp_command(Ipc *r, uint32_t *p) {
                                   g_cmdlist_addr, g_cmdlist_size, nops);
             }
             ipc_begin(r, 0x000C, 1, 0);
-            ipc_put(r, 0);
+            put_result(r);
             break;
         }
         case 0x000D: case 0x000E: case 0x000F: case 0x0010:
-        case 0x0011: case 0x0012: case 0x0014: case 0x0015:
+        case 0x0011: case 0x0014: case 0x0015:
         case 0x0016: case 0x0017:
         case 0x0019: case 0x001A: case 0x001B: case 0x001C:
-        case 0x001D: case 0x001E: case 0x001F: { /* Transfer / Perf / Right / Vram */
+        case 0x001D: case 0x001E: case 0x001F: { /* Transfer / Right / Vram / Cache */
             ipc_begin(r, r->cmd, 1, 0);
-            ipc_put(r, 0);
+            put_result(r);
             break;
         }
-        case 0x0013: { /* RegisterInterruptRelayQueue */
+        case 0x0012: { /* GetPerfLog: Result + 14 Woerter */
+            ipc_begin(r, 0x0012, 15, 0);
+            put_result(r);
+            for (int i = 0; i < 14; i++) ipc_put(r, 0);
+            break;
+        }
+        case 0x0013: { /* RegisterInterruptRelayQueue: Result, ThreadID, CopyHandle(ShMem) */
             static int gsp_relay_first = 1;
-            uint32_t ev = (uint32_t)alloc_handle(SVC_OTHER, "gsp-ev");
+            /* Der Client uebergibt sein Interrupt-Event als CopyHandle im
+               Translate-Bereich; dieses Handle wird bei Interrupts signalisiert. */
+            uint32_t ev = (r->translate >= 2) ? p[r->normal + 1] : 0u;
+            if (get_handle(ev) == NULL) {
+                ev = (uint32_t)alloc_handle(SVC_OTHER, "gsp-ev");
+                Handle *hh = get_handle(ev);
+                if (hh) hh->signaled = 1;
+            }
+            g_gsp_irq_handle = ev;
             uint32_t shm = (uint32_t)alloc_handle(SVC_OTHER, "gsp-shmem");
-            Handle *hh = get_handle(ev);
-            if (hh) hh->signaled = 1;
+            /* Azahar: MakeBuilder(2,2); Push(FirstInitialization/ResultSuccess),
+               Push(thread_id), PushCopyObjects(shared_memory).
+               ResultFirstInitialization = GX-Modul(10), Desc 519 -> 0x00002A07. */
             ipc_begin(r, 0x0013, 2, 2);
-            /* Azahar: beim ERSTEN Aufruf muss FirstInitialization (nicht 0)
-               zurueckkommen, sonst bricht die GSP-Initialisierung ab.
-               Result = (GX << 10) | 519 = 0x00000E07 */
-            ipc_put(r, gsp_relay_first ? 0x00000E07u : 0u);
+            ipc_put(r, gsp_relay_first ? 0x00002A07u : 0u);
             gsp_relay_first = 0;
-            ipc_put(r, 0x100u);
+            ipc_put(r, 0u);          /* Thread-Index in den GSP-Shared-Memory */
             ipc_put_handle_copy(r, shm);
             if (g_log) printf("[gsp] RegisterInterruptRelayQueue -> ev=%u shm=%u\n", ev, shm);
             break;
         }
-        case 0x0018: { /* ImportDisplayCaptureInfo */
-            ipc_begin(r, 0x0018, 6, 0);
-            ipc_put(r, 0);
-            ipc_put(r, 0x1F000000u); ipc_put(r, 0);
-            ipc_put(r, 0x1F000000u); ipc_put(r, 0);
-            ipc_put(r, 0); ipc_put(r, 0);
+        case 0x0018: { /* ImportDisplayCaptureInfo: Result + 2 x 4 Woerter */
+            /* Azahar: MakeBuilder(9,0), PushRaw(top_entry), PushRaw(bottom_entry). */
+            ipc_begin(r, 0x0018, 9, 0);
+            put_result(r);
+            ipc_put(r, g_gsp_fb_addr[0]); ipc_put(r, 0); ipc_put(r, 0); ipc_put(r, 0);
+            ipc_put(r, g_gsp_fb_addr[1]); ipc_put(r, 0); ipc_put(r, 0); ipc_put(r, 0);
             break;
         }
         default:
@@ -1670,43 +1719,46 @@ static void gsp_command(Ipc *r, uint32_t *p) {
 
 /* Y2R: die meisten Kommandos sind Setter (1 Result). Wichtig ist
  * 0x000F GetTransferEndEvent -> Event-Handle, sonst wartet das Spiel auf
- * Handle 0 und kommt nie zur Grafik-Initialisierung. */
+ * Handle 0 und kommt nie zur Grafik-Initialisierung.
+ * Layouts nach Azahar src/core/hle/service/cam/y2r_u.cpp. */
 static void y2r_command(Ipc *r, uint32_t *p) {
     switch (r->cmd) {
         case 0x0002: case 0x0004: case 0x0006: case 0x0008:
-        case 0x000A: case 0x000C: case 0x000E: { /* Get* -> Result + Wert */
+        case 0x000A: case 0x000C: case 0x000E: { /* Get*: Result + Wert */
             ipc_begin(r, r->cmd, 2, 0);
-            ipc_put(r, 0);
-            ipc_put(r, 0);
-            break;
-        }
-        case 0x000D: { /* SetTransferEndInterrupt -> (Result, enabled) */
-            ipc_begin(r, 0x000D, 2, 0);
-            ipc_put(r, 0);
+            put_result(r);
             ipc_put(r, 0);
             break;
         }
-        case 0x000F: { /* GetTransferEndEvent -> (Result) + CopyObject(Event) */
+        case 0x000D: { /* SetTransferEndInterrupt: Result */
+            ipc_begin(r, 0x000D, 1, 0);
+            put_result(r);
+            break;
+        }
+        case 0x000F: { /* GetTransferEndEvent: Result + CopyHandle(Event) */
             uint32_t ev = (uint32_t)alloc_handle(SVC_OTHER, "y2r-ev");
             Handle *hh = get_handle(ev);
             if (hh) hh->signaled = 1;
             ipc_begin(r, 0x000F, 1, 2);
-            ipc_put(r, 0);
+            put_result(r);
             ipc_put_handle_copy(r, ev);
             if (g_log) printf("[y2r] GetTransferEndEvent -> %u\n", ev);
             break;
         }
-        case 0x0014: case 0x0019: { /* IsFinished* -> true */
+        case 0x0014: case 0x0015: case 0x0016: case 0x0017:
+        case 0x0019: { /* IsFinished*: Result + bool(true) */
             ipc_begin(r, r->cmd, 2, 0);
-            ipc_put(r, 0);
+            put_result(r);
             ipc_put(r, 1);
             break;
         }
-        default:
+        default: {
+            /* Setter (Result) bzw. nicht implementierte Kommandos. */
             ipc_begin(r, r->cmd, 1, 0);
-            ipc_put(r, 0);
+            put_result(r);
             if (g_log) printf("[y2r] cmd 0x%04X -> 0\n", r->cmd);
             break;
+        }
     }
 }
 
@@ -1715,11 +1767,10 @@ static void generic_command(Ipc *r, int service) {
         printf("[%s] cmd 0x%04X normal=%d -> 0\n",
                SERVICE_NAMES[service], r->cmd, r->normal);
     }
-    /* Antwort: Header + so viele Nullwoerter wie Parameter erwartet werden */
-    int n = r->normal > 0 ? r->normal : 1;
-    if (n > 16) n = 16;
-    ipc_begin(r, r->cmd, n, 0);
-    for (int i = 0; i < n; i++) ipc_put(r, 0);
+    /* Azahar ServiceFrameworkBase::ReportUnimplementedFunction: Header mit
+       derselben Kommandonummer, normal_params_size = 1, Result = 0. */
+    ipc_begin(r, r->cmd, 1, 0);
+    put_result(r);
 }
 
 static void dispatch_ipc(uint32_t handle) {
@@ -1794,9 +1845,11 @@ static void dispatch_ipc(uint32_t handle) {
         }
     }
     if (cmd < 64 && service >= 0 && service < 64) g_cmd_seen[service][cmd]++;
-    if (h && (g_ipc_count <= g_ipc_log_limit || g_log)) {
-        printf("[ipc] th=%03X blk=%08X %-9s cmd=0x%04X n=%d t=%d h=%u", (uint32_t)((g_cpu ? g_cpu->tpidruro : 0) >> 12) & 0xFFFu, arm_last_block, SERVICE_NAMES[service], cmd,
-               normal, translate, handle);
+    if ((h != NULL || g_log) && (g_ipc_count <= g_ipc_log_limit || g_log)) {
+        printf("[ipc] th=%03X blk=%08X %-9s cmd=0x%04X n=%d t=%d h=%u%s",
+               (uint32_t)((g_cpu ? g_cpu->tpidruro : 0) >> 12) & 0xFFFu, arm_last_block,
+               SERVICE_NAMES[service], cmd, normal, translate, handle,
+               h ? "" : " (unbekannt)");
         for (int i = 0; i < normal && i < 8; i++) printf(" p%d=%08X", i, params[i]);
         printf("\n");
     }

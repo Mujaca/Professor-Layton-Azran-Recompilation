@@ -58,7 +58,6 @@ das ist ein Workaround.
 
 | Kennung | Ort | Wirkung |
 |---|---|---|
-| `wa-fs-client-slot` | `runtime/kernel/hle.c` (srv/fs) | schreibt fs-Handles direkt an 0x3D91D0 / 0x3D66C4 |
 | `wa-kernel-signal-all` | `runtime/kernel/hle.c` (vblank_thread) | weckt alle Handles + Arbiter pauschal alle 16 ms, ohne Gast-Lock |
 | – | `hle_svc` WaitSynchronization | nach 0x400 Yields gelten Handles als signalisiert; Handle 0 gilt als signalisiert |
 | – | `hle_svc` ArbitrateAddress | negativer Wert/Timeout setzt das Wort auf 1 |
@@ -66,11 +65,12 @@ das ist ein Workaround.
 | – | generierter Code | unbekannte Aufrufziele = No-op (geloggt in `out/missing_calls.txt`) |
 | – | `arm_mem_read/write` | Zugriffe außerhalb des Speichers liefern 0 statt Abbruch (`ARM_STRICT=1` bricht ab) |
 
-## 5. Bekannter Verdacht (noch nicht geprüft)
+## 5. Erledigt: IPC-Reply-Layouts
 
-Laut Code-Review beginnen viele IPC-Antworten in `hle.c` mit `ipc_put(r, 0)`
-als „Result“ statt mit dem Platzhalterwort für den Header. Dann sind alle
-weiteren Wörter um eins verschoben (z. B. hid GetIPCHandles, APT
-GetLockHandle, fs OpenArchive, gsp RegisterInterruptRelayQueue). Das würde
-erklären, warum Setter im Spiel „nie laufen“ (`wa-fs-client-slot`). **Erster
-Prüfpunkt**, weil hid:USER direkt vor dem Hänger liegt.
+Der frühere Verdacht (Antworten begannen mit `ipc_put(0)` als Result statt mit
+dem Header-Platzhalter, dadurch alle Wörter um eins verschoben) ist behoben:
+`ipc_begin()` reserviert seither das Header-Wort, und jede Antwort wurde
+gegen Azahar `IPC::RequestBuilder` geprüft (srv, APT, fs, file, hid, cfg,
+ndm, ptm, gsp, dsp, y2r, boss). Damit entfielen `wa-fs-client-slot` sowie die
+`g_srv_layout`-Varianten; das Spiel liest den fs-Handle jetzt selbst aus der
+Antwort.

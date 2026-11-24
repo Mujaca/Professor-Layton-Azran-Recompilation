@@ -29,9 +29,12 @@ Header in `cmdbuf[0]`: Bits 0..5 `translate_params_size`, 6..11
 | MappedBuffer | `0x8 \| (perms<<1) \| (size<<4)` | Gastadresse |
 
 Antwort: `cmdbuf[0]` = Header, `cmdbuf[1]` = Result, danach Parameter.
-In `runtime/hle` schreibt `ipc_finish()` den Header **nach** dem Füllen nach
-`buf[0]`; deshalb beginnt jede Antwort mit einem Platzhalterwort
-(`put_result()`), dann Result, dann Parameter.
+In `runtime/kernel/hle.c` reserviert `ipc_begin()` das Header-Wort
+(`written = 1`); `put_result()` schreibt daher in `cmdbuf[1]`, danach folgen
+die Parameter. `normal` zählt Result + Normal-Parameter (ohne Header), wie
+Azahar `MakeBuilder(normal, translate)`. `ipc_finish()` leitet den
+Header-Wert aus den tatsächlich geschriebenen Wörtern ab, damit Header und
+Nutzlast nicht auseinanderlaufen.
 
 ### Dienst-Kommandos, die das Spiel benutzt
 

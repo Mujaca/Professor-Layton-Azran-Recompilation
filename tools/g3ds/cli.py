@@ -15,9 +15,10 @@ from . import common
 
 
 def _exe(value: str) -> Path:
-    if value in ("boot", "out/boot.exe", "out\\boot.exe"):
-        return common.ROOT / "out" / "boot.exe"
-    if value in ("port", "out/port.exe", "out\\port.exe"):
+    # Seit dem Cleanup gibt es nur noch out/port.exe (natuerlicher Boot);
+    # "boot" bleibt als Alias erhalten, damit alte Aufrufe weiter laufen.
+    if value in ("boot", "out/boot.exe", "out\\boot.exe",
+                 "port", "out/port.exe", "out\\port.exe"):
         return common.ROOT / "out" / "port.exe"
     p = Path(value)
     return p if p.is_absolute() else (common.ROOT / p)
