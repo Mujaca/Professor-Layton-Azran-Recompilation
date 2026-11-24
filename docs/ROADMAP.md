@@ -120,3 +120,7 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | 2026-11-24 | ringpuffer-wartestelle-2 | 10/10 | None | 0 |
 | 2026-11-24 | m4-filmtextur | 10/10 | None | 0 |
 | 2026-11-24 | m4-gl-init-cosim | 10/10 | None | 0 |
+| 2026-11-24 | m3-intraframe-bedingung | 10/10 | None | 0 |
+| 2026-11-24 | m3-intraframe-bedingung-2 | 10/10 | None | 0 |
+| 2026-11-24 | m4-nach-film | 10/10 | None | 0 |
+| 2026-11-24 | m4-zweite-wiedergabe | 10/10 | None | 0 |

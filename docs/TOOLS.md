@@ -114,7 +114,9 @@ absichtlich nicht zum Commit-Gate.
 ## Diagnose-Umgebungsvariablen (verändern keinen Gastzustand)
 
 `HLE_LOG=1`, `HLE_SRV_NAMES=1`, `HLE_IPC_LOG=<n>`, `HLE_TRACE=1`,
-`ARM_WATCH=<hex>`, `ARM_MEMWATCH=<hex>`, `ARM_MEMWATCHRD=<hex>[,size]`,
+`ARM_WATCH=<hex>` (Treffer werden ab 0 nummeriert; zusaetzlich je 8 Woerter
+ab `r0`, `r1` und `r5` als `[watchmem]`-Zeile), `ARM_MEMWATCH=<hex>`,
+`ARM_MEMWATCHRD=<hex>[,size]`,
 `ARM_MEMWATCHRANGE=<hex>,<size>`, `ARM_STRICT=1`,
 `HLE_PERFMAP_FILE=<pfad>`, `HLE_DET_SCHED=1`,
 `HLE_PICA_DIAG=1` (PICA-Register-Histogramm je Liste inkl. Kanal-Spruengen,
