@@ -44,7 +44,7 @@ static void test_adpcm_zero_coeff(void) {
     int16_t out[16][2];
     int16_t want[14];
     int16_t coeff[16] = {0};
-    int yn1 = 0, yn2 = 0;
+    int16_t yn1 = 0, yn2 = 0;
 
     for (int i = 1; i < 14; i++) want[i] = (int16_t)(i * 2);
     want[0] = 0;
@@ -67,7 +67,7 @@ static void test_adpcm_predictor(void) {
     /* Nibbles: 1,2,3,4. y: 1, 3, 6, 10. */
     int16_t want[4] = {1, 3, 6, 10};
     int16_t coeff[16] = {0};
-    int yn1 = 0, yn2 = 0;
+    int16_t yn1 = 0, yn2 = 0;
 
     coeff[2] = 2048;  /* Praediktor 1: coef1 */
     coeff[3] = 0;
@@ -75,6 +75,23 @@ static void test_adpcm_predictor(void) {
     check(n == 4, "adpcm_pred_count");
     check_samples(out, want, 4, "adpcm_pred");
     check(yn1 == 10 && yn2 == 6, "adpcm_pred_state");
+}
+
+static void test_adpcm_negative_state(void) {
+    /* ADPCM-Verlauf ist s16 (Azahar ADPCMState::yn1/yn2). c1 = 2048 (1.0),
+     * Scale 1, Nibble 0:
+     *   y = (0x400 + 2048*(-100)) >> 11 = -203776 >> 11 = -100 (floor). */
+    static const uint8_t data[8] = {0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    int16_t out[8][2];
+    int16_t want[2] = {-100, -100};
+    int16_t coeff[16] = {0};
+    int16_t yn1 = -100, yn2 = 0;
+
+    coeff[2] = 2048;
+    uint32_t n = audio_adpcm_decode(data, 2, coeff, &yn1, &yn2, out, 8);
+    check(n == 2, "adpcm_neg_count");
+    check_samples(out, want, 2, "adpcm_neg");
+    check(yn1 == -100 && yn2 == -100, "adpcm_neg_state");
 }
 
 static void test_pcm(void) {
@@ -126,6 +143,25 @@ static void test_linear_double(void) {
     check_samples(out, want, 4, "linear_double");
 }
 
+static void test_linear_negative_floor(void) {
+    /* Azahar Schrittweite 0.25: fposition = 9 * 2^22. An dieser Stelle ist
+     * x0 = in[0] = 0, x1 = in[1] = -1, delta = -1, fraction = 2^22.
+     * Azahar rechnet fraction*delta/2^24 in uint64 -> floor(-0.25) = -1,
+     * also out = 0 + (-1) = -1. Eine Division gegen Null ergaebe 0. */
+    int16_t in[8][2];
+    int16_t out[160][2];
+    AudioInterpState st;
+    uint32_t len = 8, outi = 0;
+
+    memset(&st, 0, sizeof(st));
+    in[0][0] = in[0][1] = 0;
+    for (int i = 1; i < 8; i++) in[i][0] = in[i][1] = -1;
+    audio_interp_linear(&st, (const int16_t (*)[2])in, &len, 0.25f, out, 160, &outi);
+    check(outi == 32, "linear_floor_count");
+    check(out[8][0] == 0 && out[8][1] == 0, "linear_floor_at8");
+    check(out[9][0] == -1 && out[9][1] == -1, "linear_floor_at9");
+}
+
 static void test_none(void) {
     int16_t in[3][2];
     int16_t out[160][2];
@@ -146,9 +182,11 @@ static void test_none(void) {
 int main(void) {
     test_adpcm_zero_coeff();
     test_adpcm_predictor();
+    test_adpcm_negative_state();
     test_pcm();
     test_linear_half();
     test_linear_double();
+    test_linear_negative_floor();
     test_none();
     if (failures) {
         printf("%d FEHLER\n", failures);

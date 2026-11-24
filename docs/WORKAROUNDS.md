@@ -173,7 +173,7 @@ mit denselben Objekten. Beide Pfade kommen im Boot bisher nicht vor.
 `out/savedata/{savedata,extsavedata,sharedextsavedata,systemsavedata}/...` ab.
 Kommandos, Result-Codes und das 0x228-Byte-Directory-Entry-Layout folgen Azahar
 (`fs_user.cpp`, `archive_*.cpp`, `disk_archive.cpp`, `path_parser.cpp`);
-Directory-Objekte sind echte Kernel-Handles mit eigenem Stream. Zwei bewusste
+Directory-Objekte sind echte Kernel-Handles mit eigenem Stream. Bewusste
 Host-Abweichungen:
 
 * SaveData nutzt `program_id = 0`, weil der Port `fs:REG`/das Codeset-
@@ -181,10 +181,26 @@ Host-Abweichungen:
   Registrierung ebenfalls 0). Azahar liefert fuer ein fehlendes SaveData
   `NotFormatted` (0xC8A04554); der Port ebenso, das Spiel formatiert selbst.
 * SharedExtSaveData ist auf echter Hardware ein bereits vorhandenes
-  Systemarchiv, das das Spiel nicht anlegt. Fehlt das Host-Verzeichnis, legt
-  der Port es beim ersten `OpenArchive` an (nur Verzeichnis + Metadaten, kein
-  Gastzustand). Ohne diese Provisionierung bricht der natuerliche Boot mit
-  `NotFormatted` ab (belegt: Frontier 6/10 vor der Provisionierung).
+  Systemarchiv. Der Archiv-Layer legt es **nicht** mehr an: ein fehlendes
+  Shared-ExtSaveData liefert wie Azahar `NotFormatted` (0xC8A04554), ein
+  fehlendes normales ExtSaveData `NotFound/InvalidState` (0xC8A04478).
+  `hle_init` stellt das Titel-Archiv `00048000/F000000B` (`/gamecoin.dat`,
+  belegt aus `reports/azahar_trace.txt` OpenArchive 7 + OpenFile mode=3) beim
+  Start in `out/savedata` bereit (`fs_archive_provision_shared`); das ist
+  Host-Zustand, kein Gastzustand und kein Spielcode-Eingriff.
+
+Weitere Angleichungen an Azahar (2026-11-24, Review): die vier
+Usage-Result-Codes tragen das FS-Modul 17 (0x4400): InvalidPath 0xE0E046BE,
+UnsupportedOpenFlags 0xE0C046F8, UnexpectedFileOrDirectory 0xE0C04702,
+WriteBeyondEnd 0xE0E046C1. `OpenFile` lehnt `mode == 0` und Create ohne Write
+ab; ExtSaveData lehnt das Create-Flag und `CreateFile(size 0)` ab, setzt
+Dateien auf feste Groesse (`FixSizeDiskFile`: Schreiben hinter das Ende ->
+WriteBeyondEnd, am Ende 0 Bytes, sonst kappen). `RenameDirectory` hat eine
+eigene Funktion. `GetFreeBytes` liefert 32 MiB (Azahar-Stub). `0x0831`
+(CreateSharedExtSaveData) bleibt wie in Azahar ohne Handler; `0x0851` liest
+die Parameter in Azahar-Reihenfolge (dirs, files, size u64). Alle
+Gastspeicherzugriffe der Pfaddekodierung und der Directory-Reads
+(`count * 0x228`) sind gegen `mem_size` geprueft.
 
 
 Diese Liste stammt aus dem Review der Nachtarbeit (2026-11-24) gegen Azahar.

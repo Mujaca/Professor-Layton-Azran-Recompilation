@@ -51,17 +51,31 @@ int main(int argc, char **argv) {
     uint8_t wbuf[64];
     const char *s = "/gamecoin.dat";
     uint8_t syspath[8];
+    int fixed = 0;
 
     fs_archive_init(base);
     fs_archive_set_program_id(0x00040000000F7E00ull);
 
+    /* --- Azahar-Result-Codes (core/file_sys/errors.h, Modul FS=17) ----- */
+    CHECK(FS_RESULT_INVALID_PATH == 0xE0E046BEu);
+    CHECK(FS_RESULT_UNSUPPORTED_OPEN_FLAGS == 0xE0C046F8u);
+    CHECK(FS_RESULT_UNEXPECTED_FILE_OR_DIR == 0xE0C04702u);
+    CHECK(FS_RESULT_WRITE_BEYOND_END == 0xE0E046C1u);
+    CHECK(FS_RESULT_NOT_FORMATTED == 0xC8A04554u);
+    CHECK(FS_RESULT_NOT_FOUND_INVALID_STATE == 0xC8A04478u);
+
     /* --- Self-Test Pfaddekodierung ------------------------------------ */
     memset(wbuf, 0, sizeof(wbuf));
     for (int i = 0; s[i]; i++) wbuf[2 * i] = (uint8_t)s[i];
-    CHECK(fs_archive_decode_path(wbuf, 4, 28, 0, (uint8_t *)host, sizeof(host)) == 13);
+    CHECK(fs_archive_decode_path(wbuf, sizeof(wbuf), 4, 28, 0, (uint8_t *)host,
+                                 sizeof(host)) == 13);
     CHECK(strcmp(host, s) == 0);
-    CHECK(fs_archive_decode_path((const uint8_t *)s, 3, 14, 0, (uint8_t *)host, sizeof(host)) == 13);
+    CHECK(fs_archive_decode_path((const uint8_t *)s, 14, 3, 14, 0, (uint8_t *)host,
+                                 sizeof(host)) == 13);
     CHECK(strcmp(host, s) == 0);
+    /* Grenzpruefung: Zugriff hinter mem_size wird abgelehnt. */
+    CHECK(fs_archive_decode_path((const uint8_t *)s, 4, 3, 14, 0, (uint8_t *)host,
+                                 sizeof(host)) == -1);
 
     /* --- SaveData: erster Start ist nicht formatiert ------------------- */
     h = fs_archive_open(4, NULL, 0, fs_archive_program_id(), &res);
@@ -102,17 +116,22 @@ int main(int argc, char **argv) {
     CHECK_RES(fs_archive_create_file((uint64_t)h, "/fehlt/b.bin", 4, 0),
               FS_RESULT_PATH_NOT_FOUND);
 
-    CHECK_RES(fs_archive_open_file((uint64_t)h, "/sav/a.bin", 1, 0, host, sizeof(host)),
+    CHECK_RES(fs_archive_open_file((uint64_t)h, "/sav/a.bin", 1, 0, host, sizeof(host), &fixed),
               FS_RESULT_SUCCESS);
     CHECK(file_size(host) == 16);
-    CHECK_RES(fs_archive_open_file((uint64_t)h, "/sav/fehlt.bin", 1, 0, host, sizeof(host)),
+    CHECK_RES(fs_archive_open_file((uint64_t)h, "/sav/fehlt.bin", 1, 0, host, sizeof(host), &fixed),
               FS_RESULT_FILE_NOT_FOUND);
     /* SaveData erlaubt O_CREAT (Mode-Bit 2). */
-    CHECK_RES(fs_archive_open_file((uint64_t)h, "/sav/neu.bin", 5, 0, host, sizeof(host)),
+    CHECK_RES(fs_archive_open_file((uint64_t)h, "/sav/neu.bin", 7, 0, host, sizeof(host), &fixed),
               FS_RESULT_SUCCESS);
     CHECK(file_exists(host));
-    CHECK_RES(fs_archive_open_file((uint64_t)h, "/sav", 1, 0, host, sizeof(host)),
+    CHECK_RES(fs_archive_open_file((uint64_t)h, "/sav", 1, 0, host, sizeof(host), &fixed),
               FS_RESULT_UNEXPECTED_FILE_OR_DIR);
+    /* Azahar SaveDataArchive::OpenFile: Mode 0 und Create ohne Write. */
+    CHECK_RES(fs_archive_open_file((uint64_t)h, "/sav/a.bin", 0, 0, host, sizeof(host), &fixed),
+              0xE0C046F8u);
+    CHECK_RES(fs_archive_open_file((uint64_t)h, "/sav/mit4.bin", 4, 0, host, sizeof(host), &fixed),
+              0xE0C046F8u);
 
     /* Rename/Delete */
     CHECK_RES(fs_archive_rename_file((uint64_t)h, "/sav/neu.bin", (uint64_t)h, "/sav/neu2.bin"),
@@ -167,7 +186,7 @@ int main(int argc, char **argv) {
     CHECK_RES(fs_archive_create_file((uint64_t)h, "ohne_slash", 4, 0), FS_RESULT_INVALID_PATH);
     CHECK_RES(fs_archive_create_file((uint64_t)h, "/../ausbruch", 4, 0), FS_RESULT_INVALID_PATH);
     CHECK_RES(fs_archive_create_file((uint64_t)h, "/a:b", 4, 0), FS_RESULT_INVALID_PATH);
-    CHECK_RES(fs_archive_open_file(9999, "/x", 1, 0, host, sizeof(host)),
+    CHECK_RES(fs_archive_open_file(9999, "/x", 1, 0, host, sizeof(host), &fixed),
               FS_RESULT_INVALID_ARCHIVE_HANDLE);
     CHECK_RES(fs_archive_close((uint64_t)h), FS_RESULT_SUCCESS);
     CHECK_RES(fs_archive_close((uint64_t)h), FS_RESULT_INVALID_ARCHIVE_HANDLE);
@@ -186,19 +205,42 @@ int main(int argc, char **argv) {
     CHECK(fs_archive_root((uint64_t)h, host, sizeof(host)) == 1);
     CHECK(strstr(host, "/extsavedata/00048000/F000000B/user") != NULL);
     CHECK_RES(fs_archive_create_file((uint64_t)h, "/x.bin", 8, 0), FS_RESULT_SUCCESS);
+    CHECK_RES(fs_archive_create_file((uint64_t)h, "/leer.bin", 0, 0), 0xE0C046F8u);
     /* ExtSaveData verbietet O_CREAT. */
-    CHECK_RES(fs_archive_open_file((uint64_t)h, "/y.bin", 5, 0, host, sizeof(host)),
-              FS_RESULT_UNSUPPORTED_OPEN_FLAGS);
-    CHECK_RES(fs_archive_open_file((uint64_t)h, "/x.bin", 3, 0, host, sizeof(host)),
+    CHECK_RES(fs_archive_open_file((uint64_t)h, "/y.bin", 5, 0, host, sizeof(host), &fixed),
+              0xE0C046F8u);
+    fixed = 0;
+    CHECK_RES(fs_archive_open_file((uint64_t)h, "/x.bin", 3, 0, host, sizeof(host), &fixed),
               FS_RESULT_SUCCESS);
+    CHECK(fixed == 1);   /* FixSizeDiskFile */
+    CHECK_RES(fs_archive_open_file((uint64_t)h, "/x.bin", 0, 0, host, sizeof(host), &fixed),
+              0xE0C046F8u);
     CHECK_RES(fs_archive_close((uint64_t)h), FS_RESULT_SUCCESS);
 
-    /* --- SharedExtSaveData (0x7): Systemarchiv wird provisioniert ------ */
+    /* --- SharedExtSaveData (0x7): fehlt -> NotFormatted, Start legt an -- */
+    h = fs_archive_open(7, extpath, sizeof(extpath), 0, &res);
+    CHECK(h == -1);
+    CHECK_RES(res, 0xC8A04554u);           /* 340, InvalidState, Status */
+    snprintf(host, sizeof(host), "%s/sharedextsavedata", base);
+    CHECK(!file_exists(host));
+    fs_archive_provision_shared(low);
     h = fs_archive_open(7, extpath, sizeof(extpath), 0, &res);
     CHECK(h > 0);
     CHECK_RES(res, FS_RESULT_SUCCESS);
     CHECK(fs_archive_root((uint64_t)h, host, sizeof(host)) == 1);
     CHECK(strstr(host, "/sharedextsavedata/00048000/F000000B/user") != NULL);
+    /* RenameDirectory ist eine eigene Operation (nicht RenameFile). */
+    CHECK_RES(fs_archive_create_directory((uint64_t)h, "/d1", 0), FS_RESULT_SUCCESS);
+    CHECK_RES(fs_archive_rename_directory((uint64_t)h, "/d1", (uint64_t)h, "/d2"),
+              FS_RESULT_SUCCESS);
+    CHECK_RES(fs_archive_rename_directory((uint64_t)h, "/d1", (uint64_t)h, "/d3"),
+              FS_RESULT_PATH_NOT_FOUND);
+    /* Azahar SaveDataArchive::GetFreeBytes: 32 MiB. */
+    {
+        uint64_t free_bytes = 0;
+        CHECK_RES(fs_archive_get_free_bytes((uint64_t)h, &free_bytes), FS_RESULT_SUCCESS);
+        CHECK(free_bytes == 0x02000000ull);
+    }
     CHECK_RES(fs_archive_close((uint64_t)h), FS_RESULT_SUCCESS);
 
     /* --- SystemSaveData (0x8) ----------------------------------------- */

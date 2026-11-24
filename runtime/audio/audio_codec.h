@@ -25,7 +25,7 @@ typedef struct {
  * sample_count (auf gerade gerundet) Stereo-Samples auf (beide Kanaele
  * gleich, ADPCM ist mono). Rueckgabe: geschriebene Samples. */
 uint32_t audio_adpcm_decode(const uint8_t *data, uint32_t sample_count,
-                            const int16_t coeff[16], int *yn1, int *yn2,
+                            const int16_t coeff[16], int16_t *yn1, int16_t *yn2,
                             int16_t (*out)[2], uint32_t out_capacity);
 
 /* PCM8: u8 -> s16 (Wert << 8), mono oder stereo. */

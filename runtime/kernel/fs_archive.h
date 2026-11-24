@@ -26,13 +26,13 @@
 #define FS_RESULT_NOT_FORMATTED           0xC8A04554u  /* 340, InvalidState */
 #define FS_RESULT_NOT_FOUND_INVALID_STATE  0xC8A04478u /* 120, InvalidState */
 #define FS_RESULT_INVALID_ARCHIVE_HANDLE  0xC8804465u  /* 101, ArchiveNotMounted */
-#define FS_RESULT_INVALID_PATH            0xE0E042BEu  /* 702, InvalidArgument, Usage */
+#define FS_RESULT_INVALID_PATH            0xE0E046BEu  /* 702, InvalidArgument, Usage */
 #define FS_RESULT_FILE_ALREADY_EXISTS     0xC8A044B4u  /* 180, NothingHappened */
 #define FS_RESULT_DIR_ALREADY_EXISTS      0xC8A044B9u  /* 185, NothingHappened */
 #define FS_RESULT_DIRECTORY_NOT_EMPTY     0xC92044F0u  /* 240, Canceled */
-#define FS_RESULT_UNEXPECTED_FILE_OR_DIR  0xE0C04302u  /* 770, NotSupported, Usage */
-#define FS_RESULT_UNSUPPORTED_OPEN_FLAGS  0xE0C042F8u  /* 760, NotSupported, Usage */
-#define FS_RESULT_WRITE_BEYOND_END        0xE0E042C1u  /* 705, InvalidArgument, Usage */
+#define FS_RESULT_UNEXPECTED_FILE_OR_DIR  0xE0C04702u  /* 770, NotSupported, Usage */
+#define FS_RESULT_UNSUPPORTED_OPEN_FLAGS  0xE0C046F8u  /* 760, NotSupported, Usage */
+#define FS_RESULT_WRITE_BEYOND_END        0xE0E046C1u  /* 705, InvalidArgument, Usage */
 
 typedef struct {
     uint32_t total_size;
@@ -50,9 +50,10 @@ void fs_archive_set_program_id(uint64_t program_id);
 uint64_t fs_archive_program_id(void);
 
 /* Dekodiert einen Gastpfad (LowPathType: 1 Empty, 2 Binary, 3 Char nested,
- * 4 Wchar) aus dem Gastpuffer.  Liefert die Laenge in Bytes oder -1. */
-int fs_archive_decode_path(const uint8_t *mem, uint32_t type, uint32_t size, uint32_t addr,
-                           uint8_t *out, size_t out_cap);
+ * 4 Wchar) aus dem Gastpuffer.  mem_size begrenzt jeden Zugriff.
+ * Liefert die Laenge in Bytes oder -1. */
+int fs_archive_decode_path(const uint8_t *mem, uint32_t mem_size, uint32_t type, uint32_t size,
+                           uint32_t addr, uint8_t *out, size_t out_cap);
 
 /* Oeffnet ein Archiv.  raw/raw_len ist der dekodierte Archivpfad (binary/char).
  * Liefert einen ArchiveHandle > 0 oder -1; *result traegt den Azahar-Code. */
@@ -69,17 +70,25 @@ uint32_t fs_archive_control(uint64_t handle, uint32_t action, uint32_t input_siz
                             uint32_t output_size);
 
 /* Datei-/Verzeichnisoperationen (Pfade relativ, mit fuehrendem '/'). */
+/* fixed_size wird auf 1 gesetzt, wenn das Archiv feste Dateigroessen erzwingt
+ * (ExtSaveData/SharedExtSaveData: FixSizeDiskFile). */
 uint32_t fs_archive_open_file(uint64_t handle, const char *guest_path, uint32_t mode,
-                              uint32_t attributes, char *host_out, size_t host_size);
+                              uint32_t attributes, char *host_out, size_t host_size,
+                              int *fixed_size);
 uint32_t fs_archive_create_file(uint64_t handle, const char *guest_path, uint64_t size,
                                 uint32_t attributes);
 uint32_t fs_archive_delete_file(uint64_t handle, const char *guest_path);
 uint32_t fs_archive_rename_file(uint64_t src_handle, const char *src_path, uint64_t dst_handle,
                                 const char *dst_path);
+uint32_t fs_archive_rename_directory(uint64_t src_handle, const char *src_path,
+                                     uint64_t dst_handle, const char *dst_path);
 uint32_t fs_archive_create_directory(uint64_t handle, const char *guest_path, uint32_t attributes);
 uint32_t fs_archive_delete_directory(uint64_t handle, const char *guest_path, int recursive);
 uint32_t fs_archive_open_directory(uint64_t handle, const char *guest_path, char *host_out,
                                    size_t host_size);
+
+/* GetFreeBytes: Azahar SaveDataArchive::GetFreeBytes liefert 32 MiB. */
+uint32_t fs_archive_get_free_bytes(uint64_t handle, uint64_t *bytes);
 
 /* Formatierung/Format-Info. */
 uint32_t fs_archive_get_format_info(uint32_t archive_id, const uint8_t *raw, uint32_t raw_len,
@@ -89,6 +98,13 @@ uint32_t fs_archive_format(uint32_t archive_id, const uint8_t *raw, uint32_t raw
 uint32_t fs_archive_create_ext(uint32_t archive_id, const uint8_t *raw, uint32_t raw_len,
                                const FsFormatInfo *info, uint64_t program_id);
 uint32_t fs_archive_create_system(uint32_t high, uint32_t low, const FsFormatInfo *info);
+
+/* Stellt ein existierendes SharedExtSaveData-Archiv im Host-Zustand bereit.
+ * Auf echter Hardware ist das Systemarchiv bereits vorhanden; der Port legt es
+ * (wie Azahar mit vorbereitetem NAND-Verzeichnis) beim Start an, NICHT beim
+ * OpenArchive.  Quelle: Azahar archive_extsavedata.cpp GetCorrectedPath
+ * (high = 0x00048000) und FormatAsExtData (user/, boss/, metadata). */
+void fs_archive_provision_shared(uint32_t save_low);
 
 /* Directory-Stream (echtes Handle-Objekt in hle.c).  fs_archive_dir_open
  * liefert einen Slot >= 0 oder -1. */

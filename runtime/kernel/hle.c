@@ -253,6 +253,7 @@ typedef struct {
     char path[256];
     FILE *fp;
     uint32_t size;
+    int fixed_size;  /* ExtSaveData: Groesse bleibt fest (Azahar FixSizeDiskFile) */
 } FileSlot;
 
 static FileSlot g_files[MAX_FILES];
@@ -1438,7 +1439,8 @@ static int fs_req_path(uint32_t *p, int normal, int translate, int index, uint32
         if (cap) out[0] = 0;
         return 0;
     }
-    return fs_archive_decode_path(g_cur_mem, type, size, addr, out, cap);
+    return fs_archive_decode_path(g_cur_mem, g_cpu ? g_cpu->mem_size : 0, type, size, addr,
+                                  out, cap);
 }
 
 static int fs_open_host_file(const char *host, const char *label, FileSlot **slot_out) {
@@ -1488,15 +1490,17 @@ static void fs_command(Ipc *r, uint32_t *p) {
             char host[FS_ARCHIVE_PATH_MAX];
             FileSlot *slot = NULL;
             uint32_t h = 0;
+            int fixed = 0;
             uint32_t res = FS_RESULT_INVALID_PATH;
             int len = fs_req_path(p, r->normal, r->translate, 0, type, size, raw, sizeof(raw));
 
             path[0] = 0;
             if (len > 0 && (type == 3 || type == 4)) snprintf(path, sizeof(path), "%s", raw);
             if (archive != 0 && path[0]) {
-                res = fs_archive_open_file(archive, path, mode, attrs, host, sizeof(host));
+                res = fs_archive_open_file(archive, path, mode, attrs, host, sizeof(host), &fixed);
                 if (res == FS_RESULT_SUCCESS) {
                     if (fs_open_host_file(host, host, &slot)) {
+                        slot->fixed_size = fixed;
                         h = (uint32_t)alloc_handle(SVC_FILE, "file");
                         if (h && h < MAX_HANDLES) g_handles[h].file = (int)(slot - g_files);
                     } else {
@@ -1529,6 +1533,7 @@ static void fs_command(Ipc *r, uint32_t *p) {
             char host[FS_ARCHIVE_PATH_MAX];
             FileSlot *slot = NULL;
             uint32_t h = 0;
+            int fixed = 0;
             uint32_t res = FS_RESULT_INVALID_PATH;
             int alen = fs_req_path(p, r->normal, r->translate, 0, atype, asize, araw, sizeof(araw));
             int flen = fs_req_path(p, r->normal, r->translate, 1, ftype, fsize, fraw, sizeof(fraw));
@@ -1553,10 +1558,12 @@ static void fs_command(Ipc *r, uint32_t *p) {
                 if (ah > 0) {
                     if (flen > 0 && (ftype == 3 || ftype == 4))
                         snprintf(fpath, sizeof(fpath), "%s", fraw);
-                    res = fs_archive_open_file((uint64_t)ah, fpath, mode, attrs, host, sizeof(host));
+                    res = fs_archive_open_file((uint64_t)ah, fpath, mode, attrs, host, sizeof(host),
+                                               &fixed);
                     fs_archive_close((uint64_t)ah);
                     if (res == FS_RESULT_SUCCESS && !fs_open_host_file(host, host, &slot))
                         res = FS_RESULT_FILE_NOT_FOUND;
+                    if (res == FS_RESULT_SUCCESS && slot != NULL) slot->fixed_size = fixed;
                 }
             }
             if (res == FS_RESULT_SUCCESS && slot != NULL) {
@@ -1653,7 +1660,7 @@ static void fs_command(Ipc *r, uint32_t *p) {
             sp[0] = dp[0] = 0;
             if (slen > 0 && (p[3] == 3 || p[3] == 4)) snprintf(sp, sizeof(sp), "%s", sraw);
             if (dlen > 0 && (p[7] == 3 || p[7] == 4)) snprintf(dp, sizeof(dp), "%s", draw);
-            if (sp[0] && dp[0]) res = fs_archive_rename_file(src, sp, dst, dp);
+            if (sp[0] && dp[0]) res = fs_archive_rename_directory(src, sp, dst, dp);
             if (g_log) printf("[fs] RenameDirectory \"%s\" -> \"%s\" : %08X\n", sp, dp, res);
             fs_reply_result(r, 0x080A, res);
             break;
@@ -1732,13 +1739,12 @@ static void fs_command(Ipc *r, uint32_t *p) {
         }
         case 0x0812: { /* GetFreeBytes */
             uint64_t a = (uint64_t)p[0] | ((uint64_t)p[1] << 32);
-            char root[FS_ARCHIVE_PATH_MAX];
-            uint32_t res = fs_archive_root(a, root, sizeof(root)) ? FS_RESULT_SUCCESS
-                                                                  : FS_RESULT_INVALID_ARCHIVE_HANDLE;
+            uint64_t bytes = 0;
+            uint32_t res = fs_archive_get_free_bytes(a, &bytes);
             ipc_begin(r, 0x0812, 3, 0);
             ipc_put(r, res);
-            ipc_put(r, res == FS_RESULT_SUCCESS ? 0x40000000u : 0u);
-            ipc_put(r, 0);
+            ipc_put(r, (uint32_t)bytes);
+            ipc_put(r, (uint32_t)(bytes >> 32));
             break;
         }
         case 0x0813: case 0x0821: {
@@ -1762,7 +1768,12 @@ static void fs_command(Ipc *r, uint32_t *p) {
             ipc_put(r, 0x080000);
             break;
         }
-        case 0x0831: case 0x0851: { /* CreateSharedExtSaveData / CreateExtSaveData */
+        case 0x0831: { /* CreateSharedExtSaveData: in Azahar ohne Handler
+                         (fs_user.cpp CommandInfo 0x0831 = nullptr). */
+            generic_command(r, SVC_FS_USER);
+            break;
+        }
+        case 0x0851: { /* CreateExtSaveData: Info, dirs, files, size u64, icon */
             uint32_t media = p[0] & 0xFFu;
             uint8_t bin[12];
             FsFormatInfo info;
@@ -1770,14 +1781,13 @@ static void fs_command(Ipc *r, uint32_t *p) {
             memcpy(bin + 0, &p[0], 4);
             memcpy(bin + 4, &p[1], 4);
             memcpy(bin + 8, &p[2], 4);
-            info.number_directories = p[4];
-            info.number_files = p[5];
-            info.total_size = p[6];
+            info.number_directories = p[3];
+            info.number_files = p[4];
+            info.total_size = p[5];
             info.duplicate_data = 0;
             if (g_log) printf("[fs] CreateExtSaveData cmd=%04X low=%08X high=%08X media=%u\n",
                               r->cmd, p[1], p[2], media);
-            res = fs_archive_create_ext(r->cmd == 0x0831 ? 7u : 6u, bin, sizeof(bin), &info,
-                                        fs_archive_program_id());
+            res = fs_archive_create_ext(6u, bin, sizeof(bin), &info, fs_archive_program_id());
             ipc_begin(r, r->cmd, 1, 2);
             ipc_put(r, res);
             ipc_put(r, (r->translate >= 2) ? p[r->normal] : 0u);
@@ -1875,9 +1885,14 @@ static void file_command(Ipc *r, uint32_t *p) {
                 uint32_t addr = (r->translate >= 2) ? p[r->normal + 1] : 0u;
                 uint32_t got = 0;
                 uint32_t res;
-                res = fs_archive_dir_read(h->dir,
-                                          addr ? g_cur_mem + (addr & 0x1FFFFFFFu) : NULL,
-                                          count, &got);
+                int in_range = count == 0 ||
+                    (addr != 0 && g_cpu != NULL &&
+                     (uint64_t)(addr & 0x1FFFFFFFu) + (uint64_t)count * 0x228u <=
+                         (uint64_t)g_cpu->mem_size);
+                res = in_range ? fs_archive_dir_read(h->dir,
+                                                     addr ? g_cur_mem + (addr & 0x1FFFFFFFu) : NULL,
+                                                     count, &got)
+                               : FS_RESULT_INVALID_PATH;
                 if (g_log) printf("[fs] DirRead count=%u -> %08X got=%u\n", count, res, got);
                 ipc_begin(r, 0x0801, 2, 2);
                 ipc_put(r, res);
@@ -1972,6 +1987,27 @@ static void file_command(Ipc *r, uint32_t *p) {
             /* Translate-Deskriptor: {size|flags, adresse} -> Adresse ist das ZWEITE Wort. */
             if (r->translate >= 2) addr = p[r->normal + 1];
             uint32_t done = 0;
+            if (addr && length && f->fixed_size) {
+                /* Azahar FixSizeDiskFile::Write: offset > size -> WriteBeyondEnd,
+                 * offset == size -> 0 Bytes, sonst auf die Groesse kappen. */
+                if (offset > f->size) {
+                    ipc_begin(r, 0x0803, 2, 2);
+                    ipc_put(r, FS_RESULT_WRITE_BEYOND_END);
+                    ipc_put(r, 0);
+                    ipc_put(r, p[r->normal]);
+                    ipc_put(r, p[r->normal + 1]);
+                    break;
+                }
+                if (offset == f->size) {
+                    ipc_begin(r, 0x0803, 2, 2);
+                    ipc_put(r, 0);
+                    ipc_put(r, 0);
+                    ipc_put(r, p[r->normal]);
+                    ipc_put(r, p[r->normal + 1]);
+                    break;
+                }
+                if (offset + length > f->size) length = (uint32_t)(f->size - offset);
+            }
             if (addr && length) {
                 if (f->fp == NULL) f->fp = fopen(f->path, "w+b");
                 if (f->fp) {
@@ -2359,10 +2395,10 @@ static void dsp_audio_struct_addresses(void) {
         buf[2 + i * 2] = (uint8_t)(addrs[i] & 0xFF);
         buf[2 + i * 2 + 1] = (uint8_t)(addrs[i] >> 8);
     }
-    g_dsp_pipe_len[2] = 0;
+    /* Azahar AudioPipeWriteStructAddresses haengt an die Pipe an; geleert wird
+     * sie nur bei Initialize/Wakeup (ResetPipes), das macht WriteProcessPipe. */
     dsp_pipe_append(2, buf, sizeof(buf));   /* DspPipe::Audio */
-    dsp_signal_events(2, 2);                /* InterruptType::Pipe, Audio */
-}
+    dsp_signal_events(2, 2);                /* InterruptType::Pipe, Audio */}
 
 static void dsp_command(Ipc *r, uint32_t *p) {
     /* Antwortlayouts nach Azahar src/core/hle/service/dsp/dsp_dsp.cpp. */
@@ -2414,7 +2450,11 @@ static void dsp_command(Ipc *r, uint32_t *p) {
                 if (ch == 2) {
                     /* Audio-Pipe: StateChange (Initialize/Shutdown/Wakeup/
                        Sleep) an das DSP-HLE-Modul; die Struktur-Adressen
-                       schreibt der Callback (Azahar PipeWrite). */
+                       schreibt der Callback (Azahar PipeWrite).  Initialize
+                       und Wakeup leeren alle Pipe-Puffer (ResetPipes). */
+                    if (size == 4 && (src[0] == 0 || src[0] == 2)) {
+                        for (int i = 0; i < DSP_NUM_PIPES; i++) g_dsp_pipe_len[i] = 0;
+                    }
                     audio_dsp_pipe_write(src, size);
                 } else {
                     dsp_pipe_append((int)ch, src, size);
@@ -3856,6 +3896,12 @@ static DWORD WINAPI vblank_thread(LPVOID p) {
 void hle_init(ArmCpu *c, const char *romfs_dir) {
     ensure_savedata();
     fs_archive_init("out/savedata");
+    /* SharedExtSaveData ist auf echter Hardware ein vorhandenes Systemarchiv.
+     * Der Host stellt es beim Start bereit (nicht beim OpenArchive, siehe
+     * Azahar ArchiveFactory_ExtSaveData::Open -> NotFormatted).  Die ID stammt
+     * aus der Azahar-Referenzspur (OpenArchive 7, Path 000000000b0000f0...):
+     * 00048000/F000000B, darin /gamecoin.dat. */
+    fs_archive_provision_shared(0xF000000Bu);
     g_cpu = c;
     g_main_cpu = c;
     snprintf(g_romfs, sizeof(g_romfs), "%s", romfs_dir ? romfs_dir : "out/romfs");

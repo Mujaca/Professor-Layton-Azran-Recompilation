@@ -109,7 +109,7 @@ typedef struct {
     uint32_t physical_address;
     uint32_t length;
     uint8_t adpcm_ps;
-    uint16_t adpcm_yn[2];
+    int16_t adpcm_yn[2];   /* s16 wie Azahar ADPCMState::yn1/yn2 */
     uint8_t adpcm_dirty;
     uint8_t is_looping;
     uint16_t buffer_id;
@@ -144,8 +144,8 @@ typedef struct {
     uint16_t current_buffer_id;
 
     int16_t adpcm_coeffs[16];
-    int adpcm_yn1;
-    int adpcm_yn2;
+    int16_t adpcm_yn1;
+    int16_t adpcm_yn2;
 
     float rate_multiplier;
     int interpolation_mode;
@@ -263,7 +263,7 @@ static uint8_t *coeff_ptr(uint8_t *region, int i) {
 }
 
 static int mem_range_ok(DspState *d, uint32_t addr, uint64_t bytes) {
-    uint64_t a = (uint64_t)(addr & 0x1FFFFFFFu);
+    uint64_t a = (uint64_t)audio_phys_to_guest(addr);
     return d->mem != NULL && a + bytes <= (uint64_t)d->mem_size;
 }
 
@@ -293,7 +293,7 @@ static int source_ensure_cap(DspState *d, DspSource *s, uint32_t need) {
 }
 
 static int decode_into(DspState *d, DspSource *s, const DspBuffer *b) {
-    uint32_t addr = b->physical_address & 0x1FFFFFFFu;
+    uint32_t addr = audio_phys_to_guest_aligned(b->physical_address);
     uint32_t need = b->length + (b->length & 1u);
     int stereo = b->mono_or_stereo == 2;
     uint64_t bytes;
@@ -355,9 +355,10 @@ static int source_dequeue(DspState *d, DspSource *s) {
         s->adpcm_yn2 = b.adpcm_yn[1];
     }
     if (!decode_into(d, s, &b)) {
-        /* Azahar: ungueltige Adresse -> leerer Puffer, aber Buffer gilt als
-         * verbraucht (dequeue liefert true). */
+        /* Azahar Source::DequeueBuffer: ungueltige Adresse -> current_buffer
+         * leeren und sofort true zurueckgeben (Statusfelder bleiben unberuehrt). */
         s->cur_len = 0;
+        return 1;
     }
 
     s->current_sample_number = b.has_played ? 0 : b.play_position;
@@ -554,23 +555,30 @@ static void source_parse_config(DspState *d, DspSource *s, uint8_t *cfg,
     }
 
     if (dirty & (1u << 3)) {
-        /* Teilupdate des laufenden Puffers: nur PCM16 (Azahar). */
-        if (s->current_buffer_format == 1 && s->current_buffer_physical_address != 0) {
-            DspBuffer b;
-            memset(&b, 0, sizeof(b));
-            b.physical_address = s->current_buffer_physical_address;
-            b.length = rd_dsp32(cfg + CFG_EMB_LEN);
-            b.mono_or_stereo = s->mono_or_stereo;
-            b.format = s->format;
-            if (decode_into(d, s, &b) && s->cur_len > 0) {
-                if (s->current_sample_number >= s->cur_len) {
-                    s->current_sample_number = 0;
-                } else {
-                    uint32_t drop = s->current_sample_number;
-                    memmove(s->cur, s->cur + drop * 2,
-                            (size_t)(s->cur_len - drop) * 2 * sizeof(int16_t));
-                    s->cur_len -= drop;
-                }
+        /* Azahar Source::ParseConfig partial_embedded_buffer_dirty: den bereits
+         * geladenen Puffer mit der neuen Laenge neu dekodieren (nur PCM16;
+         * Adresse ist die gelatchte current_buffer_physical_address, weil die
+         * aus config ungueltig sein kann). Laenge/Looping/Format/Modus
+         * werden uebernommen. */
+        DspBuffer b;
+        memset(&b, 0, sizeof(b));
+        b.physical_address = s->current_buffer_physical_address;
+        b.length = rd_dsp32(cfg + CFG_EMB_LEN);
+        b.mono_or_stereo = s->mono_or_stereo;
+        b.format = s->current_buffer_format;
+        if (s->current_buffer_format == 1 && b.physical_address != 0 &&
+            decode_into(d, s, &b)) {
+            s->current_buffer_length = b.length;
+            s->current_buffer_mono_or_stereo = s->mono_or_stereo;
+            s->current_buffer_format = b.format;
+            s->current_buffer_is_looping = (rd16(cfg + CFG_EMB_FLAGS2) >> 1) & 1;
+            if (s->cur_len < s->current_sample_number) {
+                s->current_sample_number = 0;
+            } else {
+                uint32_t drop = s->current_sample_number;
+                memmove(s->cur, s->cur + drop * 2,
+                        (size_t)(s->cur_len - drop) * 2 * sizeof(int16_t));
+                s->cur_len -= drop;
             }
         }
     }
@@ -585,8 +593,8 @@ static void source_parse_config(DspState *d, DspSource *s, uint8_t *cfg,
             b.physical_address = rd_dsp32(cfg + CFG_EMB_PHYS);
             b.length = (uint32_t)len;
             b.adpcm_ps = (uint8_t)rd16(cfg + CFG_EMB_PS);
-            b.adpcm_yn[0] = rd16(cfg + CFG_EMB_YN);
-            b.adpcm_yn[1] = rd16(cfg + CFG_EMB_YN + 2);
+            b.adpcm_yn[0] = (int16_t)rd16(cfg + CFG_EMB_YN);
+            b.adpcm_yn[1] = (int16_t)rd16(cfg + CFG_EMB_YN + 2);
             b.adpcm_dirty = rd16(cfg + CFG_EMB_FLAGS2) & 1;
             b.is_looping = (rd16(cfg + CFG_EMB_FLAGS2) >> 1) & 1;
             b.buffer_id = rd16(cfg + CFG_EMB_BUFFER_ID);
@@ -611,8 +619,8 @@ static void source_parse_config(DspState *d, DspSource *s, uint8_t *cfg,
                     b.physical_address = rd_dsp32(bp + BUF_PHYS);
                     b.length = (uint32_t)len;
                     b.adpcm_ps = (uint8_t)rd16(bp + BUF_PS);
-                    b.adpcm_yn[0] = rd16(bp + BUF_YN);
-                    b.adpcm_yn[1] = rd16(bp + BUF_YN + 2);
+                    b.adpcm_yn[0] = (int16_t)rd16(bp + BUF_YN);
+                    b.adpcm_yn[1] = (int16_t)rd16(bp + BUF_YN + 2);
                     b.adpcm_dirty = bp[BUF_DIRTY] != 0;
                     b.is_looping = bp[BUF_LOOPING] != 0;
                     b.buffer_id = rd16(bp + BUF_ID);
@@ -897,11 +905,16 @@ static void generate_frame(DspState *d) {
 /* ---------- Ablaufsteuerung ---------- */
 
 static void dsp_initialize(DspState *d) {
-    /* Azahar: dsp_memory->raw_memory.fill(0) fuer den gesamten DSP-RAM,
-     * mixers.Reset(), sources Reset. Danach schreibt das Spiel die Regionen
-     * neu (die Struktur-Adressen kommen ueber Pipe 2). */
-    memset(d->region[0], 0, AUDIO_DSP_REGION_SIZE);
-    memset(d->region[1], 0, AUDIO_DSP_REGION_SIZE);
+    /* Azahar: dsp_memory->raw_memory.fill(0) fuer den gesamten DSP-RAM
+     * (0x80000 Byte), mixers.Reset(), sources Reset. Danach schreibt das Spiel
+     * die Regionen neu (die Struktur-Adressen kommen ueber Pipe 2). */
+    if (d->mem != NULL &&
+        (uint64_t)AUDIO_DSP_RAM_ADDR + AUDIO_DSP_RAM_SIZE <= (uint64_t)d->mem_size)
+        memset(d->mem + AUDIO_DSP_RAM_ADDR, 0, AUDIO_DSP_RAM_SIZE);
+    else {
+        memset(d->region[0], 0, AUDIO_DSP_REGION_SIZE);
+        memset(d->region[1], 0, AUDIO_DSP_REGION_SIZE);
+    }
     mixers_reset(&d->mixers);
     for (int i = 0; i < AUDIO_DSP_NUM_SOURCES; i++) source_reset(&d->sources[i]);
 }
@@ -942,6 +955,16 @@ static void audio_tick(DspState *d) {
         if (d->interrupt) d->interrupt(AUDIO_DSP_INT_PIPE, 2);
     }
     d->frame_count++;
+}
+
+static void audio_thread_tick(DspState *d) {
+    if (d->lock_enter) d->lock_enter();
+    audio_tick(d);
+    if (d->lock_leave) d->lock_leave();
+}
+
+void audio_dsp_tick(void) {
+    audio_thread_tick(&g_dsp);
 }
 
 static DWORD WINAPI audio_thread(LPVOID p) {
@@ -1008,6 +1031,10 @@ void audio_dsp_pipe_write(const uint8_t *buffer, uint32_t size) {
     DspState *d = &g_dsp;
     if (buffer == NULL || size != 4) return; /* Azahar: genau 4 Byte */
     if (d->verbose) printf("[audio] pipe state=%u\n", buffer[0]);
+    /* Azahar DspHle::Impl::PipeWrite: eine faellige Sleep-Uebergabe sofort
+     * abschliessen und die Reply-Frames zuruecksetzen. */
+    finish_pending_sleep(d);
+    d->sleep_reply_frames = 0;
     /* Azahar DSP_DSP::WriteProcessPipe: Bytes 2/3 sind Muell und werden
      * genullt; der StateChange steht in Byte 0. */
     switch (buffer[0]) {

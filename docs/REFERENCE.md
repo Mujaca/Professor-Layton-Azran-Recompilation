@@ -67,6 +67,16 @@ ReadPipeIfPossible` (Request `normal=3, translate=0`).
 * **dsp::DSP, ptm:u, y2r:u, boss:U, hid:USER:** siehe Azahar
   `core/hle/service/*`.
 
+fs-Result-Codes (Azahar `core/file_sys/errors.h`): `description |
+module(FS=17)<<10 | summary<<21 | level<<27`. Die vier Usage-Codes tragen
+`0x4400`: InvalidPath (702) `0xE0E046BE`, WriteBeyondEnd (705) `0xE0E046C1`,
+UnsupportedOpenFlags (760) `0xE0C046F8`, UnexpectedFileOrDirectory (770)
+`0xE0C04702`. NotFound (120) `0xC8804478`, NotFound/InvalidState
+`0xC8A04478`, NotFormatted (340) `0xC8A04554`, FileAlreadyExists (180)
+`0xC8A044B4`, DirectoryAlreadyExists (185) `0xC8A044B9`, DirectoryNotEmpty
+(240) `0xC92044F0`, ArchiveNotMounted (101) `0xC8804465`. Der
+Free-Bytes-Wert von SaveDataArchive ist in Azahar auf 32 MiB gestubbt.
+
 Referenzreihenfolge der Dienste im echten Boot (Azahar-Log
 `reports/azahar_trace.txt`): APT:U, ndm:u, fs:USER, hid:USER, ptm:u, cfg:u,
 gsp::Gpu, y2r:u, dsp::DSP, boss:U.
@@ -266,6 +276,24 @@ effects}.cpp`, `src/audio_core/{codec,interpolate}.cpp`.
   schreibt Endmix + Status in die Schreibregion. Danach wird
   `InterruptType::Pipe` fuer `DspPipe::Audio` signalisiert (Azahar
   `AudioTickCallback`).
+* Pufferadressen sind FCRAM-physikalisch (`0x20000000 + x`). Die DSP-DMA
+  ignoriert die unteren zwei Adressbits: Azahar dekodiert immer ab
+  `physical_address & 0xFFFFFFFC`. Im Port entspricht das
+  `(addr & 0xFFFFFFFC) & 0x1FFFFFFF` (Gast-Linearspeicher, `arm_mem_read`).
+* Der ADPCM-Zustand `yn1`/`yn2` ist **s16** (Azahar `ADPCMState`); die
+  Koeffizienten sind s16 mit 11 Nachkommabits. Ein als u16 gelesener Verlauf
+  kehrt das Vorzeichen um.
+* `WriteProcessPipe(Audio)`: vor jedem StateChange wird ein offener Sleep
+  abgeschlossen (`FinishPendingSleep`, State Sleeping) und
+  `sleep_reply_frames = 0` gesetzt. `Initialize` nullt den **gesamten**
+  DSP-RAM (0x80000 Byte ab 0x1FF00000); `Initialize` und `Wakeup` leeren alle
+  Pipe-Puffer (`ResetPipes`). Nach einem Sleep setzt der naechste Audio-Frame
+  `sleep_reply_frames = 2`; zwei Frames spaeter wird `InterruptType::Zero`
+  signalisiert.
+* Lineare Interpolation: `x0 + fraction * (x1 - x0) / 2^24` mit gesaettigter
+  Differenz. Azahar rechnet das in `uint64` (implizite Konversion), was fuer
+  negative Differenzen einer Abrundung (floor) entspricht, nicht der
+  C-Division gegen Null.
 * Status je Quelle (12 Byte): `is_enabled` (0), `current_buffer_id_dirty` (1),
   `sync_count` (2), `buffer_position` (4, u32_dsp), `current_buffer_id` (8),
   `last_buffer_id` (10). Die Dirty-Bits der gelesenen Konfiguration werden

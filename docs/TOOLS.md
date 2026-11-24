@@ -76,6 +76,8 @@ Selbsttest: `python tools/selftest_tools.py`.
 | `python tests/framebuffer_test.py` | Bildausgabe/FrameBufferInfo mit synthetischen Puffern |
 | `python tests/y2r_test.py` | YUV→RGB-Konverter mit synthetischen Bildern |
 | `python tests/fs_archive_test.py` | fs-Archive (SaveData/Ext/Shared/System): Host-Layout, Result-Codes, Datei-/Verzeichnisoperationen, Directory-Eintraege |
+| `python tests/audio_test.py` | DSP-HLE-Dekodierung/Resampling (ADPCM inkl. s16-Verlauf, PCM8/16, lineare Interpolation mit Azahar-Rundung) |
+| `python tests/dsp_hle_test.py` | DSP-HLE-Frame-Verarbeitung: Regionenwahl ueber Frame-Counter (inkl. Wraparound), Dirty-Bits, Status-Rueckschreiben, `u32_dsp`, Sleep-Reply nach zwei Frames, DSP-RAM-Nullung bei Initialize |
 
 Diese Tests brauchen nur `zig cc` und laufen in Sekunden; sie gehoeren
 absichtlich nicht zum Commit-Gate.

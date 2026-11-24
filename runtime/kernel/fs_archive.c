@@ -171,21 +171,23 @@ static int dir_is_empty(const char *path) {
 /* ------------------------------------------------------------------ */
 /* Gastpfade                                                           */
 
-int fs_archive_decode_path(const uint8_t *mem, uint32_t type, uint32_t size, uint32_t addr,
-                           uint8_t *out, size_t out_cap) {
+int fs_archive_decode_path(const uint8_t *mem, uint32_t mem_size, uint32_t type, uint32_t size,
+                           uint32_t addr, uint8_t *out, size_t out_cap) {
+    uint32_t off = addr & 0x1FFFFFFFu;
     if (out_cap == 0) return -1;
     out[0] = 0;
     if (type == 1) return 0; /* Empty */
     if (mem == NULL) return -1;
+    if ((uint64_t)off + (uint64_t)size > (uint64_t)mem_size) return -1;
     if (type == 2) { /* Binary: rohe Bytes (z. B. ExtSaveDataInfo) */
         if (size > out_cap) return -1;
-        memcpy(out, mem + (addr & 0x1FFFFFFFu), size);
+        memcpy(out, mem + off, size);
         return (int)size;
     }
     if (type == 3) { /* Char */
         uint32_t i, n = 0;
         for (i = 0; i < size && n + 1 < out_cap; i++) {
-            uint8_t c = mem[(addr & 0x1FFFFFFFu) + i];
+            uint8_t c = mem[off + i];
             if (c == 0) break;
             out[n++] = c;
         }
@@ -195,8 +197,7 @@ int fs_archive_decode_path(const uint8_t *mem, uint32_t type, uint32_t size, uin
     if (type == 4) { /* Wchar (UTF-16LE, nur ASCII relevant) */
         uint32_t i, n = 0;
         for (i = 0; i + 1 < size && n + 1 < out_cap; i += 2) {
-            uint16_t c = (uint16_t)mem[(addr & 0x1FFFFFFFu) + i] |
-                              (uint16_t)(mem[(addr & 0x1FFFFFFFu) + i + 1] << 8);
+            uint16_t c = (uint16_t)mem[off + i] | (uint16_t)(mem[off + i + 1] << 8);
             if (c == 0) break;
             out[n++] = (c < 0x80) ? (uint8_t)c : (uint8_t)'?';
         }
@@ -400,26 +401,12 @@ int64_t fs_archive_open(uint32_t archive_id, const uint8_t *raw, uint32_t raw_le
                 return -1;
             }
             if (!path_is_dir(root)) {
-                if (archive_id == ARCHIVE_SHARED) {
-                    /* SharedExtSaveData ist ein Systemarchiv: auf echter
-                     * Hardware existiert es bereits beim Spielstart (das
-                     * Spiel legt es nicht selbst an).  Der Host provisioniert
-                     * es beim ersten Oeffnen, damit der natuerliche Boot
-                     * denselben Ausgangszustand sieht. */
-                    FsFormatInfo info;
-                    memset(&info, 0, sizeof(info));
-                    info.total_size = 0x100000;
-                    info.number_directories = 512;
-                    info.number_files = 512;
-                    fs_archive_create_ext(archive_id, raw, raw_len, &info, 0);
-                    {
-                        int64_t hh = register_archive(archive_id, root);
-                        if (hh < 0 && result) *result = FS_RESULT_NOT_FOUND;
-                        else if (result) *result = FS_RESULT_SUCCESS;
-                        return hh;
-                    }
-                }
-                if (result) *result = FS_RESULT_NOT_FOUND_INVALID_STATE;
+                /* Azahar ArchiveFactory_ExtSaveData::Open: ExtSaveData liefert
+                 * NotFound/InvalidState (120), SharedExtSaveData NotFormatted
+                 * (340).  Das Systemarchiv wird NICHT hier angelegt. */
+                if (result) *result = (archive_id == ARCHIVE_SHARED)
+                                          ? FS_RESULT_NOT_FORMATTED
+                                          : FS_RESULT_NOT_FOUND_INVALID_STATE;
                 return -1;
             }
             break;
@@ -485,14 +472,23 @@ static uint32_t resolve(uint64_t handle, const char *guest, char *host, size_t h
 }
 
 uint32_t fs_archive_open_file(uint64_t handle, const char *guest_path, uint32_t mode,
-                              uint32_t attributes, char *host_out, size_t host_size) {
+                              uint32_t attributes, char *host_out, size_t host_size,
+                              int *fixed_size) {
     char host[FS_ARCHIVE_PATH_MAX];
     char rel[FS_ARCHIVE_PATH_MAX];
     char parent[FS_ARCHIVE_PATH_MAX];
     uint32_t res = resolve(handle, guest_path, host, sizeof(host), rel, sizeof(rel));
     FsArchive *a = archive_by_handle(handle);
+    int is_ext;
     (void) attributes;
+    if (fixed_size) *fixed_size = 0;
     if (res != FS_RESULT_SUCCESS) return res;
+    is_ext = (a != NULL && (a->id == ARCHIVE_EXTDATA || a->id == ARCHIVE_SHARED));
+    /* Azahar SaveDataArchive::OpenFile: leerer Modus und Create ohne Write
+     * werden abgelehnt; ExtSaveData verbietet das Create-Flag generell. */
+    if (mode == 0) return FS_RESULT_UNSUPPORTED_OPEN_FLAGS;
+    if ((mode & 4u) != 0 && (mode & 2u) == 0) return FS_RESULT_UNSUPPORTED_OPEN_FLAGS;
+    if (is_ext && (mode & 4u) != 0) return FS_RESULT_UNSUPPORTED_OPEN_FLAGS;
     if (path_is_dir(host)) return FS_RESULT_UNEXPECTED_FILE_OR_DIR;
     if (!path_is_file(host)) {
         char *slash;
@@ -504,15 +500,12 @@ uint32_t fs_archive_open_file(uint64_t handle, const char *guest_path, uint32_t 
         *slash = 0;
         if (!path_is_dir(parent)) return FS_RESULT_PATH_NOT_FOUND;
         if ((mode & 4u) == 0) return FS_RESULT_FILE_NOT_FOUND;
-        if (a != NULL && (a->id == ARCHIVE_EXTDATA || a->id == ARCHIVE_SHARED)) {
-            /* ExtSaveData verbietet O_CREAT (Azahar ExtSaveDataArchive::OpenFile). */
-            return FS_RESULT_UNSUPPORTED_OPEN_FLAGS;
-        }
         f = fopen(host, "wb");
         if (f == NULL) return FS_RESULT_FILE_NOT_FOUND;
         fclose(f);
     }
     snprintf(host_out, host_size, "%s", host);
+    if (fixed_size && is_ext) *fixed_size = 1;
     return FS_RESULT_SUCCESS;
 }
 
@@ -523,11 +516,16 @@ uint32_t fs_archive_create_file(uint64_t handle, const char *guest_path, uint64_
     char parent[FS_ARCHIVE_PATH_MAX];
     char *slash;
     uint32_t res = resolve(handle, guest_path, host, sizeof(host), rel, sizeof(rel));
+    FsArchive *a = archive_by_handle(handle);
     FILE *f;
     (void) attributes;
     if (res != FS_RESULT_SUCCESS) return res;
     if (rel[0] == 0) return FS_RESULT_INVALID_PATH;
     if (path_exists(host)) return FS_RESULT_FILE_ALREADY_EXISTS;
+    /* Azahar SaveDataArchive::CreateFile mit allow_zero_size_create=false
+     * (ExtSaveData/SharedExtSaveData): Groesse 0 -> UnsupportedOpenFlags. */
+    if (size == 0 && a != NULL && (a->id == ARCHIVE_EXTDATA || a->id == ARCHIVE_SHARED))
+        return FS_RESULT_UNSUPPORTED_OPEN_FLAGS;
     snprintf(parent, sizeof(parent), "%s", host);
     slash = strrchr(parent, '/');
     if (slash == NULL) return FS_RESULT_PATH_NOT_FOUND;
@@ -576,6 +574,37 @@ uint32_t fs_archive_rename_file(uint64_t src_handle, const char *src_path, uint6
     return FS_RESULT_SUCCESS;
 }
 
+/* Azahar SaveDataArchive::RenameDirectory (eigene Funktion, nicht RenameFile). */
+uint32_t fs_archive_rename_directory(uint64_t src_handle, const char *src_path,
+                                     uint64_t dst_handle, const char *dst_path) {
+    char src[FS_ARCHIVE_PATH_MAX], dst[FS_ARCHIVE_PATH_MAX];
+    char src_rel[FS_ARCHIVE_PATH_MAX], dst_rel[FS_ARCHIVE_PATH_MAX];
+    uint32_t res;
+    if (src_handle != dst_handle) {
+        /* ArchiveManager::RenameDirectoryBetweenArchives: Unimplemented. */
+        return FS_RESULT_UNSUPPORTED_OPEN_FLAGS;
+    }
+    res = resolve(src_handle, src_path, src, sizeof(src), src_rel, sizeof(src_rel));
+    if (res != FS_RESULT_SUCCESS) return res;
+    res = resolve(dst_handle, dst_path, dst, sizeof(dst), dst_rel, sizeof(dst_rel));
+    if (res != FS_RESULT_SUCCESS) return res;
+    if (src_rel[0] == 0) return FS_RESULT_UNEXPECTED_FILE_OR_DIR;
+    if (!path_is_dir(src)) return FS_RESULT_PATH_NOT_FOUND;
+    if (path_exists(dst)) return FS_RESULT_DIR_ALREADY_EXISTS;
+    if (rename(src, dst) != 0) return FS_RESULT_PATH_NOT_FOUND;
+    return FS_RESULT_SUCCESS;
+}
+
+uint32_t fs_archive_get_free_bytes(uint64_t handle, uint64_t *bytes) {
+    /* Azahar SaveDataArchive::GetFreeBytes: "Stubbed to return 32MiB". */
+    if (archive_by_handle(handle) == NULL) {
+        if (bytes) *bytes = 0;
+        return FS_RESULT_INVALID_ARCHIVE_HANDLE;
+    }
+    if (bytes) *bytes = 32ull * 1024ull * 1024ull;
+    return FS_RESULT_SUCCESS;
+}
+
 uint32_t fs_archive_create_directory(uint64_t handle, const char *guest_path, uint32_t attributes) {
     char host[FS_ARCHIVE_PATH_MAX];
     char rel[FS_ARCHIVE_PATH_MAX];
@@ -600,7 +629,8 @@ uint32_t fs_archive_delete_directory(uint64_t handle, const char *guest_path, in
     uint32_t res = resolve(handle, guest_path, host, sizeof(host), rel, sizeof(rel));
     if (res != FS_RESULT_SUCCESS) return res;
     if (rel[0] == 0) return FS_RESULT_DIRECTORY_NOT_EMPTY;
-    if (!path_is_dir(host)) return FS_RESULT_PATH_NOT_FOUND;
+    if (!path_exists(host)) return FS_RESULT_PATH_NOT_FOUND;
+    if (!path_is_dir(host)) return FS_RESULT_UNEXPECTED_FILE_OR_DIR;
     if (recursive) {
         remove_tree(host);
         return FS_RESULT_SUCCESS;
@@ -702,6 +732,30 @@ uint32_t fs_archive_create_system(uint32_t high, uint32_t low, const FsFormatInf
     mkdir_parents(root);
     if (!write_format_meta(meta, info)) return FS_RESULT_NOT_FORMATTED;
     return FS_RESULT_SUCCESS;
+}
+
+void fs_archive_provision_shared(uint32_t save_low) {
+    ExtPath p;
+    char parent[FS_ARCHIVE_PATH_MAX], user[FS_ARCHIVE_PATH_MAX], meta[FS_ARCHIVE_PATH_MAX];
+    char boss[FS_ARCHIVE_PATH_MAX];
+    FsFormatInfo info;
+
+    memset(&p, 0, sizeof(p));
+    p.save_low = save_low;
+    p.save_high = SHARED_EXTDATA_HIGH;
+    /* ext_paths setzt save_high fuer ARCHIVE_SHARED selbst auf 0x00048000. */
+    if (!ext_paths(ARCHIVE_SHARED, (const uint8_t *)&p, sizeof(p), parent, sizeof(parent), user,
+                   sizeof(user), meta, sizeof(meta)))
+        return;
+    if (path_is_dir(user)) return; /* bereits vorhanden (Spielstand) */
+    mkdir_parents(user);
+    snprintf(boss, sizeof(boss), "%s/boss", parent);
+    mkdir_parents(boss);
+    memset(&info, 0, sizeof(info));
+    info.total_size = 0x100000;
+    info.number_directories = 512;
+    info.number_files = 512;
+    write_format_meta(meta, &info);
 }
 
 /* ------------------------------------------------------------------ */

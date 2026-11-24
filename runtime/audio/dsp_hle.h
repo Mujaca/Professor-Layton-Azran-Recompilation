@@ -18,6 +18,21 @@
 #define AUDIO_DSP_REGION0_ADDR 0x1FF50000u
 #define AUDIO_DSP_REGION1_ADDR 0x1FF70000u
 #define AUDIO_DSP_REGION_SIZE  0x8000u
+/* DSP-RAM: 0x1FF00000, 0x80000 Byte (Azahar DspMemory::raw_memory). */
+#define AUDIO_DSP_RAM_ADDR     0x1FF00000u
+#define AUDIO_DSP_RAM_SIZE     0x80000u
+
+/* Einheitliche Umrechnung physikalische Gastadresse -> Offset im linear
+ * abgebildeten Gast-Speicher des Ports (arm_cpu.c: addr & 0x1FFFFFFF).
+ * Audio-Pufferadressen sind FCRAM-physikalisch (0x20000000+x). */
+static inline uint32_t audio_phys_to_guest(uint32_t phys) {
+    return phys & 0x1FFFFFFFu;
+}
+/* Wie Azahar source.cpp: DSP-DMA ignoriert die unteren zwei Adressbits
+ * (GetPhysicalPointer(addr & 0xFFFFFFFC)). */
+static inline uint32_t audio_phys_to_guest_aligned(uint32_t phys) {
+    return audio_phys_to_guest(phys & 0xFFFFFFFCu);
+}
 
 #define AUDIO_DSP_NUM_SOURCES  24
 #define AUDIO_DSP_SAMPLES_PER_FRAME 160
@@ -73,6 +88,11 @@ int audio_dsp_recv_data_ready(void);
 /* Thread starten/stoppen (hle_init / hle_report). */
 void audio_dsp_start(void);
 void audio_dsp_stop(void);
+
+/* Ein Audio-Frame (160 Samples). Der Audio-Thread ruft das periodisch; Tests
+ * treiben damit die Frame-Verarbeitung deterministisch. Guest-Lock wird dabei
+ * genommen, falls gesetzt. */
+void audio_dsp_tick(void);
 
 /* Diagnosezaehler: erzeugte Frames. */
 unsigned long long audio_dsp_frames(void);

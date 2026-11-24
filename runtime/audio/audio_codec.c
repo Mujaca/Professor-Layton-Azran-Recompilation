@@ -9,7 +9,7 @@ static const int SIGNED_NIBBLES[16] = {
 };
 
 uint32_t audio_adpcm_decode(const uint8_t *data, uint32_t sample_count,
-                            const int16_t coeff[16], int *yn1, int *yn2,
+                            const int16_t coeff[16], int16_t *yn1, int16_t *yn2,
                             int16_t (*out)[2], uint32_t out_capacity) {
     /* GC-ADPCM: 8-Byte-Rahmen, 14 Samples je Rahmen, ein Nibble je Sample. */
     const uint32_t FRAME_LEN = 8;
@@ -110,6 +110,15 @@ static void combined_get(const AudioInterpState *st, const int16_t (*in)[2],
     }
 }
 
+/* Azahar interpolate.cpp rechnet `fraction * delta / scale_factor` mit
+ * uint64-Arithmetik; fuer negative deltas ist das eine Abrundung (floor), nicht
+ * die C-Division gegen Null. Nachbildung als arithmetischer Shift >> 24. */
+static int64_t interp_scaled(int64_t delta, uint64_t fraction) {
+    int64_t prod = delta * (int64_t)fraction;
+    if (prod >= 0) return prod / (int64_t)AUDIO_INTERP_SCALE;
+    return -(((-prod) + (int64_t)AUDIO_INTERP_SCALE - 1) / (int64_t)AUDIO_INTERP_SCALE);
+}
+
 static uint32_t step_over(AudioInterpState *st, const int16_t (*in)[2],
                           uint32_t *in_len, float rate, int16_t (*out)[2],
                           uint32_t out_capacity, uint32_t *outi, int linear) {
@@ -144,10 +153,8 @@ static uint32_t step_over(AudioInterpState *st, const int16_t (*in)[2],
             if (d0 > 32767) d0 = 32767;
             if (d1 < -32768) d1 = -32768;
             if (d1 > 32767) d1 = 32767;
-            out[*outi][0] = (int16_t)((int64_t)x0[0] +
-                (int64_t)(fraction * (uint64_t)d0) / (int64_t)AUDIO_INTERP_SCALE);
-            out[*outi][1] = (int16_t)((int64_t)x0[1] +
-                (int64_t)(fraction * (uint64_t)d1) / (int64_t)AUDIO_INTERP_SCALE);
+            out[*outi][0] = (int16_t)((int64_t)x0[0] + interp_scaled(d0, fraction));
+            out[*outi][1] = (int16_t)((int64_t)x0[1] + interp_scaled(d1, fraction));
         } else {
             out[*outi][0] = x0[0];
             out[*outi][1] = x0[1];
