@@ -251,6 +251,71 @@ Antwort.
 
 ## 6. Befunde (offene Ursachen, kein Workaround eingebaut)
 
+### IPC-Folge bis OpenLinkFile – Dienst-Routing/Reply behoben 2026-11-24
+
+**Ziel:** erste inhaltliche Abweichung der IPC-/SVC-Folge nach dem Oeffnen
+aller 10 Dienste gegen `reports/azahar_trace.txt` finden und an der Ursache
+beheben.
+
+**Befund 1 (Dienst-Routing, HEAD vor diesem Paket):** Das Spiel oeffnet
+`fs:USER` per `srv GetServiceHandle` (Referenzzeile 340) und schickt danach
+`0x0861 InitializeWithSdkVersion`, `0x0862 SetPriority`, spaeter
+`0x0845 GetFormatInfo` auf diesem Session-Handle. `dispatch_ipc` route alle
+`0x08xx` pauschal nach Kommandoform; `0x0845` (normal=3) landete dadurch im
+**Datei**-Handler `file_command` und bekam `generic_command` mit
+`MakeBuilder(1,0)` (nur Result) statt Azahars `MakeBuilder(5,0)`
+(`FS_USER::GetFormatInfo`, `fs_user.cpp:1190`). Beleg im HEAD-Lauf:
+`[ipc] ... file cmd=0x0845 n=3 t=2 h=15` direkt nach
+`fs OpenArchive id=4` und vor `OpenFile /head.lt6`; im anschliessenden
+40-s-Lauf fehlt `file 0x080C` (OpenLinkFile) vollstaendig.
+
+**Befund 2 (Antwort/Handle):** Auf dem SelfNCCH-Dateihandle folgt nach
+`file Read/Close` von `/head.lt6` Azahars `File::OpenLinkFile`
+(Referenz 2.469 s, `file.cpp:388`: `MakeBuilder(1,2)` + MoveHandle).
+Mit der Form-Route kam `0x080C` stattdessen als `fs:USER OpenArchive` an
+und lieferte einen falschen Archiv-Handle.
+
+**Korrektur (`runtime/kernel/hle.c`):**
+* `dispatch_ipc`: bei bekanntem Datei-/FS-Handle entscheidet das Handle;
+  der Form-Fallback bleibt nur fuer unbekannte/fremde Handles (z. B. die
+  `0x0802/0x0803/0x0808`-Aufrufe auf dem "sync"-Handle).
+* `file_command 0x080C OpenLinkFile`: neue `FileSlot`-Sitzung auf denselben
+  Pfad (eigene Position/Groesse, gemeinsames Backend), Reply
+  `MakeBuilder(1,2)` + MoveHandle.
+* `fs_command 0x0845 GetFormatInfo`: Reply `MakeBuilder(5,0)`; Werte aus dem
+  tatsaechlich bereitgestellten Save-Archiv `out/savedata`
+  (total_size, Anzahl Verzeichnisse/Dateien, duplicate=0).
+
+**Erreichte Uebereinstimmung:** Die von Azahar geloggte Dienstfolge ist
+vollstaendig (10/10); die Reihenfolge und Parameter der geloggten
+Service-Methoden stimmen bis einschliesslich `File::OpenLinkFile` und
+`File::SetPriority` (Referenz 2.469 s, Zeilen 340-473). Beleg ist der
+codegleiche 120-s-Lauf des verworfenen Stands (`scratch/night/rejected-09.diff`,
+identische HLE-Hunks); im aktuellen Arbeitsbaum liegt dieses Fenster hinter
+dem unten genannten Host-Timing-Stall. Azahars interne `file_sys`-Meldungen
+(`LoadHeader`, `LoadSectionExeFS`, `ReadRomFS`, ...) sind keine IPC-Kommandos
+und werden nicht verglichen.
+
+**Naechste offene Divergenz:** Auf `File::SetPriority` folgt in der Referenz
+der Y2R-Zyklus (`SetInputFormat` ... `StartConversion`, 2.628 s). Der Port
+liest zu diesem Zeitpunkt das verlinkte File (`file 0x0802` 0x10000 Byte)
+und erreicht den Y2R-Zyklus nicht. Ausserdem bleibt ein **Host-Timing-Stall**
+offen: unter paralleler Host-Last bleibt der Boot intermittierend nach der
+zweiten PICA-Liste stehen (`lists=2`, kein `SetBufferSwap`, Threads warten auf
+LightLock `0x0040F120`/Event 32); derselbe Stall trat auch vor diesem Paket
+auf. Deshalb bleibt der Frontier-Gate in `docs/ROADMAP.md` bei 9/10, obwohl
+einzelne gesunde 40-s-Laeufe 10/10 und M2 liefern.
+
+**Offener Recompiler-Befund (nicht in diesem Paket geaendert):**
+`out/missing_calls.txt` enthaelt weiterhin 3622 Aufrufe des Ziels
+`0x0029226D` (ARM-Veneer `0x00292264: add r12, pc, #1; bx r12` -> Thumb
+`0x0029226C`). `scan.py` legt derzeit nur `ldr pc`/`mov pc`-Ziele an, nicht
+`adr rN; bx rN`. Der verworfene Stand enthaelt dafuer eine Korrektur samt
+Test (`scratch/night/rejected-09.diff`, `adr+bx-Veneer-Ziel im Scan`); sie
+braucht eine komplette Neugenerierung (`build.py`, danach `check.py --full`)
+und wurde hier aus Zeitgruenden nicht uebernommen. Der Boot erreicht 10/10
+auch ohne sie, die printf-Formathelfer-Aufrufe sind aber No-ops.
+
 ### VFP-Semantik korrigiert – kein Workaround 2026-11-24
 
 Der Recompiler erzeugte VFP-Code mit vier Abweichungen: `vcmp` setzte das
@@ -306,6 +371,35 @@ ist die Semantik von `fn_00292198` (`g_os+9`) und warum `fn_001028A0` diesen
 Pfad im Port durchläuft (möglicher Recompiler-/HLE-Unterschied bei
 OS-Init/Syscall-Rückgaben, kein Spielcode-Patch).
 
+
+### Funktionserkennung: Scheinaufrufe aus falschem Dekodermodus – behoben 2026-11-24
+
+**Befund:** Im Frontier-Log standen 52x `unbekanntes call-Ziel 0x0010056D
+(von Block 0x00100280)` plus 4x `0x0010001C`; ein echter Aufruf wurde als
+No-op verschluckt. Ursache war die Funktionserkennung, nicht der Spielcode:
+
+* Eine Thumb-Funktion `blx #imm` springt nach ARM. `scan.decode_function`
+  setzte das Ziel aber immer auf den Modus des Aufrufers. Dadurch wurde
+  `0x00292258` (ARM: `mov r0,r0; mov r0,#0; b 0x26c5c4`) im Thumb-Modus
+  dekodiert; der Scheinblock `0x0029259E` (`movs r0,r0; blx r0` auf
+  Padding) erzeugte den Scheinaufruf.
+* `pointer_seeds` ignorierte das Thumb-Bit des Zeigerworts und uebersprang
+  die ersten 4 KiB (`addr < 0x101000`). `0x0010056C` ist eine echte
+  Thumb-Funktion; ihr Zeiger `0x0010056D` steht im Literalpool `0x1005B8`
+  und wird von ihr in ein Objektfeld (+8) gespeichert. Der Aufrufer
+  `0x00100280` (`ldr r0,[r0,#8]; blx r0`) lief deshalb ins Leere.
+
+**Korrektur:** `call_target_thumb()` (Interworking-Regel), Thumb-Bit und
+voller Codebereich in `pointer_seeds()`, Verwerfen von schwachen Seeds
+mitten in dekodiertem Code (ausser dort steht ein Prolog). Test:
+`tests/mvp_selftest.py::discovery_tests`. Belege/Auswertung:
+`scratch/recomp/analyze.py` (Funktionen 17613 -> 12969, Scheinfunktionen
+weg; 90.64% der Textbytes abgedeckt), Frontier **9/10 -> 10/10**.
+
+**Offen:** `0x0029226D` (ARM-Veneer `add ip,pc,#1; bx ip` auf die
+Thumb-Funktion `0x0029226C`) bleibt ein No-op; der Scanner loest
+`add rN, pc, #imm` + `bx rN` noch nicht als Sprungziel auf. Alle anderen
+Fehlziele des vorherigen Laufs (`0x0010056D`, `0x00123D54`) sind weg.
 
 ### Stack-Drift + frueher Finalize-Zweig: `bx rN`-Rueckkehr – behoben 2026-11-24
 
