@@ -125,6 +125,26 @@ Exit-Code 0 = identisch, 1 = Abweichung (oder der Port terminiert nicht,
 wo das Original zurueckkehrt). Das Werkzeug veraendert keinen Gastzustand;
 der Schnappschuss ist reine Diagnose (`ARM_DUMP`).
 
+`tools/cosim.py`: **Co-Simulation im Blockgleichschritt**. `snapshot` startet
+`port.exe` mit `ARM_DUMP=0xADDR:datei` (Diagnose, nur lesend) und sichert
+Register, Flags und Gast-Speicher beim ersten Erreichen eines Basisblocks.
+`run` fuehrt die Originalbytes ab derselben Adresse in Unicorn aus (jede
+Instruktion gehookt) und ruft im Port-Build (`build/gen_boot.o`) dieselbe
+Funktion mit identischem Zustand auf; der Harness zeichnet jeden Basisblock
+mit r0-r15 und Flags auf. Beide Blockfolgen werden verglichen; bei der ersten
+Abweichung werden Block, Vorgaengerblock (disassembliert), Register/Flags und
+ueber einen zweiten Lauf mit Blocklimit die Speicherseiten an dieser
+Blockgrenze ausgegeben. `--root` erlaubt einen fremden Arbeitsbaum.
+
+```powershell
+python tools/cosim.py snapshot --root . --watch 0x0016A500 --out scratch/cosim/snap.bin
+python tools/cosim.py run --root . --snapshot scratch/cosim/snap.bin --context 12
+```
+
+Exit-Code 0 = Blockfolge, Register, Flags und Endzustand identisch, 1 =
+Abweichung. Reines Testwerkzeug (Unicorn nur hier, nicht im Produkt); es
+veraendert keinen Gastzustand.
+
 `tools/recomp/seeds.txt`: zusätzliche Funktionseinstiege (z. B. aus
 `out/missing_calls.txt`).
 

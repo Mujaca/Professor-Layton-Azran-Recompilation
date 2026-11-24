@@ -258,6 +258,45 @@ Antwort.
 
 ## 6. Befunde (offene Ursachen, kein Workaround eingebaut)
 
+### Co-Simulation: Decoder-Kette bricht nach 92 Bloecken ab (belegt 2026-11-24)
+
+**Werkzeug:** `tools/cosim.py` (neu, `docs/TOOLS.md`): Schnappschuss per
+`ARM_DUMP`, danach Blockgleichschritt Port-Code (`build/gen_boot.o`) gegen die
+Originalbytes in Unicorn, inkl. Register/Flags je Blockgrenze und
+Speichervergleich an der ersten Abweichung. Reines Testwerkzeug, kein
+Produktcode.
+
+**Messung:** Schnappschuss am Decoder-Einstieg `0x0016A500` im natuerlichen
+Boot (Stand `b9b2932`), Co-Simulation:
+
+```
+unicorn: 177609 Instruktionen
+port:    RETURNED, 92 Bloecke
+ERSTE ABWEICHUNG (Endzustand): Port 92 Bloecke, Unicorn 177609 Instruktionen
+  r0: unicorn=0x000001B8 port=0x0C682378
+  r13(sp): unicorn=0x1667FCA0 port=0x1667FC54
+  r14(lr): unicorn=0xE0000000 port=0x0016C340
+  ... 5 abweichende Speicherseiten
+  Vorgaenger 0x0016CEE4: mov r6,#0x80; orr ...; stm ...
+```
+
+Alle 92 Blockgrenzen, die der Port erreicht, stimmen in r0-r12/Flags mit den
+Originalbytes ueberein; die Abweichung ist **kein Rechenfehler in einem
+ausgefuehrten Block**, sondern der bereits in §6 dokumentierte Kontrollfluss:
+`0x16CEE4` endet mit `mov pc,lr` (LR = `0x16C340`, Rueckkehradresse eines
+aeusseren Aufrufers, keine Funktion), der Port setzt den Gast dort **nicht**
+fort und kehrt aus dem C-Stack zum Aufrufer zurueck (SP um 0x4C zu klein).
+Unicorn laeuft 177.609 Instruktionen bis zum echten Funktionsende. Der
+Videodecoder liefert damit kein Bild; auf diesem Stand gibt es **0x
+`y2r StartConversion`** im 60-s-Lauf (die 41 der m3-Branches setzen die
+dortigen Recompiler-Fixes voraus) und einen einfarbigen Screenshot
+(`--shot --frames 900`: 400x480, 1 Farbe 000000).
+
+**Naechster Schritt (unveraendert):** Fortsetzung bei `c->r[14]` im
+Dispatcher (Block-Einstieg statt nur Funktions-Einstieg), Regression ueber
+`tools/cosim.py run` mit diesem Schnappschuss. Die Co-Simulation schliesst
+einen reinen Instruktionssemantikfehler auf dem *ausgefuehrten* Pfad aus.
+
 ### Dekoder-Kette: dynamischer Sprung + `mov pc,lr` verliert den Gast-PC – offen 2026-11-24
 
 **Werkzeug:** neuer Funktions-Differenztest `tools/func_difftest.py`
