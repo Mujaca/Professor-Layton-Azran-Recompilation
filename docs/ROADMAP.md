@@ -67,3 +67,4 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | 2026-11-24 | kernel-sync | 9/10 | boss:U | 23 |
 | 2026-11-24 | cfg-eur | 9/10 | boss:U | 22 |
 | 2026-11-24 | workarounds | 9/10 | boss:U | 0 |
+| 2026-11-24 | arbiter-apt (9 war Schein) | 3/10 | hid:USER | 0 |

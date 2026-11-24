@@ -65,7 +65,7 @@ def test_trace_diff():
 def test_guest_run_repeat():
     a = OUT / "run_a.json"
     b = OUT / "run_b.json"
-    args = ["guest-run", "--until", "srvname.*hid:USER",
+    args = ["guest-run", "--until", "srvname.*ndm:u",
             "--timeout", "15", "--json-out"]
     pa = run(args + [str(a)])
     pb = run(args + [str(b)])
@@ -104,7 +104,7 @@ def test_guest_exp():
         reg.unlink()
     p = run(["guest-exp", "record", "--hypothesis",
              "Selbsttest: hid-Acquisition reproduzierbar",
-             "--until", "srvname.*hid:USER", "--timeout", "15",
+             "--until", "srvname.*ndm:u", "--timeout", "15",
              "--repeat", "2", "--registry", str(reg)])
     need(p.returncode == 0, "guest-exp Exit %d\n%s" % (p.returncode, p.stderr[-1500:]))
     data = load_json(reg)
@@ -113,7 +113,7 @@ def test_guest_exp():
     e = data["experiments"][0]
     need(e["deterministic"] is True, "nicht deterministisch")
     need(len(e["runs"]) == 2, "Runs: %d" % len(e["runs"]))
-    q = run(["guest-exp", "check", "--until", "srvname.*hid:USER",
+    q = run(["guest-exp", "check", "--until", "srvname.*ndm:u",
              "--timeout", "15", "--registry", str(reg)])
     need(q.returncode == 0, "check fand den Lauf nicht: %s" % q.stdout)
 

@@ -83,7 +83,6 @@ fn_001B9938) sind entfernt: Build ohne sie bleibt Frontier 9/10 (boss:U).
 | – | `dispatch_ipc` | leitet Kommandos nach Form statt nach Handle um (APT/cfg/fs) |
 | – | generierter Code | unbekannte Aufrufziele = No-op (geloggt in `out/missing_calls.txt`) |
 | – | `arm_mem_read/write` | Zugriffe außerhalb des Speichers liefern 0 statt Abbruch (`ARM_STRICT=1` bricht ab) |
-| – | `hle_svc` 0x22 ArbitrateAddress | Typen falsch zugeordnet: 2 dekrementiert nicht und wartet mit Timeout aus r4/r5, 3 dekrementiert (Azahar: 1 WaitIfLessThan, 2 DecrementAndWait, 3/4 WithTimeout). Korrekte Zuordnung getestet: Frontier 9 → 2 (fs:USER), d. h. ein fehlendes Signal wird bisher durch Timeout-Polling verdeckt |
 | – | Y2R `GetTransferEndEvent`, DSP `GetSemaphoreEventHandle` | Events vorab signalisiert; Y2R `IsFinished*` immer wahr (Azahar: unsignalisiert, Signal bei echter Fertigmeldung) |
 | – | DSP `ReadPipeIfPossible` | schreibt abwechselnd 1/0 in den Gastpuffer statt echter Pipe-Daten |
 | – | srv `GetServiceHandle`, `generic_command` | unbekannte Dienste/Kommandos liefern Erfolg |
@@ -205,3 +204,15 @@ Audio-/DSP-Kern, der Pipe-Interrupts liefert; Azahar signalisiert diese im
 HLE-Audio (`DspHle`) beim Pipe-Processing. Naechster Arbeitsvorrat ist
 daher DSP-Interrupt-Zustellung, nicht Kernel-Synchronisation.
 
+### Arbiter korrekt, Boot stoppt am Gast-RomFS-Lookup (2026-11-24)
+
+`svcArbitrateAddress` folgt jetzt Azahar (1/2 ohne Timeout, 3/4 mit Timeout
+und immer `ResultTimeout`, Decrement nur bei 2/4). Fehlende Weckquelle war
+APT: das erste registrierte Applet bekommt einen Wakeup-Parameter (Sender 0,
+Signal 1), das Parameter-Event wird signalisiert. Folge: Frontier 9 -> 3
+(`hid:USER`). Die 9 waren nur scheinbar: Der Gast-RomFS-Lookup schlaegt fehl
+(err:f `cmd 0x0001`, `E0A046DB`), danach legt das Spiel absichtlich einen
+Endlos-Halt ein (`LightEvent_Wait` auf ein Event auf dem Stack). Der alte
+Arbiter liess diesen Halt per Timeout 0 sofort zurueckkehren. Naechste
+Ursache: Lookup in `fn_00212E3C` (Vergleich bei 0x212F3C, Namensvergleich
+`fn_0021077C`) bzw. das RomFS-Image (`tools/fix_romfs_cycles.py`).

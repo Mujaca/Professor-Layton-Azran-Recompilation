@@ -139,6 +139,7 @@ typedef struct {
     ArmCpu *cpu;
     uint32_t entry;
     int id;
+    int prio;          /* Gast-Prioritaet aus svcCreateThread (kleiner = hoeher) */
     uint32_t handle;   /* Handle aus svcCreateThread */
 } GuestThread;
 static GuestThread g_threads[32];
@@ -412,6 +413,16 @@ static uint32_t cur_tid(ArmCpu *c) {
     return 0;
 }
 
+/* Gast-Prioritaet des aktuell laufenden Threads. Hauptthread und unbekannte
+ * CPUs laufen mit der SDK-Default-Prioritaet 0x18 (Azahar Thread::DEFAULT). */
+static int cur_prio(ArmCpu *c) {
+    if (c == g_main_cpu) return 0x18;
+    for (int i = 0; i < 32; i++) {
+        if (g_threads[i].used && g_threads[i].cpu == c) return g_threads[i].prio;
+    }
+    return 0x18;
+}
+
 static const char *handle_kind_name(const Handle *h) {
     switch (h->kind) {
     case HK_MUTEX: return "mutex";
@@ -658,7 +669,18 @@ static uint32_t g_cmdlist_size = 0;
 static void y2r_command(Ipc *r, uint32_t *p);
 
 
-static int g_apt_wakeup_sent = 0;
+/* APT-Parameterwarteschlange (Azahar AppletManager::CancelAndSendParameter):
+ * APT::Initialize legt fuer den ersten registrierten Applet einen
+ * Wakeup-Parameter (Sender 0, Signal 1) an und signalisiert das
+ * Parameter-Event. ReceiveParameter konsumiert ihn, GlanceParameter nicht. */
+typedef struct {
+    int used;
+    uint32_t sender;
+    uint32_t dest;
+    uint32_t signal;
+    uint32_t size;
+} AptParam;
+static AptParam g_apt_next_param;
 
 static void apt_command(Ipc *r, uint32_t *p) {
     switch (r->cmd) {
@@ -675,9 +697,24 @@ static void apt_command(Ipc *r, uint32_t *p) {
             break;
         }
         case 2: { /* Initialize: Result, CopyHandle(Notification), CopyHandle(Parameter) */
+            uint32_t app_id = (r->normal >= 1) ? p[0] : 0x300u;
             uint32_t ev1 = new_event_handle("apt-notif", 0);
             uint32_t ev2 = new_event_handle("apt-param", 0);
             g_apt_param_ev = ev2;
+            /* Azahar AppletManager::Initialize -> SendParameter(Wakeup): der
+               erste registrierte Applet bekommt sofort einen Wakeup-Parameter
+               (Sender 0, Signal 1, Groesse 0), das Parameter-Event wird
+               signalisiert. Ohne dieses Signal warten APT-Notification-Thread
+               und Main-Loop (LightEvent) aufeinander. */
+            g_apt_next_param.used = 1;
+            g_apt_next_param.sender = 0;
+            g_apt_next_param.dest = app_id;
+            g_apt_next_param.signal = 1;   /* SignalType::Wakeup */
+            g_apt_next_param.size = 0;
+            {
+                Handle *ph = get_handle(ev2);
+                if (ph != NULL) ph->signaled = 1;
+            }
             /* Azahar: MakeBuilder(1,3), PushCopyObjects(notif, param). */
             ipc_begin(r, 2, 1, 3);
             put_result(r);
@@ -721,36 +758,39 @@ static void apt_command(Ipc *r, uint32_t *p) {
                 dsc_flags = p[r->normal];
                 dsc_addr = p[r->normal + 1];
             }
-            /* Hardware-Semantik: GlanceParameter (0x000E) konsumiert den
-               Parameter NICHT, ReceiveParameter (0x000D) schon. Der Wakeup
-               wird erst zugestellt, wenn die Main-Loop bereits pollt, danach
-               NoData. */
+            /* GlanceParameter (0x000E) konsumiert den Parameter NICHT,
+               ReceiveParameter (0x000D) schon. */
             {
-                static unsigned rx_calls = 0;
-                unsigned wake_at = 1u;
-                rx_calls++;
-                if (!g_apt_wakeup_sent && rx_calls >= wake_at) {
-                    if (r->cmd == 0x000D) g_apt_wakeup_sent = 1;
-                    uint32_t obj = (uint32_t)alloc_handle(SVC_OTHER, "apt-parobj");
-                    Handle *oh = get_handle(obj);
-                    if (oh != NULL) oh->signaled = 1;
+                uint32_t app_id = (r->normal >= 1) ? p[0] : 0u;
+                uint32_t buffer_size = (r->normal >= 2) ? p[1] : 0u;
+                (void)dsc_flags;
+                if (!g_apt_next_param.used || g_apt_next_param.dest != app_id) {
+                    /* Kein passender Parameter: NoData */
+                    ipc_begin(r, r->cmd, 1, 0);
+                    ipc_put(r, 0xC8A303EFu);
+                    break;
+                }
+                {
+                    AptParam par = g_apt_next_param;
+                    uint32_t size = (par.size < buffer_size) ? par.size : buffer_size;
+                    if (r->cmd == 0x000D) {
+                        g_apt_next_param.used = 0;
+                        if (g_apt_param_ev != 0) {
+                            Handle *ph = get_handle(g_apt_param_ev);
+                            if (ph != NULL && ph->reset_type != 1) ph->signaled = 0;
+                        }
+                    }
                     ipc_begin(r, r->cmd, 4, 4);
                     put_result(r);
-                    ipc_put(r, 0u);         /* sender id */
-                    ipc_put(r, 1u);         /* Signal: Wakeup */
-                    ipc_put(r, 0);          /* Parameter-Groesse */
-                    ipc_put_handle(r, obj); /* MoveHandle(Parameter-Objekt) */
-                    ipc_put(r, (2u | (0u << 10) | (0u << 14)));  /* StaticBuffer, 0 Byte */
+                    ipc_put(r, par.sender);
+                    ipc_put(r, par.signal);
+                    ipc_put(r, size);
+                    ipc_put_handle(r, 0);  /* MoveHandle: kein Objekt (Azahar: nullptr) */
+                    ipc_put(r, (2u | ((buffer_size & 0x3FFFFu) << 14)));
                     ipc_put(r, dsc_addr);
-                    if (g_apt_param_ev != 0) {
-                        Handle *ph = get_handle(g_apt_param_ev);
-                        if (ph != NULL) ph->signaled = 1;
-                    }
-                    if (g_log) printf("[apt] ReceiveParameter -> Wakeup (#%u)\n", rx_calls);
-                } else {
-                    ipc_begin(r, r->cmd, 1, 0);
-                    /* Result(NoData=1007, Applet=51, InvalidState=5, Status=25) */
-                    ipc_put(r, 0xC8A303EFu);
+                    if (g_log) printf("[apt] %s -> sender=%u signal=%u\n",
+                                      r->cmd == 0x0D ? "ReceiveParameter" : "GlanceParameter",
+                                      par.sender, par.signal);
                 }
             }
             break;
@@ -2714,30 +2754,39 @@ typedef struct {
     int used;
     uint32_t addr;
     uint32_t tid;
+    int prio;            /* Gast-Prioritaet, kleiner = hoeher */
     int woken;
 } ArbWaiter;
 static ArbWaiter g_arbq[ARBQ_MAX];
 
-/* Signal: value < 0 weckt alle, sonst die ersten value Waiter (FIFO statt
- * Prioritaetswahl, da der Port keine echten Thread-Prioritaeten plant). */
+/* Signal: value < 0 weckt alle, sonst value Threads in Prioritaetsreihenfolge
+ * (Azahar AddressArbiter::ResumeHighestPriorityThread: kleinster
+ * Prioritaetswert zuerst, bei Gleichstand der zuerst eingetragene Thread). */
 static int arb_resume(uint32_t addr, int32_t value) {
     int woken = 0;
     int32_t remaining = (value < 0) ? 0x7FFFFFFF : value;
-    for (int i = 0; i < ARBQ_MAX && remaining > 0; i++) {
-        if (!g_arbq[i].used || g_arbq[i].addr != addr || g_arbq[i].woken) continue;
-        g_arbq[i].woken = 1;
+    while (remaining > 0) {
+        int best = -1;
+        for (int i = 0; i < ARBQ_MAX; i++) {
+            if (!g_arbq[i].used || g_arbq[i].addr != addr) continue;
+            if (g_arbq[i].woken) continue;
+            if (best < 0 || g_arbq[i].prio < g_arbq[best].prio) best = i;
+        }
+        if (best < 0) break;
+        g_arbq[best].woken = 1;
         remaining--;
         woken++;
     }
     return woken;
 }
 
-static int arb_register(uint32_t addr, uint32_t tid) {
+static int arb_register(uint32_t addr, uint32_t tid, int prio) {
     for (int i = 0; i < ARBQ_MAX; i++) {
         if (!g_arbq[i].used) {
             g_arbq[i].used = 1;
             g_arbq[i].addr = addr;
             g_arbq[i].tid = tid;
+            g_arbq[i].prio = prio;
             g_arbq[i].woken = 0;
             return i;
         }
@@ -2778,6 +2827,9 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     g_main_cpu = c;
     snprintf(g_romfs, sizeof(g_romfs), "%s", romfs_dir ? romfs_dir : "out/romfs");
     g_log = getenv("HLE_LOG") != NULL;
+    /* Diagnose-Laeufe werden per Timeout beendet; ungepufferte Ausgabe
+       verhindert, dass die letzten Zeilen im stdio-Puffer verloren gehen. */
+    if (getenv("HLE_ARB_LOG") || getenv("HLE_KLOG")) setvbuf(stdout, NULL, _IONBF, 0);
     {
         const char *lim = getenv("HLE_IPC_LOG");
         if (lim) g_ipc_log_limit = atoi(lim);
@@ -2977,6 +3029,7 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                     t->cpu = tc;
                     t->entry = entry;
                     t->id = ((g_thread_count + 1) & 15);
+                    t->prio = (int)c->r[4];
                     t->handle = h;
                     if (getenv("HLE_THR_LOG"))
                         printf("[thrnew] handle=%u entry=%08X arg=%08X stack=%08X id=%d\n",
@@ -3004,8 +3057,19 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
                 if (g_guest_lock_init) ExitThread(0);
             }
             return 0;
-        case 0x0C: /* SetThreadPriority(handle, prio) -> Result */
+        case 0x0C: { /* SetThreadPriority(handle, prio) -> Result */
+            Handle *hh;
+            if (c->r[1] > 0x3Fu) return RESULT_OUT_OF_RANGE;
+            hh = get_handle(c->r[0]);
+            if (hh == NULL || hh->kind != HK_THREAD) return RESULT_INVALID_HANDLE;
+            for (int i = 0; i < 32; i++) {
+                if (g_threads[i].used && g_threads[i].handle == c->r[0]) {
+                    g_threads[i].prio = (int)c->r[1];
+                    break;
+                }
+            }
             return 0;
+        }
         case 0x0A: { /* SleepThread(ns): echte Wartezeit */
             uint64_t ns = (uint64_t)c->r[0] | ((uint64_t)c->r[1] << 32);
             uint32_t ms = (uint32_t)(ns / 1000000ull);
@@ -3162,53 +3226,54 @@ uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
             if (getenv("HLE_ARB_LOG") && arb_prints < 300) {
                 int32_t adbg = 0;
                 if (off + 4 <= c->mem_size) memcpy(&adbg, c->mem + off, 4);
-                printf("[arb] tid=%u addr=%08X type=%u val=%d mem=%08X blk=%08X lr=%08X\n",
+                printf("[arb] tid=%u addr=%08X type=%u val=%d mem=%08X to=%llu blk=%08X lr=%08X\n",
                        cur_tid(c), addr, type, value, (uint32_t)adbg,
-                       arm_last_block, c->r[14]);
+                       (unsigned long long)timeout_ns, arm_last_block, c->r[14]);
                 arb_prints++;
             }
             if (off + 4 > c->mem_size) return 0;
 
-            /* type 0 = Signal: weckt wartende Threads, blockiert nie. */
+            /* Azahar ArbitrationType: 0 Signal, 1 WaitIfLessThan,
+             * 2 DecrementAndWaitIfLessThan, 3 WaitIfLessThanWithTimeout,
+             * 4 DecrementAndWaitIfLessThanWithTimeout.
+             * Signal blockiert nie. 1/2 warten ohne Grenze, 3/4 werten den
+             * Timeout aus und liefern immer ResultTimeout (auch ohne Warten).
+             * Dekrementiert wird nur bei 2/4 und nur, wenn gewartet wird. */
             if (type == 0) {
                 arb_resume(addr, value);
                 return 0;
             }
-            if (type < 1 || type > 4) return 0xD8E093EDu;
+            if (type > 4) return 0xD8E093EDu;
 
-            /* Azahar ArbitrationType: 1 WaitIfLessThan, 2 DecrementAndWait-
-             * IfLessThan, 3 WaitIfLessThanWithTimeout, 4 DecrementAndWait-
-             * IfLessThanWithTimeout. BEKANNTER FEHLER (docs/WORKAROUNDS.md):
-             * unten sind 2 und 3 vertauscht; die korrekte Zuordnung laesst
-             * den Boot haengen, weil ein Signal fehlt. */
             {
                 int32_t cur = 0;
                 memcpy(&cur, c->mem + off, 4);
-                if (cur >= value) return 0;
-                if (type == 3 || type == 4) {
-                    int32_t nv = cur - 1;
-                    memcpy(c->mem + off, &nv, 4);
+                if (cur < value) {
+                    if (type == 2 || type == 4) {
+                        int32_t nv = cur - 1;
+                        memcpy(c->mem + off, &nv, 4);
+                    }
+                    uint32_t tid = cur_tid(c);
+                    int slot = arb_register(addr, tid, cur_prio(c));
+                    uint64_t start = host_us();
+                    /* 1/2 warten ohne Grenze; nur 3/4 werten den Timeout aus. */
+                    int infinite = (type == 1 || type == 2) ||
+                                   timeout_ns == UINT64_MAX;
+                    uint64_t timeout_us =
+                        infinite ? 0 : ((timeout_ns + 999ull) / 1000ull);
+                    if (getenv("HLE_KLOG"))
+                        printf("[karb] tid=%u addr=%08X type=%u val=%d slot=%d"
+                               " mem=%d\n", tid, addr, type, value, slot, cur);
+                    for (;;) {
+                        if (slot < 0 || g_arbq[slot].woken) break;
+                        if (!infinite && (host_us() - start) >= timeout_us) break;
+                        guest_yield();
+                    }
+                    arb_unregister(slot);
                 }
-            }
-            {
-                uint32_t tid = cur_tid(c);
-                int slot = arb_register(addr, tid);
-                uint64_t start = host_us();
-                /* Nur die WithTimeout-Typen (3/4) werten den Timeout aus. */
-                int infinite = (timeout_ns == UINT64_MAX);
-                uint64_t timeout_us = infinite ? 0 : ((timeout_ns + 999ull) / 1000ull);
-                if (getenv("HLE_KLOG"))
-                    printf("[karb] tid=%u addr=%08X type=%u val=%d slot=%d\n",
-                           tid, addr, type, value, slot);
-                for (;;) {
-                    if (slot < 0 || g_arbq[slot].woken) break;
-                    if (!infinite && (host_us() - start) >= timeout_us) break;
-                    guest_yield();
-                }
-                arb_unregister(slot);
             }
             /* Azahar: die WithTimeout-Typen liefern immer ResultTimeout. */
-            if (type == 2 || type == 4) return RESULT_TIMEOUT;
+            if (type == 3 || type == 4) return RESULT_TIMEOUT;
             return 0;
         }
         case 0x23: { /* CloseHandle(handle) */
