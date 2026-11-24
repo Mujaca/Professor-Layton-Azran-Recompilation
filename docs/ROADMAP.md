@@ -118,3 +118,4 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | 2026-11-24 | ringpuffer-wartestelle | 10/10 | None | 0 |
 | 2026-11-24 | m3-demux-paketlaenge | 10/10 | None | 0 |
 | 2026-11-24 | ringpuffer-wartestelle-2 | 10/10 | None | 0 |
+| 2026-11-24 | m4-filmtextur | 10/10 | None | 0 |

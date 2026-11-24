@@ -1075,3 +1075,45 @@ den Originalbytes ab dem Port-Speicherabbild las genau 1.108 Byte;
 in der Azahar-Referenz (Gap 112/312). Der Y2R-Ausgabepuffer enthaelt die
 echten Filmbilder (8x8-Kacheln, RGB24, 512x240). Offen: das Spiel zeichnet
 die Textur noch nicht (keine PICA-Draws), der Bildschirm bleibt einfarbig.
+
+### Filmtextur-Hypothese ausgeschlossen: das Spiel sendet gar keinen Draw – Befund 2026-11-24
+
+**Hypothese (PICA-Strang):** Der Film wird ueber eine PICA-Textur aus dem
+Y2R-Puffer gezeichnet, aber der Draw-Pfad (0x27B34C -> Builder 0x1323FC)
+fehlt im Port. Dann muesste mindestens eine PICA-Liste die Textur 0x081..0x08E
+auf den Y2R-Ausgabepuffer zeigen bzw. einen Trigger (0x22E/0x22F, Immediate,
+Kanal-Sprung) enthalten.
+
+**Messung** (natuerlicher Boot, `HLE_PICA_DIAG=1`, 900 Host-Frames
+`scratch/pica_diag_900.log`; Rohdumps `scratch/pica/list_*.bin`; zusaetzlich
+1400-Frame-Lauf mit `ARM_WATCH`/`HLE_STALLDUMP`):
+
+| Pruefung | Beleg | Ergebnis |
+|---|---|---|
+| Listen/Trigger | 4179 `[gpu] list`-Zeilen, alle `draws=0` | jeder Trigger fehlt: in **keinem** Rohdump steht das Bytepaar `2E 02`/`2F 02` (54 Dateien, alle Bytepositionen geprueft) |
+| Textur auf Y2R-Puffer | Y2R-Ziele 0x15E3DE00/0x15E9DE00 -> PICA-Adressfeld 0x02BC7BC0/0x02BD3BC0 (`PAddr = address*8`) | **0 Treffer**; tatsaechlich gesetzte Textur 0x085 = 0x030A2340 (-> 0x18511A00, VRAM-Textur) |
+| Immediate-Mode 0x232/0x233/0x234/0x235 | Histogramm zeigt je 12 Schreibzugriffe in mehreren Listen | das ist `vs_default_attributes_setup` (Azahar `regs_internal.h:114`), **kein** Draw-Trigger |
+| Attribut-Loader ohne Trigger | Listen enthalten 0x205..0x227, 0x228, 0x25E, VS-Uniforms 0x2C0/0x2C1 (31-Wort-Block), TEV/Lighting, Texturen 0x080..0x08E, dann Finalize 0x010 | kompletter Draw-**Zustand** wird geschrieben, nur der Draw-Befehl fehlt |
+| Kanal-Spruenge 0x23C/0x23D | `[picadiag] ... jumps=0` in allen Listen | keine |
+| GSP-Kommandos | 64x 0x0001 WriteHWRegs (GPU-Init/Framebuffer), 4x 0x0002 (Trigger/Finished loeschen), 1x 0x000B SetLcdForceBlack, 12006x 0x000C TriggerCmdReqQueue | **kein** 0x0003 DisplayTransfer, 0x0004 TextureCopy oder 0x0007 RequestDma |
+| CPU-Direkt-MMIO | `ARM_MEMWATCHRANGE=1EF00000,1000` | 0 Schreibzugriffe (Trigger kommen ausschliesslich ueber GSP/Kommandolisten) |
+| Renderer-Pfad | `ARM_WATCH`, 1400/1000/700 Frames | 0x27B34C, 0x1323FC, 0x132130, die Aufrufer-Einstiege 0x11AD4C/0x250FE8/0x256E40/0x27B6CC/0x2812EC und alle BL-Aufrufstellen (0x11AD98, 0x251004, 0x256E5C, 0x27B71C, 0x281314) je **0 Treffer** |
+| GSP-Queue | 4179 FlushCacheRegions, 0 `ungueltig` | keine verworfene/abgeschnittene Liste |
+
+**Ergebnis:** Die Hypothese ist widerlegt. Der Port verliert keinen Draw: das
+Spiel schickt nach dem Film **ueberhaupt keinen** Draw (weder Textur-Quad noch
+Immediate/GS/Kanal-Sprung und auch keinen Transfer des Y2R-Puffers). Die
+Engine fuellt ihre Kommandopuffer mit vollstaendigem Material-/Uniform-Zustand
+und beendet jede Liste mit Finalize, ruft aber den Draw-Builder nie auf. Der
+Blocker liegt damit **oberhalb von PICA**: Es fehlt die Szene/der
+Renderer-Aufruf (die Aufrufstellen 0x11AD98/0x251004/0x256E5C/0x27B71C/
+0x281314 und der Builder 0x1323FC sind im gesamten Lauf 0x-frei), nicht
+ein PICA-Befehl. Im selben 1400-Frame-Lauf stehen mehrere Gast-Threads in
+`svc 0x22` auf 0x0040F120 (siehe Abschnitt „Stall nach der zweiten
+PICA-Liste“); der Hauptthread kommt dort nicht zur Szenen-/Draw-Abgabe.
+
+**Naechster Schritt:** Die Bedingung suchen, die den Renderer-Aufruf
+verhindert (Szene-/Node-Liste leer, Movie-Player-Zustand, oder
+Mutex-Halter 0x0040F120). Dafuer den Halter-Thread per
+`tools/cosim/lockstep_run.sh` an seiner heissen Funktion (fn_00269E94) gegen
+Unicorn vergleichen. Kein Workaround eingebaut.
