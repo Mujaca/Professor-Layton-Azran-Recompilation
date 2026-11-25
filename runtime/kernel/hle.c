@@ -3782,12 +3782,33 @@ static void y2r_command(Ipc *r, uint32_t *p) {
             }
             {
                 int conv = y2r_perform_conversion(&mem, &g_y2r);
-                if (getenv("HLE_Y2R_LOG"))
-                    fprintf(stderr, "[y2rsc] t=%llu conv=%d fmt=%d/%d %ux%u\n",
+                if (getenv("HLE_Y2R_LOG")) {
+                    /* Nur lesend: Mittelwerte der ersten 4096 Y-Bytes, der
+                     * zugehoerigen U/V-Bytes und der Ausgabe (Farbdiagnose). */
+                    double my = 0, mu = 0, mv = 0, mo = 0;
+                    uint32_t k, n = 4096u;
+                    for (k = 0; k < n; k++) {
+                        uint32_t ay = (g_y2r.src_y.address & 0x1FFFFFFFu) + k;
+                        uint32_t au = (g_y2r.src_u.address & 0x1FFFFFFFu) + k / 4u;
+                        uint32_t av = (g_y2r.src_v.address & 0x1FFFFFFFu) + k / 4u;
+                        uint32_t ao = (g_y2r.dst.address & 0x1FFFFFFFu) + k;
+                        if (ay < mem.size) my += mem.mem[ay];
+                        if (au < mem.size) mu += mem.mem[au];
+                        if (av < mem.size) mv += mem.mem[av];
+                        if (ao < mem.size) mo += mem.mem[ao];
+                    }
+                    fprintf(stderr, "[y2rsc] t=%llu conv=%d fmt=%d/%d %ux%u Y=%.0f U=%.0f V=%.0f "
+                            "out=%.0f c=%d,%d,%d,%d,%d,%d,%d,%d alpha=%u\n",
                             (unsigned long long)((host_ns() - g_boot_ns) / 1000000ull),
                             conv, g_y2r.input_format, g_y2r.output_format,
                             (unsigned)g_y2r.input_line_width,
-                            (unsigned)g_y2r.input_lines);
+                            (unsigned)g_y2r.input_lines, my / n, mu / n, mv / n, mo / n,
+                            g_y2r.coefficients[0], g_y2r.coefficients[1],
+                            g_y2r.coefficients[2], g_y2r.coefficients[3],
+                            g_y2r.coefficients[4], g_y2r.coefficients[5],
+                            g_y2r.coefficients[6], g_y2r.coefficients[7],
+                            (unsigned)g_y2r.alpha);
+                }
                 if (conv != 0) {
                     /* Azahar-ASSERT-Faelle; die Hardware meldet dort kein
                      * Completion-Interrupt. */
