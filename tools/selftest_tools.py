@@ -290,6 +290,25 @@ def test_veneer_thumb_seed():
          % sorted("%08X" % a for a in res.functions))
 
 
+def test_pic_thumb_callback_seed():
+    """`ldr r1,[pc,#4]; add r1, pc` bildet einen Thumb-Funktionszeiger
+    (Callback, wird nur gespeichert) -> Ziel wird als Funktion geseedet."""
+    import struct
+    from recomp import isa, scan
+    base = isa.ARM_BASE
+    code = bytearray(0x20)
+    code[0x00:0x02] = struct.pack("<H", 0x4901)   # ldr r1, [pc, #4]  (Literal @0x08)
+    code[0x02:0x04] = struct.pack("<H", 0x4479)   # add r1, pc        (pc = 0x02+4)
+    code[0x04:0x06] = struct.pack("<H", 0x6001)   # str r1, [r0]
+    code[0x06:0x08] = struct.pack("<H", 0x4770)   # bx lr
+    code[0x08:0x0C] = struct.pack("<I", 0x11 - 6) # Abstand -> base + 0x11 (Thumb)
+    code[0x10:0x16] = bytes.fromhex("00b500207047")
+    res = scan.scan(bytes(code), [(base, "entry", True)])
+    need((base + 0x10) in res.functions and res.functions[base + 0x10].thumb,
+         "PIC-Callback nicht als Thumb-Funktion geseedet: %s"
+         % sorted("%08X" % a for a in res.functions))
+
+
 def test_offset_table_seed():
     """`add pc,rX,rB` ueber eine Offset-Tabelle seedet die Handler.
 
@@ -460,6 +479,7 @@ TESTS = [
     ("BLX-Zielmodus im Scan", test_call_mode),
     ("ldr-pc-Veneer-Ziel im Scan", test_ldrpc_veneer),
     ("Veneer-Seed Thumb", test_veneer_thumb_seed),
+    ("PIC-Callback-Seed Thumb", test_pic_thumb_callback_seed),
     ("Offset-Tabelle Seed", test_offset_table_seed),
     ("Zwei-Schritt-PC-Adresse", test_chained_pc_add_seed),
     ("Ruecksprung in Funktionsmitte", test_dynamic_pc_resume),

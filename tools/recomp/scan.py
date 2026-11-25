@@ -380,6 +380,8 @@ def decode_function(data, fn, visited):
         # PC-relative Konstanten im Block (Interworking-Veneer):
         #   add rN, pc, #imm  /  adr rN, #imm   ->  rN = Zieladresse
         pc_const = {}
+        # Literal per `ldr rX, [pc, #imm]` (fuer PIC-Adressbildung, s. u.)
+        lit_reg = {}
         # `ldr rX,[rB,rI,lsl #2]` mit pc-relativer Basis rB: Offset-Tabelle.
         off_tbl = {}
         lr_known = None
@@ -462,6 +464,39 @@ def decode_function(data, fn, visited):
             value = pc_relative_const(ins, cur, fn.thumb)
             if value is not None:
                 pc_const[value[0]] = value[1]
+            # Positionsunabhaengige Funktionszeiger: `ldr rX, [pc, #imm]`
+            # (Literal = Abstand) + `add rX, pc` ergibt eine Codeadresse, die
+            # z. B. als Callback gespeichert und spaeter per blx aufgerufen
+            # wird (0x1009A2 -> Lese-Callback 0x100999 im Formatierer nach
+            # der Namenseingabe). Ohne Seed landete der Aufruf im No-op und
+            # die Schleife endete nie. Nur ungerade Ergebnisse (Thumb-Bit) im
+            # Codebereich gelten als Funktionszeiger.
+            if (ins.id == A.ARM_INS_LDR and len(ins.operands) >= 2
+                    and ins.operands[0].type == A.ARM_OP_REG
+                    and ins.operands[0].reg != A.ARM_REG_PC
+                    and ins.operands[1].type == A.ARM_OP_MEM
+                    and ins.operands[1].mem.base == A.ARM_REG_PC
+                    and ins.operands[1].mem.index == 0):
+                pcb = ((cur + 4) & ~3) if fn.thumb else (cur + 8)
+                off = pcb + ins.operands[1].mem.disp - isa.ARM_BASE
+                if 0 <= off and off + 4 <= len(data):
+                    lit_reg[ins.operands[0].reg] = int.from_bytes(data[off:off + 4], "little")
+            elif (ins.id == A.ARM_INS_ADD and ins.operands
+                    and ins.operands[0].type == A.ARM_OP_REG
+                    and ins.operands[0].reg in lit_reg
+                    and all(o.type == A.ARM_OP_REG for o in ins.operands)
+                    and A.ARM_REG_PC in [o.reg for o in ins.operands[1:]]
+                    and sorted([o.reg for o in ins.operands[1:]] + ([ins.operands[0].reg] if len(ins.operands) == 2 else []))
+                        == sorted([A.ARM_REG_PC, ins.operands[0].reg])):
+                rd = ins.operands[0].reg
+                pcv = (cur + 4) if fn.thumb else (cur + 8)
+                val = (lit_reg.pop(rd) + pcv) & 0xFFFFFFFF
+                tgt = val & ~1
+                if (val & 1) and tgt >= isa.ARM_BASE and tgt - isa.ARM_BASE < len(data) \
+                        and isa.decode(data, tgt, thumb=True) is not None:
+                    fn.calls.add((tgt, True))
+            elif ins.operands and ins.operands[0].type == A.ARM_OP_REG:
+                lit_reg.pop(ins.operands[0].reg, None)
             if (ins.id == A.ARM_INS_LDR and len(ins.operands) >= 2
                     and ins.operands[0].type == A.ARM_OP_REG
                     and ins.operands[1].type == A.ARM_OP_MEM):

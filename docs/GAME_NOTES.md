@@ -241,3 +241,17 @@ Struktur je Draw statt Registerlesen je Pixel.
   (lr 0x10208C), tid 8 4708x 1 ms, tid 9 8813x 1 ms, tid 10-12 je ~3000x 7 ms.
   Entwurf fuer den naechsten Schritt: docs/IDEAS.md "Scheduler nach
   Azahar-Vorbild".
+
+## Neues Spiel (M11, 2026-11-25)
+
+* Titel -> "New Game" per Touch (unterer Bildschirm, ca. 160,118) ->
+  Namenseingabe (Bildschirmtastatur, "OK!" bei ca. 160,225) -> erste
+  Spielszene (Hangar, Luke und Emmy auf der Treppe, Untertitel). Bewaehrte
+  Folge: `--press touch@3600:20:160:118,touch@4500:12:55:111,touch@4560:12:170:135,touch@4620:12:112:135,touch@4800:15:160:225`
+  (Host-Frames, --renderer hw).
+* Nach "OK!" hing das Spiel frueher: der Formatierer (Thumb, 0x10024E
+  `blx r2`) ruft einen Lese-Callback 0x100999, dessen Adresse in 0x1009A2 per
+  `ldr r1,[pc,#0x14]` + `add r1, pc` gebildet wird; der Scanner kannte das
+  Muster nicht -> Callback nie dekodiert -> Aufruf im No-op -> Endlosschleife.
+* Offen: sporadischer Haenger bei 0x14F5CC (Stream-Pufferliste mit
+  Selbstverweis), siehe Untersuchung Haenger 2.
