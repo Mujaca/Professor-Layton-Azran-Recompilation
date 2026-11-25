@@ -108,6 +108,22 @@ void gpu_pica_invalidate_guest(void)
     if (g_hw_render) hw_invalidate_guest();
 }
 
+/* Nur Texturen im Gastbereich [offset, offset+bytes) verwerfen. offset ist
+ * eine Gast-Linearadresse wie in HwTexture.offset; Aufrufer sind die
+ * GX-Schreiboperationen MemoryFill/DisplayTransfer/TextureCopy und Y2R. */
+void gpu_pica_invalidate_tex_range(uint32_t offset, uint32_t bytes)
+{
+    if (g_hw_render) hw_invalidate_texture_range(offset, bytes);
+}
+
+/* Diagnose: Textur-Uploads und Dekodierzeit des Hardware-Pfads. */
+void gpu_pica_texture_stats(unsigned long long *uploads, unsigned long long *decode_us)
+{
+    if (uploads) *uploads = 0ull;
+    if (decode_us) *decode_us = 0ull;
+    if (g_hw_render) hw_texture_stats(uploads, decode_us);
+}
+
 void gpu_pica_flush_guest(void)
 {
     if (g_hw_render) hw_flush_to_guest();
@@ -5033,6 +5049,11 @@ static void p_ext_memory_fill(ArmCpu *c, int index, int intr_index)
        Ziel verwerfen (der naechste HW-Draw laedt neu aus dem Gast). */
     hw_sync_guest();
     p_hw_tex_gen_bump();
+    {
+        uint32_t gs = gpu_pica_phys_to_guest(start);
+        uint32_t ge = gpu_pica_phys_to_guest(end);
+        if (ge > gs) gpu_pica_invalidate_tex_range(gs, ge - gs);
+    }
     p_mem_fill(c, gpu_pica_phys_to_guest(start), gpu_pica_phys_to_guest(end),
                value, control);
     f[3] = (control & ~1u) | 2u;
@@ -5067,15 +5088,21 @@ static void p_ext_transfer(ArmCpu *c)
         /* Azahar regs_external.h DisplayTransferConfig: flags@0x304,
            trigger@0x306, texture_copy.size@0x308, input_size@0x309,
            output_size@0x30A. */
+        uint32_t dst = gpu_pica_phys_to_guest(out_p);
+        uint32_t sz = p_ext_regs[0x308];
+        gpu_pica_invalidate_tex_range(dst, sz);
         p_texture_copy_run(c, gpu_pica_phys_to_guest(in_p),
-                           gpu_pica_phys_to_guest(out_p), p_ext_regs[0x308],
+                           dst, sz,
                            p_ext_regs[0x309] & 0xFFFFu,
                            (p_ext_regs[0x309] >> 16) & 0xFFFFu,
                            p_ext_regs[0x30A] & 0xFFFFu,
                            (p_ext_regs[0x30A] >> 16) & 0xFFFFu);
     } else {
+        uint32_t dst = gpu_pica_phys_to_guest(out_p);
+        /* output_size (0x302) ist die Groesse des Zielbereichs in Bytes. */
+        gpu_pica_invalidate_tex_range(dst, p_ext_regs[0x302]);
         p_display_transfer_run(c, gpu_pica_phys_to_guest(in_p),
-                               gpu_pica_phys_to_guest(out_p),
+                               dst,
                                p_ext_regs[0x303], p_ext_regs[0x302], flags);
     }
     p_ext_regs[0x306] &= ~1u;

@@ -69,6 +69,8 @@ int gpu_pica_texture_bound(void);
 /* Gastspeicher wurde ausserhalb der PICA-Liste geschrieben (Y2R,
  * DisplayTransfer, TextureCopy, MemoryFill): Hardware-Ziel neu laden. */
 void gpu_pica_invalidate_guest(void);
+void gpu_pica_invalidate_tex_range(uint32_t offset, uint32_t bytes);
+void gpu_pica_texture_stats(unsigned long long *uploads, unsigned long long *decode_us);
 /* Ausstehende Hardware-Ergebnisse ins Gast-VRAM schreiben (vor einer
  * Gast-Schreiboperation bzw. am Ende einer Kommandoliste). */
 void gpu_pica_flush_guest(void);

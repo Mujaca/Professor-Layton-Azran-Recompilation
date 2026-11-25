@@ -156,6 +156,10 @@ void hw_invalidate_guest(void);
 /* Signalisieren, dass sich Gast-Texturbytes geaendert haben. */
 void hw_invalidate_textures(void);
 
+/* Nur Texturen, die den Gastbereich [offset, offset+bytes) ueberlappen,
+ * beim naechsten Draw neu pruefen (GX-Schreiboperationen). */
+void hw_invalidate_texture_range(uint32_t offset, uint32_t bytes);
+
 /* Diagnose: benutzter Treiber ("hardware"/"warp"), Draws, Flushes,
  * Textur-Uploads. */
 const char *hw_driver_name(void);
@@ -163,6 +167,8 @@ void hw_stats(unsigned long long *draws, unsigned long long *flushes);
 /* hw_list_begin: gehaltene (Gast unveraendert) / neu geladene Ziele. */
 void hw_target_sync_stats(unsigned long long *kept, unsigned long long *reloads);
 unsigned long long hw_texture_uploads(void);
+/* Diagnose: Uploads und Wandzeit der Dekodierung (HLE_GTIME/HLE_HW_STATE). */
+void hw_texture_stats(unsigned long long *uploads, unsigned long long *decode_us);
 unsigned long long hw_depth_writes(void);
 /* Volle Gast->D3D-Ladungen des Ziels (Diagnose fuer HW/SW-Wechsel). */
 unsigned long long hw_target_loads(void);

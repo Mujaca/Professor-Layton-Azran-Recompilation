@@ -12,9 +12,10 @@
  *   - Tiefenziele D16/D24/D24S8 in PICA-Kachelung
  *   - Texturen (Einheit 0..2, Typ 2D/Disabled): alle PICA-Formate werden mit
  *     dem Software-Dekoder (gpu_pica_decode_texel, inkl. ETC1/ETC1A4) nach
- *     RGBA8 dekodiert und hochgeladen. Cache je (Adresse, Format, Groesse);
- *     bei neuer Kommandoliste bzw. Kopie (gpu_pica_tex_generation) wird der
- *     Quellbereich konservativ per FNV-1a-Hash verglichen.
+ *     RGBA8 dekodiert und hochgeladen. Cache mit bis zu 32 Texturen (LRU),
+ *     Schluessel (Adresse, Format, Breite/Hoehe, Groesse); Inhalt per
+ *     FNV-1a einmal pro Kommandoliste je Textur sowie nach GX-Schreib-
+ *     zugriffen in den Bereich bzw. HW-Rueckschreiben (Generation).
  *   - Wrap/Border wie p_wrap_coord, Nearest und Linear (PICA-Filterbits).
  *   - TEV: ein Uber-Pixel-Shader interpretiert die 6 Stufen aus einem
  *     Constant Buffer (Quellen, Modifier, Kombinierer inkl. Dot3, Skalierung,
@@ -132,19 +133,62 @@ static int g_sh_valid;
 static unsigned long long g_sync_kept, g_sync_reloads;
 static unsigned long long g_target_loads;   /* volle Gast->D3D-Ladungen */
 
-/* ---- Texturcache ------------------------------------------------------- */
+/* ---- Texturcache -------------------------------------------------------
+ * Schluessel: Guest-Offset, Format, Breite/Hoehe und Bytezahl (die
+ * PICA-Texturgroesse 0x82 bestimmt Dimensionen und damit die Mip-Stufen; der
+ * Port dekodiert wie der Software-Pfad nur Level 0). Der Cache haelt mehrere
+ * Texturen gleichzeitig (der Titel wechselt je Draw zwischen vielen), damit
+ * ein erneutes Binden ohne Dekodieren/Upload auskommt. Der Inhalt wird per
+ * FNV-1a ueber die Quellbytes geprueft:
+ *   (a) GX-Schreiboperationen (MemoryFill/DisplayTransfer/TextureCopy/
+ *       RequestDma/Y2R) markieren nur die ueberlappenden Eintraege als stale,
+ *   (b) HW-Rueckschreiben/SW-Draws erhoehen die Texturgeneration,
+ *   (c) CPU-Schreibzugriffe erkennt der Hash einmal pro Kommandoliste je
+ *       Textur (hw_list_begin erhoeht g_list_serial). */
 typedef struct {
     uint32_t offset, bytes, fmt, w, h;
     uint64_t hash;
+    uint32_t list_seen;         /* Kommandolisten-Serie der letzten Pruefung */
+    uint32_t last_use;          /* LRU */
+    int stale;                  /* Schreibzugriff im Bereich -> neu pruefen */
     int valid;                  /* hash passt zum hochgeladenen Bild */
     ID3D11Texture2D *tex;
     ID3D11ShaderResourceView *srv;
 } HwTexSlot;
 
-static HwTexSlot g_texslot[3];
+#define HW_TEX_CACHE_N 32
+#define HW_TEX_CACHE_BYTES (64ull * 1024ull * 1024ull)
+
+static HwTexSlot g_texcache[HW_TEX_CACHE_N];
+static int g_texbind[3] = { -1, -1, -1 };   /* Cache-Index je Einheit */
+static unsigned long long g_tex_cache_bytes;
+static uint32_t g_tex_clock;                /* LRU-Zeitstempel */
 static ID3D11ShaderResourceView *g_tex_dummy;
 static uint32_t g_tex_gen_seen = 0xFFFFFFFFu;
+static uint32_t g_list_serial;      /* hw_list_begin() */
 static int g_tex_force = 1;
+static unsigned long long g_tex_upload_us;
+static unsigned long long g_tex_upload_key, g_tex_upload_hash;  /* Diagnose */
+static int g_tex_diag = -1;         /* HLE_GTIME/HLE_HW_STATE (nur Diagnose) */
+
+static unsigned long long hw_now_us(void)
+{
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER now;
+    if (freq.QuadPart == 0) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&now);
+    return (unsigned long long)((double)now.QuadPart * 1000000.0 /
+                                (double)freq.QuadPart);
+}
+
+static int tex_diag_on(void)
+{
+    if (g_tex_diag < 0) {
+        const char *a = getenv("HLE_GTIME"), *b = getenv("HLE_HW_STATE");
+        g_tex_diag = ((a && *a) || (b && *b)) ? 1 : 0;
+    }
+    return g_tex_diag;
+}
 
 const char *hw_driver_name(void) { return g_warp ? "warp" : "hardware"; }
 void hw_stats(unsigned long long *draws, unsigned long long *flushes) {
@@ -156,11 +200,30 @@ void hw_target_sync_stats(unsigned long long *kept, unsigned long long *reloads)
     if (reloads) *reloads = g_sync_reloads;
 }
 unsigned long long hw_texture_uploads(void) { return g_tex_uploads; }
+void hw_texture_stats(unsigned long long *uploads, unsigned long long *decode_us) {
+    if (uploads) *uploads = g_tex_uploads;
+    if (decode_us) *decode_us = g_tex_upload_us;
+}
 unsigned long long hw_depth_writes(void) { return g_depth_writes; }
 unsigned long long hw_target_loads(void) { return g_target_loads; }
 int hw_available(void) { return g_ready; }
 void hw_invalidate_guest(void) { g_guest_dirty = 1; g_rendered = 0; }
 void hw_invalidate_textures(void) { g_tex_force = 1; g_tex_gen_seen = 0xFFFFFFFFu; }
+/* Nur Slots, deren Quellbytes den Bereich ueberlappen, muessen neu geprueft
+ * werden (GX-Schreiboperationen). Offset/bytes beziehen sich wie
+ * HwTexture.offset auf den Gastpuffer. */
+void hw_invalidate_texture_range(uint32_t offset, uint32_t bytes)
+{
+    int i;
+    if (bytes == 0u) return;
+    for (i = 0; i < HW_TEX_CACHE_N; i++) {
+        HwTexSlot *s = &g_texcache[i];
+        if (!s->valid) continue;
+        if ((uint64_t)offset < (uint64_t)s->offset + s->bytes &&
+            (uint64_t)s->offset < (uint64_t)offset + bytes)
+            s->stale = 1;
+    }
+}
 void hw_sync_guest(void)
 {
     if (g_have_state && g_rendered && !g_guest_dirty) hw_flush_to_guest();
@@ -1007,10 +1070,13 @@ int hw_init(const char *driver) {
 
 void hw_shutdown(void) {
     int i;
-    for (i = 0; i < 3; i++) {        if (g_texslot[i].srv) { ID3D11ShaderResourceView_Release(g_texslot[i].srv); g_texslot[i].srv = NULL; }
-        if (g_texslot[i].tex) { ID3D11Texture2D_Release(g_texslot[i].tex); g_texslot[i].tex = NULL; }
-        memset(&g_texslot[i], 0, sizeof(g_texslot[i]));
+    for (i = 0; i < HW_TEX_CACHE_N; i++) {
+        if (g_texcache[i].srv) { ID3D11ShaderResourceView_Release(g_texcache[i].srv); g_texcache[i].srv = NULL; }
+        if (g_texcache[i].tex) { ID3D11Texture2D_Release(g_texcache[i].tex); g_texcache[i].tex = NULL; }
+        memset(&g_texcache[i], 0, sizeof(g_texcache[i]));
     }
+    g_tex_cache_bytes = 0;
+    g_texbind[0] = g_texbind[1] = g_texbind[2] = -1;
     if (g_tex_dummy) { ID3D11ShaderResourceView_Release(g_tex_dummy); g_tex_dummy = NULL; }
     release_targets();
     if (g_bs) { ID3D11BlendState_Release(g_bs); g_bs = NULL; }
@@ -1097,7 +1163,7 @@ static void set_constants(const HwDrawState *st, const ID3D11ShaderResourceView 
         cb.u[148 + i * 4 + 1] = st->tex[i].enabled ? 1u : 0u;
         cb.u[148 + i * 4 + 2] = st->tex[i].filter;
         cb.u[148 + i * 4 + 3] = st->tex[i].type;
-        cb.u[160 + i * 4 + 0] = g_texslot[i].valid ? 1u : 0u;
+        cb.u[160 + i * 4 + 0] = (g_texbind[i] >= 0) ? 1u : 0u;
     }
     cb.u[176] = (uint32_t)pica_shader_blend(st);
     cb.u[177] = pica_logic_active(st) ? (st->logic_op & 0xFu) : 0u;
@@ -1130,17 +1196,28 @@ static uint64_t fnv1a(const unsigned char *p, uint32_t n)
     return h;
 }
 
+/* Gibt die D3D-Ressourcen eines Cache-Eintrags frei. */
+static void texslot_release(HwTexSlot *s)
+{
+    if (s->srv) { ID3D11ShaderResourceView_Release(s->srv); s->srv = NULL; }
+    if (s->tex) {
+        ID3D11Texture2D_Release(s->tex);
+        s->tex = NULL;
+        g_tex_cache_bytes -= (unsigned long long)s->w * s->h * 4u;
+    }
+    memset(s, 0, sizeof(*s));
+}
+
 /* Dekodiert das ganze Texturbild einmal nach RGBA8 und laedt es hoch.
  * Kachelreihenfolge wie p_lookup_texel: ti = (y/8)*(w/8) + x/8, innerhalb
  * der Kachel dekodiert gpu_pica_decode_texel (alle Formate inkl. ETC1). */
-static int texslot_upload(int unit, const HwDrawState *st)
+static int texslot_upload(HwTexSlot *s, const HwDrawState *st, const HwTexture *t)
 {
-    HwTexSlot *s = &g_texslot[unit];
-    const HwTexture *t = &st->tex[unit];
     D3D11_TEXTURE2D_DESC td;
     D3D11_SHADER_RESOURCE_VIEW_DESC sv;
     unsigned char *stage;
     uint32_t ts, tiles, tx, ty, k;
+    unsigned long long t0 = 0;
 
     ts = gpu_pica_tex_tile_size(t->format);
     tiles = (t->width / 8u) * (t->height / 8u);
@@ -1149,8 +1226,9 @@ static int texslot_upload(int unit, const HwDrawState *st)
         return 0;
 
     if (!s->tex || s->w != t->width || s->h != t->height) {
-        if (s->srv) { ID3D11ShaderResourceView_Release(s->srv); s->srv = NULL; }
-        if (s->tex) { ID3D11Texture2D_Release(s->tex); s->tex = NULL; }
+        if (s->tex) {
+            texslot_release(s);
+        }
         memset(&td, 0, sizeof(td));
         td.Width = t->width;
         td.Height = t->height;
@@ -1171,10 +1249,12 @@ static int texslot_upload(int unit, const HwDrawState *st)
             return 0;
         s->w = t->width;
         s->h = t->height;
+        g_tex_cache_bytes += (unsigned long long)t->width * t->height * 4u;
     }
 
     stage = (unsigned char *)malloc((size_t)t->width * t->height * 4u);
     if (!stage) return 0;
+    if (tex_diag_on()) t0 = hw_now_us();
     for (ty = 0; ty < t->height / 8u; ty++) {
         for (tx = 0; tx < t->width / 8u; tx++) {
             uint32_t ti = ty * (t->width / 8u) + tx;
@@ -1195,7 +1275,61 @@ static int texslot_upload(int unit, const HwDrawState *st)
     s->fmt = t->format;
     s->bytes = t->bytes;
     g_tex_uploads++;
+    if (t0 != 0ull) g_tex_upload_us += hw_now_us() - t0;
     return 1;
+}
+
+/* Sucht einen gueltigen Eintrag mit exakt diesem Schluessel. */
+static int texslot_find(const HwTexture *t)
+{
+    int i;
+    for (i = 0; i < HW_TEX_CACHE_N; i++) {
+        HwTexSlot *s = &g_texcache[i];
+        if (s->valid && s->offset == t->offset && s->fmt == t->format &&
+            s->w == t->width && s->h == t->height && s->bytes == t->bytes)
+            return i;
+    }
+    return -1;
+}
+
+/* Freien Platz schaffen (leerer Eintrag, sonst LRU). Eintraege, die in
+ * diesem Draw bereits an eine fruehere Einheit gebunden sind, bleiben. */
+static int texslot_alloc(const HwTexture *t, int unit)
+{
+    unsigned long long need = (unsigned long long)t->width * t->height * 4u;
+    int i, j, victim = -1;
+    uint32_t oldest = 0xFFFFFFFFu;
+
+    for (i = 0; i < HW_TEX_CACHE_N; i++)
+        if (!g_texcache[i].valid && g_texcache[i].tex == NULL) { victim = i; break; }
+    if (victim < 0) {
+        for (i = 0; i < HW_TEX_CACHE_N; i++) {
+            int bound = 0;
+            for (j = 0; j < unit; j++) if (g_texbind[j] == i) bound = 1;
+            if (bound) continue;
+            if (g_texcache[i].last_use <= oldest) {
+                oldest = g_texcache[i].last_use;
+                victim = i;
+            }
+        }
+    }
+    if (victim < 0) victim = 0;
+    texslot_release(&g_texcache[victim]);
+    /* Bytebudget: weitere LRU-Eintraege freigeben, bis der Upload passt. */
+    while (need <= HW_TEX_CACHE_BYTES &&
+           g_tex_cache_bytes + need > HW_TEX_CACHE_BYTES) {
+        int drop = -1;
+        uint32_t o = 0xFFFFFFFFu;
+        for (i = 0; i < HW_TEX_CACHE_N; i++) {
+            int bound = (i == victim);
+            for (j = 0; j < unit; j++) if (g_texbind[j] == i) bound = 1;
+            if (bound || !g_texcache[i].valid) continue;
+            if (g_texcache[i].last_use <= o) { o = g_texcache[i].last_use; drop = i; }
+        }
+        if (drop < 0) break;
+        texslot_release(&g_texcache[drop]);
+    }
+    return victim;
 }
 
 static void bind_textures(const HwDrawState *st)
@@ -1205,34 +1339,53 @@ static void bind_textures(const HwDrawState *st)
     int i;
 
     for (i = 0; i < 3; i++) {
-        HwTexSlot *s = &g_texslot[i];
         const HwTexture *t = &st->tex[i];
+        HwTexSlot *s;
+        int idx;
+
+        g_texbind[i] = -1;
+        srv[i] = g_tex_dummy;
         if (t->type != 0u || !t->enabled || t->bytes == 0u ||
             st->guest_mem == NULL ||
-            (uint64_t)t->offset + t->bytes > st->guest_size) {
-            s->valid = 0;
+            (uint64_t)t->offset + t->bytes > st->guest_size)
+            continue;
+        /* Schluessel (Adresse, Format, Breite/Hoehe, Bytezahl) kann sich
+           innerhalb derselben Kommandoliste aendern: bei JEDEM Draw suchen.
+           Der Byte-Hash laeuft hoechstens einmal pro Kommandoliste je
+           Textur, bei neuer Texturgeneration oder nach einem
+           GX-Schreibzugriff in den Bereich. */
+        idx = texslot_find(t);
+        if (idx < 0) {
+            idx = texslot_alloc(t, i);
+            s = &g_texcache[idx];
+            if (!texslot_upload(s, st, t)) {
+                texslot_release(s);
+                continue;
+            }
+            s->valid = 1;
+            s->hash = fnv1a(st->guest_mem + t->offset, t->bytes);
+            s->list_seen = g_list_serial;
+            s->stale = 0;
+            g_tex_upload_key++;
         } else {
-            /* Der Schluessel (Adresse/Format/Groesse) kann sich innerhalb
-               derselben Kommandoliste aendern: bei JEDEM Draw pruefen. Der
-               teure Byte-Hash laeuft nur bei neuer Generation. */
-            int key_ok = s->valid && s->offset == t->offset &&
-                         s->fmt == t->format && s->w == t->width &&
-                         s->h == t->height;
-            uint64_t h = 0;
-            if (!key_ok) {
-                if (texslot_upload(i, st)) s->valid = 1;
-                else s->valid = 0;
-                if (s->valid && gen_check) s->hash = fnv1a(st->guest_mem + t->offset, t->bytes);
-            } else if (gen_check) {
-                h = fnv1a(st->guest_mem + t->offset, t->bytes);
+            s = &g_texcache[idx];
+            if (gen_check || s->stale || s->list_seen != g_list_serial) {
+                uint64_t h = fnv1a(st->guest_mem + t->offset, t->bytes);
                 if (s->hash != h) {
-                    if (texslot_upload(i, st)) s->valid = 1;
-                    else s->valid = 0;
-                    if (s->valid) s->hash = h;
+                    if (!texslot_upload(s, st, t)) {
+                        texslot_release(s);
+                        continue;
+                    }
+                    s->hash = h;
+                    g_tex_upload_hash++;
                 }
+                s->list_seen = g_list_serial;
+                s->stale = 0;
             }
         }
-        srv[i] = s->valid ? s->srv : g_tex_dummy;
+        s->last_use = ++g_tex_clock;
+        g_texbind[i] = idx;
+        srv[i] = s->srv;
     }
     if (gen_check) {
         g_tex_gen_seen = st->tex_generation;
@@ -1540,6 +1693,27 @@ int hw_flush_to_guest(void) {
 }
 
 void hw_list_begin(void) {
+    /* Neue Kommandoliste: jede gebundene Textur wird hoechstens einmal per
+       Byte-Hash gegen den Gastspeicher geprueft (CPU-Schreibzugriffe). */
+    g_list_serial++;
+    /* Diagnose (HLE_HW_STATE/HLE_GTIME): Upload- und Dekodierrate. */
+    if (tex_diag_on()) {
+        static unsigned long long t0, up0, dec0, start;
+        unsigned long long now = hw_now_us();
+        if (start == 0ull) start = now;
+        if (t0 == 0ull) { t0 = now; up0 = 0ull; dec0 = 0ull; }
+        if (now - t0 >= 5000000ull && now > t0) {
+            double sec = (double)(now - t0) / 1000000.0;
+            printf("[texcache] t=%.1fs uploads=%llu (%.1f/s) key=%llu hash=%llu "
+                   "dekodier_ms=%llu (%.1f%%)\n", (double)(now - start) / 1000000.0,
+                   g_tex_uploads - up0, (double)(g_tex_uploads - up0) / sec,
+                   g_tex_upload_key, g_tex_upload_hash,
+                   (g_tex_upload_us - dec0) / 1000ull,
+                   100.0 * (double)(g_tex_upload_us - dec0) / 1000000.0 / sec);
+            fflush(stdout);
+            t0 = now; up0 = g_tex_uploads; dec0 = g_tex_upload_us;
+        }
+    }
     if (!g_ready || !g_have_state) return;
     /* Ausstehende Ergebnisse zuerst in den Gast (falls ein Aufrufer den
      * Listenanfang ohne Listenende erreicht hat); danach ist der Gast der

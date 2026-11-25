@@ -405,15 +405,16 @@ static uint32_t scene_e(ArmCpu *c) {
 }
 
 /* Szene F: RGBA8-Textur, Repeat, Nearest; TEV Stufe 0 Replace(Tex0),
- * Stufe 1 Modulate(Previous, PrimaryColor). */
-static uint32_t scene_f(ArmCpu *c) {
+ * Stufe 1 Modulate(Previous, PrimaryColor). scene_tex_cmd emittiert nur die
+ * Kommandoliste, damit ein Test die Gasttextur zwischen zwei Listen aendern
+ * kann. */
+static uint32_t scene_tex_cmd(ArmCpu *c) {
     static const Vtx3 v[3] = {
         {{-0.9f, -0.9f, 0.0f}, {0.5f, 0.5f, 0.5f, 1.0f}, {0.0f, 0.0f}},
         {{ 0.9f, -0.9f, 0.0f}, {0.5f, 0.5f, 0.5f, 1.0f}, {1.0f, 0.0f}},
         {{ 0.0f,  0.9f, 0.0f}, {0.5f, 0.5f, 0.5f, 1.0f}, {0.5f, 1.0f}},
     };
     uint32_t *q;
-    fill_tex_rgba8(c, TEX0, 1);
     put_vertices3(c, v, 3);
     q = (uint32_t *)(c->mem + LIST);
     q = emit_attrs3(q, 3);
@@ -427,6 +428,11 @@ static uint32_t scene_f(ArmCpu *c) {
     q = emit_target(q, FB, 16, 16, 0u, 0u, 0, 0u);
     q = emit(q, 0x22E, 0);
     return (uint32_t)((unsigned char *)q - (c->mem + LIST));
+}
+
+static uint32_t scene_f(ArmCpu *c) {
+    fill_tex_rgba8(c, TEX0, 1);
+    return scene_tex_cmd(c);
 }
 
 /* Szene G: zwei Texturen mit Dot3_RGBA (Stufe 0), Alpha = Rot. */
@@ -1115,8 +1121,7 @@ int main(int argc, char **argv) {
         u1 = hw_texture_uploads();
         check(d1 - d0 >= 2, "Szene P fuehrt zwei Draws aus");
         check(f1 - f0 <= 1, "hoechstens ein Readback je Kommandoliste");
-        check(u1 - u0 >= 2, "Texturwechsel wird bei jedem Draw geprueft");
-
+        check(u1 - u0 <= 2, "Texturcache dekodiert je Draw hoechstens eine neue Textur");
         /* (3b) Ohne Tiefen-/Stencil-Schreiben bleibt das Gast-Tiefenziel
            unangetastet (kein D24-Roundtrip, kein Readback). */
         gpu_pica_reset();
@@ -1153,6 +1158,42 @@ int main(int argc, char **argv) {
               "CPU-Schreibzugriff zwischen zwei Listen bleibt erhalten");
         check(c.mem[FB + offr + 3] == 0x10,
               "zweite Liste zeichnet in das neu geladene Ziel");
+    }
+
+    /* (E5) Textur aendert sich zwischen zwei Kommandolisten: der zweite Draw
+       muss die neuen Gastbytes sampeln. Der Byte-Hash laeuft einmal pro Liste
+       je Textur, ein Warmlauf-Cache darf den Wechsel nicht verschlucken. */
+    {
+        static unsigned char hwb[16 * 16 * 4], swb[16 * 16 * 4];
+        uint32_t sz;
+        int bad, one, edge, first;
+
+        /* Hardware: Liste 1 mit Seed 1, dann Gasttextur auf Seed 2 aendern. */
+        gpu_pica_reset();
+        gpu_pica_set_render_hw(1);
+        memset(c.mem + FB, 0, 16 * 16 * 4);
+        sz = scene_f(&c);
+        gpu_run_pica_list(&c, LIST, sz);
+        fill_tex_rgba8(&c, TEX0, 2);
+        memset(c.mem + FB, 0, 16 * 16 * 4);
+        sz = scene_tex_cmd(&c);
+        gpu_run_pica_list(&c, LIST, sz);
+        memcpy(hwb, c.mem + FB, sizeof(hwb));
+
+        /* Software-Referenz mit genau diesen Gastbytes. */
+        gpu_pica_reset();
+        gpu_pica_set_render_hw(0);
+        memset(c.mem + FB, 0, 16 * 16 * 4);
+        fill_tex_rgba8(&c, TEX0, 2);
+        sz = scene_tex_cmd(&c);
+        gpu_run_pica_list(&c, LIST, sz);
+        memcpy(swb, c.mem + FB, sizeof(swb));
+
+        bad = compare_pixels(swb, hwb, (int)sizeof(swb), 4, &one, &edge, &first);
+        if (bad > 0)
+            printf("     Texturwechsel: %d Pixel >1 LSB (erster %d), %d Kantenpixel\n",
+                   bad, first, edge);
+        check(bad <= 32, "Texturinhalt zwischen zwei Listen wird neu gesampelt");
     }
 
     /* (E3) D24 ueber D32_FLOAT: Laden und Rueckschreiben ohne Draw muss

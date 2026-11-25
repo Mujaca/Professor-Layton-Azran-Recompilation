@@ -37,10 +37,11 @@ Rückfallebene erhalten.
 
 * Texturen der Einheiten 0–2 (`Texture2D` und `Disabled`) in allen 14
   PICA-Formaten. Die Dekodierung nutzt exakt den Software-Dekoder
-  (`gpu_pica_decode_texel`, inkl. ETC1/ETC1A4); der Upload-Cache ist je
-  (Adresse, Format, Größe) geschlüsselt und prüft bei jeder neuen
-  Kommandoliste sowie nach MemoryFill/DisplayTransfer/TextureCopy einen
-  FNV-1a-Hash der Quellbytes (`gpu_pica_tex_generation`).
+  (`gpu_pica_decode_texel`, inkl. ETC1/ETC1A4); der Upload-Cache haelt bis
+  zu 32 Texturen (LRU, 64 MiB) je (Adresse, Format, Größe) und
+  prüft den Inhalt per FNV-1a einmal pro Kommandoliste je Textur sowie nach
+  GX-Schreiboperationen in den Bereich (`gpu_pica_tex_generation`,
+  `hw_invalidate_texture_range`).
 * Wrap-Modi 0–7 inklusive Border-Farbe und Nearest/Linear (PICA mag/min-Bits;
   der Software-Pfad liest weiterhin nur den Nachbartexel, deshalb sind
   Linear-Szenen nicht pixelgleich).
