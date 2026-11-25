@@ -134,6 +134,17 @@ static unsigned long long g_lock_idle_us;
 static volatile unsigned long long g_lock_free_us = 0;
 static unsigned g_vblank_tick = 0;
 
+/* Wartende Gast-Threads (hs_wait, ArbitrateAddress) schlafen auf g_kcv statt
+ * im Millisekundentakt um die Gast-Sperre zu pollen. Jeder Thread, der die
+ * Sperre nach echter Arbeit abgibt (guest_lock_leave ausserhalb eines
+ * Warte-Polls), weckt alle Warter: jede Zustandsaenderung (Event, Mutex,
+ * Arbiter, IPC, Timer-Poll im VBlank, DSP/GPU-Interrupts) passiert unter der
+ * Sperre und endet mit einer Abgabe. Ein Timeout-Deckel (KWAIT_SLICE_MS)
+ * haelt Timer und Zeitlimits ohne weiteren Weckruf aktuell. */
+static CONDITION_VARIABLE g_kcv = CONDITION_VARIABLE_INIT;
+static _Thread_local int t_wait_poll = 0;
+#define KWAIT_SLICE_MS 2u
+
 static void guest_lock_enter(void) {
     if (!g_guest_lock_init || g_no_lock) return;
     if (t_lock_owned) return;
@@ -157,6 +168,7 @@ static void guest_lock_leave(void) {
      * invalidieren global, weil der naechste Thread beliebig ist. */
     arm_excl_clear_all();
     LeaveCriticalSection(&g_guest_lock);
+    if (!t_wait_poll) WakeAllConditionVariable(&g_kcv);
     if (g_ystat) g_lock_free_us = host_us();
 }
 /* Nicht blockierend (DSP-Thread): 1 = Sperre erhalten. */
@@ -167,6 +179,95 @@ static int guest_lock_try(void) {
     t_lock_owned = 1;
     return 1;
 }
+/* GPU-Abschnitte: GSP-GX-Befehle (RequestDma, SubmitCmdList, MemoryFill,
+ * DisplayTransfer, TextureCopy) laufen synchron im aufrufenden Gast-Thread
+ * (gx_run_inline) unter g_gpu_cs, das alle GPU-Zugriffe serialisiert. Waehrend
+ * der GPU-Arbeit wird die Gast-Sperre abgegeben, wenn ein anderer Gast-Thread
+ * bereit ist, den echte Hardware jetzt laufen liesse (Sound-Thread auf dem
+ * SysCore). Frueher hielt der Software-Rasterizer die Sperre durchgehend und
+ * hungerte den Sound-Thread aus (Musikluecken 35..140 ms). Interrupts aus dem
+ * Abschnitt werden geordnet vorgemerkt (gpu_irq_push) und unter der
+ * Gast-Sperre zugestellt (gsp_flush_pending_irqs). Sperr-Reihenfolge:
+ * Gast-Sperre -> g_gpu_cs; wer g_gpu_cs haelt, nimmt die Gast-Sperre nie. */
+static CRITICAL_SECTION g_gpu_cs;
+static int g_gpu_cs_init = 0;
+/* Vorgemerkte GPU-Interrupts als geordnete FIFO (Anzahl und Reihenfolge
+ * zaehlen: das Spiel erwartet z. B. je DisplayTransfer einen PPF). */
+#define GPU_IRQ_Q 1024u
+static uint8_t g_gpu_irq_q[GPU_IRQ_Q];
+static unsigned g_gpu_irq_head = 0, g_gpu_irq_tail = 0;
+static volatile LONG g_gpu_irq_pending = 0;   /* Anzahl in der FIFO */
+static SRWLOCK g_gpu_irq_srw = SRWLOCK_INIT;
+static void gpu_irq_push(int id) {
+    AcquireSRWLockExclusive(&g_gpu_irq_srw);
+    if (g_gpu_irq_head - g_gpu_irq_tail < GPU_IRQ_Q) {
+        g_gpu_irq_q[g_gpu_irq_head % GPU_IRQ_Q] = (uint8_t)id;
+        g_gpu_irq_head++;
+        InterlockedIncrement(&g_gpu_irq_pending);
+    }
+    ReleaseSRWLockExclusive(&g_gpu_irq_srw);
+}
+static _Thread_local int t_gpu_section = 0;
+static void gsp_signal_interrupt(int id);
+
+static void gpu_cs_enter(void) { if (g_gpu_cs_init) EnterCriticalSection(&g_gpu_cs); }
+static void gpu_cs_leave(void) { if (g_gpu_cs_init) LeaveCriticalSection(&g_gpu_cs); }
+
+/* Aufrufer haelt die Gast-Sperre (oder es gibt keine). */
+static void gsp_flush_pending_irqs(void) {
+    if (g_gpu_irq_pending == 0) return;
+    for (;;) {
+        int id;
+        AcquireSRWLockExclusive(&g_gpu_irq_srw);
+        if (g_gpu_irq_head == g_gpu_irq_tail) {
+            ReleaseSRWLockExclusive(&g_gpu_irq_srw);
+            break;
+        }
+        id = g_gpu_irq_q[g_gpu_irq_tail % GPU_IRQ_Q];
+        g_gpu_irq_tail++;
+        InterlockedDecrement(&g_gpu_irq_pending);
+        ReleaseSRWLockExclusive(&g_gpu_irq_srw);
+        gsp_signal_interrupt(id);
+    }
+}
+
+typedef struct { uint32_t w[8]; } GxOp;
+static void gx_exec(const GxOp *op);
+
+/* Synchron im aufrufenden Thread: das Spiel sieht die Fertigmeldung wie
+ * bisher direkt nach dem Befehl. Die Gast-Sperre wird fuer die Dauer der
+ * GPU-Arbeit nur abgegeben, wenn ein Gast-Thread bereit ist, den echte
+ * Hardware jetzt laufen liesse (hoeher priorisiert, oder auf dem anderen Kern:
+ * der Sound-Thread dieses Spiels laeuft auf dem SysCore, processor_id 1). Sonst bleibt sie gehalten: parallel
+ * laufende Gast-Threads bremsen den Software-Rasterizer messbar (CPU). */
+static uint32_t cur_tid(ArmCpu *c);
+static int cur_prio(ArmCpu *c);
+static int kernel_other_should_run(uint32_t tid, int prio);
+static void gx_run_inline(ArmCpu *c, const uint32_t w[8]) {
+    GxOp op;
+    int had = 0;
+    memcpy(op.w, w, sizeof(op.w));
+    if (t_lock_owned) {
+        audio_dsp_flush_events();
+        gsp_flush_pending_irqs();
+        if (kernel_other_should_run(cur_tid(c), cur_prio(c))) {
+            had = 1;
+            guest_lock_leave();
+        }
+    }
+    t_gpu_section = 1;
+    gpu_cs_enter();
+    gx_exec(&op);
+    gpu_cs_leave();
+    t_gpu_section = 0;
+    if (had && g_guest_lock_init && !g_no_lock) {
+        EnterCriticalSection(&g_guest_lock);
+        t_lock_owned = 1;
+    }
+    gsp_flush_pending_irqs();
+}
+
+
 /* Wartet garantiert, bis der Lock wieder erlangt ist (kein "ohne Lock
    weiterlaufen" mehr). */
 static void guest_lock_reacquire(void) {
@@ -192,7 +293,7 @@ static void y2r_poll(void);
  * kooperativen Lock nicht dauerhaft halten. Alle 0x4000 Bloecke abgeben. */
 void hle_pump(void) {
     if ((++g_pump_count & 0x3FFFu) != 0) return;
-    if (t_lock_owned) audio_dsp_flush_events();
+    if (t_lock_owned) { audio_dsp_flush_events(); gsp_flush_pending_irqs(); }
     hid_poll();
     y2r_poll();
     if (!g_guest_lock_init || g_no_lock) return;
@@ -226,10 +327,29 @@ static void guest_yield(void) {
     /* Garantiert wieder in den Lock zurueck (bilanziert ueber t_lock_owned). */
     guest_lock_reacquire();
     audio_dsp_flush_events();
+    gsp_flush_pending_irqs();
     if (g_ystat) {
         g_yield_n++;
         g_yield_us += host_us() - t0;
     }
+}
+
+static void gsp_flush_pending_irqs(void);
+/* Warte-Poll: Sperre abgeben und schlafen, bis ein anderer Thread nach
+ * echter Arbeit abgibt (g_kcv) oder KWAIT_SLICE_MS vergeht. Ohne Sperre bzw.
+ * im deterministischen Modus wie bisher guest_yield(). */
+static void guest_wait_change(void) {
+    if (!g_guest_lock_init || g_no_lock || g_det_sched || !t_lock_owned) {
+        guest_yield();
+        return;
+    }
+    arm_excl_clear_all();
+    t_wait_poll = 1;
+    SleepConditionVariableCS(&g_kcv, &g_guest_lock, KWAIT_SLICE_MS);
+    t_wait_poll = 0;
+    /* Sperre ist wieder gehalten (t_lock_owned blieb 1). */
+    audio_dsp_flush_events();
+    gsp_flush_pending_irqs();
 }
 
 
@@ -811,6 +931,28 @@ static int kernel_higher_ready(uint32_t tid, int prio) {
     return 0;
 }
 
+/* Kern (processor_id) eines Gast-Threads: 0 AppCore, 1 SysCore. */
+static int proc_of_tid(uint32_t tid) {
+    if (tid == 0) return g_main_proc;
+    for (int i = 0; i < 32; i++)
+        if (g_threads[i].used && (uint32_t)g_threads[i].id == tid) return g_threads[i].proc_id;
+    return 0;
+}
+
+/* Ist ein Thread bereit, den echte Hardware jetzt laufen liesse, waehrend
+ * tid beschaeftigt ist? Hoeher priorisiert auf demselben Kern, oder beliebig
+ * auf einem anderen Kern (3DS: AppCore und SysCore laufen parallel). */
+static int kernel_other_should_run(uint32_t tid, int prio) {
+    int mine = proc_of_tid(tid);
+    for (int i = 0; i < KWAIT_MAX; i++) {
+        KernelWaiter *w = &g_kwait[i];
+        if (!w->used || (uint32_t)w->tid == tid) continue;
+        if (w->prio >= prio && proc_of_tid((uint32_t)w->tid) == mine) continue;
+        if (kwait_ready(w)) return 1;
+    }
+    return 0;
+}
+
 /* Abgelaufene Timer signalisieren (Azahar Timer::Signal). Wird aus den
  * Warteschleifen und dem VBlank-Thread gepollt. */
 static void kernel_poll_timers(void) {
@@ -901,7 +1043,7 @@ static int hs_wait(ArmCpu *c, Handle **objs, int cnt, int wait_all,
             return 0;
         }
         yielded = 1;
-        guest_yield();
+        guest_wait_change();
     }
 }
 
@@ -2927,6 +3069,10 @@ static void gsp_signal_interrupt(int id) {
  * GSP_GPU::SignalInterrupt). */
 static void gsp_pica_irq(int id) {
     if (id < 0 || id > GSP_IRQ_DMA) return;
+    if (t_gpu_section) {
+        gpu_irq_push(id);
+        return;
+    }
     gsp_signal_interrupt(id);
 }
 
@@ -2965,7 +3111,9 @@ static void gsp_vblank_fb_update(ArmCpu *c, int tid) {
                           st, fmt, shown);
         ReleaseSRWLockExclusive(&g_gsp_fb_srw);
         if (left != 0u) {
+            gpu_cs_enter();
             gpu_set_fb_size(left, (screen == 1) ? 320 : 400, 240);
+            gpu_cs_leave();
             if (g_log)
                 printf("[gsp] SetBufferSwap screen=%d fb=0x%08X stride=0x%X fmt=%X (VBlank)\n",
                        screen, left, st, fmt);
@@ -3017,6 +3165,77 @@ static void pica_pair_put(ArmCpu *c, uint32_t a, uint32_t n, uint32_t value,
 /* Verarbeitet den GX-Kommandopuffer des Threads mit GPU-Recht
  * (Azahar GSP_GPU::TriggerCmdReqQueue). Header: Index u8, Anzahl u8,
  * Status u8, ShouldStop u8; Kommandos ab +0x20 je 0x20 Byte. */
+/* GPU-Worker: einen GX-Befehl ausfuehren (ohne Gast-Sperre, unter g_gpu_cs).
+ * Interrupts nur vormerken (t_gpu_section / gpu_irq_push). */
+static void gx_exec(const GxOp *op) {
+    ArmCpu *c = g_cpu;
+    uint32_t w[8];
+    uint32_t id;
+    memcpy(w, op->w, sizeof(w));
+    id = w[0] & 0xFFu;
+    if (c == NULL) return;
+    switch (id) {
+            case 0x00: { /* RequestDma: Quelle -> Ziel, danach DMA-Interrupt */
+                uint32_t s0 = w[1] & 0x1FFFFFFFu;
+                uint32_t s1 = w[2] & 0x1FFFFFFFu;
+                uint32_t sz = w[3];
+                if (sz != 0u && sz <= 0x08000000u &&
+                    (uint64_t)s0 + sz <= c->mem_size &&
+                    (uint64_t)s1 + sz <= c->mem_size) {
+                    memmove(c->mem + s1, c->mem + s0, sz);
+                    printf("[gspq] RequestDma %08X -> %08X (%u)\n", w[1], w[2], sz);
+                } else {
+                    printf("[gspq] RequestDma ungueltig %08X -> %08X (%u)\n", w[1], w[2], sz);
+                }
+                gpu_irq_push(GSP_IRQ_DMA);
+                break;
+            }
+            case 0x01: { /* SubmitCmdList (Azahar GPU::Execute) */
+                uint32_t addr = w[1], size = w[2];
+                /* GSP reicht eine Virtualadresse; PICA-Register halten wie
+                   auf echter Hardware physische Adressen (Azahar
+                   GPU::Execute -> VirtualToPhysicalAddress). */
+                uint32_t paddr = gpu_pica_virt_to_phys(addr);
+                /* Azahar: eine Laenge von 0 ist zulaessig (er schreibt die
+                   Register und fuehrt nichts aus); nur ein nicht abbildbarer
+                   Bereich meldet P3D. */
+                if (addr != 0u &&
+                    (size == 0u ||
+                     (uint64_t)gpu_pica_phys_to_guest(paddr) + size <= c->mem_size)) {
+                    unsigned long long d0 = gpu_pica_draw_count();
+                    uint64_t gt0 = g_gtime ? host_us() : 0;
+                    int nops = gpu_gsp_submit_cmdlist_cmd(c, paddr, size);
+                    if (g_gtime) {
+                        g_gtime_us += host_us() - gt0;
+                        g_gtime_lists++;
+                    }
+                    /* Frontier-M3: Liste mit Draws ([gpu] list ... draws=N). */
+                    printf("[gpu] list addr=%08X paddr=%08X size=%X ops=%d draws=%llu\n",
+                           addr, paddr, size, nops, gpu_pica_draw_count() - d0);
+                } else {
+                    /* Azahar GPU::SubmitCmdList: ungueltige Liste -> P3D. */
+                    printf("[gspq] ProcessCommandList ungueltig %08X/%X\n", addr, size);
+                    gpu_irq_push(GSP_IRQ_P3D);
+                }
+                break;
+            }
+            case 0x02: { /* MemoryFill */
+                gpu_gsp_memory_fill_cmd(c, w);
+                break;
+            }
+            case 0x03: { /* DisplayTransfer */
+                gpu_gsp_display_transfer_cmd(c, w);
+                break;
+            }
+            case 0x04: { /* TextureCopy */
+                gpu_gsp_texture_copy_cmd(c, w);
+                break;
+            }
+            default:
+                break;
+    }
+}
+
 static int gsp_process_cmdqueue(ArmCpu *c) {
     int qops = 0;
     int tid = g_gsp_right_thread >= 0 ? g_gsp_right_thread : g_gsp_thread_id;
@@ -3056,59 +3275,13 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
         id = w[0] & 0xFFu;
         stop_cmd = ((w[0] >> 16) & 0xFFu) != 0u;
         switch (id) {
-            case 0x00: { /* RequestDma: Quelle -> Ziel, danach DMA-Interrupt */
-                uint32_t s0 = w[1] & 0x1FFFFFFFu;
-                uint32_t s1 = w[2] & 0x1FFFFFFFu;
-                uint32_t sz = w[3];
-                if (sz != 0u && sz <= 0x08000000u &&
-                    (uint64_t)s0 + sz <= c->mem_size &&
-                    (uint64_t)s1 + sz <= c->mem_size) {
-                    memmove(c->mem + s1, c->mem + s0, sz);
-                    printf("[gspq] RequestDma %08X -> %08X (%u)\n", w[1], w[2], sz);
-                } else {
-                    printf("[gspq] RequestDma ungueltig %08X -> %08X (%u)\n", w[1], w[2], sz);
-                }
-                gsp_signal_interrupt(GSP_IRQ_DMA);
-                break;
-            }
-            case 0x01: { /* SubmitCmdList (Azahar GPU::Execute) */
-                uint32_t addr = w[1], size = w[2];
-                /* GSP reicht eine Virtualadresse; PICA-Register halten wie
-                   auf echter Hardware physische Adressen (Azahar
-                   GPU::Execute -> VirtualToPhysicalAddress). */
-                uint32_t paddr = gpu_pica_virt_to_phys(addr);
-                /* Azahar: eine Laenge von 0 ist zulaessig (er schreibt die
-                   Register und fuehrt nichts aus); nur ein nicht abbildbarer
-                   Bereich meldet P3D. */
-                if (addr != 0u &&
-                    (size == 0u ||
-                     (uint64_t)gpu_pica_phys_to_guest(paddr) + size <= c->mem_size)) {
-                    unsigned long long d0 = gpu_pica_draw_count();
-                    uint64_t gt0 = g_gtime ? host_us() : 0;
-                    int nops = gpu_gsp_submit_cmdlist_cmd(c, paddr, size);
-                    if (g_gtime) {
-                        g_gtime_us += host_us() - gt0;
-                        g_gtime_lists++;
-                    }
-                    qops += nops;
-                    /* Frontier-M3: Liste mit Draws ([gpu] list ... draws=N). */
-                    printf("[gpu] list addr=%08X paddr=%08X size=%X ops=%d draws=%llu\n",
-                           addr, paddr, size, nops, gpu_pica_draw_count() - d0);
-                } else {
-                    /* Azahar GPU::SubmitCmdList: ungueltige Liste -> P3D. */
-                    printf("[gspq] ProcessCommandList ungueltig %08X/%X\n", addr, size);
-                    gsp_signal_interrupt(GSP_IRQ_P3D);
-                }
-                break;
-            }
+            case 0x00: /* RequestDma */
+            case 0x01: /* SubmitCmdList */
             case 0x02: /* MemoryFill */
-                gpu_gsp_memory_fill_cmd(c, w);
-                break;
             case 0x03: /* DisplayTransfer */
-                gpu_gsp_display_transfer_cmd(c, w);
-                break;
             case 0x04: /* TextureCopy */
-                gpu_gsp_texture_copy_cmd(c, w);
+                gx_run_inline(c, w);
+                qops++;
                 break;
             case 0x05: /* FlushCacheRegions: kein CPU-Cache im Port */
                 printf("[gspq] FlushCacheRegions %08X/%X %08X/%X %08X/%X\n",
@@ -3199,6 +3372,7 @@ static void gsp_command(Ipc *r, uint32_t *p) {
             }
 
             if (result == 0u && g_cpu != NULL) {
+                gpu_cs_enter();
                 for (i = 0u; i + 4u <= size; i += 4u) {
                     uint32_t val = 0u;
                     memcpy(&val, g_cpu->mem + ((src + i) & 0x1FFFFFFFu), 4);
@@ -3219,6 +3393,7 @@ static void gsp_command(Ipc *r, uint32_t *p) {
                                                  val, mask);
                     }
                 }
+                gpu_cs_leave();
             }
             ipc_begin(r, r->cmd, 1, 0);
             ipc_put(r, result);
@@ -3251,7 +3426,10 @@ static void gsp_command(Ipc *r, uint32_t *p) {
             if (result == 0u && dsc_addr >= 0x08000000u && g_cpu != NULL &&
                 (uint64_t)(dsc_addr & 0x1FFFFFFFu) + size <= g_cpu->mem_size) {
                 for (i = 0u; i < size; i += 4u) {
-                    uint32_t v = gpu_gsp_read_reg(g_cpu, 0x1EB00000u + addr + i);
+                    uint32_t v;
+                    gpu_cs_enter();   /* wartet auf eine laufende GPU-Operation */
+                    v = gpu_gsp_read_reg(g_cpu, 0x1EB00000u + addr + i);
+                    gpu_cs_leave();
                     memcpy(g_cpu->mem + ((dsc_addr + i) & 0x1FFFFFFFu), &v, 4);
                 }
             }
@@ -3282,8 +3460,10 @@ static void gsp_command(Ipc *r, uint32_t *p) {
                     gsp_fb_regs_apply(&g_gsp_fb_regs[screen], (int)screen, active,
                                       left, right, st, fmt, shown);
                     ReleaseSRWLockExclusive(&g_gsp_fb_srw);
+                    gpu_cs_enter();
                     gpu_set_fb_size(gsp_fb_regs_visible_left(&g_gsp_fb_regs[screen]),
                                     (screen == 1u) ? 320 : 400, 240);
+                    gpu_cs_leave();
                 }
                 if (g_log) printf("[gsp] SetBufferSwap screen=%u fb=0x%08X stride=0x%X fmt=%X active=%u shown=%u\n",
                                   screen, left, st, fmt, active, shown);
@@ -4025,6 +4205,7 @@ static DWORD WINAPI vblank_thread(LPVOID p) {
         kernel_poll_timers();
         hid_poll();
         audio_dsp_flush_events();
+        gsp_flush_pending_irqs();
         if (g_ystat && (++g_vblank_tick % 62u) == 0u) {
             printf("[ystat] vbl=%u t=%llus yields=%llu yield_ms=%llu pumps=%llu pump_ms=%llu idle_ms=%llu\n",
                    g_vblank_tick,
@@ -4090,6 +4271,8 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
 
     if (!g_guest_lock_init) {
         InitializeCriticalSection(&g_guest_lock);
+        InitializeCriticalSection(&g_gpu_cs);
+        g_gpu_cs_init = 1;
         g_guest_lock_init = 1;
         /* Kooperatives Threading: genau ein Gast-Thread laeuft. */
         g_no_lock = getenv("HLE_NO_THREAD_LOCK") != NULL;
@@ -4625,7 +4808,7 @@ static uint32_t hle_svc_dispatch(ArmCpu *c, uint32_t imm) {
                     for (;;) {
                         if (slot < 0 || g_arbq[slot].woken) break;
                         if (!infinite && (host_us() - start) >= timeout_us) break;
-                        guest_yield();
+                        guest_wait_change();
                     }
                     arb_unregister(slot);
                 }
