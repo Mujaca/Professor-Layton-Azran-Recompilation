@@ -136,12 +136,41 @@ static void test_baton(void) {
     CHECK(ks_pick_ready(prio, qseq, ready, 4, -1) == -1, "niemand bereit: Leerlauf");
 }
 
+/* 6) Thread-Ids eindeutig: ein endender Thread traegt nur SEINE Warte-
+ *    eintraege aus (hle.c thread_signal_exit -> kwait_unregister_tid). Mit
+ *    der frueheren Formel (n + 1) & 15 bekam der 16. Thread die Id 0 des
+ *    Hauptthreads, sein Ende loeschte dessen Eintrag (Stillstand 2026-11-26). */
+static void test_thread_ids(void) {
+    enum { N = 200 };
+    static uint32_t ids[N];
+    int ok = 1;
+    for (int n = 0; n < N; n++) {
+        ids[n] = ks_thread_id(n);
+        if (ids[n] == 0) ok = 0;                   /* 0 = Hauptthread */
+        for (int k = 0; k < n; k++)
+            if (ids[k] == ids[n]) ok = 0;
+    }
+    CHECK(ok, "Thread-Ids eindeutig und ungleich Hauptthread");
+
+    /* Szenario: Hauptthread (Id 0) und Thread #0 warten; Thread #15 endet und
+     * traegt seine Eintraege per Id aus. */
+    {
+        uint32_t waiter_tid[2] = {0u, ks_thread_id(0)};
+        int used[2] = {1, 1};
+        uint32_t exiting = ks_thread_id(15);
+        for (int i = 0; i < 2; i++)
+            if (used[i] && waiter_tid[i] == exiting) used[i] = 0;
+        CHECK(used[0] && used[1], "Thread-Ende loescht keine fremden Warteeintraege");
+    }
+}
+
 int main(void) {
     test_priority();
     test_ticks();
     test_wait_index();
     test_wake_order();
     test_baton();
+    test_thread_ids();
     if (fails) {
         printf("%d Fehler\n", fails);
         return 1;

@@ -317,9 +317,11 @@ static void y2r_poll(void);
  * pruefen (abgelaufene Deadlines/Timer koennen einen besseren Thread bereit
  * machen; Azahar prueft nach jeder Zeitscheibe), alle 0x4000 Bloecke die
  * zeitgesteuerten HID/Y2R-Updates. */
+static volatile unsigned long long g_guest_blocks = 0;   /* Diagnose: Fortschritt */
 void hle_pump(void) {
     unsigned n;
     if (!t_has_baton) return;
+    g_guest_blocks++;
     if (g_ext_pending) {
         sched_service(host_ns());
         sched_preempt_check();
@@ -829,6 +831,7 @@ typedef struct {
 } KernelWaiter;
 static KernelWaiter g_kwait[KWAIT_MAX];
 static uint32_t g_kwait_seq = 0;
+static unsigned long long g_kwait_lost = 0;   /* Diagnose */
 
 static int kwait_register(uint32_t tid, int prio, int wait_all, const Handle **objs, int cnt) {
     for (int i = 0; i < KWAIT_MAX; i++) {
@@ -849,6 +852,12 @@ static int kwait_register(uint32_t tid, int prio, int wait_all, const Handle **o
 
 static void kwait_unregister(int slot) {
     if (slot >= 0 && slot < KWAIT_MAX) g_kwait[slot].used = 0;
+}
+
+/* Gehoert der Eintrag `slot` (noch) dem Thread `tid`? */
+static int kwait_owned(int slot, uint32_t tid) {
+    return slot >= 0 && slot < KWAIT_MAX && g_kwait[slot].used &&
+           (uint32_t)g_kwait[slot].tid == tid;
 }
 
 static void kwait_unregister_tid(uint32_t tid) {
@@ -956,7 +965,7 @@ static int hs_wait(ArmCpu *c, Handle **objs, int cnt, int wait_all,
             }
             if (ok && kwait_self_wins(tid, slots, n)) {
                 for (int k = 0; k < n; k++) hs_acquire(objs[k], tid);
-                kwait_unregister(wslot);
+                if (kwait_owned(wslot, tid)) kwait_unregister(wslot);
                 *out_idx = -1;
                 *result = 0;
                 return 1;
@@ -975,7 +984,7 @@ static int hs_wait(ArmCpu *c, Handle **objs, int cnt, int wait_all,
                                tid, proc_of_tid(tid), (unsigned long long)(lat / 1000));
                 }
                 hs_acquire(objs[hit], tid);
-                kwait_unregister(wslot);
+                if (kwait_owned(wslot, tid)) kwait_unregister(wslot);
                 /* Azahar: sofortiger Treffer meldet den ersten Index
                    (find_if), ein Aufwachen aus dem Warten den letzten Index
                    desselben Objekts (GetWaitObjectIndex via rbegin). */
@@ -986,13 +995,13 @@ static int hs_wait(ArmCpu *c, Handle **objs, int cnt, int wait_all,
             }
         }
         if (!infinite && timeout_ns_eff == 0) {
-            kwait_unregister(wslot);
+            if (kwait_owned(wslot, tid)) kwait_unregister(wslot);
             *out_idx = -1;
             *result = RESULT_TIMEOUT;
             return 0;
         }
         if (!infinite && (host_ns() - start) >= timeout_ns_eff) {
-            kwait_unregister(wslot);
+            if (kwait_owned(wslot, tid)) kwait_unregister(wslot);
             *out_idx = -1;
             *result = RESULT_TIMEOUT;
             if (getenv("HLE_WAITTMO_LOG") && g_waittmo_n < 200) {
@@ -1009,6 +1018,13 @@ static int hs_wait(ArmCpu *c, Handle **objs, int cnt, int wait_all,
         {
             SchedThread *self = t_self;
             if (self == NULL || !t_has_baton) { Sleep(0); continue; }
+            /* Ohne gueltigen eigenen Eintrag waere der Thread fuer den
+               Scheduler "immer bereit" bzw. folgte einem fremden Waiter:
+               neu eintragen (Befund 2026-11-26, siehe sched_ready). */
+            if (!kwait_owned(wslot, tid)) {
+                g_kwait_lost++;
+                wslot = kwait_register(tid, prio, wait_all, (const Handle **)objs, n);
+            }
             self->kw_slot = wslot;
             self->deadline_ns = infinite ? 0 : start + timeout_ns_eff;
             sched_set(self, ST_WAIT_SYNC);
@@ -4353,7 +4369,7 @@ static int sched_ready(SchedThread *s, uint64_t now) {
         return 1;
     case ST_WAIT_SYNC:
         if (s->deadline_ns != 0 && now >= s->deadline_ns) return 1;
-        if (s->kw_slot >= 0 && s->kw_slot < KWAIT_MAX && g_kwait[s->kw_slot].used) {
+        if (kwait_owned(s->kw_slot, s->tid)) {
             KernelWaiter *w = &g_kwait[s->kw_slot];
             return kwait_ready(w) && kwait_self_wins((uint32_t)w->tid, w->objs, w->nobj);
         }
@@ -4552,6 +4568,83 @@ static DWORD WINAPI idle_thread(LPVOID p) {
     return 0;
 }
 
+
+/* ---- Diagnose HLE_STALLDUMP: Scheduler-Waechter (liest nur) ----
+ * Prueft zweimal je Sekunde die Invarianten des Staffelstabs und meldet
+ * Verstoesse auf stderr:
+ *   * verwaister Warteeintrag: Thread in WAIT_SYNC, dessen kw_slot nicht
+ *     (mehr) ihm gehoert (war die Folge doppelter Thread-Ids);
+ *   * bereit, aber nicht gewaehlt: der Leerlauf-Thread haelt den Stab, waehrend
+ *     ein Gast-Thread seit >= 2 Pruefungen bereit ist;
+ *   * kein Fortschritt: seit 2 s kein Gast-Block -> Zustand aller Threads.
+ * Liest Kernel-Zustand ohne Synchronisation (nur Diagnose, kein Gastzustand). */
+static const char *sched_state_name(LONG st) {
+    switch (st) {
+    case ST_READY: return "READY";
+    case ST_RUNNING: return "RUNNING";
+    case ST_WAIT_SYNC: return "WAIT_SYNC";
+    case ST_WAIT_ARB: return "WAIT_ARB";
+    case ST_SLEEP: return "SLEEP";
+    case ST_DEAD: return "DEAD";
+    default: return "FREE";
+    }
+}
+
+static void sched_dump(FILE *f, const char *why) {
+    uint64_t now = host_ns();
+    SchedThread *run = g_run;
+    fprintf(f, "[sched] %s: stab=%s%d ext=%ld dsp_due=%d gxq=%u/%u kwait_verloren=%llu\n", why,
+            run == &g_idle ? "idle" : "t", run == &g_idle || run == NULL ? -1 : (int)(run - g_sched),
+            (long)g_ext_pending, audio_dsp_due(), g_gxq_tail, g_gxq_head, g_kwait_lost);
+    for (int i = 0; i < SCHED_MAX; i++) {
+        SchedThread *s = &g_sched[i];
+        if (!s->used) continue;
+        fprintf(f, "[sched]   t%-2d id=%u p%-2d %-9s bereit=%d qseq=%lld dl=%lldms kw=%d%s arb=%d%s\n",
+                i, s->tid, s->prio, sched_state_name(s->state), sched_ready(s, now), s->qseq,
+                s->deadline_ns ? (long long)((int64_t)(s->deadline_ns - now) / 1000000) : 0ll,
+                s->kw_slot, (s->state == ST_WAIT_SYNC && !kwait_owned(s->kw_slot, s->tid)) ? "(fremd!)" : "",
+                s->arb_slot, (s->arb_slot >= 0 && g_arbq[s->arb_slot].woken) ? "(geweckt)" : "");
+    }
+    fflush(f);
+}
+
+static DWORD WINAPI sched_watchdog(LPVOID p) {
+    unsigned long long last = 0;
+    int still = 0, reported = 0;
+    static long long prev_qseq[SCHED_MAX];
+    static unsigned char prev_ready[SCHED_MAX];
+    (void)p;
+    for (;;) {
+        uint64_t now;
+        int stuck = -1;
+        Sleep(500);
+        now = host_ns();
+        for (int i = 0; i < SCHED_MAX; i++) {
+            SchedThread *s = &g_sched[i];
+            int r;
+            if (!s->used) { prev_ready[i] = 0; continue; }
+            if (s->state == ST_WAIT_SYNC && s->kw_slot >= 0 && !kwait_owned(s->kw_slot, s->tid))
+                fprintf(stderr, "[sched] VERLETZUNG: t%d (id=%u) wartet mit fremdem/verwaistem Eintrag %d\n",
+                        i, s->tid, s->kw_slot);
+            /* Derselbe Thread (gleicher Rang) ist seit der letzten Pruefung
+             * bereit, und der Leerlauf haelt den Stab. */
+            r = s->state != ST_RUNNING && sched_ready(s, now);
+            if (r && prev_ready[i] && prev_qseq[i] == s->qseq && g_run == &g_idle) stuck = i;
+            prev_ready[i] = (unsigned char)r;
+            prev_qseq[i] = s->qseq;
+        }
+        if (stuck >= 0) sched_dump(stderr, "VERLETZUNG: bereit, aber Leerlauf haelt den Stab");
+        still = (g_guest_blocks == last) ? still + 1 : 0;
+        last = g_guest_blocks;
+        if (still == 4 && !reported && g_run != NULL) {
+            sched_dump(stderr, "kein Gast-Block seit 2 s");
+            reported = 1;
+        }
+        if (still == 0) reported = 0;
+    }
+    return 0;
+}
+
 static void sched_init_once(void) {
     if (g_sched_init) return;
     g_sched_init = 1;
@@ -4569,13 +4662,15 @@ static void sched_init_once(void) {
     g_idle.ev = CreateEventW(NULL, FALSE, FALSE, NULL);
     CreateThread(NULL, 0, idle_thread, NULL, 0, NULL);
     CreateThread(NULL, 0, gx_worker, NULL, 0, NULL);
+    if (getenv("HLE_STALLDUMP") != NULL) CreateThread(NULL, 0, sched_watchdog, NULL, 0, NULL);
 }
 
 /* Traegt einen Gast-Thread in die Wahl ein (Index 0 = Hauptthread). */
-static SchedThread *sched_register(int idx, int prio, int state) {
+static SchedThread *sched_register(int idx, uint32_t tid, int prio, int state) {
     SchedThread *s = &g_sched[idx];
     memset(s, 0, sizeof(*s));
     s->prio = prio;
+    s->tid = tid;
     s->kw_slot = -1;
     s->arb_slot = -1;
     s->qseq = InterlockedIncrement64(&g_qseq);
@@ -4668,7 +4763,7 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
 void hle_guest_enter(void) {
     SchedThread *s;
     sched_init_once();
-    s = sched_register(0, g_main_prio, ST_RUNNING);
+    s = sched_register(0, 0u, g_main_prio, ST_RUNNING);
     t_self = s;
     g_run = s;
     t_has_baton = 1;
@@ -4871,7 +4966,9 @@ static uint32_t hle_svc_dispatch(ArmCpu *c, uint32_t imm) {
                     t->used = 1;
                     t->cpu = tc;
                     t->entry = entry;
-                    t->id = ((g_thread_count + 1) & 15);
+                    /* Eindeutig und nie wiederverwendet (ks_thread_id): Wartelisten,
+                       Mutex-Besitz und GetThreadId haengen an der Id. */
+                    t->id = (int)ks_thread_id(g_thread_count);
                     t->prio = (int)prio;
                     t->proc_id = (int)proc;
                     t->handle = h;
@@ -4882,7 +4979,7 @@ static uint32_t hle_svc_dispatch(ArmCpu *c, uint32_t imm) {
                     /* Azahar CreateThread: neuer Thread ist Ready und steht
                        hinten in seiner Prioritaetsklasse; ob er sofort
                        laeuft, entscheidet der Preemptionspunkt nach dem SVC. */
-                    sched_register(g_thread_count + 1, (int)prio, ST_READY);
+                    sched_register(g_thread_count + 1, (uint32_t)t->id, (int)prio, ST_READY);
                     g_thread_count++;
                     CreateThread(NULL, 0, guest_thread_main, t, 0, NULL);
                 }

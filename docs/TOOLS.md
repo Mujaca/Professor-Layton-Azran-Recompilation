@@ -278,7 +278,10 @@ grosser Dreiecke; Standard 3, `0` = seriell und pixelgleich).
 `HLE_STALLDUMP=1` (bei jedem 300. Host-Frame die letzten 12 Bloecke, den
 letzten Registerstand (`r0`–`r12`, `sp`, `lr`), acht Woerter an `r0`/`r1`/`r12`
 sowie 40 Stackwoerter je Gast-Thread auf stderr, um Haenger ohne IPC zu
-lokalisieren),
+lokalisieren; zusaetzlich prueft ein Scheduler-Waechter zweimal je Sekunde
+die Staffelstab-Invarianten und meldet `[sched] VERLETZUNG` (verwaister
+Warteeintrag; Thread bleibt bereit, waehrend der Leerlauf den Stab haelt)
+sowie nach 2 s ohne Gast-Block den Zustand aller Threads),
 `ARM_WATCH_DUMP="n,addr,size[,addr,size …]"` (beim n-ten `ARM_WATCH`-Treffer
 bis zu vier Gastspeicherbereiche nach `out/watchdump_<addr>.bin` und alle
 Register nach `out/watchdump_regs.txt`; ab dann schreibt derselbe Gast-Thread

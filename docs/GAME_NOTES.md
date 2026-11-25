@@ -290,3 +290,16 @@ Struktur je Draw statt Registerlesen je Pixel.
   Muster nicht -> Callback nie dekodiert -> Aufruf im No-op -> Endlosschleife.
 * Offen: sporadischer Haenger bei 0x14F5CC (Stream-Pufferliste mit
   Selbstverweis), siehe Untersuchung Haenger 2.
+* Stillstand in der ersten Inworld-Szene (2026-11-26, Nutzerlauf, Gast-
+  Zaehler steht, kein Gast-Block mehr; letzter Block 0x134AE8 = Abschluss-
+  Callback eines endenden Threads, Hauptthread in svcArbitrateAddress
+  Signal): Thread-Ids wurden als (n + 1) & 15 vergeben. Das Spiel erzeugt bis
+  zur ersten Szene 16 Threads (HLE_THR_LOG), der 16. (Prio 46) bekam Id 0 wie
+  der Hauptthread; spaetere teilen sich Ids mit lebenden Threads. Beim
+  Thread-Ende trug thread_signal_exit alle Warteeintraege und Kernel-Mutexe
+  der Id aus -> ein lebender Waiter gleicher Id stand ohne eigenen Eintrag
+  da, galt fuer den Scheduler als "immer bereit", fand sein Objekt nicht
+  signalisiert und waehlte sich als bester Thread endlos selbst (kein
+  Gastcode, Hauptthread verhungert). Fix: eindeutige Ids (ks_thread_id, wie
+  Azahars next_thread_id), hs_wait traegt sich neu ein, falls der Eintrag
+  nicht mehr ihm gehoert, Waechter unter HLE_STALLDUMP.

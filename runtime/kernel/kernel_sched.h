@@ -64,6 +64,20 @@ static inline int ks_pick_ready(const int *prio, const long long *qseq,
     return best;
 }
 
+/* Thread-Id des n-ten mit svcCreateThread erzeugten Threads (n ab 0). Der
+ * Hauptthread hat Id 0. Ids sind eindeutig und werden nie wiederverwendet
+ * (Azahar ThreadManager: ++next_thread_id). Frueher (n + 1) & 15: der 16.
+ * Thread bekam Id 0 wie der Hauptthread, spaetere teilten sich Ids mit
+ * lebenden Threads. Wartelisten (kwait), Mutex-Besitz und das Austragen beim
+ * Thread-Ende haengen an der Id: ein endender Thread trug so den
+ * Warteeintrag eines lebenden Threads mit gleicher Id aus, dieser blieb
+ * ohne eigenen Eintrag "immer bereit" und lief im Scheduler im Kreis, ohne
+ * Gastcode auszufuehren (Stillstand in der ersten Inworld-Szene,
+ * 2026-11-26). */
+static inline uint32_t ks_thread_id(int n) {
+    return (uint32_t)n + 1u;
+}
+
 /* Verdraengt `next_prio` einen laufenden Thread mit `cur_prio`? */
 static inline int ks_preempts(int next_prio, int cur_prio) {
     return next_prio < cur_prio;
