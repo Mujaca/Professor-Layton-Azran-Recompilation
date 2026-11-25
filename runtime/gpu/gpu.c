@@ -219,10 +219,13 @@ uint32_t gpu_pica_reg(uint32_t id)
     return (id < PICA_NREGS) ? p_regs[id] : 0u;
 }
 
-/* Generation des Gast-Texturspeichers: jede neue Kommandoliste sowie
-   MemoryFill/DisplayTransfer/TextureCopy koennen Texturbytes geaendert haben.
-   Der D3D11-Textur-Cache (runtime/gpu/hw_d3d11.c) prueft dann konservativ
-   einen Hash der Quellbytes, bevor er eine Textur weiterverwendet. */
+/* Generation des Gast-Texturspeichers: jede neue Kommandoliste, MemoryFill,
+   HW-Rueckschreiben und Software-Draws (auch Fallback-Dreiecke im HW-Modus)
+   koennen Texturbytes geaendert haben. Der D3D11-Textur-Cache
+   (runtime/gpu/hw_d3d11.c) merkt sich die Generation je Eintrag und prueft
+   bei Abweichung einen Hash der Quellbytes. DisplayTransfer/TextureCopy
+   markieren stattdessen nur den beschriebenen Bereich
+   (gpu_pica_invalidate_tex_range). */
 static uint32_t g_hw_tex_gen = 1u;
 
 void gpu_pica_reset(void)
@@ -3462,7 +3465,14 @@ static void p_raster_tri(ArmCpu *c, const PicaVertex *a, const PicaVertex *b,
         if (n < 3) return;
     }
 
-    if (g_hw_render && p_hw_tri_clip(c, in, n)) return;
+    if (g_hw_render) {
+        if (p_hw_tri_clip(c, in, n)) return;
+        /* Software-Fallback im HW-Modus: dieses Dreieck schreibt gleich in
+           den Gastpuffer (evtl. eine Textur). Der D3D11-Cache muss gebundene
+           Texturen beim naechsten HW-Draw neu pruefen. Im reinen SW-Modus
+           erhoeht das Draw-Ende die Generation (kein Zusatzaufwand). */
+        gpu_pica_bump_tex_generation();
+    }
 
     half_x = p_f24_to_float(p_regs[0x41]);
     half_y = p_f24_to_float(p_regs[0x43]);
@@ -5070,6 +5080,36 @@ static int p_gspq_log(void)
     return v;
 }
 
+/* Laenge des von p_texture_copy_run beschriebenen Zielbereichs ab dst,
+ * inklusive der Output-Gaps zwischen den Zeilen (Azahar SwBlitter::
+ * TextureCopy). Ohne Gaps ist das die Kopiergroesse. */
+static uint32_t p_texture_copy_extent(uint32_t size, uint32_t out_w_raw,
+                                      uint32_t out_gap_raw)
+{
+    uint32_t rem = size & ~0xFu;
+    uint32_t out_gap = out_gap_raw * 16u;
+    uint32_t out_width = (out_gap == 0u) ? rem : out_w_raw * 16u;
+    uint64_t n;
+    if (rem == 0u || out_width == 0u) return 0u;
+    n = (uint64_t)(rem / out_width) * (out_width + out_gap) + rem % out_width;
+    return n > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)n;
+}
+
+/* Laenge des von p_display_transfer_run beschriebenen Zielbereichs ab dem
+ * Ziel-Startwert (Flip+Crop verschiebt den Start). */
+static uint32_t p_display_transfer_extent(uint32_t in_size, uint32_t out_size,
+                                          uint32_t flags)
+{
+    uint32_t in_w = in_size & 0xFFFFu;
+    uint32_t out_w = out_size & 0xFFFFu, out_h = (out_size >> 16) & 0xFFFFu;
+    uint64_t bpp = (uint64_t)p_bpp((flags >> 12) & 7u), n;
+    if (out_w == 0u || out_h == 0u || bpp == 0u) return 0u;
+    n = (uint64_t)out_w * out_h * bpp;
+    if ((flags & 1u) && (flags & 4u))
+        n += (uint64_t)(uint32_t)(in_w - out_w) * (out_h - 1u) * bpp;
+    return n > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)n;
+}
+
 static void p_ext_transfer(ArmCpu *c)
 {
     uint32_t in_p, out_p, flags;
@@ -5082,15 +5122,19 @@ static void p_ext_transfer(ArmCpu *c)
         printf("[gpu] transfer in=%08X out=%08X flags=%08X sz=%08X/%08X tc=%u\n",
                in_p, out_p, flags, p_ext_regs[0x303], p_ext_regs[0x302],
                (flags >> 3) & 1u);
-    p_hw_tex_gen_bump();       /* Kopie kann Texturbytes veraendern */
-    hw_sync_guest();           /* vorher ausstehende HW-Ergebnisse sichern */
+    /* Vorher ausstehende HW-Ergebnisse sichern (der Flush erhoeht die
+       Texturgeneration) und das Ziel verwerfen. Die Kopie selbst markiert
+       nur die Cache-Eintraege im tatsaechlich beschriebenen Zielbereich. */
+    hw_sync_guest();
     if (flags & 8u) {                   /* is_texture_copy */
         /* Azahar regs_external.h DisplayTransferConfig: flags@0x304,
            trigger@0x306, texture_copy.size@0x308, input_size@0x309,
            output_size@0x30A. */
         uint32_t dst = gpu_pica_phys_to_guest(out_p);
         uint32_t sz = p_ext_regs[0x308];
-        gpu_pica_invalidate_tex_range(dst, sz);
+        /* Mit Output-Gap ist der beschriebene Bereich laenger als sz. */
+        gpu_pica_invalidate_tex_range(dst, p_texture_copy_extent(
+            sz, p_ext_regs[0x30A] & 0xFFFFu, (p_ext_regs[0x30A] >> 16) & 0xFFFFu));
         p_texture_copy_run(c, gpu_pica_phys_to_guest(in_p),
                            dst, sz,
                            p_ext_regs[0x309] & 0xFFFFu,
@@ -5099,8 +5143,9 @@ static void p_ext_transfer(ArmCpu *c)
                            (p_ext_regs[0x30A] >> 16) & 0xFFFFu);
     } else {
         uint32_t dst = gpu_pica_phys_to_guest(out_p);
-        /* output_size (0x302) ist die Groesse des Zielbereichs in Bytes. */
-        gpu_pica_invalidate_tex_range(dst, p_ext_regs[0x302]);
+        /* output_size (0x302) ist Breite|Hoehe<<16 in Pixeln. */
+        gpu_pica_invalidate_tex_range(dst, p_display_transfer_extent(
+            p_ext_regs[0x303], p_ext_regs[0x302], flags));
         p_display_transfer_run(c, gpu_pica_phys_to_guest(in_p),
                                dst,
                                p_ext_regs[0x303], p_ext_regs[0x302], flags);
