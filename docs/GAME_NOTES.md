@@ -200,3 +200,14 @@ alle PICA-Tests bleiben bit-identisch):
 Kachel-Bins und fester Band-Reihenfolge; lohnt erst, wenn der
 Lighting-Hotspot beseitigt ist), Mipmaps, sowie eine TEV-/Texturzustands-
 Struktur je Draw statt Registerlesen je Pixel.
+
+## Threads und Ton (2026-11-25)
+
+* Einziger Gast-Thread auf dem SysCore (processor_id 1): Prioritaet 33,
+  laut Verhalten der Sound-Thread (wartet auf den DSP-Pipe-Interrupt und
+  fuellt die Stream-Puffer nach). Haelt der Software-Rasterizer die
+  Gast-Sperre, verhungert er -> exakte Null-Luecken 35..140 ms in der
+  Titelmusik (`HLE_AUDIO_WAV`). Behoben durch die Sperr-Abgabe waehrend
+  GPU-Arbeit (`gx_run_inline` in `runtime/kernel/hle.c`).
+* Audiopuffer liegen im Linear-Heap (FCRAM phys 0x20000000+x = virtuell
+  0x14000000+x).

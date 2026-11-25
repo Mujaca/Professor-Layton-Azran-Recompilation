@@ -96,7 +96,7 @@ deshalb lief der frühere Versuch in eine Endlosschleife; Puffer ist jetzt
 | Kennung | Ort | Wirkung |
 |---|---|---|
 | – | `dispatch_ipc` | leitet Kommandos nach Form statt nach Handle um (APT/cfg/fs) |
-| – | Thread-Scheduler | alle Gast-Threads laufen kooperativ auf **einem** Host-Thread; Prioritaeten gelten nur an SVC-/Yield-Grenzen, `GetCurrentProcessorNumber`/`GetThreadIdealProcessor` liefern die ExHeader-/CreateThread-Id (0 AppCore, 1 SysCore), ein zweiter Kern wird nicht simuliert |
+| – | Thread-Scheduler | alle Gast-Threads laufen kooperativ unter **einer** Gast-Sperre; Prioritaeten gelten nur an SVC-/Yield-Grenzen, `GetCurrentProcessorNumber`/`GetThreadIdealProcessor` liefern die ExHeader-/CreateThread-Id (0 AppCore, 1 SysCore), ein zweiter Kern wird nicht simuliert. Annaeherungen (2026-11-25): wartende Threads schlafen auf einer an die Sperre gekoppelten Condition Variable (Weckruf bei jeder Abgabe nach echter Arbeit, Deckel 2 ms) statt im ms-Takt zu pollen; waehrend GPU-Arbeit (GX-Befehle) wird die Sperre abgegeben, wenn ein hoeher priorisierter oder ein Thread des anderen Kerns bereit ist; DSP-Frames laufen ohne Gast-Sperre (nur die Meldungen an den Gast brauchen sie) |
 | – | generierter Code | unbekannte Aufrufziele = No-op (geloggt in `out/missing_calls.txt`) |
 | – | `arm_mem_read/write` | Zugriffe außerhalb des Speichers liefern 0 statt Abbruch (`ARM_STRICT=1` bricht ab) |
 | – | fs `OpenFile`, `file_command` | Sentinel-Dateislot und Erfolg auch bei fehlgeschlagenem Open; `romfs_image.bin` mit Offset +0x1000 |
