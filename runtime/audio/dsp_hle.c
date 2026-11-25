@@ -437,10 +437,43 @@ static void simple_process(DspSource *s) {
     }
 }
 
+/* Azahar 5a1c580d6 ("Fix live looping PCM playback"): das Spiel darf den
+ * noch nicht abgespielten Teil eines loopenden PCM16-Puffers waehrend der
+ * Wiedergabe ueberschreiben. Azahar dekodiert diesen Rest vor jedem Frame neu
+ * (Source::GenerateFrame). Nur der Basiszeiger wird wie beim DSP-DMA auf
+ * 4 Byte maskiert, der Sample-Offset wird danach addiert; bei Mono kann das
+ * eine 2-Byte-Adresse ergeben. PCM8/ADPCM sind in Azahar ebenfalls nicht
+ * behandelt. */
+static void source_refresh_looping_pcm16(DspState *d, DspSource *s) {
+    uint32_t channels, byte_offset, remaining, base, addr;
+    uint64_t bytes;
+    int stereo;
+
+    if (s->cur_len == 0) return;
+    if (!s->current_buffer_is_looping) return;
+    if (s->current_buffer_format != 1 /* PCM16 */) return;
+    if (s->current_buffer_physical_address == 0) return;
+    if (s->current_sample_number >= s->current_buffer_length) return;
+
+    stereo = s->current_buffer_mono_or_stereo == 2;
+    channels = stereo ? 2u : 1u;
+    remaining = s->current_buffer_length - s->current_sample_number;
+    byte_offset = s->current_sample_number * channels * 2u;
+    base = s->current_buffer_physical_address & 0xFFFFFFFCu;
+    addr = audio_phys_to_guest(base + byte_offset);
+    bytes = (uint64_t)remaining * channels * 2u;
+
+    if (!mem_range_ok(d, addr, bytes) || !source_ensure_cap(d, s, remaining))
+        return;
+    s->cur_len = audio_pcm16_decode(d->mem + addr, remaining, stereo,
+                                    (int16_t (*)[2])s->cur, s->cur_cap);
+}
+
 static void source_generate_frame(DspState *d, DspSource *s) {
     uint32_t pos = 0;
 
     memset(s->frame, 0, sizeof(s->frame));
+    source_refresh_looping_pcm16(d, s);
     if (s->cur_len == 0) {
         if (source_dequeue(d, s)) return;
         if (d->verbose && (s->enabled || s->current_buffer_id != 0))

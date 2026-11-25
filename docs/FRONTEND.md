@@ -113,3 +113,14 @@ out/port.exe [romfs] [--frames N] [--shot datei.bmp] [--shot-every N] [--shot-fr
   0..319 bzw. 0..239 begrenzt.
 * Alle drei Optionen sind reine Diagnose: die Eingabe geht denselben Weg wie
   Tastatur/Maus (`hle_hid_set_input`), es wird kein Gastzustand gesetzt.
+
+## Fensterausgabe (Doppelpufferung)
+
+Das Fenster zeichnet Hintergrund, Bild und Statuszeilen in einen
+Speicher-DC und uebertraegt ihn mit einem einzigen `BitBlt`
+(`runtime/platform/window.c`, `draw`). Vorher wurde direkt ins Fenster
+gezeichnet (erst schwarz fuellen, dann Bild) - der kurz sichtbare schwarze
+Zwischenstand war das Flackern im Fenster (M13). Screenshots (`--shot`) lesen
+den Bildpuffer vor der Fensterausgabe und zeigten es deshalb nie; die vom
+Spiel erzeugte Bildfolge ist flackerfrei (600 aufeinanderfolgende Frames mit
+`--shot-every 1`, kein A-B-A-Wechsel).

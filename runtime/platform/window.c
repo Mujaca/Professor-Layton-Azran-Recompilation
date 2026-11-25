@@ -325,11 +325,44 @@ static void toggle_fullscreen(HWND hwnd) {
     update_viewport(hwnd);
 }
 
-static void draw(HDC dc) {
-    RECT rc;
-    GetClientRect(g_hwnd, &rc);
-    FillRect(dc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
+/* Hintergrundpuffer (Doppelpufferung). Frueher wurde direkt ins Fenster
+ * gezeichnet: erst der ganze Client-Bereich schwarz (FillRect), dann das Bild
+ * (StretchDIBits), dann der Statustext - 60-mal pro Sekunde. Der kurz
+ * sichtbare schwarze/teilgezeichnete Zwischenstand war das Flackern im
+ * Fenster (M13); Screenshots zeigten es nicht, weil sie den Bildpuffer vor
+ * der Fensterausgabe lesen. Jetzt wird alles in einen Speicher-DC gezeichnet
+ * und mit einem einzigen BitBlt uebertragen. */
+static HDC g_back_dc;
+static HBITMAP g_back_bmp, g_back_old;
+static int g_back_w, g_back_h;
+
+static HDC back_buffer(HDC dc, int w, int h) {
+    if (w <= 0 || h <= 0) return NULL;
+    if (g_back_dc && g_back_w == w && g_back_h == h) return g_back_dc;
+    if (g_back_dc) {
+        SelectObject(g_back_dc, g_back_old);
+        DeleteObject(g_back_bmp);
+        DeleteDC(g_back_dc);
+        g_back_dc = NULL;
+    }
+    g_back_dc = CreateCompatibleDC(dc);
+    if (!g_back_dc) return NULL;
+    g_back_bmp = CreateCompatibleBitmap(dc, w, h);
+    if (!g_back_bmp) {
+        DeleteDC(g_back_dc);
+        g_back_dc = NULL;
+        return NULL;
+    }
+    g_back_old = (HBITMAP)SelectObject(g_back_dc, g_back_bmp);
+    g_back_w = w;
+    g_back_h = h;
+    return g_back_dc;
+}
+
+static void draw_into(HDC dc, const RECT *rc) {
+    FillRect(dc, rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
     if (g_dib) {
+        SetStretchBltMode(dc, COLORONCOLOR);
         StretchDIBits(dc, g_vp.x, g_vp.y, g_vp.width, g_vp.height,
                       0, 0, g_w, g_h, g_dib, &g_bi, DIB_RGB_COLORS, SRCCOPY);
     }
@@ -338,6 +371,19 @@ static void draw(HDC dc) {
     for (int i = 0; i < g_status_lines; i++) {
         TextOutA(dc, 8, 8 + i * 16, g_status[i], (int)strlen(g_status[i]));
     }
+}
+
+static void draw(HDC dc) {
+    RECT rc;
+    HDC bdc;
+    GetClientRect(g_hwnd, &rc);
+    bdc = back_buffer(dc, rc.right - rc.left, rc.bottom - rc.top);
+    if (!bdc) {           /* Fallback: direkt (z. B. minimiert) */
+        draw_into(dc, &rc);
+        return;
+    }
+    draw_into(bdc, &rc);
+    BitBlt(dc, 0, 0, rc.right - rc.left, rc.bottom - rc.top, bdc, 0, 0, SRCCOPY);
 }
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
