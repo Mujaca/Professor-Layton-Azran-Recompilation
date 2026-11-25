@@ -48,25 +48,33 @@ Azahar-Referenz (`reports/azahar_trace.txt`) und meldet:
 
 Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 
-## Nächste Arbeitspakete (priorisiert, Stand 2026-11-25)
+## Stand und nächste Arbeitspakete (Stand 2026-11-26, master e52cb3c)
 
-Erreicht: M1–M5, M8, M13 (Sichttest durch den Nutzer). Teilweise: M6
-(bis Namenseingabe), M7 (Ton/Film ja, Effekte/Saves offen), M9 (Titel und
-Namenseingabe korrekt, Abnahme-Bildvergleich offen), M10 (Krach behoben,
-periodische Aussetzer offen).
+| # | Stand | Beleg |
+|---|---|---|
+| M1–M5, M8 | erreicht | Frontier 10/10, 0 Patches, Titel |
+| M6 | erreicht | Menü, Touch, Namenseingabe, Rätsel-Eingabe (Nutzer) |
+| M7 | erreicht (Effekte siehe M16) | Ton, Filme, Speichern/Laden |
+| M9 | teilweise | `--renderer hw` läuft (Titel, Szenen, ~50 % mehr Gast-Frames); Abnahme-Bildvergleich offen (braucht M18); 3D-Figuren falsch texturiert |
+| M10 | teilweise | Aussetzer (DSP-Zustellung), Hänger (DSP-Frame beim Stabhalter) und Echtzeit gelöst, Hörtest Nutzer „sauber“; Azahar-Aufnahme fehlt (kein Azahar-Build vorhanden) |
+| M11 | erreicht | Namenseingabe → Eröffnungsszene (`--press`-Folge in `docs/GAME_NOTES.md`) |
+| M12 | offen | Titel ~20 sichtbare fps (HW), 3D-Szenen/Rätsel ~3 fps |
+| M13 | erreicht | Sichttest Nutzer (Doppelpufferung) |
+| M14 | erreicht | Nutzer: erstes Rätsel gespielt, gespeichert, „Continue“ lädt in Froenborg |
+| M15 | erreicht (Logo) | Logo gegen FFmpeg mittlere Abweichung 0,91; weitere Filme ungeprüft |
+| M16 | teilweise | Speichern/Laden ja; Soundeffekte ungeprüft |
+| M17 | offen | – |
+| M18 | offen | – |
 
-1. **Ton-Aussetzer (M10)**: DSP-Interrupts kamen gebündelt 15–23 ms zu spät
-   beim Spiel an (`HLE_WSTAT`); Zustellung pro Frame. Danach Hörtest.
-2. **Gast-Sperre (M10/M12)**: eine globale Sperre serialisiert alle
-   Gast-Threads, ~95 % der Thread-Zeit ist Warten. Ziel: SysCore-Thread
-   bzw. jeder 3DS-Kern unter eigener Sperre, Kernel-Zustand getrennt
-   geschützt, ldrex/strex atomar über Host-Threads.
-3. **Hardware-Renderer (M9/M17)**, Stufen: E Restfehler → D Textur-Cache →
-   A Bilder auf der GPU + D3D-Ausgabe → B höhere interne Auflösung →
-   C Vertex-Shader auf der GPU.
-4. **Logo-Farben (M15)**: Y/U/V-Ebenen des Spiel-Decoders gegen FFmpeg
-   vergleichen, Recompiler-/Y2R-Fehler finden.
-5. **Reproduzierbarkeit (M18)**, danach **M16**, **M11**, **M14**.
+1. **Effizientes Testen**: Szenen ohne Durchklicken erreichen (Spielstände
+   als Testfixtures, Eingaben an Gastzeit gekoppelt, Szenen-Skript).
+2. **3D-Figuren** (M9): Gesichter/Haare einfarbig - SW/HW-Vergleich, dann
+   Texturkoordinaten/Texturzuordnung der Modelle.
+3. **Bildrate in 3D-Szenen** (M12/M17): Profil in der Szene, dann
+   HW-Renderer-Ausbau (Bilder auf der GPU, D3D-Ausgabe, Vertex-Shader auf
+   der GPU, höhere interne Auflösung).
+4. **Soundeffekte** (M16), **Reproduzierbarkeit** (M18), Speicherpfad mit
+   echter Titel-ID.
 
 ## Frontier-Verlauf
 
