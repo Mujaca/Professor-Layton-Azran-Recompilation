@@ -233,3 +233,11 @@ Struktur je Draw statt Registerlesen je Pixel.
   Sleep(0) statt Sleep(1) beim Wiedereintritt, Sperr-Uebergabe per Zaehler,
   Abgabe in hle_pump nur bei bereitem hoeher-prioren Thread, 16x groesseres
   hle_pump-Intervall.
+* A/B-Messungen am 2026-11-25 nachmittags (HW-Renderer, Gast-Frames bei
+  Host-Frame 1200, je 3 Laeufe, master ~790): SysCore-Thread ohne Sperre +
+  CAS-Monitor ~705 (kein Gewinn), asynchroner GX-Worker ~684, praeziser
+  SleepThread 0 (Boot-Haenger) bzw. 303. Sichtbare fps: SW 10, HW 20 (Spiel
+  an VBlanks gekoppelt). SleepThread-Nutzer (60 s): tid 0 1702x 1 ms
+  (lr 0x10208C), tid 8 4708x 1 ms, tid 9 8813x 1 ms, tid 10-12 je ~3000x 7 ms.
+  Entwurf fuer den naechsten Schritt: docs/IDEAS.md "Scheduler nach
+  Azahar-Vorbild".
