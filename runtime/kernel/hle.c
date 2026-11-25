@@ -3627,6 +3627,11 @@ static uint16_t g_y2r_dither[16];
 static uint8_t g_y2r_std_coefficient = 0;
 static int g_y2r_busy = 0;
 static uint64_t g_y2r_due_us = 0;
+/* Reine Diagnose (HLE_Y2R_DUMP=<dir>): schreibt je StartConversion die
+ * vollstaendigen Y/U/V-Eingabeebenen so, wie die CDMA-Eingabe sie liest
+ * (transfer_unit/gap beachtet) sowie die Konfiguration. Liest nur. */
+static char g_y2r_dump_dir[240];
+static int g_y2r_dump_count = 0;
 
 static void y2r_poll(void) {
     if (g_y2r_busy && host_us() >= g_y2r_due_us) {
@@ -3650,6 +3655,122 @@ static void y2r_set_sending(Y2rBuffer *buf, const uint32_t *p) {
     buf->image_size = p[1];
     buf->transfer_unit = (uint16_t)p[2];
     buf->gap = (uint16_t)p[3];
+}
+
+static void y2r_dump_plane(const char *dir, int index, const char *name,
+                           const uint8_t *data, uint32_t size) {
+    char path[320];
+    FILE *f;
+    snprintf(path, sizeof(path), "%s/y2r_%04d_%s.bin", dir, index, name);
+    f = fopen(path, "wb");
+    if (f == NULL) return;
+    if (size != 0) fwrite(data, 1, size, f);
+    fclose(f);
+}
+
+/* Liest die aktuell konfigurierten Y/U/V-Eingabeebenen mit genau den
+ * CDMA-Einheiten der Konversion (transfer_unit/gap) in lineare Puffer und
+ * schreibt sie als Rohdateien. Loest dabei keine Zustandsaenderung aus:
+ * ReceiveData arbeitet auf Kopien der Puffer. */
+static void y2r_dump_inputs(const Y2rMemory *mem, const Y2rConversion *cvt) {
+    unsigned width = cvt->input_line_width;
+    unsigned lines = cvt->input_lines;
+    unsigned y;
+    uint8_t *y_plane, *u_plane, *v_plane;
+    uint32_t y_size, c_size;
+    int format = cvt->input_format;
+    int is420 = (format == Y2R_IN_YUV420_INDIV8 || format == Y2R_IN_YUV420_INDIV16);
+    int count = g_y2r_dump_count;
+
+    if (width == 0 || lines == 0) return;
+
+    if (format == Y2R_IN_YUYV422_INTERLEAVED) y_size = width * lines * 2u;
+    else y_size = width * lines;
+    c_size = (width / 2u) * (is420 ? (lines + 1u) / 2u : lines);
+    y_plane = (uint8_t *)calloc(y_size ? y_size : 1u, 1);
+    u_plane = (uint8_t *)calloc(c_size ? c_size : 1u, 1);
+    v_plane = (uint8_t *)calloc(c_size ? c_size : 1u, 1);
+    if (y_plane == NULL || u_plane == NULL || v_plane == NULL) {
+        free(y_plane); free(u_plane); free(v_plane);
+        return;
+    }
+
+    {
+    Y2rBuffer byuv = cvt->src_yuyv;
+    Y2rBuffer by = cvt->src_y, bu = cvt->src_u, bv = cvt->src_v;
+    for (y = 0; y < lines; y += 8u) {
+        unsigned row_height = lines - y < 8u ? lines - y : 8u;
+        uint32_t row_data_size = row_height * width;
+        if (format == Y2R_IN_YUYV422_INTERLEAVED) {
+            y2r_receive_data(mem, y_plane + y * width * 2u, &byuv,
+                             row_data_size * 2u, 1);
+        } else if (format == Y2R_IN_YUV420_INDIV8) {
+            y2r_receive_data(mem, y_plane + y * width, &by, row_data_size, 1);
+            y2r_receive_data(mem, u_plane + (y / 2u) * (width / 2u), &bu,
+                             row_data_size / 4u, 1);
+            y2r_receive_data(mem, v_plane + (y / 2u) * (width / 2u), &bv,
+                             row_data_size / 4u, 1);
+        } else if (format == Y2R_IN_YUV422_INDIV8) {
+            y2r_receive_data(mem, y_plane + y * width, &by, row_data_size, 1);
+            y2r_receive_data(mem, u_plane + y * (width / 2u), &bu,
+                             row_data_size / 2u, 1);
+            y2r_receive_data(mem, v_plane + y * (width / 2u), &bv,
+                             row_data_size / 2u, 1);
+        } else if (format == Y2R_IN_YUV420_INDIV16) {
+            y2r_receive_data(mem, y_plane + y * width, &by, row_data_size, 2);
+            y2r_receive_data(mem, u_plane + (y / 2u) * (width / 2u), &bu,
+                             row_data_size / 4u, 2);
+            y2r_receive_data(mem, v_plane + (y / 2u) * (width / 2u), &bv,
+                             row_data_size / 4u, 2);
+        } else if (format == Y2R_IN_YUV422_INDIV16) {
+            y2r_receive_data(mem, y_plane + y * width, &by, row_data_size, 2);
+            y2r_receive_data(mem, u_plane + y * (width / 2u), &bu,
+                             row_data_size / 2u, 2);
+            y2r_receive_data(mem, v_plane + y * (width / 2u), &bv,
+                             row_data_size / 2u, 2);
+        }
+    }
+    }
+
+    y2r_dump_plane(g_y2r_dump_dir, count, "Y", y_plane, y_size);
+    if (format != Y2R_IN_YUYV422_INTERLEAVED) {
+        y2r_dump_plane(g_y2r_dump_dir, count, "U", u_plane, c_size);
+        y2r_dump_plane(g_y2r_dump_dir, count, "V", v_plane, c_size);
+    }
+    free(y_plane);
+    free(u_plane);
+    free(v_plane);
+
+    {
+        char path[320];
+        FILE *f;
+        snprintf(path, sizeof(path), "%s/meta.txt", g_y2r_dump_dir);
+        f = fopen(path, "a");
+        if (f != NULL) {
+            fprintf(f,
+                    "%d fmt=%d out=%d rot=%d align=%d %ux%u "
+                    "Y=%08X/%u%+u U=%08X/%u%+u V=%08X/%u%+u YUYV=%08X/%u%+u "
+                    "dst=%08X/%u%+u alpha=%u c=%d,%d,%d,%d,%d,%d,%d,%d\n",
+                    count, cvt->input_format, cvt->output_format, cvt->rotation,
+                    cvt->block_alignment, width, lines,
+                    cvt->src_y.address, (unsigned)cvt->src_y.transfer_unit,
+                    (unsigned)cvt->src_y.gap,
+                    cvt->src_u.address, (unsigned)cvt->src_u.transfer_unit,
+                    (unsigned)cvt->src_u.gap,
+                    cvt->src_v.address, (unsigned)cvt->src_v.transfer_unit,
+                    (unsigned)cvt->src_v.gap,
+                    cvt->src_yuyv.address, (unsigned)cvt->src_yuyv.transfer_unit,
+                    (unsigned)cvt->src_yuyv.gap,
+                    cvt->dst.address, (unsigned)cvt->dst.transfer_unit,
+                    (unsigned)cvt->dst.gap, (unsigned)cvt->alpha,
+                    cvt->coefficients[0], cvt->coefficients[1],
+                    cvt->coefficients[2], cvt->coefficients[3],
+                    cvt->coefficients[4], cvt->coefficients[5],
+                    cvt->coefficients[6], cvt->coefficients[7]);
+            fclose(f);
+        }
+    }
+    g_y2r_dump_count++;
 }
 
 static uint32_t y2r_set_line_width(uint32_t width) {
@@ -3781,17 +3902,25 @@ static void y2r_command(Ipc *r, uint32_t *p) {
                 break;
             }
             {
-                int conv = y2r_perform_conversion(&mem, &g_y2r);
+                int conv;
+                /* Startadressen vor der Konversion merken: PerformConversion
+                 * schreibt die Pufferstaende fort (Azahar-Verhalten). */
+                uint32_t a_y = g_y2r.src_y.address;
+                uint32_t a_u = g_y2r.src_u.address;
+                uint32_t a_v = g_y2r.src_v.address;
+                uint32_t a_dst = g_y2r.dst.address;
+                if (g_y2r_dump_dir[0] != '\0') y2r_dump_inputs(&mem, &g_y2r);
+                conv = y2r_perform_conversion(&mem, &g_y2r);
                 if (getenv("HLE_Y2R_LOG")) {
                     /* Nur lesend: Mittelwerte der ersten 4096 Y-Bytes, der
                      * zugehoerigen U/V-Bytes und der Ausgabe (Farbdiagnose). */
                     double my = 0, mu = 0, mv = 0, mo = 0;
                     uint32_t k, n = 4096u;
                     for (k = 0; k < n; k++) {
-                        uint32_t ay = (g_y2r.src_y.address & 0x1FFFFFFFu) + k;
-                        uint32_t au = (g_y2r.src_u.address & 0x1FFFFFFFu) + k / 4u;
-                        uint32_t av = (g_y2r.src_v.address & 0x1FFFFFFFu) + k / 4u;
-                        uint32_t ao = (g_y2r.dst.address & 0x1FFFFFFFu) + k;
+                        uint32_t ay = (a_y & 0x1FFFFFFFu) + k;
+                        uint32_t au = (a_u & 0x1FFFFFFFu) + k / 4u;
+                        uint32_t av = (a_v & 0x1FFFFFFFu) + k / 4u;
+                        uint32_t ao = (a_dst & 0x1FFFFFFFu) + k;
                         if (ay < mem.size) my += mem.mem[ay];
                         if (au < mem.size) mu += mem.mem[au];
                         if (av < mem.size) mv += mem.mem[av];
@@ -4265,6 +4394,13 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     g_log = getenv("HLE_LOG") != NULL;
     g_ystat = getenv("HLE_YSTAT") != NULL;
     g_gtime = getenv("HLE_GTIME") != NULL;
+    {
+        const char *dd = getenv("HLE_Y2R_DUMP");
+        if (dd != NULL && dd[0] != '\0') {
+            snprintf(g_y2r_dump_dir, sizeof(g_y2r_dump_dir), "%s", dd);
+            _mkdir(g_y2r_dump_dir);
+        }
+    }
     {
         /* Paralleles Rasterisieren grosser Dreiecke (Ergebnis pixelgleich).
          * HLE_RASTER_THREADS=0 schaltet es fuer Messungen ab. */

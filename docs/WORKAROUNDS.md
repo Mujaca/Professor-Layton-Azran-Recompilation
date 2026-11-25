@@ -1952,3 +1952,39 @@ echter Fix muesste die DSP-Frames an den Gast-Fortschritt koppeln (nicht an
   exakt wie Azahar; zusaetzliche Quellen tauchen dabei nicht auf.
 * Diagnose-Ergaenzungen (nur mit `HLE_AUDIO_LOG`): Puffer-Dirty/`yn`,
   erste dekodierte Samples je Dequeue, `rate`, Gains.
+
+### Logo-Film zu dunkel: Y2R-Eingabeebenen belegt, Recompiler-Kandidat `bx`-Rueckkehr offen (2026-11-25)
+
+**Befund (nur Diagnose):** Der Level-5-Logo-Film (`m999.moflex`, 400x240
+yuv420p) erscheint im Port dunkler als die FFmpeg-Referenz (Plateau
+Y-Mittel ~146 statt ~199; RGB ~150 statt ~212, Saettigung 13 statt 0.3) und
+mit 8x8-Blockstreifen. Die Y2R-Rechenformel ist nicht die Ursache.
+
+**Belege:** Neuer reiner Dump-Schalter `HLE_Y2R_DUMP=<dir>` schreibt je
+`StartConversion` die vollstaendigen Y/U/V-Eingabeebenen so, wie
+`ReceiveData` sie mit `transfer_unit`/`gap` liest, plus `meta.txt`
+(Adressen, Strides, Formate). Die Ebenen sind strukturell das richtige Bild,
+aber die Helligkeit driftet:
+
+| Dump | Referenzframe | Y-Mittel Referenz | Y-Mittel Port | Korrelation | Gain |
+|---|---|---|---|---|---|
+| 80 | 80 | 108.8 | 110.8 | 0.63 | 0.99 |
+| 180 | 180 | 172.7 | 147.8 | 0.83 | 0.85 |
+| 300 | 300 | 199.2 | 146.2 | 0.92 | 0.74 |
+| 320 | 320 | 199.4 | 114.7 | 0.97 | 0.58 |
+
+Der Fehler sitzt also im Gast-Decoder (rekompilierter Mobiclip-Pfad), nicht in
+Y2R, im Kernel oder in der Anzeige. `tools/cosim.py` mit Schnappschuss an
+`0x0016A500` zeigt: `0x0016BD84` (`add lr, pc, #0; bx r4`) ist ein
+berechneter Aufruf; Unicorn kehrt an dieser Stelle 375x nach `0x16BD8C`
+zurueck, der Port verliess nach dem ersten Durchlauf die C-Funktion
+(`arm_call_guest(...); return;`). Dieselbe Vorlage steht in `0x15F184` und
+`0x165784` (drei Decoder-Modi). Ein generischer Fix (LR auch nach `bx rN`
+als Rueckkehrziel per `goto_cont` fortsetzen; Selbsttest
+`berechneter_aufruf_bx_reg`) behebt den Kontrollfluss, **laesst den Port
+danach aber vor dem Film haengen**: in 2400 Host-Frames kein einziges
+`StartConversion`, Gast steht bei Block `0x001449A4`; Frontier bleibt dabei
+10/10/M1-M3 ja. Damit ist der `bx`-Fix allein nicht abnehmbar; er wurde
+nicht uebernommen. Der naechste Schritt ist der Deadlock, den die nun
+vollstaendige Decoder-Schleife sichtbar macht (Thread-/Lock-Pfad um
+`0x001449A4`/`0x0040xxxx`).
