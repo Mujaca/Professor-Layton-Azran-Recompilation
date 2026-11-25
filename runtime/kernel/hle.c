@@ -3804,7 +3804,9 @@ static void y2r_command(Ipc *r, uint32_t *p) {
                        Renderer muss sein Ziel/Texturen neu aus dem Gast
                        laden (sonst bleibt ein von Y2R beschriebener Puffer
                        auf dem alten D3D-Stand). */
+                    gpu_cs_enter();   /* nicht parallel zu einer laufenden Liste */
                     gpu_pica_invalidate_guest();
+                    gpu_cs_leave();
                 }
             }
             ipc_begin(r, r->cmd, 1, 0);
