@@ -93,7 +93,9 @@ def main():
            '-I', os.path.join(ROOT, 'runtime', 'cpu'), '-I', os.path.join(ROOT, 'runtime', 'gpu'),
            os.path.join(ROOT, 'tests', 'pica_selftest.c'),
            os.path.join(ROOT, 'runtime', 'gpu', 'gpu.c'),
-           os.path.join(ROOT, 'runtime', 'cpu', 'arm_cpu.c'), '-o', EXE]
+           os.path.join(ROOT, 'runtime', 'gpu', 'hw_d3d11.c'),
+           os.path.join(ROOT, 'runtime', 'cpu', 'arm_cpu.c'), '-o', EXE,
+           '-ld3d11', '-ldxgi', '-ld3dcompiler_47']
     p = subprocess.run(cmd, capture_output=True, text=True)
     if p.returncode != 0:
         print('BUILD-FEHLER:\n' + p.stderr[-3000:])

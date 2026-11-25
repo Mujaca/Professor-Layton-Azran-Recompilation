@@ -95,7 +95,7 @@ Tastatur-Circle-Pad nur, wenn er die Deadzone verlaesst.
 
 ```
 out/port.exe [romfs] [--frames N] [--shot datei.bmp] [--shot-every N] [--shot-from M]
-             [--press taste@frame[:dauer[:x:y]],...]
+             [--shot-guest] [--press taste@frame[:dauer[:x:y]],...]
 ```
 
 * `--frames N` beendet nach N Host-Frames (`--shot` allein setzt 600).
@@ -103,9 +103,15 @@ out/port.exe [romfs] [--frames N] [--shot datei.bmp] [--shot-every N] [--shot-fr
   Bildes (400x480: oben 400x240, unten 320x240 ab x=40,y=240).
   `--shot-every N` schreibt zusaetzlich alle N Host-Frames
   `name_000600.bmp` (Szenenfolge dokumentieren); `--shot-from M` erst ab
-  Host-Frame M (Flacker-Analyse mit `--shot-every 1`).
+  Host-Frame M (Flacker-Analyse mit `--shot-every 1`). Mit `--shot-guest`
+  zaehlt `--shot-every`/`--shot-from` Gast- statt Host-Frames; das ist fuer
+  den Software-/Hardware-Bildvergleich noetig, weil die Gastgeschwindigkeit
+  der beiden Pfade auseinanderlaeuft (`[port] ... gast=`).
 * `HLE_AUDIO_WAV=datei.wav` schreibt den erzeugten DSP-Ton zusaetzlich als
   WAV (32728 Hz Stereo); `HLE_LOG` meldet am Ende `host_dropped`/`underruns`.
+* `HLE_HW_STATE=1` meldet im Hardware-Pfad jede neue Kombination der
+  Output-Merger-/Stencil-/Fog-Register einmal als `[hwstate]` (reines Lesen,
+  keine Zustandsaenderung).
 * `--press` haelt eine logische Taste (`a`, `b`, `x`, `y`, `start`,
   `select`, `touch`) fuer `dauer` Host-Frames ab `frame` gedrueckt
   (Standard 10). `touch` nimmt zusaetzlich Koordinaten auf dem unteren

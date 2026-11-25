@@ -31,3 +31,30 @@ korrekte Bilder.
 **Abnahme später:** Bildvergleich Software-Pfad gegen Hardware-Pfad auf
 denselben Gast-Frames. Der Software-Pfad bleibt als Referenz und
 Rückfallebene erhalten.
+
+**Stand 2026-11-25 (m9-hw-texturen-tev):** Der D3D11-Pfad
+(`runtime/gpu/hw_d3d11.c`, `--renderer hw`) deckt jetzt zusätzlich ab:
+
+* Texturen der Einheiten 0–2 (`Texture2D` und `Disabled`) in allen 14
+  PICA-Formaten. Die Dekodierung nutzt exakt den Software-Dekoder
+  (`gpu_pica_decode_texel`, inkl. ETC1/ETC1A4); der Upload-Cache ist je
+  (Adresse, Format, Größe) geschlüsselt und prüft bei jeder neuen
+  Kommandoliste sowie nach MemoryFill/DisplayTransfer/TextureCopy einen
+  FNV-1a-Hash der Quellbytes (`gpu_pica_tex_generation`).
+* Wrap-Modi 0–7 inklusive Border-Farbe und Nearest/Linear (PICA mag/min-Bits;
+  der Software-Pfad liest weiterhin nur den Nachbartexel, deshalb sind
+  Linear-Szenen nicht pixelgleich).
+* TEV als ein HLSL-Über-Shader: 6 Stufen mit Quellen, Modifern aller 16
+  Quellen, Kombinierern Replace…AddThenMultiply inkl. Dot3, Skalierung und
+  Combiner-Buffer (0xE0/0xFD) mit derselben Integer-Semantik wie `p_tev`.
+* Alpha-Test auf dem TEV-Alpha.
+
+`tests/hw_selftest.c` vergleicht zusätzlich texturierte TEV-Szenen
+(RGBA8-Modulate, zwei Texturen mit Dot3_RGBA, ClampToBorder + Alpha-Test,
+I8-Textur) pixelweise gegen den Software-Pfad; alle Szenen sind identisch.
+
+**Offen im Hardware-Pfad:** Fragment-Lighting, Fog, Blending/LogicOps,
+W-Buffer, Stencil, prozedurale Textur, Cube-/Shadow-/Projection-Texturen und
+Mipmaps. Solange diese Zustände aktiv sind, zeichnet weiterhin der
+Software-Rasterizer (`p_hw_supported` in `runtime/gpu/gpu.c`).
+

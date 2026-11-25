@@ -3800,6 +3800,13 @@ static void y2r_command(Ipc *r, uint32_t *p) {
                 } else {
                     g_y2r_busy = 1;
                     g_y2r_due_us = host_us() + 186;
+                    /* Y2R schreibt direkt in Gastpuffer: der Hardware-
+                       Renderer muss sein Ziel/Texturen neu aus dem Gast
+                       laden (sonst bleibt ein von Y2R beschriebener Puffer
+                       auf dem alten D3D-Stand). */
+                    gpu_cs_enter();   /* nicht parallel zu einer laufenden Liste */
+                    gpu_pica_invalidate_guest();
+                    gpu_cs_leave();
                 }
             }
             ipc_begin(r, r->cmd, 1, 0);

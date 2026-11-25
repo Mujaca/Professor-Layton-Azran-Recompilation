@@ -305,6 +305,28 @@ aendern (Locks), sind keine Recompiler-Fehler.
 (`--bench` misst zusaetzlich den Software-Rasterizer: 2000 texturierte
 Dreiecke auf 400x240, siehe `docs/GAME_NOTES.md`).
 
+## Hardware-Renderer (D3D11, M9)
+
+`tests/hw_test.py` baut `tests/hw_selftest.c` mit dem Software-Rasterizer
+(`runtime/gpu/gpu.c`) und dem D3D11-Pfad (`runtime/gpu/hw_d3d11.c`) und
+rendert dieselben synthetischen PICA-Kommandolisten einmal je Pfad:
+konstante und vertexgefaerbte Dreiecke, Viewport, Scissor (Include),
+Tiefentest mit Tiefen-Rueckschreiben, RGBA8 und RGB565. Verglichen werden
+die Gast-Framebuffer pixelweise; Toleranz max. 1 LSB je Kanal, Kantenpixel
+(Top-Left-/Subpixel-Regel) werden gezaehlt und je Szene begrenzt.
+
+```powershell
+python tests/hw_test.py          # D3D11-Hardware, Fallback WARP
+python tests/hw_test.py --warp   # erzwingt WARP
+```
+
+Im Port schaltet ausschliesslich `port.exe ... --renderer hw` den
+Hardware-Pfad ein; ohne Schalter bleibt der Software-Rasterizer Standard
+und bitgleich. Der Hardware-Pfad uebernimmt nur Rasterisierung und
+Fragment-Pipeline (Vertex-/Geometry-Shader bleiben CPU); nicht unterstuetzte
+Zustaende (Texturen, TEV jenseits Replace, Lighting, Fog, Blending,
+Stencil, W-Buffer) fallen je Draw auf den Software-Pfad zurueck.
+
 ## Referenz
 
 * `tools/azahar` – Azahar-Quellcode (Submodul, **nur lesen**).
