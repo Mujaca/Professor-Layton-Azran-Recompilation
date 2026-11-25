@@ -374,6 +374,10 @@ static int source_dequeue(DspState *d, DspSource *s) {
         s->cur_len = 0;
         return 1;
     }
+    if (d->verbose && s->cur_len >= 3)
+        printf("[audio]   id=%u ps=%u dirty=%u yn_in=%d,%d first=%d,%d %d,%d %d,%d\n",
+               b.buffer_id, b.adpcm_ps, b.adpcm_dirty, b.adpcm_yn[0], b.adpcm_yn[1],
+               s->cur[0], s->cur[1], s->cur[2], s->cur[3], s->cur[4], s->cur[5]);
 
     s->current_sample_number = b.has_played ? 0 : b.play_position;
     s->current_buffer_physical_address = b.physical_address;
@@ -543,6 +547,8 @@ static void source_parse_config(DspState *d, DspSource *s, uint8_t *cfg,
     }
     if (dirty & (1u << 18)) {
         s->rate_multiplier = rd_f32(cfg + CFG_RATE);
+        if (d->verbose)
+            printf("[audio] src=%d rate=%f\n", idx, (double)s->rate_multiplier);
         if (!(s->rate_multiplier > 0.0f)) s->rate_multiplier = 1.0f;
     }
     if (dirty & (1u << 2)) {
@@ -555,6 +561,10 @@ static void source_parse_config(DspState *d, DspSource *s, uint8_t *cfg,
                 s->gain_ramp_start[g][c] = s->gain[g][c];
                 s->gain[g][c] = rd_f32(cfg + CFG_GAIN + (g * 4 + c) * 4);
             }
+            if (d->verbose)
+                printf("[audio] src=%d gain%d=%.4f,%.4f,%.4f,%.4f\n", idx, g,
+                       (double)s->gain[g][0], (double)s->gain[g][1],
+                       (double)s->gain[g][2], (double)s->gain[g][3]);
             s->gain_ramp_active[g] = 1;
         }
     }
@@ -690,9 +700,9 @@ static void source_parse_config(DspState *d, DspSource *s, uint8_t *cfg,
                     b.has_played = 0;
                     queue_push(s, &b);
                     if (d->verbose)
-                        printf("[audio] src=%d queued[%d] addr=%08X len=%u id=%u fmt=%u loop=%d\n",
+                        printf("[audio] src=%d queued[%d] addr=%08X len=%u id=%u fmt=%u loop=%d dirty=%d yn=%d,%d\n",
                                idx, i, b.physical_address, b.length, b.buffer_id,
-                               b.format, b.is_looping);
+                               b.format, b.is_looping, b.adpcm_dirty, b.adpcm_yn[0], b.adpcm_yn[1]);
                 }
             }
         }

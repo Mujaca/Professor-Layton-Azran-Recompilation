@@ -1885,3 +1885,69 @@ nachweislich nicht aus diesen Dateien (Host-Drops 0, ein Unterlauf beim Start).
 * `loop_related != 0` wird wie in Azahar nur ignoriert/geloggt; Reverb ist in
   beiden Implementierungen Stub.
 * Der Port serialisiert keinen DSP-Zustand; das braucht nur Savestates.
+
+### Filmton (MOFLEX-Audiospur) und Effektquellen – Messung 2026-11-25
+
+**Format und Weg:** `MOV_999.dspadpcm.bcstm` (RomFS
+`/lt6/snd/uk/stream/`) ist ein CSTM mit 2 Kanaelen, **DSP-ADPCM** (codec 2),
+**32728 Hz**, 283642 Samples = **8,667 s**, non-looping, Interleave-Bloecke
+0x2000 Byte je Kanal (letzter 0x1940). Das Spiel dekodiert die BCSTM-Rahmen
+selbst (Nintendo-3DS-Codec) und legt **je Kanal eine mono DSP-Quelle** an:
+Quellen 0/1, `fmt=2`, `rate=1.0`, Gain L/R 1.0, Puffer 14336 Samples
+(19 volle + 11258), `adpcm_dirty=0` (die DSP-Historie `yn1/yn2` laeuft
+fortlaufend ueber die Puffergrenzen). Damit ist der Weg Spiel -> DSP-RAM ->
+DSP-HLE -> Mixer im Port derselbe wie in Azahar (`Source::DequeueBuffer`,
+`Codec::DecodeADPCM`: 8-Byte-Rahmen, 14 Samples, Koeffizientensatz aus der
+Source-Konfiguration).
+
+**Referenzvergleich (sample-genau):** `scratch/audio2/bcstm_ref.py`/`cmp.py`
+dekodieren dieselbe BCSTM unabhaengig nach vgmstream-Layout. Der WAV-Ausgang
+eines Laufs ohne `HLE_LOG` (`HLE_AUDIO_WAV` + `HLE_AUDIO_LOG` only) ist im
+gesamten Film **sample-genau**: Residuum 1 LSB, Korrelation 1.00, Mess-Gain
+0.9998, kein Clipping (Port-WAV `scratch/audio2/film.wav`, Referenz
+`scratch/audio2/MOV_999.bcstm`). Tonhoehe/Tempo sind damit belegt (32728 Hz,
+rate 1.0, 8,667 s); die Synchronitaet liefert das Spiel selbst ueber die
+Puffer-IDs/`SourceStatus` (kein Host-Eingriff).
+
+| Lauf | Filmton | wavstat |
+|---|---|---|
+| ohne `HLE_LOG` (`film.wav`) | deckungsgleich bis Sample 283642 | Residuum 1, clip 0.0000, keine Luecken im Nutzsignal |
+| mit `HLE_LOG=1` (`film2/3/4.wav`) | ab ~2,4 s Filmzeit abweichend, danach Wiederholungen | Residuum bis 3307, Null-Luecken 12-22 (0,13-0,31 s) |
+
+**Ursache der Abweichung mit `HLE_LOG` (offen, kein Workaround eingebaut):**
+`HLE_LOG=1` verlangsamt die Gast-Threads, der DSP-Thread laeuft aber weiter
+nach Host-Wanduhr (QPC). Der Gast-Produzent kann dann nicht rechtzeitig
+nachliefern: `[audio] underrun` (z. B. nach Puffer 14), das Spiel setzt seinen
+Pufferring ab einer alten id fort und schickt denselben id erneut (im Log
+`queued addr=... id=12/13/14` nach `last=14`). Azahar taktet die DSP-HLE
+dagegen aus `core_timing` und skaliert mit `GetStableFrameTimeScale()`
+(`DspHle::AudioTickCallback`), die DSP-Zeit folgt also der Gast-Zeit. Im Port
+ist `runtime/audio/dsp_hle.c::audio_thread` eine eigene Host-Wanduhr. Ein
+echter Fix muesste die DSP-Frames an den Gast-Fortschritt koppeln (nicht an
+`HLE_LOG`-Tempo); das ist ausserhalb dieses Pakets und bleibt dokumentiert.
+
+**Effektquellen (Titel/New Game, `--press`):**
+* Saemtliche laufende Musik (auch die des gruenen Zwischenspiels nach dem
+  Film) streamt das Spiel ueber dieselben Quellen **0/1** (`fmt=2`, ADPCM,
+  14336-Byte-Puffer). Ein kurzer Einmal-Jingle nutzt das Paar **2/3**
+  (embedded `len=62314`, Gain 0.7733 L/R).
+* **Quellen 4..23 wurden in keinem Lauf aktiviert** (Tastenfolgen
+  `a@1650,down@1750,a@1850,touch@1950`, `a@3600,…`, und neu
+  `a@4600,a@4700,down@4750,a@4800,touch@4900,a@5000` ueber 6200 Frames).
+  Das Spiel schreibt keine separaten DSP-SFX-Puffer; die HLE mischt alle 24
+  Quellen wie Azahar, es gibt also auf DSP-Seite **keine** Abweichung.
+* Neue Vergleichslaeufe (jeweils 103 s, `HLE_AUDIO_WAV`,
+  `scratch/night4/menu_{ctrl,press}.wav`): kein Clipping, globaler Peak
+  29846 (ctrl) bzw. 32115 (press), also < 32767 (Vollaussteuerung); Pegel im
+  Nutzsignal RMS bis ~10,4 k, groesster Sample-Sprung 10813 (musikbedingt,
+  kein Aussetzer). Der Press-Lauf enthaelt ab ~68 s zusaetzliches Signal
+  (RMS 1-4 k), das der Kontrolllauf nicht hat; das 2/3-Jingle-Paar wird im
+  Press-Lauf um ~81,5 s aktiviert (im Kontrolllauf nie).
+* **Einschraenkung:** `--press` zaehlt *Host*-Frames. Der Gastfortschritt
+  schwankt mit der Host-Last (im selben Lauf verschoben sich Filmende und
+  Zwischenspiel um mehrere Sekunden), deshalb ist aus einem einzelnen Lauf
+  nicht ablesbar, ob eine bestimmte Taste im passenden Menuezustand ankam.
+  Gesichert ist nur die DSP-Seite: was der Gast konfiguriert, mischt die HLE
+  exakt wie Azahar; zusaetzliche Quellen tauchen dabei nicht auf.
+* Diagnose-Ergaenzungen (nur mit `HLE_AUDIO_LOG`): Puffer-Dirty/`yn`,
+  erste dekodierte Samples je Dequeue, `rate`, Gains.
