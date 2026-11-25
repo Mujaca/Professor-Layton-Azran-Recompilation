@@ -78,7 +78,9 @@ Die Datei wird nur beim Start gelesen; Aenderungen brauchen einen Neustart.
 
 `[gamepad] enabled = 1` liest zusaetzlich das erste verbundene XInput-Pad
 (`xinput1_4.dll`, sonst `1_3`, sonst `9_1_0`; per `LoadLibrary`, kein harter
-Link). Belegung:
+Link). Wie die Tastatur wirkt das Pad nur, solange das Spielfenster im
+Vordergrund ist (sonst steuerte ein Controller alle laufenden Instanzen).
+Belegung:
 
 | 3DS | Gamepad |
 |---|---|

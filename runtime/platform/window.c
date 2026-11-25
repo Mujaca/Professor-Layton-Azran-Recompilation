@@ -609,8 +609,12 @@ void win_input_poll(WinInput *out) {
         out->circle_y = (int16_t)lround(cydir * (cxdir == 0 ? 1.0 : SQRT_HALF) * 0x9A);
     }
 
-    /* Optionales XInput-Gamepad zusaetzlich zur Tastatur. */
-    (void)xinput_poll(out);
+    /* Optionales XInput-Gamepad zusaetzlich zur Tastatur. XInput ist global
+     * (unabhaengig vom Fokus); wie die Tastatur (Fenstermeldungen) wirkt das
+     * Gamepad nur, solange dieses Fenster im Vordergrund ist. Sonst steuerte
+     * ein Controller alle laufenden Instanzen gleichzeitig. */
+    if (g_hwnd != NULL && GetForegroundWindow() == g_hwnd)
+        (void)xinput_poll(out);
 
     if (g_has_touch_rect && g_vp.scale > 0) {
         int px, py, tx, ty;
