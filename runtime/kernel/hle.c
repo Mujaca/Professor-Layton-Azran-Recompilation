@@ -125,6 +125,8 @@ static uint64_t host_us(void);
  * Zeit, in der der Gast-Lock zwischen zwei Gast-Abschnitten frei lag.
  * Reine Zaehler, kein Gastzustand. */
 static int g_ystat = 0;
+/* Diagnose (HLE_WSTAT): DSP-Zustell- und Aufwachverzoegerungen > 10 ms. */
+static int g_wstat = 0;
 /* Diagnose (HLE_GTIME): Wandzeit der PICA-Kommandolisten-Ausfuehrung
  * (Software-Rasterizer) gegen die Gesamtlaufzeit. Reine Zaehler. */
 static int g_gtime = 0;
@@ -470,6 +472,7 @@ typedef struct {
     int max_count;           /* Semaphore: Maximum */
     int reset_type;          /* Event/Timer: 0 OneShot, 1 Sticky, 2 Pulse */
     uint64_t timer_due;      /* Timer: faellig (Host-ns) */
+    uint64_t sig_us;         /* Diagnose HLE_WSTAT: Zeitpunkt der DSP-Signalisierung */
     uint64_t timer_interval; /* Timer: Wiederholung (Host-ns), 0 = einmalig */
     int timer_active;        /* Timer: laeuft */
     char name[12];
@@ -1011,6 +1014,14 @@ static int hs_wait(ArmCpu *c, Handle **objs, int cnt, int wait_all,
                 if (!hs_should_wait(objs[k], tid)) { hit = k; break; }
             }
             if (hit >= 0 && kwait_self_wins(tid, slots, n)) {
+                if (g_wstat && objs[hit]->sig_us != 0) {
+                    uint64_t lat = host_us() - objs[hit]->sig_us;
+                    objs[hit]->sig_us = 0;
+                    if (lat > 10000)
+                        printf("[wstat] t=%llu tid=%u proc=%d aufwachen %llu ms nach DSP-Signal\n",
+                               (unsigned long long)((host_ns() - g_boot_ns) / 1000000ull),
+                               tid, proc_of_tid(tid), (unsigned long long)(lat / 1000));
+                }
                 hs_acquire(objs[hit], tid);
                 kwait_unregister(wslot);
                 /* Azahar: sofortiger Treffer meldet den ersten Index
@@ -2750,7 +2761,16 @@ static void dsp_signal_events(int type, int pipe) {
     {
         uint32_t ev = g_dsp_events[type][pipe];
         Handle *hh = get_handle(ev);
-        if (hh != NULL) hh->signaled = 1;
+        if (hh != NULL) {
+            hh->signaled = 1;
+            if (g_wstat) {
+                long long fd = audio_dsp_last_flush_delay_us();
+                hh->sig_us = host_us();
+                if (fd > 10000)
+                    printf("[wstat] t=%llu dsp-zustellung %lld ms spaet\n",
+                           (unsigned long long)((host_ns() - g_boot_ns) / 1000000ull), fd / 1000);
+            }
+        }
     }
 }
 
@@ -4264,6 +4284,7 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     snprintf(g_romfs, sizeof(g_romfs), "%s", romfs_dir ? romfs_dir : "out/romfs");
     g_log = getenv("HLE_LOG") != NULL;
     g_ystat = getenv("HLE_YSTAT") != NULL;
+    g_wstat = getenv("HLE_WSTAT") != NULL;
     g_gtime = getenv("HLE_GTIME") != NULL;
     {
         /* Paralleles Rasterisieren grosser Dreiecke (Ergebnis pixelgleich).

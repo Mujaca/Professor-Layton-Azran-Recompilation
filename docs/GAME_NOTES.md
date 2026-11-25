@@ -211,6 +211,11 @@ Struktur je Draw statt Registerlesen je Pixel.
   GPU-Arbeit (`gx_run_inline` in `runtime/kernel/hle.c`).
 * Audiopuffer liegen im Linear-Heap (FCRAM phys 0x20000000+x = virtuell
   0x14000000+x).
+* **Musikaussetzer behoben (2026-11-25 nachmittags):** Ursache waren
+  gebuendelt zugestellte DSP-Pipe-Interrupts (der DSP-Thread stellte nur per
+  TryEnter zu; bei belegter Gast-Sperre kamen ~4 Frames als ein Interrupt,
+  15..23 ms spaet, `HLE_WSTAT`). Seit der blockierenden Zustellung je Frame:
+  Luecken 0/0/1 statt 10/8/12 je ~40 s Titelmusik (A/B je 3 Laeufe).
 * Musik-Stream: je Kanal ein Ring aus 5 ADPCM-Puffern a 8 KB (14336 Samples,
   0,438 s) an festen Adressen um 0x2031xxxx; ein Umlauf dauert 2,19 s. Die
   verbleibenden Null-Luecken der Titelmusik (master 08b773d: 6..13 Luecken je
