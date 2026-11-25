@@ -129,33 +129,6 @@ void gpu_pica_flush_guest(void)
     if (g_hw_render) hw_flush_to_guest();
 }
 
-void gpu_pica_sync_range(uint32_t offset, uint32_t bytes)
-{
-    if (g_hw_render) hw_sync_range(offset, bytes);
-}
-
-void gpu_pica_guest_write_range(uint32_t offset, uint32_t bytes)
-{
-    if (g_hw_render) hw_guest_write_range(offset, bytes);
-}
-
-int gpu_pica_target_pending(void)
-{
-    return g_hw_render ? hw_target_pending() : 0;
-}
-
-void gpu_pica_readback_stats(unsigned long long *draws, unsigned long long *flushes,
-                             unsigned long long *loads)
-{
-    if (draws) *draws = 0ull;
-    if (flushes) *flushes = 0ull;
-    if (loads) *loads = 0ull;
-    if (g_hw_render) {
-        hw_stats(draws, flushes);
-        if (loads) *loads = hw_target_loads();
-    }
-}
-
 /* ================= echte PICA200-Kommandoliste =================
  * Format (Azahar pica_core.cpp, ProcessCmdList/WriteInternalReg): Strom aus
  * Paaren
@@ -4728,9 +4701,8 @@ int gpu_run_pica_list(ArmCpu *c, uint32_t addr, uint32_t size)
         p_run_list(c, gpu_pica_phys_to_guest(addr), size, &ctx, 0);
         if (saved_round != FE_TONEAREST) fesetround(saved_round);
     }
-    /* Ende der Kommandoliste: die Ergebnisse bleiben im D3D-Ziel. Der Gast
-     * bekommt sie erst ueber einen Sync-Punkt (hw_sync_range/hw_sync_guest,
-     * Bildausgabe) -- siehe Rueckschreibepolitik in hw_d3d11.c. */
+    /* Ende der Kommandoliste: der Gast darf die Ergebnisse lesen. */
+    if (g_hw_render) hw_flush_to_guest();
     g_pica_lists++;
     if (diag) {
         int i, first = 1;
@@ -5073,18 +5045,15 @@ static void p_ext_memory_fill(ArmCpu *c, int index, int intr_index)
     uint32_t value = f[2], control = f[3];
 
     if ((control & 1u) == 0u) return;
-    /* Beschreibt der Fill das aktuelle Farb-/Tiefenziel, werden ausstehende
-     * GPU-Ergebnisse vorher gesichert und das Ziel verworfen; sonst bleibt
-     * der D3D-Zielzustand unberuehrt (Rueckschreibepolitik). */
+    /* Vor dem Gast-Schreiben ausstehende HW-Ergebnisse sichern und das
+       Ziel verwerfen (der naechste HW-Draw laedt neu aus dem Gast). */
+    hw_sync_guest();
+    p_hw_tex_gen_bump();
     {
         uint32_t gs = gpu_pica_phys_to_guest(start);
         uint32_t ge = gpu_pica_phys_to_guest(end);
-        if (ge > gs) {
-            gpu_pica_guest_write_range(gs, ge - gs);
-            gpu_pica_invalidate_tex_range(gs, ge - gs);
-        }
+        if (ge > gs) gpu_pica_invalidate_tex_range(gs, ge - gs);
     }
-    p_hw_tex_gen_bump();
     p_mem_fill(c, gpu_pica_phys_to_guest(start), gpu_pica_phys_to_guest(end),
                value, control);
     f[3] = (control & ~1u) | 2u;
@@ -5114,17 +5083,13 @@ static void p_ext_transfer(ArmCpu *c)
                in_p, out_p, flags, p_ext_regs[0x303], p_ext_regs[0x302],
                (flags >> 3) & 1u);
     p_hw_tex_gen_bump();       /* Kopie kann Texturbytes veraendern */
+    hw_sync_guest();           /* vorher ausstehende HW-Ergebnisse sichern */
     if (flags & 8u) {                   /* is_texture_copy */
         /* Azahar regs_external.h DisplayTransferConfig: flags@0x304,
            trigger@0x306, texture_copy.size@0x308, input_size@0x309,
            output_size@0x30A. */
         uint32_t dst = gpu_pica_phys_to_guest(out_p);
         uint32_t sz = p_ext_regs[0x308];
-        /* Quelle liest der Blitter: bei Ueberlappung mit ausstehenden
-         * GPU-Ergebnissen zuerst zurueckschreiben. Ziel: nur bei
-         * Ueberlappung sichern/verwerfen. */
-        gpu_pica_sync_range(gpu_pica_phys_to_guest(in_p), sz);
-        gpu_pica_guest_write_range(dst, sz);
         gpu_pica_invalidate_tex_range(dst, sz);
         p_texture_copy_run(c, gpu_pica_phys_to_guest(in_p),
                            dst, sz,
@@ -5134,17 +5099,8 @@ static void p_ext_transfer(ArmCpu *c)
                            (p_ext_regs[0x30A] >> 16) & 0xFFFFu);
     } else {
         uint32_t dst = gpu_pica_phys_to_guest(out_p);
-        /* input_size (0x303) und output_size (0x302) sind gepackte
-         * Breite/Hoehe; die Bytezahl folgt aus Format und Groesse. */
-        uint32_t in_fmt = (flags >> 8) & 7u, out_fmt = (flags >> 12) & 7u;
-        uint32_t iw = p_ext_regs[0x303] & 0xFFFFu;
-        uint32_t ih = (p_ext_regs[0x303] >> 16) & 0xFFFFu;
-        uint32_t ow = p_ext_regs[0x302] & 0xFFFFu;
-        uint32_t oh = (p_ext_regs[0x302] >> 16) & 0xFFFFu;
-        gpu_pica_sync_range(gpu_pica_phys_to_guest(in_p),
-                            iw * ih * (uint32_t)p_bpp(in_fmt));
-        gpu_pica_guest_write_range(dst, ow * oh * (uint32_t)p_bpp(out_fmt));
-        gpu_pica_invalidate_tex_range(dst, ow * oh * (uint32_t)p_bpp(out_fmt));
+        /* output_size (0x302) ist die Groesse des Zielbereichs in Bytes. */
+        gpu_pica_invalidate_tex_range(dst, p_ext_regs[0x302]);
         p_display_transfer_run(c, gpu_pica_phys_to_guest(in_p),
                                dst,
                                p_ext_regs[0x303], p_ext_regs[0x302], flags);

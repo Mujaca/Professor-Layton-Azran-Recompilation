@@ -153,17 +153,6 @@ void hw_sync_guest(void);
  * HW-Zielzustand verwerfen, ohne ihn zurueckzuschreiben. */
 void hw_invalidate_guest(void);
 
-/* Rueckschreibepolitik (Ausbaustufe A): liegen ausstehende GPU-Ergebnisse
- * vor und ueberlappt [offset, offset+bytes) das aktuelle Farb-/Tiefenziel,
- * wird zuerst zurueckgeschrieben. offset bezieht sich auf
- * HwDrawState.guest_mem. Sonst passiert nichts. */
-void hw_sync_range(uint32_t offset, uint32_t bytes);
-/* Der Gast beschreibt [offset, offset+bytes): nur bei Ueberlappung mit dem
- * aktuellen Ziel wird gesichert und der D3D-Zielzustand verworfen. */
-void hw_guest_write_range(uint32_t offset, uint32_t bytes);
-/* 1 = es stehen GPU-Ergebnisse aus, die noch nicht im Gast stehen. */
-int hw_target_pending(void);
-
 /* Signalisieren, dass sich Gast-Texturbytes geaendert haben. */
 void hw_invalidate_textures(void);
 

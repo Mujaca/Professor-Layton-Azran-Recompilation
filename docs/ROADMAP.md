@@ -159,4 +159,3 @@ periodische Aussetzer offen).
 | 2026-11-25 | m9-hw-review-fixes | 10/10 | None | 0 |
 | 2026-11-25 | m9-hw-restfehler | 10/10 | None | 0 |
 | 2026-11-25 | m9-hw-texturcache | 10/10 | None | 0 |
-| 2026-11-25 | m9-hw-gpu-resident | 10/10 | None | 0 |

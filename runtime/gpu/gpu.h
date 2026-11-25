@@ -71,20 +71,9 @@ int gpu_pica_texture_bound(void);
 void gpu_pica_invalidate_guest(void);
 void gpu_pica_invalidate_tex_range(uint32_t offset, uint32_t bytes);
 void gpu_pica_texture_stats(unsigned long long *uploads, unsigned long long *decode_us);
-/* Diagnose der Rueckschreibepolitik: Draws, Rueckschreibungen (Flushes) und
- * volle Gast->D3D-Ladungen des Ziels. */
-void gpu_pica_readback_stats(unsigned long long *draws, unsigned long long *flushes,
-                             unsigned long long *loads);
 /* Ausstehende Hardware-Ergebnisse ins Gast-VRAM schreiben (vor einer
  * Gast-Schreiboperation bzw. am Ende einer Kommandoliste). */
 void gpu_pica_flush_guest(void);
-/* Rueckschreibepolitik: Gast/Dienst liest [offset, offset+bytes); nur wenn
- * das ausstehende Farb-/Tiefenziel ueberlappt, wird zurueckgeschrieben. */
-void gpu_pica_sync_range(uint32_t offset, uint32_t bytes);
-/* Gast/GX beschreibt [offset, offset+bytes): Ziel nur bei Ueberlappung
- * sichern und verwerfen. */
-void gpu_pica_guest_write_range(uint32_t offset, uint32_t bytes);
-int gpu_pica_target_pending(void);
 /* Texturgeneration erhoehen (Render-to-Texture: HW- oder SW-Draw hat das
  * Farbziel im Gastspeicher veraendert). */
 void gpu_pica_bump_tex_generation(void);

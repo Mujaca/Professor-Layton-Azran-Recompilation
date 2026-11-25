@@ -207,85 +207,7 @@ void hw_texture_stats(unsigned long long *uploads, unsigned long long *decode_us
 unsigned long long hw_depth_writes(void) { return g_depth_writes; }
 unsigned long long hw_target_loads(void) { return g_target_loads; }
 int hw_available(void) { return g_ready; }
-static uint32_t fmt_bpp(uint32_t fmt);
-static uint32_t depth_bpp(uint32_t fmt);
-
 void hw_invalidate_guest(void) { g_guest_dirty = 1; g_rendered = 0; }
-
-/* ---- Rueckschreibepolitik (Ausbaustufe A, docs/WORKAROUNDS.md) ----------
- * Die GPU-Ergebnisse bleiben im D3D-Ziel; in den Gastpuffer gelangen sie
- * erst, wenn ihn jemand tatsaechlich braucht:
- *   (a) ein GX-/GSP-Schreibvorgang in den Bereich (hw_sync_guest),
- *   (b) eine Textur, die den Bereich ueberlappt (hw_sync_range je Draw),
- *   (c) die Bildausgabe (compose_frame je Host-Frame = VBlank-Takt),
- *   (d) ein Dienst, der den Bereich liest (Y2R-Quelle, DisplayTransfer-
- *       Quelle; beide ueber hw_sync_guest/hw_sync_range).
- * Gast-CPU-Lesewege sind ohne MMU nicht beobachtbar. hw_list_begin
- * erkennt sie weiterhin per memcmp gegen die Schattenkopie des letzten
- * Ruckschreibens -- dafuer muss NICHT mehr am Listenende geschrieben
- * werden, weil Gast und Schatten beide auf dem letzten Flush-Stand stehen. */
-static uint32_t hw_color_bytes(const HwDrawState *st)
-{
-    uint32_t bpp = fmt_bpp(st->color_format);
-    if (bpp == 0u || st->color_width == 0u || st->color_height == 0u) return 0u;
-    return st->color_width * st->color_height * bpp;
-}
-
-static uint32_t hw_depth_bytes(const HwDrawState *st)
-{
-    uint32_t bpp = depth_bpp(st->depth_format);
-    if (bpp == 0u || st->color_width == 0u || st->color_height == 0u) return 0u;
-    return st->color_width * st->color_height * bpp;
-}
-
-static int hw_ovl(uint64_t a, uint64_t alen, uint64_t b, uint64_t blen)
-{
-    return a < b + blen && b < a + alen;
-}
-
-int hw_target_pending(void) { return g_have_state && g_rendered && !g_guest_dirty; }
-
-/* Ueberlappt [offset, offset+bytes) das aktuelle Farb- oder Tiefenziel? */
-static int hw_target_overlaps(const HwDrawState *st, uint32_t offset, uint32_t bytes)
-{
-    uint64_t o, n;
-    if (st->guest_mem == NULL || bytes == 0u) return 0;
-    if (st->color_mem != NULL) {
-        o = (uint64_t)(st->color_mem - st->guest_mem);
-        n = hw_color_bytes(st);
-        if (n != 0u && hw_ovl(o, n, offset, bytes)) return 1;
-    }
-    if (st->depth_mem != NULL) {
-        o = (uint64_t)(st->depth_mem - st->guest_mem);
-        n = hw_depth_bytes(st);
-        if (n != 0u && hw_ovl(o, n, offset, bytes)) return 1;
-    }
-    return 0;
-}
-
-void hw_sync_range(uint32_t offset, uint32_t bytes)
-{
-    if (bytes == 0u || !hw_target_pending()) return;
-    if ((uint64_t)offset + bytes > g_state.guest_size) {
-        /* Bereich ragt aus dem Gastpuffer: konservativ alles schreiben. */
-        hw_flush_to_guest();
-        return;
-    }
-    if (hw_target_overlaps(&g_state, offset, bytes)) hw_flush_to_guest();
-}
-
-/* Der Gast (CPU oder Dienst) beschreibt [offset, offset+bytes). Nur wenn das
- * ein noch nicht zurueckgeschriebenes Ziel beruehrt, wird vorher gesichert
- * und der D3D-Zielzustand danach verworfen; sonst bleibt er unberuehrt. */
-void hw_guest_write_range(uint32_t offset, uint32_t bytes)
-{
-    if (!g_ready || !g_have_state || bytes == 0u) return;
-    if (!hw_target_overlaps(&g_state, offset, bytes)) return;
-    if (g_rendered && !g_guest_dirty) hw_flush_to_guest();
-    g_have_state = 0;
-    g_rendered = 0;
-    g_guest_dirty = 0;
-}
 void hw_invalidate_textures(void) { g_tex_force = 1; g_tex_gen_seen = 0xFFFFFFFFu; }
 /* Nur Slots, deren Quellbytes den Bereich ueberlappen, muessen neu geprueft
  * werden (GX-Schreiboperationen). Offset/bytes beziehen sich wie
@@ -1427,17 +1349,6 @@ static void bind_textures(const HwDrawState *st)
             st->guest_mem == NULL ||
             (uint64_t)t->offset + t->bytes > st->guest_size)
             continue;
-        /* Die Textur liest Gastbytes. Ueberlappt ihr Bereich ein noch nicht
-         * zurueckgeschriebenes Farb-/Tiefenziel (Render-to-Texture), muss
-         * dieses zuerst in den Gast -- sonst dekodiert der Cache den alten
-         * Stand. */
-        if (hw_target_pending()) {
-            hw_sync_range(t->offset, t->bytes);
-            if (g_state.tex_generation != gpu_pica_tex_generation()) {
-                g_state.tex_generation = gpu_pica_tex_generation();
-                gen_check = 1;
-            }
-        }
         /* Schluessel (Adresse, Format, Breite/Hoehe, Bytezahl) kann sich
            innerhalb derselben Kommandoliste aendern: bei JEDEM Draw suchen.
            Der Byte-Hash laeuft hoechstens einmal pro Kommandoliste je
@@ -1804,11 +1715,10 @@ void hw_list_begin(void) {
         }
     }
     if (!g_ready || !g_have_state) return;
-    /* Kein Rueckschreiben am Listenbeginn: die Schattenkopie ist der Stand
-     * des letzten Flush, der Gast steht ebenfalls dort (sofern ihn niemand
-     * beschrieben hat). Der memcmp unten erkennt damit weiterhin
-     * Gast-CPU-Schreibzugriffe, ohne dass die GPU-Ergebnisse vorher in den
-     * Gast muessen. */
+    /* Ausstehende Ergebnisse zuerst in den Gast (falls ein Aufrufer den
+     * Listenanfang ohne Listenende erreicht hat); danach ist der Gast der
+     * gueltige Stand. */
+    if (g_rendered && !g_guest_dirty) hw_flush_to_guest();
     if (!g_sh_valid ||
         (g_sh_color_len != 0u && g_state.color_mem != NULL &&
          memcmp(g_state.color_mem, g_sh_color, g_sh_color_len) != 0) ||
