@@ -45,6 +45,13 @@ def main():
         return
     step("Build", [py, "tools/build.py"] + ([] if a.full else ["--no-gen"]))
     step("Tool-Selbsttest", [py, "tools/selftest_tools.py"])
+    # Runtime-Selbsttests (C): frueher nicht im Gate -> ein HW-Renderer-Commit
+    # mit 16 roten hw_test-Faellen wurde angenommen (2026-11-25). Der
+    # HW-Test laeuft auf WARP, damit er ohne Grafikkarte reproduzierbar ist.
+    for t in ["dsp_hle_test", "audio_test", "y2r_test", "framebuffer_test",
+              "fs_archive_test", "frame_clock_test", "sched_selftest", "hid_ring_test"]:
+        step("Runtime-Selbsttest " + t, [py, "tests/%s.py" % t], timeout=300)
+    step("HW-Renderer-Selbsttest (WARP)", [py, "tests/hw_test.py", "--warp"], timeout=600)
     need = roadmap_services() if a.min_services is None else a.min_services
     step("Frontier >= %d Dienste" % need, [py, "tools/frontier.py", "--min-services", str(need)])
     print("OK")

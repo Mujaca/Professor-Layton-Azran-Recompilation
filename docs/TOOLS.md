@@ -216,7 +216,7 @@ schreibt je Adresse hoechstens einen `ARMDMP01`-Schnappschuss nach
 
 Selbsttest: `python tools/selftest_tools.py`.
 
-## Weitere Tests (bewusst nicht in `tools/check.py`)
+## Runtime-Selbsttests (seit 2026-11-25 Teil von `tools/check.py`)
 
 | Befehl | Zweck |
 |---|---|
@@ -228,8 +228,12 @@ Selbsttest: `python tools/selftest_tools.py`.
 | `python tests/audio_test.py` | DSP-HLE-Dekodierung/Resampling (ADPCM inkl. s16-Verlauf, PCM8/16, lineare Interpolation mit Azahar-Rundung) |
 | `python tests/dsp_hle_test.py` | DSP-HLE-Frame-Verarbeitung: Regionenwahl ueber Frame-Counter (inkl. Wraparound), Dirty-Bits, Status-Rueckschreiben, `u32_dsp`, Sleep-Reply nach zwei Frames, DSP-RAM-Nullung bei Initialize |
 
-Diese Tests brauchen nur `zig cc` und laufen in Sekunden; sie gehoeren
-absichtlich nicht zum Commit-Gate.
+Diese Tests brauchen nur `zig cc` und laufen in Sekunden. Seit 2026-11-25
+laufen `dsp_hle_test`, `audio_test`, `y2r_test`, `framebuffer_test`,
+`fs_archive_test`, `frame_clock_test`, `sched_selftest`, `hid_ring_test` und
+`tests/hw_test.py --warp` (D3D11-Renderer gegen Software-Pfad, WARP ohne
+Grafikkarte) im Gate; vorher war ein HW-Commit mit roten Selbsttests
+durchgerutscht.
 
 ## Diagnose-Umgebungsvariablen (verändern keinen Gastzustand)
 
