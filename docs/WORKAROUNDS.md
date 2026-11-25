@@ -1836,3 +1836,52 @@ ist in der aktuellen Szene nach dem Intro RGB-schwarz.
   Ohne die gemeinsame Umrechnung der Summe schlaegt der Test fehl.
 
 Kein Workaround eingebaut; `tools/workarounds/` bleibt leer.
+
+### DSP-HLE gegen Azahar abgeglichen (2026-11-25)
+
+**Umfang:** `runtime/audio/dsp_hle.c` und `runtime/audio/audio_codec.c` Zeile
+fuer Zeile gegen `tools/azahar/src/audio_core/hle/{source,mixers,filter,
+shared_memory,hle}.cpp` und `audio_core/{codec,interpolate}.cpp` (Azahar-Stand
+`396b4c3`, Audio-Commit `5a1c580d6`).
+
+**Ergebnis:** Die Semantik stimmt in allen fuenf Schwerpunkten ueberein:
+
+| Bereich | Azahar | Port |
+|---|---|---|
+| Buffer-Queue | `priority_queue`, kleinste `buffer_id` zuerst | `queue_pop` kleinste Id |
+| Loop/Play-Position | `has_played ? 0 : play_position`, Rest konsumiert | identisch |
+| ADPCM-Zustand | `adpcm_dirty` setzt `yn1/yn2` vor dem Dekodieren; `adpcm_ps` nutzt Azahar nicht | identisch |
+| Interpolation | 24-Bit-Festkomma, `fposition`, zwei Historien-Samples, saturierendes Delta, Polyphase→Linear | identisch (`audio_codec.c`) |
+| Rate | `float_le rate_multiplier`, `<=0` → 1.0 | identisch |
+| Gains | 3×4 `float_le`, Rampenstart je Mix, `s32`-Cast je Sample | identisch |
+| Downmix | Mono `/2`, Stereo L=`0+2`/R=`1+3`, Clamp je Stufe | identisch |
+| AUX | Auslesen aus Lese-Region, Schreiben in Schreib-Region, Delay auf Mix 1/2 | identisch |
+| Filter | `>>15` (simple), `>>14` (biquad), s16-Koeffizienten, Vorzeichen wie Struct | identisch |
+| Endianness | `u32_dsp` mittelendian, Intermediate/Final little-endian | identisch |
+| L/R | `pcm16[sample][0]=links`, `[1]=rechts` | identisch |
+
+**Eine Abweichung gefunden und behoben:** Azahar `5a1c580d6` dekodiert bei
+einem **loopenden PCM16-Puffer** den noch nicht verbrauchten Rest vor jedem
+Frame neu (`Source::GenerateFrame`), weil das Spiel den Puffer live
+ueberschreiben darf. Der Port behielt die beim Dequeue dekodierten Bytes.
+Neu: `source_refresh_looping_pcm16()` (Basisadresse wie DSP-DMA `&~3`, erst
+danach den Sample-Offset addieren; Mono-Adresse darf 2-byte-versetzt sein).
+
+**Beleg:** `tests/dsp_hle_selftest.c::loop_refresh_*` (500 Stereo-Frames,
+looping; nach 159 verbrauchten Samples ueberschreibt der Test den Rest ab
+Sample 160 mit L=3000/R=6000). Ohne Refresh liefert Ausgabe 2 den alten Wert
+1160 → `FAIL loop_refresh_neue_samples`, Exit 1; mit Fix 3000/6000 → OK.
+WAV `scratch/night/wav_{before,after}.wav` (4000 Frames, `HLE_AUDIO_WAV`):
+Die Titelmusik nutzt laut `HLE_AUDIO_LOG` ADPCM (`fmt=2`, `loop=0`), der Fix
+greift dort nicht; beide Laeufe ohne Clipping (clip 0), maxjump gleich 15376,
+die Pegel unterscheiden sich nur durch den nicht samplegleichen
+Spielfortschritt (Host-Wanduhr). Die hoerbaren Aussetzer der Titelmusik stammen
+nachweislich nicht aus diesen Dateien (Host-Drops 0, ein Unterlauf beim Start).
+
+**Bewusst nicht geaendert (keine Spielabweichung belegbar):**
+* Filter rechnen im Port mit `int64`-Akkumulator; Azahar nutzt `s32`
+  (bei extremen Koeffizienten Overflow/UB). Fuer die beobachteten
+  Konfigurationen identisch.
+* `loop_related != 0` wird wie in Azahar nur ignoriert/geloggt; Reverb ist in
+  beiden Implementierungen Stub.
+* Der Port serialisiert keinen DSP-Zustand; das braucht nur Savestates.
