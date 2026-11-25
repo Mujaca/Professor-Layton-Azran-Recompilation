@@ -149,3 +149,4 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | 2026-11-25 | m9-hw-tev-texturen | 10/10 | None | 0 |
 | 2026-11-25 | m10-dsp-abgleich | 10/10 | None | 0 |
 | 2026-11-25 | m9-hw-blend-titel | 10/10 | None | 0 |
+| 2026-11-25 | m9-hw-review-fixes | 10/10 | None | 0 |

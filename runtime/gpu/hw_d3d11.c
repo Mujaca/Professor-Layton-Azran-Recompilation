@@ -35,6 +35,7 @@
 #define COBJMACROS
 #include "hw_d3d11.h"
 
+#include <windows.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <dxgi.h>
@@ -43,6 +44,47 @@
 #include <string.h>
 
 #include "gpu.h"
+
+/* d3d11.dll/d3dcompiler_47.dll werden erst bei --renderer hw geladen, damit
+   der Software-Pfad ohne diese DLLs startet. */
+typedef HRESULT (WINAPI *HwD3D11CreateDeviceFn)(
+    IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE, UINT,
+    const D3D_FEATURE_LEVEL *, UINT, UINT,
+    ID3D11Device **, D3D_FEATURE_LEVEL *, ID3D11DeviceContext **);
+typedef HRESULT (WINAPI *HwD3DCompileFn)(
+    LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO *, ID3DInclude *,
+    LPCSTR, LPCSTR, UINT, UINT, ID3DBlob **, ID3DBlob **);
+
+static HMODULE g_d3d11_dll, g_d3dcompiler_dll;
+static HwD3D11CreateDeviceFn g_pfn_d3d11_create;
+static HwD3DCompileFn g_pfn_d3d_compile;
+
+static void hw_release_dlls(void)
+{
+    if (g_d3dcompiler_dll) { FreeLibrary(g_d3dcompiler_dll); g_d3dcompiler_dll = NULL; }
+    if (g_d3d11_dll) { FreeLibrary(g_d3d11_dll); g_d3d11_dll = NULL; }
+    g_pfn_d3d11_create = NULL;
+    g_pfn_d3d_compile = NULL;
+}
+
+static int hw_load_dlls(void)
+{
+    if (g_pfn_d3d11_create && g_pfn_d3d_compile) return 1;
+    g_d3d11_dll = LoadLibraryA("d3d11.dll");
+    g_d3dcompiler_dll = LoadLibraryA("d3dcompiler_47.dll");
+    if (g_d3d11_dll)
+        g_pfn_d3d11_create = (HwD3D11CreateDeviceFn)(void *)
+            GetProcAddress(g_d3d11_dll, "D3D11CreateDevice");
+    if (g_d3dcompiler_dll)
+        g_pfn_d3d_compile = (HwD3DCompileFn)(void *)
+            GetProcAddress(g_d3dcompiler_dll, "D3DCompile");
+    if (!g_pfn_d3d11_create || !g_pfn_d3d_compile) {
+        fprintf(stderr, "[hw] d3d11.dll/d3dcompiler_47.dll nicht verfuegbar\n");
+        hw_release_dlls();
+        return 0;
+    }
+    return 1;
+}
 
 static ID3D11Device *g_dev;
 static ID3D11DeviceContext *g_ctx;
@@ -69,7 +111,10 @@ static int g_target_w, g_target_h;
 static HwDrawState g_state;
 static int g_have_state;
 static int g_guest_dirty = 1;
+static int g_rendered;          /* GPU-Ergebnisse stehen noch nicht im Gast */
+static int g_depth_dirty;       /* seit dem letzten Flush wurde Tiefe/Stencil geschrieben */
 static unsigned long long g_draws, g_flushes;
+static unsigned long long g_depth_writes;
 static unsigned long long g_tex_uploads;
 static uint32_t g_dss_key = 0xFFFFFFFFu;
 static uint32_t g_bs_key = 0xFFFFFFFFu;
@@ -94,9 +139,18 @@ void hw_stats(unsigned long long *draws, unsigned long long *flushes) {
     if (flushes) *flushes = g_flushes;
 }
 unsigned long long hw_texture_uploads(void) { return g_tex_uploads; }
+unsigned long long hw_depth_writes(void) { return g_depth_writes; }
 int hw_available(void) { return g_ready; }
-void hw_invalidate_guest(void) { g_guest_dirty = 1; }
+void hw_invalidate_guest(void) { g_guest_dirty = 1; g_rendered = 0; }
 void hw_invalidate_textures(void) { g_tex_force = 1; g_tex_gen_seen = 0xFFFFFFFFu; }
+void hw_sync_guest(void)
+{
+    if (g_have_state && g_rendered && !g_guest_dirty) hw_flush_to_guest();
+    /* Zielzustand verwerfen: der naechste HW-Draw laedt neu aus dem Gast. */
+    g_have_state = 0;
+    g_rendered = 0;
+    g_guest_dirty = 0;
+}
 
 /* ---- HLSL --------------------------------------------------------------
  * pica_cmp/PSOut wie im Grundgeruest; Textur- und TEV-Semantik folgt
@@ -721,6 +775,8 @@ static int create_targets(const HwDrawState *st) {
     g_target_w = w;
     g_target_h = h;
     g_guest_dirty = 0;
+    g_rendered = 0;
+    g_depth_dirty = 0;
     return 1;
 }
 
@@ -738,14 +794,14 @@ static int init_pipeline(void) {
     ID3D11Texture2D *dummy = NULL;
     HRESULT hr;
 
-    hr = D3DCompile(k_hlsl, strlen(k_hlsl), "pica_hw", NULL, NULL, "VSMain",
+    hr = g_pfn_d3d_compile(k_hlsl, strlen(k_hlsl), "pica_hw", NULL, NULL, "VSMain",
                     "vs_5_0", 0, 0, &vsb, &err);
     if (FAILED(hr)) {
         if (err) { fprintf(stderr, "[hw] VS-Fehler: %s\n", (char *)ID3D10Blob_GetBufferPointer(err)); }
         if (err) ID3D10Blob_Release(err);
         return 0;
     }
-    hr = D3DCompile(k_hlsl, strlen(k_hlsl), "pica_hw", NULL, NULL, "PSMain",
+    hr = g_pfn_d3d_compile(k_hlsl, strlen(k_hlsl), "pica_hw", NULL, NULL, "PSMain",
                     "ps_5_0", 0, 0, &psb, &err);
     if (FAILED(hr)) {
         if (err) { fprintf(stderr, "[hw] PS-Fehler: %s\n", (char *)ID3D10Blob_GetBufferPointer(err)); }
@@ -846,14 +902,18 @@ int hw_init(const char *driver) {
     HRESULT hr;
     (void)dummy;
     if (g_ready) return 1;
+    if (!hw_load_dlls()) {
+        fprintf(stderr, "[hw] D3D11 nicht ladbar, Software-Pfad bleibt aktiv\n");
+        return 0;
+    }
     g_warp = (driver != NULL && strcmp(driver, "warp") == 0);
-    hr = D3D11CreateDevice(NULL, g_warp ? D3D_DRIVER_TYPE_WARP : D3D_DRIVER_TYPE_HARDWARE,
+    hr = g_pfn_d3d11_create(NULL, g_warp ? D3D_DRIVER_TYPE_WARP : D3D_DRIVER_TYPE_HARDWARE,
                            NULL, 0, NULL, 0, D3D11_SDK_VERSION, &g_dev, &fl, &g_ctx);
     if (FAILED(hr) && !g_warp) {
         printf("[hw] Hardware-Treiber nicht verfuegbar (hr=%08lX), Fallback WARP\n",
                (unsigned long)hr);
         g_warp = 1;
-        hr = D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_WARP, NULL, 0, NULL, 0,
+        hr = g_pfn_d3d11_create(NULL, D3D_DRIVER_TYPE_WARP, NULL, 0, NULL, 0,
                                D3D11_SDK_VERSION, &g_dev, &fl, &g_ctx);
     }
     if (FAILED(hr)) {
@@ -871,8 +931,7 @@ int hw_init(const char *driver) {
 
 void hw_shutdown(void) {
     int i;
-    for (i = 0; i < 3; i++) {
-        if (g_texslot[i].srv) { ID3D11ShaderResourceView_Release(g_texslot[i].srv); g_texslot[i].srv = NULL; }
+    for (i = 0; i < 3; i++) {        if (g_texslot[i].srv) { ID3D11ShaderResourceView_Release(g_texslot[i].srv); g_texslot[i].srv = NULL; }
         if (g_texslot[i].tex) { ID3D11Texture2D_Release(g_texslot[i].tex); g_texslot[i].tex = NULL; }
         memset(&g_texslot[i], 0, sizeof(g_texslot[i]));
     }
@@ -889,8 +948,12 @@ void hw_shutdown(void) {
     if (g_dev) { ID3D11Device_Release(g_dev); g_dev = NULL; }
     g_ready = 0;
     g_have_state = 0;
+    g_guest_dirty = 1;
+    g_rendered = 0;
+    g_depth_dirty = 0;
     g_tex_gen_seen = 0xFFFFFFFFu;
     g_tex_force = 1;
+    hw_release_dlls();
 }
 
 /* ---- Constant Buffer ---------------------------------------------------
@@ -1056,7 +1119,7 @@ static int texslot_upload(int unit, const HwDrawState *st)
 static void bind_textures(const HwDrawState *st)
 {
     ID3D11ShaderResourceView *srv[3];
-    int check = g_tex_force || st->tex_generation != g_tex_gen_seen;
+    int gen_check = g_tex_force || st->tex_generation != g_tex_gen_seen;
     int i;
 
     for (i = 0; i < 3; i++) {
@@ -1066,21 +1129,30 @@ static void bind_textures(const HwDrawState *st)
             st->guest_mem == NULL ||
             (uint64_t)t->offset + t->bytes > st->guest_size) {
             s->valid = 0;
-        } else if (check) {
-            uint64_t h = fnv1a(st->guest_mem + t->offset, t->bytes);
-            if (!s->valid || s->hash != h || s->offset != t->offset ||
-                s->fmt != t->format || s->w != t->width || s->h != t->height) {
-                if (texslot_upload(i, st)) {
-                    s->hash = h;
-                    s->valid = 1;
-                } else {
-                    s->valid = 0;
+        } else {
+            /* Der Schluessel (Adresse/Format/Groesse) kann sich innerhalb
+               derselben Kommandoliste aendern: bei JEDEM Draw pruefen. Der
+               teure Byte-Hash laeuft nur bei neuer Generation. */
+            int key_ok = s->valid && s->offset == t->offset &&
+                         s->fmt == t->format && s->w == t->width &&
+                         s->h == t->height;
+            uint64_t h = 0;
+            if (!key_ok) {
+                if (texslot_upload(i, st)) s->valid = 1;
+                else s->valid = 0;
+                if (s->valid && gen_check) s->hash = fnv1a(st->guest_mem + t->offset, t->bytes);
+            } else if (gen_check) {
+                h = fnv1a(st->guest_mem + t->offset, t->bytes);
+                if (s->hash != h) {
+                    if (texslot_upload(i, st)) s->valid = 1;
+                    else s->valid = 0;
+                    if (s->valid) s->hash = h;
                 }
             }
         }
         srv[i] = s->valid ? s->srv : g_tex_dummy;
     }
-    if (check) {
+    if (gen_check) {
         g_tex_gen_seen = st->tex_generation;
         g_tex_force = 0;
     }
@@ -1100,8 +1172,12 @@ int hw_begin_draw(const HwDrawState *st) {
         /* Bei dirty hat der Software-Pfad (oder der Test) den Gastpuffer
            geaendert; dann darf der alte GPU-Stand nicht zurueckgeschrieben
            werden, sondern wird verworfen und neu aus dem Gast geladen. */
-        if (g_have_state && !g_guest_dirty) hw_flush_to_guest();
-        if (!create_targets(st)) return 0;
+        if (g_have_state && !g_guest_dirty && g_rendered) hw_flush_to_guest();
+        if (!create_targets(st)) {
+            g_have_state = 0;
+            g_rendered = 0;
+            return 0;
+        }
     }
     g_state = *st;
     g_have_state = 1;
@@ -1298,17 +1374,25 @@ int hw_triangles(const HwVertex *v, int n) {
     ID3D11DeviceContext_Draw(g_ctx, (UINT)n, 0);
     ID3D11Buffer_Release(vb);
     g_draws++;
+    g_rendered = 1;
+    if (g_state.depth_write ||
+        (g_state.stencil_enable && g_state.stencil_write_mask != 0u &&
+         (g_state.stencil_fail_op != 0u || g_state.stencil_zfail_op != 0u ||
+          g_state.stencil_pass_op != 0u)))
+        g_depth_dirty = 1;
     return 1;
 }
 
 int hw_flush_to_guest(void) {
     D3D11_MAPPED_SUBRESOURCE cm, dm;
     unsigned char *cbase, *dbase;
-    uint32_t cbpp, i, h, w;
+    uint32_t cbpp, h, w;
     int x, y;
 
-    (void)i;
     if (!g_ready || !g_have_state) return 0;
+    if (!g_rendered) return 0;
+    if (!g_color_tex || !g_color_stage || g_target_w <= 0 || g_target_h <= 0)
+        return 0;
     w = (uint32_t)g_target_w;
     h = (uint32_t)g_target_h;
     cbpp = fmt_bpp(g_state.color_format);
@@ -1338,18 +1422,27 @@ int hw_flush_to_guest(void) {
         }
     }
 
-    ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)g_depth_stage,
-                                     (ID3D11Resource *)g_depth_dsv_tex);
-    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_depth_stage, 0,
-                                       D3D11_MAP_READ, 0, &dm))) {
-        ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_color_stage, 0);
-        return 0;
+    /* Tiefe/Stencil nur zurueckschreiben, wenn in diesem Ziel seit dem
+       letzten Flush tatsaechlich Tiefe oder Stencil geschrieben wurde. Das
+       vermeidet verlustbehaftete D24-Umwege ueber D32_FLOAT. */
+    if (g_depth_dirty && g_state.depth_mem != NULL &&
+        g_depth_dsv_tex != NULL && g_depth_stage != NULL) {
+        ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)g_depth_stage,
+                                         (ID3D11Resource *)g_depth_dsv_tex);
+        if (SUCCEEDED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_depth_stage, 0,
+                                           D3D11_MAP_READ, 0, &dm))) {
+            dbase = (unsigned char *)dm.pData;
+            depth_to_guest(&g_state, dbase, dm.RowPitch, (int)w, (int)h);
+            ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_depth_stage, 0);
+        }
+        g_depth_writes++;
     }
-    dbase = (unsigned char *)dm.pData;
-    depth_to_guest(&g_state, dbase, dm.RowPitch, (int)w, (int)h);
-    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_depth_stage, 0);
     ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_color_stage, 0);
     g_flushes++;
+    g_rendered = 0;
+    g_depth_dirty = 0;
     g_guest_dirty = 0;
+    /* Render-to-Texture: der Gastpuffer ist jetzt neuer Texturinhalt. */
+    gpu_pica_bump_tex_generation();
     return 1;
 }

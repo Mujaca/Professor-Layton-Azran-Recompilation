@@ -669,6 +669,137 @@ static uint32_t scene_o(ArmCpu *c) {
     return (uint32_t)((unsigned char *)q - (c->mem + LIST));
 }
 
+/* Szene P: zwei Draws in derselben Liste, Texturadresse wechselt. */
+static uint32_t scene_p(ArmCpu *c) {
+    static const Vtx3 v[6] = {
+        {{-0.95f, -0.9f, 0.0f}, {1, 1, 1, 1}, {0.0f, 0.0f}},
+        {{-0.05f, -0.9f, 0.0f}, {1, 1, 1, 1}, {1.0f, 0.0f}},
+        {{-0.50f,  0.9f, 0.0f}, {1, 1, 1, 1}, {0.5f, 1.0f}},
+        {{ 0.05f, -0.9f, 0.0f}, {1, 1, 1, 1}, {0.0f, 0.0f}},
+        {{ 0.95f, -0.9f, 0.0f}, {1, 1, 1, 1}, {1.0f, 0.0f}},
+        {{ 0.50f,  0.9f, 0.0f}, {1, 1, 1, 1}, {0.5f, 1.0f}},
+    };
+    uint32_t *q;
+    fill_tex_rgba8(c, TEX0, 1);
+    fill_tex_rgba8(c, TEX1, 2);
+    put_vertices3(c, v, 6);
+    q = (uint32_t *)(c->mem + LIST);
+    q = emit_attrs3(q, 3);
+    q = emit_vs_tex(q, 0);
+    q = emit_viewport(q, 16, 16);
+    q = emit(q, 0x80, 1u);
+    q = emit_tex(q, 0, TEX0, 8, 8, 0u, 2u, 2u, 0u, 0u);
+    q = emit_tev_stage(q, 0, 0x00030003u, 0u, 0u, 0u, 0u);
+    q = emit_tev_passthrough(q, 1);
+    q = emit_target(q, FB, 16, 16, 0u, 0u, 0, 0u);
+    q = emit(q, 0x22E, 0u);
+    q = emit(q, 0x25E, 0u);
+    q = emit_tex(q, 0, TEX1, 8, 8, 0u, 2u, 2u, 0u, 0u);
+    q = emit(q, 0x200, (VTX + 3u * 36u) >> 3);
+    q = emit(q, 0x228, 3u);
+    q = emit(q, 0x22E, 0u);
+    return (uint32_t)((unsigned char *)q - (c->mem + LIST));
+}
+
+/* Szene Q: D16-Tiefenziel im Gast vorbelegt (links nah, rechts fern). */
+static uint32_t scene_q(ArmCpu *c) {
+    static const Vtx v[3] = {
+        {{-0.95f, -0.95f, -0.5f}, {1, 1, 1, 1}},
+        {{ 0.95f, -0.95f, -0.5f}, {1, 1, 1, 1}},
+        {{ 0.00f,  0.95f, -0.5f}, {1, 1, 1, 1}},
+    };
+    uint32_t *q;
+    int x, y;
+    for (y = 0; y < 16; y++) {
+        int yp = 15 - y;
+        for (x = 0; x < 16; x++) {
+            uint32_t off = morton_off(x, yp, 2u) + (uint32_t)(yp & ~7) * 16u * 2u;
+            uint16_t z = (x < 8) ? 0x0000u : 0xFFFFu;
+            memcpy(c->mem + ((DEPTH + off) & 0x1FFFFFFFu), &z, 2);
+        }
+    }
+    put_vertices(c, v, 3);
+    q = (uint32_t *)(c->mem + LIST);
+    q = emit_attrs(q, 3);
+    q = emit_vs_real(q);
+    q = emit_viewport(q, 16, 16);
+    q = emit_tri_color(q, 0xFF0000FFu, -0.5f);
+    q = emit_target(q, FB, 16, 16, 0u, 0u, 1, 4u);
+    q = emit(q, 0x116, 0u);
+    q = emit(q, 0x22E, 0u);
+    return (uint32_t)((unsigned char *)q - (c->mem + LIST));
+}
+
+/* Szene R: D24-Ziel gebunden, aber ohne Tiefen-/Stencil-Schreiben. */
+static uint32_t scene_r(ArmCpu *c) {
+    static const Vtx v[3] = {
+        {{-0.95f, -0.95f, 0.0f}, {1, 1, 1, 1}},
+        {{ 0.95f, -0.95f, 0.0f}, {1, 1, 1, 1}},
+        {{ 0.00f,  0.95f, 0.0f}, {1, 1, 1, 1}},
+    };
+    uint32_t *q;
+    int x, y;
+    for (y = 0; y < 16; y++) {
+        int yp = 15 - y;
+        for (x = 0; x < 16; x++) {
+            uint32_t off = morton_off(x, yp, 3u) + (uint32_t)(yp & ~7) * 16u * 3u;
+            unsigned char *p = c->mem + ((DEPTH + off) & 0x1FFFFFFFu);
+            p[0] = (unsigned char)(x * 13 + y);
+            p[1] = (unsigned char)(x * 5 + y * 11);
+            p[2] = (unsigned char)(x * 3 + y * 7);
+        }
+    }
+    put_vertices(c, v, 3);
+    q = (uint32_t *)(c->mem + LIST);
+    q = emit_attrs(q, 3);
+    q = emit_vs_real(q);
+    q = emit_viewport(q, 16, 16);
+    q = emit_tri_color(q, 0xFF20E010u, 0.0f);
+    q = emit_target(q, FB, 16, 16, 0u, 0u, 0, 0u);
+    q = emit(q, 0x11C, DEPTH >> 3);
+    q = emit(q, 0x116, 2u);
+    q = emit(q, 0x22E, 0u);
+    return (uint32_t)((unsigned char *)q - (c->mem + LIST));
+}
+
+#define FILL   0x00060000u
+
+/* Minimaler HwDrawState fuer direkte API-Tests (TEV konstant, kein Tiefen-
+ * ziel, volle Farbmaske, LogicOp Copy). */
+static void hw_test_state(HwDrawState *st, ArmCpu *c, uint32_t fb, uint32_t cst) {
+    int i;
+    memset(st, 0, sizeof(*st));
+    st->color_mem = c->mem + fb;
+    st->color_size = (uint32_t)c->mem_size - fb;
+    st->color_width = 16;
+    st->color_height = 16;
+    st->color_format = 0u;
+    st->viewport_half_w = 8.0f;
+    st->viewport_half_h = 8.0f;
+    st->depth_range = -1.0f;
+    st->logic_op = 3u;
+    st->color_write_enable = 1;
+    st->color_write_mask = 0xFu;
+    for (i = 0; i < 6; i++) st->tev_src[i] = 0x000F000Fu;
+    st->tev_src[0] = 0x000E000Eu;
+    st->tev_cst[0] = cst;
+    st->guest_mem = c->mem;
+    st->guest_size = (uint32_t)c->mem_size;
+    st->tex_generation = gpu_pica_tex_generation();
+}
+
+static const HwVertex g_hw_tri[3] = {
+    {{-0.9f, -0.9f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{0, 0}, {0, 0}, {0, 0}}},
+    {{ 0.9f, -0.9f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{0, 0}, {0, 0}, {0, 0}}},
+    {{ 0.0f,  0.9f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{0, 0}, {0, 0}, {0, 0}}},
+};
+
+static int any_nonzero(const unsigned char *p, int n) {
+    int i;
+    for (i = 0; i < n; i++) if (p[i]) return 1;
+    return 0;
+}
+
 static int bpp_of(uint32_t fmt) {
     switch (fmt) {
     case 1: return 3;
@@ -790,6 +921,9 @@ int main(int argc, char **argv) {
     scene_case(&c, "Szene M: Stencil Equal, D24S8", scene_m, 0u, 3, 16, 16, 16);
     scene_case(&c, "Szene N: Fog, RGBA8", scene_n, 0u, 0, 16, 16, 16);
     scene_case(&c, "Szene O: Min + Konstantfarben-Blend", scene_o, 0u, 0, 16, 16, 16);
+    scene_case(&c, "Szene P: Texturwechsel in einer Liste", scene_p, 0u, 0, 16, 16, 32);
+    scene_case(&c, "Szene Q: Tiefe aus dem Gast geladen", scene_q, 0u, 0, 16, 16, 16);
+    scene_case(&c, "Szene R: Tiefenziel ohne Schreiben", scene_r, 0u, 2, 16, 16, 16);
 
     /* Stencil-Bytes muessen wie im Software-Pfad geschrieben werden. */
     {
@@ -821,6 +955,87 @@ int main(int argc, char **argv) {
                nz_sw, nz_hw);
         check(nz_hw > 0, "Hardware-Pfad schreibt den Tiefenpuffer zurueck");
     }
+
+    /* --- Review-Faelle: Zielerzeugung, Invalidierung, Readback, Cache ---- */
+    {
+        HwDrawState st, bad;
+        unsigned long long d0 = 0, f0 = 0, d1 = 0, f1 = 0;
+        unsigned long long u0, u1, g0, g1, dw0, dw1;
+        uint32_t fw[8];
+        int size;
+        static unsigned char before[16 * 16 * 4];
+
+        /* (1) create_targets scheitert (Breite 0): kein Zustand darf
+           stehenbleiben, hw_flush_to_guest darf nicht auf NULL zeigen. */
+        hw_test_state(&bad, &c, FB, 0xFF0000FFu);
+        bad.color_width = 0u;
+        check(hw_begin_draw(&bad) == 0, "create_targets-Fehler wird gemeldet");
+        check(hw_flush_to_guest() == 0, "Flush nach fehlgeschlagenem Ziel ist sicher");
+
+        /* (2a) Vor einer GX-Operation muessen ausstehende HW-Ergebnisse ins
+           Gast-VRAM geschrieben werden. */
+        memset(c.mem + FB, 0, 16 * 16 * 4);
+        memset(c.mem + FILL, 0, 0x200);
+        hw_test_state(&st, &c, FB, 0xFF0000FFu);
+        check(hw_begin_draw(&st) != 0, "HW-Ziel fuer direkten Draw");
+        hw_triangles(g_hw_tri, 3);
+        memset(fw, 0, sizeof(fw));
+        fw[1] = FILL; fw[2] = 0x11223344u; fw[3] = FILL + 0x100u; fw[7] = 0x101u;
+        gpu_gsp_memory_fill_cmd(&c, fw);
+        check(any_nonzero(c.mem + FB, 16 * 16 * 4),
+              "GX-MemoryFill sichert vorher ausstehende HW-Ergebnisse");
+        check(c.mem[FILL] == 0x44u && c.mem[FILL + 1] == 0x33u,
+              "GX-MemoryFill schreibt danach den Gastpuffer");
+
+        /* (2b) Hat der Gast selbst geschrieben, darf der veraltete GPU-Stand
+           nicht zurueckgeschrieben werden (CPU-/Y2R-Schreibzugriff). */
+        memset(c.mem + FB, 0, 16 * 16 * 4);
+        check(hw_begin_draw(&st) != 0, "HW-Ziel erneut gebunden");
+        hw_triangles(g_hw_tri, 3);
+        memset(c.mem + FB, 0x5A, 16 * 16 * 4);
+        hw_invalidate_guest();
+        check(hw_flush_to_guest() == 0, "nach Gast-Schreibzugriff kein Readback");
+        check(c.mem[FB] == 0x5Au && c.mem[FB + 100] == 0x5Au,
+              "Gast-Schreibzugriff bleibt unveraendert");
+
+        /* (5) HW-Rueckschreiben erhoeht die Texturgeneration. */
+        g0 = gpu_pica_tex_generation();
+        check(hw_begin_draw(&st) != 0, "HW-Ziel fuer Generationstest");
+        hw_triangles(g_hw_tri, 3);
+        hw_flush_to_guest();
+        g1 = gpu_pica_tex_generation();
+        check(g1 > g0, "HW-Rueckschreiben erhoeht die Texturgeneration");
+
+        /* (6) Zwei Draws in einer Liste: genau ein Readback am Listenende
+           (kein vollstaendiger GPU->CPU-Transfer je Draw). */
+        gpu_pica_reset();
+        gpu_pica_set_render_hw(1);
+        memset(c.mem + FB, 0, 16 * 16 * 4);
+        size = (int)scene_p(&c);
+        hw_stats(&d0, &f0);
+        u0 = hw_texture_uploads();
+        gpu_run_pica_list(&c, LIST, (uint32_t)size);
+        hw_stats(&d1, &f1);
+        u1 = hw_texture_uploads();
+        check(d1 - d0 >= 2, "Szene P fuehrt zwei Draws aus");
+        check(f1 - f0 <= 1, "hoechstens ein Readback je Kommandoliste");
+        check(u1 - u0 >= 2, "Texturwechsel wird bei jedem Draw geprueft");
+
+        /* (3b) Ohne Tiefen-/Stencil-Schreiben bleibt das Gast-Tiefenziel
+           unangetastet (kein D24-Roundtrip, kein Readback). */
+        gpu_pica_reset();
+        gpu_pica_set_render_hw(1);
+        memset(c.mem + FB, 0, 16 * 16 * 4);
+        size = (int)scene_r(&c);
+        memcpy(before, c.mem + DEPTH, sizeof(before));
+        dw0 = hw_depth_writes();
+        gpu_run_pica_list(&c, LIST, (uint32_t)size);
+        dw1 = hw_depth_writes();
+        check(dw1 == dw0, "kein Tiefen-Readback ohne Tiefen-Schreiben");
+        check(memcmp(before, c.mem + DEPTH, sizeof(before)) == 0,
+              "D24-Gastpuffer bleibt ohne Tiefen-Schreiben unveraendert");
+    }
+
 
     {
         unsigned long long nd = 0, nf = 0;

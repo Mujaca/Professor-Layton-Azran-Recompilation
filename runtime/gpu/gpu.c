@@ -108,6 +108,11 @@ void gpu_pica_invalidate_guest(void)
     if (g_hw_render) hw_invalidate_guest();
 }
 
+void gpu_pica_flush_guest(void)
+{
+    if (g_hw_render) hw_flush_to_guest();
+}
+
 /* ================= echte PICA200-Kommandoliste =================
  * Format (Azahar pica_core.cpp, ProcessCmdList/WriteInternalReg): Strom aus
  * Paaren
@@ -228,6 +233,11 @@ uint32_t gpu_pica_tex_generation(void)
 }
 
 static void p_hw_tex_gen_bump(void)
+{
+    g_hw_tex_gen++;
+}
+
+void gpu_pica_bump_tex_generation(void)
 {
     g_hw_tex_gen++;
 }
@@ -3033,7 +3043,7 @@ static void p_process_tri(ArmCpu *c, const PicaVertex *v0, const PicaVertex *v1,
     int area;
     uint32_t cull = p_regs[0x40] & 3u;
 
-    if (!g_hw_render) hw_invalidate_guest();
+    if (!g_hw_render) hw_sync_guest();
 
     x[0] = (int)roundf(v0->pos[0] * 16.0f);
     y[0] = (int)roundf(v0->pos[1] * 16.0f);
@@ -3353,7 +3363,7 @@ static int p_hw_tri_clip(ArmCpu *c, const PicaVertex *in, int n)
     int corner_x, corner_y, i, m = 0;
 
     if (!p_hw_supported()) {
-        hw_invalidate_guest();
+        hw_sync_guest();
         return 0;
     }
     p_hw_state(&st, c);
@@ -4206,7 +4216,7 @@ static void p_vs_draw_immediate(ArmCpu *c)
         p_prim_submit(c, &v);
     }
     g_vs_imm_cur = 0;
-    if (g_hw_render) hw_flush_to_guest();
+    if (!g_hw_render) gpu_pica_bump_tex_generation();
 }
 
 static int p_draw_arrays(ArmCpu *c, int indexed)
@@ -4289,7 +4299,7 @@ static int p_draw_arrays(ArmCpu *c, int indexed)
         }
     }
     draws++;
-    if (g_hw_render) hw_flush_to_guest();
+    if (!g_hw_render) gpu_pica_bump_tex_generation();
     return 1;
 }
 
@@ -4670,6 +4680,8 @@ int gpu_run_pica_list(ArmCpu *c, uint32_t addr, uint32_t size)
         p_run_list(c, gpu_pica_phys_to_guest(addr), size, &ctx, 0);
         if (saved_round != FE_TONEAREST) fesetround(saved_round);
     }
+    /* Ende der Kommandoliste: der Gast darf die Ergebnisse lesen. */
+    if (g_hw_render) hw_flush_to_guest();
     g_pica_lists++;
     if (diag) {
         int i, first = 1;
@@ -5012,6 +5024,10 @@ static void p_ext_memory_fill(ArmCpu *c, int index, int intr_index)
     uint32_t value = f[2], control = f[3];
 
     if ((control & 1u) == 0u) return;
+    /* Vor dem Gast-Schreiben ausstehende HW-Ergebnisse sichern und das
+       Ziel verwerfen (der naechste HW-Draw laedt neu aus dem Gast). */
+    hw_sync_guest();
+    p_hw_tex_gen_bump();
     p_mem_fill(c, gpu_pica_phys_to_guest(start), gpu_pica_phys_to_guest(end),
                value, control);
     f[3] = (control & ~1u) | 2u;
@@ -5041,7 +5057,7 @@ static void p_ext_transfer(ArmCpu *c)
                in_p, out_p, flags, p_ext_regs[0x303], p_ext_regs[0x302],
                (flags >> 3) & 1u);
     p_hw_tex_gen_bump();       /* Kopie kann Texturbytes veraendern */
-    hw_invalidate_guest();       /* ... und Farb-/Tiefenziel */
+    hw_sync_guest();           /* vorher ausstehende HW-Ergebnisse sichern */
     if (flags & 8u) {                   /* is_texture_copy */
         /* Azahar regs_external.h DisplayTransferConfig: flags@0x304,
            trigger@0x306, texture_copy.size@0x308, input_size@0x309,
@@ -5192,7 +5208,6 @@ void gpu_gsp_memory_fill_cmd(ArmCpu *c, const uint32_t *w)
         printf("[gpu] memfill s1=%08X e1=%08X v1=%08X c1=%X s2=%08X e2=%08X v2=%08X c2=%X\n",
                start1, end1, value1, ctl1, start2, end2, value2, ctl2);
     p_hw_tex_gen_bump();       /* MemoryFill kann Texturbytes ueberschreiben */
-    hw_invalidate_guest();
     if (start1 != 0u) {
         uint32_t ps = gpu_pica_virt_to_phys(start1);
         p_ext_regs[0x04] = ps >> 3;

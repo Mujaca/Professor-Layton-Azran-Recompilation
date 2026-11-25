@@ -69,6 +69,12 @@ int gpu_pica_texture_bound(void);
 /* Gastspeicher wurde ausserhalb der PICA-Liste geschrieben (Y2R,
  * DisplayTransfer, TextureCopy, MemoryFill): Hardware-Ziel neu laden. */
 void gpu_pica_invalidate_guest(void);
+/* Ausstehende Hardware-Ergebnisse ins Gast-VRAM schreiben (vor einer
+ * Gast-Schreiboperation bzw. am Ende einer Kommandoliste). */
+void gpu_pica_flush_guest(void);
+/* Texturgeneration erhoehen (Render-to-Texture: HW- oder SW-Draw hat das
+ * Farbziel im Gastspeicher veraendert). */
+void gpu_pica_bump_tex_generation(void);
 
 /* Software-Texeldekoder (alle PICA-Formate inkl. ETC1/ETC1A4) fuer den
    Hardware-Pfad: Groesse einer 8x8-Kachel in Bytes und ein Texel einer

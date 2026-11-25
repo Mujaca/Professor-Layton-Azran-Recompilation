@@ -130,10 +130,18 @@ int hw_begin_draw(const HwDrawState *state);
 /* n Dreiecke (n Vielfaches von 3). Rueckgabe 0 bei Fehler. */
 int hw_triangles(const HwVertex *v, int n);
 
-/* Farb-/Tiefenpuffer ins Gast-VRAM schreiben. */
+/* Farb-/Tiefenpuffer ins Gast-VRAM schreiben (nur wenn seit dem letzten
+ * Schreiben wirklich GPU-Ergebnisse ausstehen). */
 int hw_flush_to_guest(void);
 
-/* Signalisieren, dass der Software-Pfad den Gastpuffer veraendert hat. */
+/* Vor einer Gast-Schreiboperation (MemoryFill, DisplayTransfer,
+ * TextureCopy, Software-Draw): ausstehende GPU-Ergebnisse zuerst ins
+ * Gast-VRAM schreiben und danach den HW-Zielzustand verwerfen, damit der
+ * naechste HW-Draw das Ziel neu aus dem Gast laedt. */
+void hw_sync_guest(void);
+
+/* Signalisieren, dass der Gast den Puffer bereits veraendert hat: den
+ * HW-Zielzustand verwerfen, ohne ihn zurueckzuschreiben. */
 void hw_invalidate_guest(void);
 
 /* Signalisieren, dass sich Gast-Texturbytes geaendert haben. */
@@ -144,5 +152,6 @@ void hw_invalidate_textures(void);
 const char *hw_driver_name(void);
 void hw_stats(unsigned long long *draws, unsigned long long *flushes);
 unsigned long long hw_texture_uploads(void);
+unsigned long long hw_depth_writes(void);
 
 #endif
