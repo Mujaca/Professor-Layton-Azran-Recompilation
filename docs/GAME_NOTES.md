@@ -211,3 +211,20 @@ Struktur je Draw statt Registerlesen je Pixel.
   GPU-Arbeit (`gx_run_inline` in `runtime/kernel/hle.c`).
 * Audiopuffer liegen im Linear-Heap (FCRAM phys 0x20000000+x = virtuell
   0x14000000+x).
+* Musik-Stream: je Kanal ein Ring aus 5 ADPCM-Puffern a 8 KB (14336 Samples,
+  0,438 s) an festen Adressen um 0x2031xxxx; ein Umlauf dauert 2,19 s. Die
+  verbleibenden Null-Luecken der Titelmusik (master 08b773d: 6..13 Luecken je
+  ~40 s, 20..110 ms) kommen genau in diesem Takt -> das Nachfuellen kommt
+  zu spaet, nicht der DSP-HLE (Filmton ist sample-genau, DSP gegen Azahar
+  abgeglichen). Messung: `HLE_AUDIO_WAV` + Lueckensuche; Streuung zwischen
+  Laeufen gross, daher immer >= 3 Laeufe vergleichen.
+* Thread 14 (Prio 46) entpackt (Bitbaum-Schleife 0x270D20..0x270D84) und
+  macht am Titel ~45 % aller Gast-Bloecke aus; Kandidat fuer den Stream-
+  Nachschub.
+* Sampling-Profil am Titel: ~95 % der Thread-Zeit in Wartefunktionen,
+  Gastcode kaum sichtbar, Raster-Worker ~77 % untaetig -> Bildrate und
+  Nachschub sind durch die kooperative Gast-Sperre begrenzt, nicht durch
+  Rechenleistung. Erfolglos getestet (je A/B, schlechter als master):
+  Sleep(0) statt Sleep(1) beim Wiedereintritt, Sperr-Uebergabe per Zaehler,
+  Abgabe in hle_pump nur bei bereitem hoeher-prioren Thread, 16x groesseres
+  hle_pump-Intervall.
