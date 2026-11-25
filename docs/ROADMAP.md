@@ -41,26 +41,32 @@ Azahar-Referenz (`reports/azahar_trace.txt`) und meldet:
 | M12 | Titel und Hauptmenü laufen mit ≥ 30 fps (Gast-Frames) | fps-Anzeige im Fenstertitel bzw. `[port] gast=`-Log |
 | M13 | Bild flackert nicht: jeder angezeigte Frame ist vollständig (kein Wechsel zwischen halbfertigen/alten Puffern) | Sichttest im Fenster + Frame-Folge ohne Ausreißer |
 | M14 | Erstes Rätsel spielbar: Eingabe, Lösung, Speichern | manueller Test + Speicherstand lädt erneut |
+| M15 | Filme farbtreu: Logo- und Intro-Filme (MOFLEX/Mobiclip) stimmen mit einer unabhängigen Dekodierung überein | mittlere Abweichung < 3 je Kanal gegen FFmpeg-Referenzframes, keine Blockstreifen |
+| M16 | Soundeffekte und Spielstand: Effekte bei Eingaben hörbar, Speichern und erneutes Laden funktionieren (konkretisiert M7) | Effekt-Quellen im `HLE_AUDIO_LOG` aktiv + Hörtest; Speicherstand überlebt Neustart |
+| M17 | Hardware-Renderer als Standard: Bilder bleiben auf der GPU, Ausgabe über D3D-Swapchain, wählbare höhere interne Auflösung; Software-Pfad bleibt Referenz | Bildvergleich SW/HW besteht (siehe M18), Gast-fps HW ≥ SW, Sichttest |
+| M18 | Reproduzierbare Testläufe: Eingaben an Gastzeit statt Host-Frames gekoppelt, zwei Läufe liefern dieselben Gast-Frames | zwei Läufe → identische Bildfolge (Grundlage für M9-/M15-Vergleiche und A/B-Messungen) |
 
 Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 
-## Nächste Arbeitspakete (priorisiert)
+## Nächste Arbeitspakete (priorisiert, Stand 2026-11-25)
 
-0. **IPC-Reply-Layouts prüfen** (docs/WORKAROUNDS.md §5): jede Antwort in
-   `runtime/kernel/hle.c` gegen Azahar (`IPC::RequestBuilder`) abgleichen,
-   zuerst hid GetIPCHandles (direkt vor dem Hänger). Danach
-   `wa-fs-client-slot` entfernen und Frontier messen.
-1. **Recompiler-Korrektheit absichern**: Differenztest pro Funktion
-   (recompilierter C-Code vs. Referenz-Interpreter, z. B. Unicorn als reines
-   Testwerkzeug) für Hash-, String- und Locale-Routinen. Mehrere
-   Workarounds (RomFS-Lookup, `mblen`) deuten auf Semantikfehler hin.
-2. **cfg:u korrekt** (Sprache/Region EUR) → Workaround `patch_lang_uk` entfällt.
-3. **Kernel-Semantik**: Mutex/Semaphore/Event/ArbitrateAddress, Thread-
-   Prioritäten, IPC-Reply-Größen sauber nach Azahar-Vorbild implementieren →
-   Recompiler-Hacks (`0x1079D0`, `0x12E1E4`, `0x287DD4`) entfallen.
-4. **M1**: y2r:u, dsp::DSP, boss:U erreichen.
-5. **GSP-Interrupts** (PDC0/PDC1/P3D) zeitlich korrekt → M2/M3.
-6. **PICA-Shader + TEV** in `runtime/gpu` → M4/M5.
+Erreicht: M1–M5, M8, M13 (Sichttest durch den Nutzer). Teilweise: M6
+(bis Namenseingabe), M7 (Ton/Film ja, Effekte/Saves offen), M9 (Titel und
+Namenseingabe korrekt, Abnahme-Bildvergleich offen), M10 (Krach behoben,
+periodische Aussetzer offen).
+
+1. **Ton-Aussetzer (M10)**: DSP-Interrupts kamen gebündelt 15–23 ms zu spät
+   beim Spiel an (`HLE_WSTAT`); Zustellung pro Frame. Danach Hörtest.
+2. **Gast-Sperre (M10/M12)**: eine globale Sperre serialisiert alle
+   Gast-Threads, ~95 % der Thread-Zeit ist Warten. Ziel: SysCore-Thread
+   bzw. jeder 3DS-Kern unter eigener Sperre, Kernel-Zustand getrennt
+   geschützt, ldrex/strex atomar über Host-Threads.
+3. **Hardware-Renderer (M9/M17)**, Stufen: E Restfehler → D Textur-Cache →
+   A Bilder auf der GPU + D3D-Ausgabe → B höhere interne Auflösung →
+   C Vertex-Shader auf der GPU.
+4. **Logo-Farben (M15)**: Y/U/V-Ebenen des Spiel-Decoders gegen FFmpeg
+   vergleichen, Recompiler-/Y2R-Fehler finden.
+5. **Reproduzierbarkeit (M18)**, danach **M16**, **M11**, **M14**.
 
 ## Frontier-Verlauf
 
