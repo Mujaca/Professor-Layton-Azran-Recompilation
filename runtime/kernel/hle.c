@@ -3804,6 +3804,17 @@ static void y2r_command(Ipc *r, uint32_t *p) {
                 break;
             }
             {
+                /* Rueckschreibepolitik: Y2R liest die Y/U/V-Quellen aus dem
+                 * Gast. Stammen sie aus einem noch nicht zurueckgeschriebenen
+                 * PICA-Ziel, muss das jetzt in den Gast. */
+                gpu_cs_enter();
+                gpu_pica_sync_range(g_y2r.src_y.address & 0x1FFFFFFFu,
+                                    g_y2r.src_y.image_size);
+                gpu_pica_sync_range(g_y2r.src_u.address & 0x1FFFFFFFu,
+                                    g_y2r.src_u.image_size);
+                gpu_pica_sync_range(g_y2r.src_v.address & 0x1FFFFFFFu,
+                                    g_y2r.src_v.image_size);
+                gpu_cs_leave();
                 int conv = y2r_perform_conversion(&mem, &g_y2r);
                 if (getenv("HLE_Y2R_LOG")) {
                     /* Nur lesend: Mittelwerte der ersten 4096 Y-Bytes, der
@@ -4374,15 +4385,18 @@ void hle_report(void) {
         unsigned long long frag = 0, tex = 0, lit = 0, fb = 0;
         unsigned long long pc = 0, sc = 0, pr = 0, sr = 0;
         unsigned long long up = 0, udec = 0;
+        unsigned long long hwd = 0, hwf = 0, hwl = 0;
         gpu_pica_work_stats(&frag, &tex, &lit, &fb);
         gpu_pica_par_stats(&pc, &sc, &pr, &sr);
         gpu_pica_texture_stats(&up, &udec);
+        gpu_pica_readback_stats(&hwd, &hwf, &hwl);
         printf("[gtime] lists=%llu raster_ms=%llu wall_ms=%llu (%.1f%%) "
                "frag=%llu tex=%llu lit=%llu fb=%llu par=%llu/%llu ser=%llu/%llu "
-               "texup=%llu texdec_ms=%llu\n",
+               "texup=%llu texdec_ms=%llu hwdraws=%llu hwreadbacks=%llu hwloads=%llu\n",
                g_gtime_lists, g_gtime_us / 1000ull, wall_ms,
                wall_ms ? 100.0 * (double)g_gtime_us / 1000.0 / (double)wall_ms : 0.0,
-               frag, tex, lit, fb, pc, pr, sc, sr, up, udec / 1000ull);
+               frag, tex, lit, fb, pc, pr, sc, sr, up, udec / 1000ull,
+               hwd, hwf, hwl);
     }
     if (g_log) printf("[audio] frames=%llu host_dropped=%u underruns=%u\n", audio_dsp_frames(),
                       host_audio_dropped(), host_audio_underruns());

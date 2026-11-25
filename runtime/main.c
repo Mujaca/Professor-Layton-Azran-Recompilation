@@ -66,6 +66,27 @@ static void compose_frame(void) {
     FbScreen ft, fb;
     hle_gsp_frame(0, &top);
     hle_gsp_frame(1, &bottom);
+    /* Rueckschreibepolitik: die Anzeige liest die gemeldeten Puffer aus dem
+     * Gast. Liegen die GPU-Ergebnisse fuer genau diesen Puffer noch im
+     * D3D-Ziel, werden sie hier genau einmal zurueckgeschrieben (einmal je
+     * Host-Frame = VBlank-Takt, beide Screens). Der Flush beruehrt den
+     * D3D-Kontext, deshalb unter der Gast-Sperre wie jede GPU-Arbeit. */
+    if (gpu_pica_target_pending()) {
+        hle_guest_enter();
+        if (top.valid) {
+            int bpp = fb_bytes_per_pixel(top.format);
+            uint32_t bytes = top.stride ? top.stride * FB_TOP_ROWS
+                                        : (uint32_t)(FB_TOP_COLUMNS * FB_TOP_ROWS * bpp);
+            gpu_pica_sync_range(top.address, bytes);
+        }
+        if (bottom.valid) {
+            int bpp = fb_bytes_per_pixel(bottom.format);
+            uint32_t bytes = bottom.stride ? bottom.stride * FB_BOTTOM_ROWS
+                                           : (uint32_t)(FB_BOTTOM_COLUMNS * FB_BOTTOM_ROWS * bpp);
+            gpu_pica_sync_range(bottom.address, bytes);
+        }
+        hle_guest_leave();
+    }
     ft.valid = top.valid;
     ft.address = top.address;
     ft.stride = top.stride;
