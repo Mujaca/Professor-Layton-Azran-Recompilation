@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 
 #include "arm_cpu.h"
 #include "gpu.h"
@@ -29,6 +30,7 @@ void arm_trace_svc(uint32_t imm) { (void)imm; }
 #define VTX    0x00020000u
 #define FB     0x00030000u
 #define DEPTH  0x00038000u
+#define RTTDST 0x00040000u
 #define TEX0   0x00050000u
 #define TEX1   0x00051000u
 
@@ -135,6 +137,14 @@ static void put_vertices(ArmCpu *c, const Vtx *v, int n) {
     }
 }
 
+static void put_vertices_at(ArmCpu *c, uint32_t base, const Vtx *v, int n) {
+    int i;
+    for (i = 0; i < n; i++) {
+        memcpy(c->mem + ((base + (uint32_t)i * 28u) & 0x1FFFFFFFu), v[i].pos, 12);
+        memcpy(c->mem + ((base + (uint32_t)i * 28u + 12u) & 0x1FFFFFFFu), v[i].col, 16);
+    }
+}
+
 typedef struct {
     float pos[3];
     float col[4];
@@ -145,6 +155,16 @@ static void put_vertices3(ArmCpu *c, const Vtx3 *v, int n) {
     int i;
     for (i = 0; i < n; i++) {
         uint32_t a = VTX + (uint32_t)i * 36u;
+        memcpy(c->mem + (a & 0x1FFFFFFFu), v[i].pos, 12);
+        memcpy(c->mem + ((a + 12u) & 0x1FFFFFFFu), v[i].col, 16);
+        memcpy(c->mem + ((a + 28u) & 0x1FFFFFFFu), v[i].uv, 8);
+    }
+}
+
+static void put_vertices3_at(ArmCpu *c, uint32_t base, const Vtx3 *v, int n) {
+    int i;
+    for (i = 0; i < n; i++) {
+        uint32_t a = base + (uint32_t)i * 36u;
         memcpy(c->mem + (a & 0x1FFFFFFFu), v[i].pos, 12);
         memcpy(c->mem + ((a + 12u) & 0x1FFFFFFFu), v[i].col, 16);
         memcpy(c->mem + ((a + 28u) & 0x1FFFFFFFu), v[i].uv, 8);
@@ -191,14 +211,18 @@ static uint32_t *emit_attrs(uint32_t *q, int nv) {
 }
 
 /* Drei Attribute: float3 Position, float4 Farbe, float2 UV (Stride 36). */
-static uint32_t *emit_attrs3(uint32_t *q, int nv) {
-    q = emit(q, 0x200, VTX >> 3);
+static uint32_t *emit_attrs3_at(uint32_t *q, uint32_t base, int nv) {
+    q = emit(q, 0x200, base >> 3);
     q = emit(q, 0x201, 0xB | (0xFu << 4) | (0x7u << 8));
     q = emit(q, 0x202, 2u << 28);          /* 3 Attribute */
     q = emit(q, 0x203, 0u);
     q = emit(q, 0x204, 0x210u);            /* attr0, attr1, attr2 */
     q = emit(q, 0x205, (3u << 28) | (36u << 16));
     return emit(q, 0x228, (uint32_t)nv);
+}
+
+static uint32_t *emit_attrs3(uint32_t *q, int nv) {
+    return emit_attrs3_at(q, VTX, nv);
 }
 
 /* Textur-Einheit 0..2 konfigurieren (8x8-Kacheln, Format wie 0x8E). */
@@ -762,6 +786,71 @@ static uint32_t scene_r(ArmCpu *c) {
     return (uint32_t)((unsigned char *)q - (c->mem + LIST));
 }
 
+/* Szene T: eine Haelfte (links/rechts) mit konstanter Farbe. Wird fuer den
+ * Test "CPU-Schreibzugriff zwischen zwei Listen" zweimal aufgerufen. */
+static uint32_t scene_half(ArmCpu *c, int right) {
+    Vtx v[3];
+    uint32_t *q;
+    if (right) {
+        v[0].pos[0] = 0.1f;  v[0].pos[1] = -0.9f;
+        v[1].pos[0] = 0.9f;  v[1].pos[1] = -0.9f;
+        v[2].pos[0] = 0.5f;  v[2].pos[1] =  0.9f;
+    } else {
+        v[0].pos[0] = -0.9f; v[0].pos[1] = -0.9f;
+        v[1].pos[0] =  0.0f; v[1].pos[1] = -0.9f;
+        v[2].pos[0] = -0.45f; v[2].pos[1] = 0.9f;
+    }
+    v[0].pos[2] = v[1].pos[2] = v[2].pos[2] = 0.0f;
+    v[0].col[0] = v[0].col[1] = v[0].col[2] = v[0].col[3] = 1.0f;
+    v[1].col[0] = v[1].col[1] = v[1].col[2] = v[1].col[3] = 1.0f;
+    v[2].col[0] = v[2].col[1] = v[2].col[2] = v[2].col[3] = 1.0f;
+    put_vertices(c, v, 3);
+    q = (uint32_t *)(c->mem + LIST);
+    q = emit_attrs(q, 3);
+    q = emit_vs_real(q);
+    q = emit_viewport(q, 16, 16);
+    q = emit_tri_color(q, 0xFF20E010u, 0.0f);
+    q = emit_target(q, FB, 16, 16, 0u, 0u, 0, 0u);
+    q = emit(q, 0x22E, 0u);
+    return (uint32_t)((unsigned char *)q - (c->mem + LIST));
+}
+
+/* Szene U: vier Draws in einer Liste, HW/SW/HW/SW. Der Software-Fallback
+ * wird ueber Fragment-Lighting (0x1C6 Bit0 = 0) erzwungen. */
+static uint32_t scene_u(ArmCpu *c) {
+    Vtx v[12];
+    uint32_t *q;
+    int i, k;
+    for (i = 0; i < 4; i++) {
+        float cx = -0.6f + 0.4f * (float)i;
+        k = i * 3;
+        v[k + 0].pos[0] = cx - 0.15f; v[k + 0].pos[1] = -0.9f;
+        v[k + 1].pos[0] = cx + 0.15f; v[k + 1].pos[1] = -0.9f;
+        v[k + 2].pos[0] = cx;         v[k + 2].pos[1] = -0.3f;
+        v[k + 0].pos[2] = v[k + 1].pos[2] = v[k + 2].pos[2] = 0.0f;
+        v[k + 0].col[0] = v[k + 0].col[3] = 1.0f;
+        v[k + 1].col[1] = v[k + 1].col[3] = 1.0f;
+        v[k + 2].col[2] = v[k + 2].col[3] = 1.0f;
+    }
+    for (i = 0; i < 4; i++) put_vertices_at(c, VTX + (uint32_t)i * 0x100u,
+                                            v + i * 3, 3);
+    q = (uint32_t *)(c->mem + LIST);
+    q = emit_attrs(q, 3);
+    q = emit_vs_real(q);
+    q = emit_viewport(q, 16, 16);
+    q = emit_target(q, FB, 16, 16, 0u, 0u, 0, 0u);
+    for (i = 0; i < 4; i++) {
+        q = emit(q, 0x1C6, (i & 1) ? 0u : 1u);   /* 0 = Lighting -> SW */
+        q = emit_tri_color(q, 0xFFu - (uint32_t)i * 0x30u, 0.0f);
+        /* Eigener 16-Byte-Slot je Dreieck (0x200 = addr>>3, Bit0 ignoriert). */
+        q = emit(q, 0x200, (VTX + (uint32_t)i * 0x100u) >> 3);
+        q = emit(q, 0x228, 3u);
+        q = emit(q, 0x22E, 0u);
+    }
+    q = emit(q, 0x1C6, 1u);                /* Zustand fuer Folgetests */
+    return (uint32_t)((unsigned char *)q - (c->mem + LIST));
+}
+
 #define FILL   0x00060000u
 
 /* Minimaler HwDrawState fuer direkte API-Tests (TEV konstant, kein Tiefen-
@@ -792,6 +881,13 @@ static const HwVertex g_hw_tri[3] = {
     {{-0.9f, -0.9f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{0, 0}, {0, 0}, {0, 0}}},
     {{ 0.9f, -0.9f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{0, 0}, {0, 0}, {0, 0}}},
     {{ 0.0f,  0.9f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{0, 0}, {0, 0}, {0, 0}}},
+};
+
+/* Voellig ausserhalb des Clip-Volumens: setzt depth_dirty, ohne Pixel. */
+static const HwVertex g_hw_off[3] = {
+    {{2.0f, 2.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{0, 0}, {0, 0}, {0, 0}}},
+    {{3.0f, 2.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{0, 0}, {0, 0}, {0, 0}}},
+    {{2.5f, 3.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{0, 0}, {0, 0}, {0, 0}}},
 };
 
 static int any_nonzero(const unsigned char *p, int n) {
@@ -1036,6 +1132,152 @@ int main(int argc, char **argv) {
               "D24-Gastpuffer bleibt ohne Tiefen-Schreiben unveraendert");
     }
 
+
+    /* (E2) CPU-Schreibzugriff der Gast-CPU zwischen zwei Kommandolisten:
+       der zweite HW-Draw muss das Ziel aus dem Gast neu laden, sonst
+       ueberschreibt der Flush den CPU-Wert mit dem alten D3D-Stand. */
+    {
+        uint32_t size, offl, offr;
+        offl = morton_off(2, 7, 4u);
+        offr = morton_off(12, 7, 4u);
+        gpu_pica_reset();
+        gpu_pica_set_render_hw(1);
+        memset(c.mem + FB, 0, 16 * 16 * 4);
+        size = scene_half(&c, 0);
+        gpu_run_pica_list(&c, LIST, size);
+        memset(c.mem + FB, 0x5A, 16 * 16 * 4);
+        size = scene_half(&c, 1);
+        gpu_run_pica_list(&c, LIST, size);
+        check(c.mem[FB + offl] == 0x5A && c.mem[FB + offl + 1] == 0x5A &&
+              c.mem[FB + offl + 2] == 0x5A && c.mem[FB + offl + 3] == 0x5A,
+              "CPU-Schreibzugriff zwischen zwei Listen bleibt erhalten");
+        check(c.mem[FB + offr + 3] == 0x10,
+              "zweite Liste zeichnet in das neu geladene Ziel");
+    }
+
+    /* (E3) D24 ueber D32_FLOAT: Laden und Rueckschreiben ohne Draw muss
+       bitgleich sein (keine 1-LSB-Drift durch den Float-Umweg). */
+    {
+        HwDrawState st;
+        static unsigned char d0[16 * 16 * 4], d1[16 * 16 * 4];
+        int x, y;
+        for (y = 0; y < 16; y++) {
+            int yp = 15 - y;
+            for (x = 0; x < 16; x++) {
+                uint32_t off = morton_off(x, yp, 3u) +
+                               (uint32_t)(yp & ~7) * 16u * 3u;
+                uint32_t z = ((uint32_t)(x * 16 + y) * 2654435761u) & 0xFFFFFFu;
+                unsigned char *p = c.mem + ((DEPTH + off) & 0x1FFFFFFFu);
+                if (x == 0 && y == 0) z = 0xFFFFFFu;
+                if (x == 1 && y == 0) z = 0x000001u;
+                p[0] = (unsigned char)(z & 0xFFu);
+                p[1] = (unsigned char)((z >> 8) & 0xFFu);
+                p[2] = (unsigned char)((z >> 16) & 0xFFu);
+            }
+        }
+        memcpy(d0, c.mem + DEPTH, 16 * 16 * 3);
+        hw_test_state(&st, &c, FB, 0xFF0000FFu);
+        st.depth_mem = c.mem + DEPTH;
+        st.depth_size = (uint32_t)c.mem_size - DEPTH;
+        st.depth_format = 2u;              /* D24 */
+        st.depth_test = 0;
+        st.depth_write = 1;
+        check(hw_begin_draw(&st) != 0, "D24-Ziel fuer Bitgenauigkeit");
+        hw_triangles(g_hw_off, 3);         /* setzt depth_dirty, kein Pixel */
+        hw_flush_to_guest();
+        memcpy(d1, c.mem + DEPTH, 16 * 16 * 3);
+        check(memcmp(d0, d1, 16 * 16 * 3) == 0,
+              "D24 laden+zurueckschreiben bitgleich (ohne Draw)");
+    }
+
+    /* (E1) Render-to-Texture: der erste Draw nach einem Zielwechsel muss die
+       soeben gerenderte Textur neu hochladen. hw_begin_draw liest die
+       Texturgeneration deshalb erst NACH dem Flush des alten Ziels; ohne den
+       Fix samplet dieser Draw den alten Cache-Stand (hier: Null statt Farbe). */
+    {
+        HwDrawState st;
+        static const HwVertex quad[6] = {
+            {{-1.0f, -1.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{0.0f, 0.0f}, {0, 0}, {0, 0}}},
+            {{ 1.0f, -1.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{1.0f, 0.0f}, {0, 0}, {0, 0}}},
+            {{ 1.0f,  1.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{1.0f, 1.0f}, {0, 0}, {0, 0}}},
+            {{-1.0f, -1.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{0.0f, 0.0f}, {0, 0}, {0, 0}}},
+            {{ 1.0f,  1.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{1.0f, 1.0f}, {0, 0}, {0, 0}}},
+            {{-1.0f,  1.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{0.0f, 1.0f}, {0, 0}, {0, 0}}},
+        };
+        HwDrawState stc, stb;
+        int i;
+
+        gpu_pica_reset();
+        gpu_pica_set_render_hw(1);
+        memset(c.mem + FB, 0, 16 * 16 * 4);
+        memset(c.mem + RTTDST, 0, 16 * 16 * 4);
+
+        hw_test_state(&st, &c, FB, 0u);
+        st.tex[0].enabled = 1;
+        st.tex[0].offset = FB;
+        st.tex[0].bytes = 16u * 16u * 4u;
+        st.tex[0].format = 0u;
+        st.tex[0].width = 16u;
+        st.tex[0].height = 16u;
+        st.tex[0].wrap_s = 2u;
+        st.tex[0].wrap_t = 2u;
+        st.tex[0].type = 0u;
+        st.tev_src[0] = 0x00030003u;         /* Replace(Texture0) */
+        st.tev_ops[0] = 0u;
+        check(hw_begin_draw(&st) != 0, "RTT: Texturziel gebunden");
+        hw_triangles(quad, 6);               /* Cache-Slot mit Nullinhalt */
+
+        stc = st;
+        stc.tev_src[0] = 0x000E000Eu;        /* Replace(Constant) */
+        stc.tev_cst[0] = 0x80402010u;
+        check(hw_begin_draw(&stc) != 0, "RTT: konstante Farbe in das Ziel");
+        hw_triangles(quad, 6);
+
+        stb = st;
+        stb.color_mem = c.mem + RTTDST;
+        stb.color_size = (uint32_t)c.mem_size - RTTDST;
+        check(hw_begin_draw(&stb) != 0, "RTT: Zielwechsel nach dem Rendern");
+        hw_triangles(quad, 6);
+        hw_flush_to_guest();
+        i = (int)morton_off(8, 7, 4u);
+        {
+            const unsigned char *px = c.mem + RTTDST + i;
+            printf("     RTT-Pixel: %02X%02X%02X%02X (erwartet 80402010)\n",
+                   px[0], px[1], px[2], px[3]);
+            check(px[0] == 0x80u && px[1] == 0x40u && px[2] == 0x20u &&
+                  px[3] == 0x10u,
+                  "Render-to-Texture samplet das gerade gerenderte Ziel");
+        }
+    }
+
+    /* (E4) Abwechselnd Hardware- und Software-Draws in einer Liste: die
+       Zahl der vollen Transfers je Wechsel wird gemessen (Bericht). */
+    {
+        unsigned long long d0, f0, d1, f1, k0, r0, k1, r1, u0, u1, l0, l1;
+        clock_t t0, t1;
+        uint32_t size;
+        gpu_pica_reset();
+        gpu_pica_set_render_hw(1);
+        memset(c.mem + FB, 0, 16 * 16 * 4);
+        size = scene_u(&c);
+        hw_stats(&d0, &f0);
+        hw_target_sync_stats(&k0, &r0);
+        u0 = hw_texture_uploads();
+        l0 = hw_target_loads();
+        t0 = clock();
+        gpu_run_pica_list(&c, LIST, size);
+        t1 = clock();
+        hw_stats(&d1, &f1);
+        hw_target_sync_stats(&k1, &r1);
+        u1 = hw_texture_uploads();
+        l1 = hw_target_loads();
+        printf("     HW/SW-Wechsel: Draws=%llu Flushes=%llu Ladungen=%llu Reloads=%llu "
+               "gehalten=%llu Uploads=%llu, %.2f ms\n",
+               d1 - d0, f1 - f0, l1 - l0, r1 - r0, k1 - k0, u1 - u0,
+               1000.0 * (double)(t1 - t0) / (double)CLOCKS_PER_SEC);
+        check(d1 - d0 >= 2u, "zwei Hardware-Draws im HW/SW-Wechsel");
+        check(f1 - f0 >= 2u, "je SW-Draw mit ausstehendem HW-Stand ein Readback");
+    }
 
     {
         unsigned long long nd = 0, nf = 0;

@@ -4664,6 +4664,11 @@ int gpu_run_pica_list(ArmCpu *c, uint32_t addr, uint32_t size)
     unsigned long long draws0 = g_pica_draws;
 
     p_hw_tex_gen_bump();       /* neue Liste: Texturen konservativ neu pruefen */
+    /* Gast-CPU kann zwischen zwei Listen in Farb-/Tiefenziel geschrieben
+       haben. hw_list_begin vergleicht mit der Schattenkopie und laedt nur
+       dann neu (sonst wuerde der Flush am Listenende die CPU-Bytes mit dem
+       alten D3D-Stand ueberschreiben). */
+    if (g_hw_render) hw_list_begin();
     memset(&ctx, 0, sizeof(ctx));
     if (diag) {
         memset(g_diag_hist, 0, sizeof(g_diag_hist));

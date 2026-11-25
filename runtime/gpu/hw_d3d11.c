@@ -119,6 +119,19 @@ static unsigned long long g_tex_uploads;
 static uint32_t g_dss_key = 0xFFFFFFFFu;
 static uint32_t g_bs_key = 0xFFFFFFFFu;
 
+/* Schattenkopie des zuletzt synchronisierten Gast-Ziels. hw_list_begin()
+ * vergleicht sie mit dem Gastpuffer: nur wenn die CPU zwischen zwei
+ * Kommandolisten hineingeschrieben hat, wird das D3D-Ziel verworfen und neu
+ * geladen. Kosten je Liste: ein memcmp ueber Farb- und Tiefenziel (bei
+ * 400x240 RGBA8+D24 rund 0,67 MB); ein Neuladen kostet nur bei echter
+ * Gast-Aenderung. */
+static unsigned char *g_sh_color, *g_sh_depth;
+static uint32_t g_sh_color_cap, g_sh_depth_cap;
+static uint32_t g_sh_color_len, g_sh_depth_len;
+static int g_sh_valid;
+static unsigned long long g_sync_kept, g_sync_reloads;
+static unsigned long long g_target_loads;   /* volle Gast->D3D-Ladungen */
+
 /* ---- Texturcache ------------------------------------------------------- */
 typedef struct {
     uint32_t offset, bytes, fmt, w, h;
@@ -138,8 +151,13 @@ void hw_stats(unsigned long long *draws, unsigned long long *flushes) {
     if (draws) *draws = g_draws;
     if (flushes) *flushes = g_flushes;
 }
+void hw_target_sync_stats(unsigned long long *kept, unsigned long long *reloads) {
+    if (kept) *kept = g_sync_kept;
+    if (reloads) *reloads = g_sync_reloads;
+}
 unsigned long long hw_texture_uploads(void) { return g_tex_uploads; }
 unsigned long long hw_depth_writes(void) { return g_depth_writes; }
+unsigned long long hw_target_loads(void) { return g_target_loads; }
 int hw_available(void) { return g_ready; }
 void hw_invalidate_guest(void) { g_guest_dirty = 1; g_rendered = 0; }
 void hw_invalidate_textures(void) { g_tex_force = 1; g_tex_gen_seen = 0xFFFFFFFFu; }
@@ -544,7 +562,12 @@ static void depth_from_guest(const HwDrawState *st, unsigned char *base,
             } else if (st->depth_format == 3u) {
                 ((uint32_t *)row)[x] = (z & 0xFFFFFFu) | (s << 24);
             } else {
-                ((float *)row)[x] = (float)z / (float)maxv;
+                /* D24 liegt in D3D als D32_FLOAT. Skaliert wird mit 2^24
+                 * (Zweierpotenz = in float exakt): z/2^24 ist fuer jedes
+                 * z < 2^24 exakt darstellbar, und die Rueckrechnung
+                 * f*2^24 in depth_to_guest gewinnt z konstruktiv bitgleich
+                 * zurueck (kein 1-LSB-Drift bei unberuehrten Pixeln). */
+                ((float *)row)[x] = (float)z / 16777216.0f;
             }
         }
     }
@@ -571,9 +594,11 @@ static void depth_to_guest(const HwDrawState *st, const unsigned char *base,
                 s = (v >> 24) & 0xFFu;
             } else {
                 float f = ((const float *)row)[x];
+                /* Exakte Umkehrung von depth_from_guest (Skala 2^24). */
+                if (!(f == f)) f = 0.0f;          /* NaN */
                 if (f < 0.0f) f = 0.0f;
                 if (f > 1.0f) f = 1.0f;
-                z = (uint32_t)(f * 16777215.0f);
+                z = (uint32_t)(f * 16777216.0f);
                 if (z > 0xFFFFFFu) z = 0xFFFFFFu;
             }
             st->depth_mem[off] = (unsigned char)(z & 0xFFu);
@@ -585,6 +610,56 @@ static void depth_to_guest(const HwDrawState *st, const unsigned char *base,
                 st->depth_mem[off + 3u] = (unsigned char)(s & 0xFFu);
         }
     }
+}
+
+/* ---- Schattenkopie des Gast-Ziels (hw_list_begin) ---------------------- */
+
+static void shadow_invalidate(void) {
+    g_sh_valid = 0;
+    g_sh_color_len = 0;
+    g_sh_depth_len = 0;
+}
+
+static int shadow_reserve(unsigned char **buf, uint32_t *cap, uint32_t need) {
+    unsigned char *p;
+    if (*cap >= need) return 1;
+    p = (unsigned char *)realloc(*buf, need);
+    if (!p) return 0;
+    *buf = p;
+    *cap = need;
+    return 1;
+}
+
+/* Merkt sich die Gastbytes des aktuellen Ziels. Aufruf nach jedem Flush und
+ * nach jedem Neuladen: damit ist die Kopie genau der Stand, den D3D kennt. */
+static void shadow_capture(void) {
+    uint32_t clen = 0, dlen = 0;
+    if (!g_have_state || g_target_w <= 0 || g_target_h <= 0) {
+        shadow_invalidate();
+        return;
+    }
+    if (g_state.color_mem != NULL) {
+        uint64_t n = (uint64_t)g_target_w * (uint64_t)g_target_h *
+                     fmt_bpp(g_state.color_format);
+        if (n > g_state.color_size) { shadow_invalidate(); return; }
+        clen = (uint32_t)n;
+    }
+    if (g_state.depth_mem != NULL) {
+        uint64_t n = (uint64_t)g_target_w * (uint64_t)g_target_h *
+                     depth_bpp(g_state.depth_format);
+        if (n > g_state.depth_size) { shadow_invalidate(); return; }
+        dlen = (uint32_t)n;
+    }
+    if (!shadow_reserve(&g_sh_color, &g_sh_color_cap, clen) ||
+        !shadow_reserve(&g_sh_depth, &g_sh_depth_cap, dlen)) {
+        shadow_invalidate();
+        return;
+    }
+    if (clen) memcpy(g_sh_color, g_state.color_mem, clen);
+    if (dlen) memcpy(g_sh_depth, g_state.depth_mem, dlen);
+    g_sh_color_len = clen;
+    g_sh_depth_len = dlen;
+    g_sh_valid = 1;
 }
 
 static void color_decode(const unsigned char *m, uint32_t fmt,
@@ -774,6 +849,7 @@ static int create_targets(const HwDrawState *st) {
 
     g_target_w = w;
     g_target_h = h;
+    g_target_loads++;
     g_guest_dirty = 0;
     g_rendered = 0;
     g_depth_dirty = 0;
@@ -953,6 +1029,12 @@ void hw_shutdown(void) {
     g_depth_dirty = 0;
     g_tex_gen_seen = 0xFFFFFFFFu;
     g_tex_force = 1;
+    free(g_sh_color); g_sh_color = NULL;
+    free(g_sh_depth); g_sh_depth = NULL;
+    g_sh_color_cap = g_sh_depth_cap = 0;
+    shadow_invalidate();
+    g_sync_kept = g_sync_reloads = 0;
+    g_target_loads = 0;
     hw_release_dlls();
 }
 
@@ -1166,6 +1248,7 @@ int hw_begin_draw(const HwDrawState *st) {
     float w = 2.0f * st->viewport_half_w;
     float h = 2.0f * st->viewport_half_h;
     uint32_t dkey;
+    int new_target = 0;
 
     if (!g_ready) return 0;
     if (!g_have_state || !same_target(&g_state, st) || g_guest_dirty) {
@@ -1178,11 +1261,18 @@ int hw_begin_draw(const HwDrawState *st) {
             g_rendered = 0;
             return 0;
         }
+        new_target = 1;
     }
     g_state = *st;
+    /* Der Flush eines Zielwechsels (oben) schreibt das gerade gerenderte
+       Ziel in den Gast und erhoeht dabei die Texturgeneration. Erst danach
+       lesen: sonst sampelt der erste Draw nach dem Zielwechsel eine Textur,
+       die genau dieses Ziel ist, mit dem alten Cache-Stand. */
+    g_state.tex_generation = gpu_pica_tex_generation();
     g_have_state = 1;
+    if (new_target) shadow_capture();
 
-    bind_textures(st);
+    bind_textures(&g_state);
 
     /* Schattenkopie fuer LogicOp/Shader-Blending: eine Momentaufnahme des
        Ziels vor diesem Draw (wie fb.GetPixel in sw_rasterizer.cpp). */
@@ -1444,5 +1534,31 @@ int hw_flush_to_guest(void) {
     g_guest_dirty = 0;
     /* Render-to-Texture: der Gastpuffer ist jetzt neuer Texturinhalt. */
     gpu_pica_bump_tex_generation();
+    /* Der Gast entspricht jetzt dem D3D-Ziel; Schatten fuer hw_list_begin. */
+    shadow_capture();
     return 1;
+}
+
+void hw_list_begin(void) {
+    if (!g_ready || !g_have_state) return;
+    /* Ausstehende Ergebnisse zuerst in den Gast (falls ein Aufrufer den
+     * Listenanfang ohne Listenende erreicht hat); danach ist der Gast der
+     * gueltige Stand. */
+    if (g_rendered && !g_guest_dirty) hw_flush_to_guest();
+    if (!g_sh_valid ||
+        (g_sh_color_len != 0u && g_state.color_mem != NULL &&
+         memcmp(g_state.color_mem, g_sh_color, g_sh_color_len) != 0) ||
+        (g_sh_depth_len != 0u && g_state.depth_mem != NULL &&
+         memcmp(g_state.depth_mem, g_sh_depth, g_sh_depth_len) != 0)) {
+        /* Die Gast-CPU hat das Ziel zwischen zwei Listen veraendert (oder es
+         * gibt keine gueltige Schattenkopie): Ziel konservativ verwerfen,
+         * der naechste Draw laedt es neu aus dem Gast. */
+        g_have_state = 0;
+        g_rendered = 0;
+        g_guest_dirty = 0;
+        shadow_invalidate();
+        g_sync_reloads++;
+    } else {
+        g_sync_kept++;
+    }
 }
