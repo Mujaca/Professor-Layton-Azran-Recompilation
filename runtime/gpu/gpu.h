@@ -17,6 +17,11 @@ int gpu_get_fb_height(void);
 int gpu_run_pica_list(ArmCpu *c, uint32_t addr, uint32_t size);
 void gpu_pica_reset(void);
 
+/* Renderer-Auswahl (nur per Kommandozeile --renderer hw): 1 = Rasterisierung
+ * und Fragment-Pipeline auf D3D11, 0 = Software-Rasterizer (Standard). */
+int gpu_pica_set_render_hw(int on);
+int gpu_pica_render_hw(void);
+
 /* Physisch -> Gast-Linearspeicher (Azahar MemorySystem):
    VRAM 0x18000000..0x185FFFFF -> 0x1F000000.., FCRAM 0x20000000.. ->
    Linear-Heap 0x14000000... Bereits virtuelle/lineare Adressen bleiben
@@ -60,6 +65,18 @@ int gpu_pica_last_vertex(float *pos, float *color, float *uv);
 
 /* Texturzustand fuer Textureinheit 0 aus dem Engine-Texturobjekt setzen. */
 int gpu_pica_texture_bound(void);
+
+/* Software-Texeldekoder (alle PICA-Formate inkl. ETC1/ETC1A4) fuer den
+   Hardware-Pfad: Groesse einer 8x8-Kachel in Bytes und ein Texel einer
+   Kachel (x,y = 0..7 innerhalb der Kachel, Ausgabe RGBA8). */
+uint32_t gpu_pica_tex_tile_size(uint32_t fmt);
+void gpu_pica_decode_texel(const uint8_t *tile, uint32_t fmt, uint32_t x,
+                           uint32_t y, uint8_t out[4]);
+
+/* Generation des Gast-Texturspeichers: erhoeht sich bei jeder neuen
+   Kommandoliste und bei MemoryFill/DisplayTransfer/TextureCopy. Ein
+   Textur-Cache darf seinen Inhalt nur bei gleicher Generation weiterverwenden. */
+uint32_t gpu_pica_tex_generation(void);
 
 /* Zaehler fuer abgeschlossene PICA-Kommandolisten (Engine-Submits) und
    tatsaechlich ausgefuehrte Draws. Der Screenshot wartet darauf, statt

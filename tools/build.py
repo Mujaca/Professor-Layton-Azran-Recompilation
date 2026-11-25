@@ -30,6 +30,7 @@ SOURCES = [
     "kernel/hle.c",
     "kernel/fs_archive.c",
     "gpu/gpu.c",
+    "gpu/hw_d3d11.c",
     "gpu/imgc.c",
     "audio/audio_codec.c",
     "audio/dsp_hle.c",
@@ -135,7 +136,8 @@ def main():
 
     srcs = [os.path.join(RUNTIME, s) for s in SOURCES]
     run([zig(), "cc"] + cflags() + srcs + [gen_o, "-o", os.path.join(ROOT, "out", "port.exe"),
-                                           "-luser32", "-lgdi32", "-lwinmm"])
+                                           "-luser32", "-lgdi32", "-lwinmm",
+                                           "-ld3d11", "-ldxgi", "-ld3dcompiler_47"])
     print("gebaut: out/port.exe")
 
 

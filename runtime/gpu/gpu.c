@@ -39,6 +39,7 @@
 #include <windows.h>
 
 #include "arm_cpu.h"
+#include "hw_d3d11.h"
 
 #define GPU_FB_DEFAULT 0x1F000000u  /* Port-Fenster liest hier */
 
@@ -80,6 +81,23 @@ int gpu_get_fb_height(void) { return g_fb_h; }
 /* Ohne konfiguriertes Farbziel (0x11D) und ohne Vertex-Programm wird nichts
  * gezeichnet; es gibt keinen Host-Puffer-/Attribut-Fallback mehr (Azahar
  * rendert ausschliesslich ueber PICA-Register). */
+
+/* Renderer-Auswahl nur per Kommandozeile (--renderer hw in runtime/main.c).
+ * Ohne Schalter bleibt der Software-Rasterizer allein aktiv und bitgleich. */
+static int g_hw_render = 0;
+
+int gpu_pica_set_render_hw(int on)
+{
+    if (on && !hw_init(NULL)) {
+        printf("[hw] Initialisierung fehlgeschlagen, Software-Pfad bleibt aktiv\n");
+        return 0;
+    }
+    g_hw_render = on ? 1 : 0;
+    hw_invalidate_guest();
+    return 1;
+}
+
+int gpu_pica_render_hw(void) { return g_hw_render; }
 
 /* ================= echte PICA200-Kommandoliste =================
  * Format (Azahar pica_core.cpp, ProcessCmdList/WriteInternalReg): Strom aus
@@ -171,6 +189,12 @@ uint32_t gpu_pica_reg(uint32_t id)
     return (id < PICA_NREGS) ? p_regs[id] : 0u;
 }
 
+/* Generation des Gast-Texturspeichers: jede neue Kommandoliste sowie
+   MemoryFill/DisplayTransfer/TextureCopy koennen Texturbytes geaendert haben.
+   Der D3D11-Textur-Cache (runtime/gpu/hw_d3d11.c) prueft dann konservativ
+   einen Hash der Quellbytes, bevor er eine Textur weiterverwendet. */
+static uint32_t g_hw_tex_gen = 1u;
+
 void gpu_pica_reset(void)
 {
     memset(p_regs, 0, sizeof(p_regs));
@@ -186,6 +210,17 @@ void gpu_pica_reset(void)
     p_proctex_reset();
     p_vs_reset();
     p_vs_reset_draw_state();
+    g_hw_tex_gen++;
+}
+
+uint32_t gpu_pica_tex_generation(void)
+{
+    return g_hw_tex_gen;
+}
+
+static void p_hw_tex_gen_bump(void)
+{
+    g_hw_tex_gen++;
 }
 
 int gpu_pica_texture_bound(void)
@@ -896,6 +931,20 @@ static void p_decode_texel(const uint8_t *tile, uint32_t fmt, uint32_t x, uint32
     default:
         break;
     }
+}
+
+/* Oeffentliche Dekoder fuer den Hardware-Pfad (Textur-Upload). Beide nutzen
+   exakt denselben Code wie der Software-Rasterizer, damit alle Formate
+   inklusive ETC1/ETC1A4 identisch dekodiert werden. */
+uint32_t gpu_pica_tex_tile_size(uint32_t fmt)
+{
+    return p_tex_tile_size(fmt);
+}
+
+void gpu_pica_decode_texel(const uint8_t *tile, uint32_t fmt, uint32_t x,
+                           uint32_t y, uint8_t out[4])
+{
+    p_decode_texel(tile, fmt, x, y, out);
 }
 
 /* Register-Gruppen der Textureinheiten: 0x81/0x91/0x99, Format
@@ -2975,6 +3024,8 @@ static void p_process_tri(ArmCpu *c, const PicaVertex *v0, const PicaVertex *v1,
     int area;
     uint32_t cull = p_regs[0x40] & 3u;
 
+    if (!g_hw_render) hw_invalidate_guest();
+
     x[0] = (int)roundf(v0->pos[0] * 16.0f);
     y[0] = (int)roundf(v0->pos[1] * 16.0f);
     x[1] = (int)roundf(v1->pos[0] * 16.0f);
@@ -3073,6 +3124,175 @@ static void p_process_tri(ArmCpu *c, const PicaVertex *v0, const PicaVertex *v1,
     }
 }
 
+/* ---- Hardware-Pfad: Dreiecke nach Clipping an D3D11 (M9) ---- */
+static int p_hw_supported(void)
+{
+    uint32_t u;
+    if ((p_regs[0x1C6] & 1u) == 0u) return 0;     /* kein Fragment-Lighting */
+    if ((p_regs[0xE0] & 7u) != 0u) return 0;      /* kein Fog */
+    if (p_regs[0x100] & (1u << 8)) return 0;      /* kein Blending */
+    if ((p_regs[0x102] & 0xFu) != 3u) return 0;   /* LogicOp Copy */
+    if ((p_regs[0x6D] & 1u) == 0u) return 0;      /* kein W-Buffer */
+    if ((p_regs[0x105] & 1u) && (p_depth_fmt() == 3u)) return 0; /* Stencil */
+    if (p_regs[0x80] & (1u << 10)) return 0;      /* keine prozedurale Textur */
+    /* Texturen: nur adressierte 2D-Bilder (Typ 0) bzw. disabled (5), alle
+       Formate mit 8x8-Kacheln. Cube/Shadow/Projection bleiben Software. */
+    for (u = 0; u < 3u; u++) {
+        uint32_t base = p_tex_base(u);
+        uint32_t cfg = p_regs[base + 2u];
+        uint32_t size = p_regs[base + 1u];
+        uint32_t fmt = p_regs[p_tex_fmt_reg(u)] & 0xFu;
+        uint32_t type = (u == 0u) ? ((cfg >> 28) & 7u) : 0u;
+        int w = (int)((size >> 16) & 0x7FFu);
+        int h = (int)(size & 0x7FFu);
+        if (!(p_regs[0x80] & (1u << u))) continue;
+        if (type != 0u) return 0;
+        if (fmt > 13u) return 0;
+        if (w <= 0 || h <= 0 || (w & 7) || (h & 7)) return 0;
+        if (gpu_pica_tex_tile_size(fmt) == 0u) return 0;
+    }
+    return 1;
+}
+
+static void p_hw_state(HwDrawState *st, ArmCpu *c)
+{
+    uint32_t fb = (p_regs[0x11D] & 0x0FFFFFFFu) * 8u;
+    uint32_t dp = (p_regs[0x11C] & 0x0FFFFFFFu) * 8u;
+    uint32_t dm = p_regs[0x107];
+    uint32_t fb_guest = gpu_pica_phys_to_guest(fb);
+    uint32_t dp_guest = gpu_pica_phys_to_guest(dp);
+
+    memset(st, 0, sizeof(*st));
+    st->color_mem = c->mem + fb_guest;
+    st->color_size = c->mem_size > fb_guest ? c->mem_size - fb_guest : 0u;
+    st->color_width = p_regs[0x11E] & 0x7FFu;
+    st->color_height = ((p_regs[0x11E] >> 12) & 0x3FFu) + 1u;
+    st->color_format = (p_regs[0x117] >> 16) & 7u;
+    if (dp != 0u) {
+        st->depth_mem = c->mem + dp_guest;
+        st->depth_size = c->mem_size > dp_guest ? c->mem_size - dp_guest : 0u;
+    }
+    st->depth_format = p_depth_fmt();
+    st->depth_test = (int)(dm & 1u);
+    st->depth_write = (int)(((dm >> 12) & 1u) && ((p_regs[0x115] & 3u) != 0u));
+    st->depth_func = (dm >> 4) & 7u;
+    st->viewport_half_w = p_f24_to_float(p_regs[0x41]);
+    st->viewport_half_h = p_f24_to_float(p_regs[0x43]);
+    st->viewport_corner_x = (int)(p_regs[0x68] << 22) >> 22;
+    st->viewport_corner_y = (int)(p_regs[0x68] << 6) >> 22;
+    st->depth_range = p_f24_to_float(p_regs[0x4D]);
+    st->depth_near = p_f24_to_float(p_regs[0x4E]);
+    st->scissor_mode = p_regs[0x65] & 3u;
+    st->scissor_x1 = (int)(p_regs[0x66] & 0x3FFu);
+    st->scissor_y1 = (int)((p_regs[0x66] >> 16) & 0x3FFu);
+    st->scissor_x2 = (int)((p_regs[0x67] & 0x3FFu) + 1u);
+    st->scissor_y2 = (int)(((p_regs[0x67] >> 16) & 0x3FFu) + 1u);
+    st->cull = p_regs[0x40] & 3u;
+    st->alpha_test = (int)(p_regs[0x104] & 1u);
+    st->alpha_func = (p_regs[0x104] >> 4) & 7u;
+    st->alpha_ref = (p_regs[0x104] >> 8) & 0xFFu;
+
+    {
+        int i;
+        for (i = 0; i < 6; i++) {
+            uint32_t b = TEV_STAGE_BASE[i];
+            st->tev_src[i] = p_regs[b + 0u];
+            st->tev_mod[i] = p_regs[b + 1u];
+            st->tev_ops[i] = p_regs[b + 2u];
+            st->tev_cst[i] = p_regs[b + 3u];
+            st->tev_scl[i] = p_regs[b + 4u];
+        }
+    }
+    st->tev_buf_in = p_regs[0xE0];
+    st->tev_buf_color = p_regs[0xFD];
+
+    /* Texturzustand fuer den D3D11-Cache (Adresse schon Gast-linear). */
+    st->guest_mem = c->mem;
+    st->guest_size = (uint32_t)c->mem_size;
+    st->tex_generation = gpu_pica_tex_generation();
+    {
+        uint32_t u;
+        for (u = 0; u < 3u; u++) {
+            uint32_t base = p_tex_base(u);
+            uint32_t cfg = p_regs[base + 2u];
+            uint32_t size = p_regs[base + 1u];
+            uint32_t fmt = p_regs[p_tex_fmt_reg(u)] & 0xFu;
+            uint32_t addr = (p_regs[base + 4u] & 0x0FFFFFFFu) * 8u;
+            int w = (int)((size >> 16) & 0x7FFu);
+            int h = (int)(size & 0x7FFu);
+            uint32_t ts = gpu_pica_tex_tile_size(fmt);
+            HwTexture *t = &st->tex[u];
+
+            t->enabled = (p_regs[0x80] & (1u << u)) ? 1 : 0;
+            t->format = fmt;
+            t->width = (uint32_t)(w > 0 ? w : 0);
+            t->height = (uint32_t)(h > 0 ? h : 0);
+            t->wrap_s = (cfg >> 12) & 7u;
+            t->wrap_t = (cfg >> 8) & 7u;
+            t->border_rgba = p_regs[base];
+            /* PICA mag_filter Bit1/min_filter Bit2; gesetzt = Linear. */
+            t->filter = (cfg & ((1u << 1) | (1u << 2))) ? 1u : 0u;
+            t->type = (u == 0u) ? ((cfg >> 28) & 7u) : 0u;
+            t->offset = gpu_pica_phys_to_guest(addr);
+            t->bytes = 0u;
+            if (t->enabled && addr != 0u && w >= 8 && h >= 8 && ts != 0u) {
+                uint64_t n = (uint64_t)(w / 8) * (uint64_t)(h / 8) * ts;
+                if (n <= 64ull * 1024ull * 1024ull)
+                    t->bytes = (uint32_t)n;
+            }
+        }
+    }
+}
+
+/* Rueckgabe 1 = vom Hardware-Pfad uebernommen, 0 = Software faellt ein. */
+static int p_hw_tri_clip(ArmCpu *c, const PicaVertex *in, int n)
+{
+    HwDrawState st;
+    HwVertex out[16 * 4];
+    float half_x, half_y;
+    int corner_x, corner_y, i, m = 0;
+
+    if (!p_hw_supported()) {
+        hw_invalidate_guest();
+        return 0;
+    }
+    p_hw_state(&st, c);
+    if (!hw_begin_draw(&st)) return 0;
+
+    half_x = p_f24_to_float(p_regs[0x41]);
+    half_y = p_f24_to_float(p_regs[0x43]);
+    corner_x = (int)(p_regs[0x68] << 22) >> 22;
+    corner_y = (int)(p_regs[0x68] << 6) >> 22;
+    for (i = 0; i + 2 < n && m + 3 <= (int)(sizeof(out) / sizeof(out[0])); i++) {
+        const PicaVertex *t[3] = { &in[0], &in[i + 1], &in[i + 2] };
+        int x[3], y[3];
+        int k, area, keep = 1;
+        for (k = 0; k < 3; k++) {
+            float invw = 1.0f / t[k]->pos[3];
+            float sx = (t[k]->pos[0] * invw + 1.0f) * half_x + (float)corner_x;
+            float sy = (t[k]->pos[1] * invw + 1.0f) * half_y + (float)corner_y;
+            x[k] = (int)roundf(sx * 16.0f);
+            y[k] = (int)roundf(sy * 16.0f);
+        }
+        area = p_signed_area(x[0], y[0], x[1], y[1], x[2], y[2]);
+        if (st.cull == 1u) keep = area < 0;
+        else if (st.cull == 2u) keep = area > 0;
+        if (!keep) continue;
+        for (k = 0; k < 3; k++) {
+            memcpy(out[m].pos, t[k]->pos, 4 * sizeof(float));
+            memcpy(out[m].color, t[k]->color, 4 * sizeof(float));
+            memcpy(out[m].uv, t[k]->uv, sizeof(out[m].uv));
+            if (p_regs[0x80] & (1u << 13)) {   /* texture2_use_coord1 */
+                out[m].uv[2][0] = t[k]->uv[1][0];
+                out[m].uv[2][1] = t[k]->uv[1][1];
+            }
+            m++;
+        }
+    }
+    if (m > 0) hw_triangles(out, m);
+    return 1;
+}
+
 /* ---- Einzelner Vertex: Clip -> Viewport -> Rasterisierung ---- */
 static void p_raster_tri(ArmCpu *c, const PicaVertex *a, const PicaVertex *b,
                          const PicaVertex *d)
@@ -3115,6 +3335,8 @@ static void p_raster_tri(ArmCpu *c, const PicaVertex *a, const PicaVertex *b,
         { PicaVertex *t = in; in = out; out = t; }
         if (n < 3) return;
     }
+
+    if (g_hw_render && p_hw_tri_clip(c, in, n)) return;
 
     half_x = p_f24_to_float(p_regs[0x41]);
     half_y = p_f24_to_float(p_regs[0x43]);
@@ -3884,6 +4106,7 @@ static void p_vs_draw_immediate(ArmCpu *c)
         p_prim_submit(c, &v);
     }
     g_vs_imm_cur = 0;
+    if (g_hw_render) hw_flush_to_guest();
 }
 
 static int p_draw_arrays(ArmCpu *c, int indexed)
@@ -3966,6 +4189,7 @@ static int p_draw_arrays(ArmCpu *c, int indexed)
         }
     }
     draws++;
+    if (g_hw_render) hw_flush_to_guest();
     return 1;
 }
 
@@ -4329,6 +4553,7 @@ int gpu_run_pica_list(ArmCpu *c, uint32_t addr, uint32_t size)
     int diag = p_diag_mode();
     unsigned long long draws0 = g_pica_draws;
 
+    p_hw_tex_gen_bump();       /* neue Liste: Texturen konservativ neu pruefen */
     memset(&ctx, 0, sizeof(ctx));
     if (diag) {
         memset(g_diag_hist, 0, sizeof(g_diag_hist));
@@ -4715,6 +4940,7 @@ static void p_ext_transfer(ArmCpu *c)
         printf("[gpu] transfer in=%08X out=%08X flags=%08X sz=%08X/%08X tc=%u\n",
                in_p, out_p, flags, p_ext_regs[0x303], p_ext_regs[0x302],
                (flags >> 3) & 1u);
+    p_hw_tex_gen_bump();       /* Kopie kann Texturbytes veraendern */
     if (flags & 8u) {                   /* is_texture_copy */
         /* Azahar regs_external.h DisplayTransferConfig: flags@0x304,
            trigger@0x306, texture_copy.size@0x308, input_size@0x309,
@@ -4864,6 +5090,7 @@ void gpu_gsp_memory_fill_cmd(ArmCpu *c, const uint32_t *w)
     if (p_gspq_log())
         printf("[gpu] memfill s1=%08X e1=%08X v1=%08X c1=%X s2=%08X e2=%08X v2=%08X c2=%X\n",
                start1, end1, value1, ctl1, start2, end2, value2, ctl2);
+    p_hw_tex_gen_bump();       /* MemoryFill kann Texturbytes ueberschreiben */
     if (start1 != 0u) {
         uint32_t ps = gpu_pica_virt_to_phys(start1);
         p_ext_regs[0x04] = ps >> 3;

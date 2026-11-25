@@ -152,6 +152,7 @@ int main(int argc, char **argv) {
     int frames_limit = -1;
     int shot_every = 0;
     int shot_from = 0;
+    int renderer_hw = 0;
     setvbuf(stdout, NULL, _IONBF, 0);
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) shot = argv[++i];
@@ -159,6 +160,12 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--shot-from") == 0 && i + 1 < argc) shot_from = atoi(argv[++i]);
         else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) frames_limit = atoi(argv[++i]);
         else if (strcmp(argv[i], "--press") == 0 && i + 1 < argc) press_parse(argv[++i]);
+        else if (strcmp(argv[i], "--renderer") == 0 && i + 1 < argc) {
+            const char *r = argv[++i];
+            if (strcmp(r, "hw") == 0) renderer_hw = 1;
+            else if (strcmp(r, "soft") != 0)
+                printf("[port] unbekannter Renderer '%s' (erlaubt: soft, hw)\n", r);
+        }
         else romfs = argv[i];
     }
     if (shot != NULL && frames_limit < 0) frames_limit = 600;
@@ -180,6 +187,7 @@ int main(int argc, char **argv) {
     g_cpu.r[15] = CODE_BASE;
     hle_init(&g_cpu, romfs);
     arm_set_svc_handler(hle_svc);
+    if (renderer_hw) gpu_pica_set_render_hw(1);
 
     if (!win_open(FB_W, FB_H, "Professor Layton and the Azran Legacy")) {
         printf("Fenster konnte nicht geoeffnet werden\n");
