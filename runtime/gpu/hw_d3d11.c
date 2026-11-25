@@ -142,13 +142,17 @@ static unsigned long long g_target_loads;   /* volle Gast->D3D-Ladungen */
  * FNV-1a ueber die Quellbytes geprueft:
  *   (a) GX-Schreiboperationen (MemoryFill/DisplayTransfer/TextureCopy/
  *       RequestDma/Y2R) markieren nur die ueberlappenden Eintraege als stale,
- *   (b) HW-Rueckschreiben/SW-Draws erhoehen die Texturgeneration,
+ *   (b) HW-Rueckschreiben/SW-Draws erhoehen die Texturgeneration; jeder
+ *       Eintrag merkt sich die zuletzt gepruefte Generation (gen_seen).
+ *       Eine globale "schon gesehen"-Marke reicht nicht: ein Draw, der nur
+ *       Textur B bindet, wuerde die neue Generation fuer A mitverbrauchen,
  *   (c) CPU-Schreibzugriffe erkennt der Hash einmal pro Kommandoliste je
  *       Textur (hw_list_begin erhoeht g_list_serial). */
 typedef struct {
     uint32_t offset, bytes, fmt, w, h;
     uint64_t hash;
     uint32_t list_seen;         /* Kommandolisten-Serie der letzten Pruefung */
+    uint32_t gen_seen;          /* Texturgeneration der letzten Pruefung */
     uint32_t last_use;          /* LRU */
     int stale;                  /* Schreibzugriff im Bereich -> neu pruefen */
     int valid;                  /* hash passt zum hochgeladenen Bild */
@@ -164,9 +168,7 @@ static int g_texbind[3] = { -1, -1, -1 };   /* Cache-Index je Einheit */
 static unsigned long long g_tex_cache_bytes;
 static uint32_t g_tex_clock;                /* LRU-Zeitstempel */
 static ID3D11ShaderResourceView *g_tex_dummy;
-static uint32_t g_tex_gen_seen = 0xFFFFFFFFu;
 static uint32_t g_list_serial;      /* hw_list_begin() */
-static int g_tex_force = 1;
 static unsigned long long g_tex_upload_us;
 static unsigned long long g_tex_upload_key, g_tex_upload_hash;  /* Diagnose */
 static int g_tex_diag = -1;         /* HLE_GTIME/HLE_HW_STATE (nur Diagnose) */
@@ -208,7 +210,11 @@ unsigned long long hw_depth_writes(void) { return g_depth_writes; }
 unsigned long long hw_target_loads(void) { return g_target_loads; }
 int hw_available(void) { return g_ready; }
 void hw_invalidate_guest(void) { g_guest_dirty = 1; g_rendered = 0; }
-void hw_invalidate_textures(void) { g_tex_force = 1; g_tex_gen_seen = 0xFFFFFFFFu; }
+void hw_invalidate_textures(void)
+{
+    int i;
+    for (i = 0; i < HW_TEX_CACHE_N; i++) g_texcache[i].stale = 1;
+}
 /* Nur Slots, deren Quellbytes den Bereich ueberlappen, muessen neu geprueft
  * werden (GX-Schreiboperationen). Offset/bytes beziehen sich wie
  * HwTexture.offset auf den Gastpuffer. */
@@ -1093,8 +1099,6 @@ void hw_shutdown(void) {
     g_guest_dirty = 1;
     g_rendered = 0;
     g_depth_dirty = 0;
-    g_tex_gen_seen = 0xFFFFFFFFu;
-    g_tex_force = 1;
     free(g_sh_color); g_sh_color = NULL;
     free(g_sh_depth); g_sh_depth = NULL;
     g_sh_color_cap = g_sh_depth_cap = 0;
@@ -1335,7 +1339,6 @@ static int texslot_alloc(const HwTexture *t, int unit)
 static void bind_textures(const HwDrawState *st)
 {
     ID3D11ShaderResourceView *srv[3];
-    int gen_check = g_tex_force || st->tex_generation != g_tex_gen_seen;
     int i;
 
     for (i = 0; i < 3; i++) {
@@ -1365,11 +1368,13 @@ static void bind_textures(const HwDrawState *st)
             s->valid = 1;
             s->hash = fnv1a(st->guest_mem + t->offset, t->bytes);
             s->list_seen = g_list_serial;
+            s->gen_seen = st->tex_generation;
             s->stale = 0;
             g_tex_upload_key++;
         } else {
             s = &g_texcache[idx];
-            if (gen_check || s->stale || s->list_seen != g_list_serial) {
+            if (s->gen_seen != st->tex_generation || s->stale ||
+                s->list_seen != g_list_serial) {
                 uint64_t h = fnv1a(st->guest_mem + t->offset, t->bytes);
                 if (s->hash != h) {
                     if (!texslot_upload(s, st, t)) {
@@ -1380,16 +1385,13 @@ static void bind_textures(const HwDrawState *st)
                     g_tex_upload_hash++;
                 }
                 s->list_seen = g_list_serial;
+                s->gen_seen = st->tex_generation;
                 s->stale = 0;
             }
         }
         s->last_use = ++g_tex_clock;
         g_texbind[i] = idx;
         srv[i] = s->srv;
-    }
-    if (gen_check) {
-        g_tex_gen_seen = st->tex_generation;
-        g_tex_force = 0;
     }
     ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 3, srv);
 }

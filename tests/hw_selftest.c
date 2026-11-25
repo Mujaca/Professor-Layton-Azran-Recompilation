@@ -174,18 +174,21 @@ static void put_vertices3_at(ArmCpu *c, uint32_t base, const Vtx3 *v, int n) {
 /* Vertex-Shader mit Position/Farbe/UV; two_uv = zusaetzlich TEXCOORD1. */
 static uint32_t *emit_vs_tex(uint32_t *q, int two_uv) {
     uint32_t w[5];
-    q = emit(q, 0x2B9, 1u);
-    q = emit(q, 0x2BB, 0x10u);
+    /* Drei Eingaben (v0..v2 <- attr0..2). Unbenutzte Ausgabekomponenten
+       muessen die Semantik 0x1F tragen; 0x00 waere POSITION_X und
+       ueberschriebe die Position (p_out_vertex). */
+    q = emit(q, 0x2B9, 2u);
+    q = emit(q, 0x2BB, 0x210u);
     q = emit(q, 0x4F, two_uv ? 4u : 3u);
     q = emit(q, 0x50, 0x03020100u);
     q = emit(q, 0x51, 0x0B0A0908u);
-    q = emit(q, 0x52, 0x0D0Cu);
+    q = emit(q, 0x52, 0x1F1F0D0Cu);
     q = emit(q, 0x2BD, two_uv ? 0xFu : 0x7u);
     w[0] = ins_common(0x13u, 0u, 0x00u, 0u, 0u, 0u);  /* mov o0,v0 */
     w[1] = ins_common(0x13u, 0u, 0x01u, 0u, 1u, 0u);  /* mov o1,v1 */
     w[2] = ins_common(0x13u, 0u, 0x02u, 0u, 2u, 0u);  /* mov o2,v2 */
     if (two_uv) {
-        q = emit(q, 0x53, 0x0F0Eu);                    /* TEXCOORD1 */
+        q = emit(q, 0x53, 0x1F1F0F0Eu);                    /* TEXCOORD1 */
         w[3] = ins_common(0x13u, 0u, 0x02u, 0u, 3u, 0u);
         w[4] = 0x22u << 26;
         q = emit_program(q, w, 5);
@@ -858,6 +861,74 @@ static uint32_t scene_u(ArmCpu *c) {
 }
 
 #define FILL   0x00060000u
+#define CPSRC  0x00068000u
+#define CPDST  0x00070000u
+
+/* Szene V (Review 8): Software-Fallback-Draw schreibt im HW-Modus eine
+ * Textur, die ein spaeterer HW-Draw derselben Liste sampelt. Ablauf:
+ *   1 HW  Ziel FB, sampelt A (RTTDST, 8x8)       -> Cache-Eintrag A
+ *   2 SW  Ziel A, Farbe 1 (Lighting -> Fallback)  -> Flush FB, Generation+1
+ *   3 HW  Ziel FB, bindet A, Dreieck weggecullt   -> A prueft Generation+1
+ *   4 SW  Ziel A, Farbe 2 (kein HW-Stand offen, also kein Flush)
+ *   5 HW  Ziel FB, sampelt A                      -> muss Farbe 2 zeigen
+ * Ohne Generationserhoehung durch Schritt 4 sampelt Schritt 5 Farbe 1. */
+static uint32_t scene_v(ArmCpu *c) {
+    static const Vtx3 tri[3] = {
+        {{-0.9f, -0.9f, 0.0f}, {1, 1, 1, 1}, {0.0f, 0.0f}},
+        {{ 0.9f, -0.9f, 0.0f}, {1, 1, 1, 1}, {1.0f, 0.0f}},
+        {{ 0.0f,  0.9f, 0.0f}, {1, 1, 1, 1}, {0.5f, 1.0f}},
+    };
+    static const Vtx3 quad[6] = {
+        {{-1.2f, -1.2f, 0.0f}, {1, 1, 1, 1}, {0.0f, 0.0f}},
+        {{ 1.2f, -1.2f, 0.0f}, {1, 1, 1, 1}, {1.0f, 0.0f}},
+        {{ 1.2f,  1.2f, 0.0f}, {1, 1, 1, 1}, {1.0f, 1.0f}},
+        {{-1.2f, -1.2f, 0.0f}, {1, 1, 1, 1}, {0.0f, 0.0f}},
+        {{ 1.2f,  1.2f, 0.0f}, {1, 1, 1, 1}, {1.0f, 1.0f}},
+        {{-1.2f,  1.2f, 0.0f}, {1, 1, 1, 1}, {0.0f, 1.0f}},
+    };
+    static const uint32_t col[2] = { 0xFF3060C0u, 0xFFC04020u };
+    uint32_t *q;
+    int pass;
+    memset(c->mem + RTTDST, 0, 8 * 8 * 4);
+    put_vertices3_at(c, VTX, tri, 3);
+    put_vertices3_at(c, VTX + 0x200u, quad, 6);
+    q = (uint32_t *)(c->mem + LIST);
+    q = emit_attrs3_at(q, VTX, 3);
+    q = emit_vs_tex(q, 0);
+    q = emit(q, 0x80, 1u);
+    q = emit_tex(q, 0, RTTDST, 8, 8, 0u, 2u, 2u, 0u, 0u);
+    q = emit_tev_passthrough(q, 1);
+    /* 1: HW-Draw sampelt A. */
+    q = emit_viewport(q, 16, 16);
+    q = emit_target(q, FB, 16, 16, 0u, 0u, 0, 0u);
+    q = emit_tev_stage(q, 0, 0x00030003u, 0u, 0u, 0u, 0u);
+    q = emit_attrs3_at(q, VTX, 3);
+    q = emit(q, 0x25E, 0u);
+    q = emit(q, 0x22E, 0u);
+    for (pass = 0; pass < 2; pass++) {
+        /* 2/4: Software-Fallback (Fragment-Lighting) rendert in A. */
+        q = emit_viewport(q, 8, 8);
+        q = emit_target(q, RTTDST, 8, 8, 0u, 0u, 0, 0u);
+        q = emit(q, 0x1C6, 0u);
+        q = emit(q, 0x40, 0u);
+        q = emit_tev_stage(q, 0, 0x000E000Eu, 0u, 0u, col[pass], 0u);
+        q = emit_attrs3_at(q, VTX + 0x200u, 6);
+        q = emit(q, 0x25E, 0u);
+        q = emit(q, 0x22E, 0u);
+        /* 3: HW-Draw bindet A, das Dreieck wird gecullt (Flaeche > 0,
+           KeepClockWise): kein Rendern, kein offener HW-Stand.
+           5: derselbe Draw ohne Culling sampelt A. */
+        q = emit_viewport(q, 16, 16);
+        q = emit_target(q, FB, 16, 16, 0u, 0u, 0, 0u);
+        q = emit_tev_stage(q, 0, 0x00030003u, 0u, 0u, 0u, 0u);
+        q = emit(q, 0x40, pass == 0 ? 1u : 0u);
+        q = emit_attrs3_at(q, VTX, 3);
+        q = emit(q, 0x25E, 0u);
+        q = emit(q, 0x22E, 0u);
+    }
+    q = emit(q, 0x40, 0u);
+    return (uint32_t)((unsigned char *)q - (c->mem + LIST));
+}
 
 /* Minimaler HwDrawState fuer direkte API-Tests (TEV konstant, kein Tiefen-
  * ziel, volle Farbmaske, LogicOp Copy). */
@@ -960,6 +1031,9 @@ static void scene_case(ArmCpu *c, const char *name, SceneFn fn, uint32_t fmt,
 
     render(c, fn, 0, sw, bytes, fmt, depth_fmt, w, h);
     render(c, fn, 1, hw, bytes, fmt, depth_fmt, w, h);
+    /* Leere Referenz waere ein Fehler der Testszene (alles Null passt). */
+    snprintf(msg, sizeof(msg), "%s: Software-Referenz zeichnet", name);
+    check(any_nonzero(sw, bytes), msg);
     bad = compare_pixels(sw, hw, bytes, bpp_of(fmt), &one_lsb, &edge, &first_bad);
     if (bad > 0)
         printf("     %s: %d Pixel >1 LSB (erster bei %d), %d Pixel 1 LSB, %d Kantenpixel\n",
@@ -1289,6 +1363,169 @@ int main(int argc, char **argv) {
                   px[3] == 0x10u,
                   "Render-to-Texture samplet das gerade gerenderte Ziel");
         }
+    }
+
+    /* (R6) Generation je Cache-Eintrag: in einer Kommandoliste sampelt ein
+       Draw Textur A, dann wird in A gerendert, nach dem Zielwechsel (Flush,
+       Generation+1) bindet ein Draw nur B, danach wieder A. Mit einer
+       globalen "Generation gesehen"-Marke hat der B-Draw die neue
+       Generation verbraucht und A wird mit altem Inhalt gesampelt. */
+    {
+        static const HwVertex quad[6] = {
+            {{-1.0f, -1.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{0.0f, 0.0f}, {0, 0}, {0, 0}}},
+            {{ 1.0f, -1.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{1.0f, 0.0f}, {0, 0}, {0, 0}}},
+            {{ 1.0f,  1.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{1.0f, 1.0f}, {0, 0}, {0, 0}}},
+            {{-1.0f, -1.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{0.0f, 0.0f}, {0, 0}, {0, 0}}},
+            {{ 1.0f,  1.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{1.0f, 1.0f}, {0, 0}, {0, 0}}},
+            {{-1.0f,  1.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{0.0f, 1.0f}, {0, 0}, {0, 0}}},
+        };
+        HwDrawState sa, sr, sb;
+        const unsigned char *px;
+
+        gpu_pica_reset();
+        gpu_pica_set_render_hw(1);
+        memset(c.mem + FB, 0, 16 * 16 * 4);
+        memset(c.mem + RTTDST, 0, 16 * 16 * 4);
+        fill_tex_rgba8(&c, TEX1, 2);
+
+        hw_test_state(&sa, &c, FB, 0u);
+        sa.tex[0].enabled = 1;
+        sa.tex[0].offset = RTTDST;           /* A */
+        sa.tex[0].bytes = 16u * 16u * 4u;
+        sa.tex[0].format = 0u;
+        sa.tex[0].width = 16u;
+        sa.tex[0].height = 16u;
+        sa.tex[0].wrap_s = 2u;
+        sa.tex[0].wrap_t = 2u;
+        sa.tev_src[0] = 0x00030003u;         /* Replace(Texture0) */
+        check(hw_begin_draw(&sa) != 0, "R6: Draw sampelt A");
+        hw_triangles(quad, 6);               /* Cache-Eintrag A = Null */
+
+        sr = sa;
+        sr.tex[0].enabled = 0;
+        sr.color_mem = c.mem + RTTDST;
+        sr.color_size = (uint32_t)c.mem_size - RTTDST;
+        sr.tev_src[0] = 0x000E000Eu;
+        sr.tev_cst[0] = 0x80402010u;
+        check(hw_begin_draw(&sr) != 0, "R6: Rendern in A");
+        hw_triangles(quad, 6);
+
+        sb = sa;                             /* Ziel FB: Flush von A */
+        sb.tex[0].offset = TEX1;             /* B */
+        sb.tex[0].bytes = 8u * 8u * 4u;
+        sb.tex[0].width = 8u;
+        sb.tex[0].height = 8u;
+        check(hw_begin_draw(&sb) != 0, "R6: Draw bindet nur B");
+        hw_triangles(quad, 6);
+
+        check(hw_begin_draw(&sa) != 0, "R6: Draw bindet wieder A");
+        hw_triangles(quad, 6);
+        hw_flush_to_guest();
+        px = c.mem + FB + morton_off(8, 7, 4u);
+        printf("     R6-Pixel: %02X%02X%02X%02X (erwartet 80402010)\n",
+               px[0], px[1], px[2], px[3]);
+        check(px[0] == 0x80u && px[1] == 0x40u && px[2] == 0x20u &&
+              px[3] == 0x10u,
+              "R6: A nach Zwischen-Draw mit B neu geprueft (Generation je Eintrag)");
+    }
+
+    /* (R7) TextureCopy mit Output-Gap: beschrieben werden [dst, dst+0x80)
+       und [dst+0x100, dst+0x180). Eine Textur bei dst+0x100 liegt hinter
+       'size' (0x100) und muss trotzdem als veraltet gelten. */
+    {
+        static const HwVertex quad[6] = {
+            {{-1.0f, -1.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{0.0f, 0.0f}, {0, 0}, {0, 0}}},
+            {{ 1.0f, -1.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{1.0f, 0.0f}, {0, 0}, {0, 0}}},
+            {{ 1.0f,  1.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{1.0f, 1.0f}, {0, 0}, {0, 0}}},
+            {{-1.0f, -1.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{0.0f, 0.0f}, {0, 0}, {0, 0}}},
+            {{ 1.0f,  1.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{1.0f, 1.0f}, {0, 0}, {0, 0}}},
+            {{-1.0f,  1.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{0.0f, 1.0f}, {0, 0}, {0, 0}}},
+        };
+        static unsigned char got[16 * 16 * 4], want[16 * 16 * 4];
+        HwDrawState st;
+        uint32_t w[8];
+        int bad, one, edge, first;
+
+        gpu_pica_reset();
+        gpu_pica_set_render_hw(1);
+        memset(c.mem + FB, 0, 16 * 16 * 4);
+        fill_tex_rgba8(&c, CPDST + 0x100u, 1);
+        memset(c.mem + CPSRC, 0xC8, 0x100);
+
+        hw_test_state(&st, &c, FB, 0u);
+        st.tex[0].enabled = 1;
+        st.tex[0].offset = CPDST + 0x100u;
+        st.tex[0].bytes = 8u * 8u * 4u;
+        st.tex[0].format = 0u;
+        st.tex[0].width = 8u;
+        st.tex[0].height = 8u;
+        st.tex[0].wrap_s = 2u;
+        st.tex[0].wrap_t = 2u;
+        st.tev_src[0] = 0x00030003u;
+        check(hw_begin_draw(&st) != 0, "R7: Draw sampelt Textur hinter dem Gap");
+        hw_triangles(quad, 6);
+        hw_flush_to_guest();                 /* Generation+1, nichts offen */
+        check(hw_begin_draw(&st) != 0, "R7: Textur mit neuer Generation geprueft");
+
+        memset(w, 0, sizeof(w));
+        w[1] = CPSRC;
+        w[2] = CPDST;
+        w[3] = 0x100u;                       /* size */
+        w[4] = 0u;                           /* Eingabe zusammenhaengend */
+        w[5] = (8u << 16) | 8u;              /* Ausgabe 0x80 Bytes, Gap 0x80 */
+        w[6] = 8u;                           /* TextureCopy */
+        gpu_gsp_texture_copy_cmd(&c, w);
+        check(c.mem[CPDST + 0x100u] == 0xC8u && c.mem[CPDST + 0x180u] != 0xC8u,
+              "R7: TextureCopy schreibt hinter das Gap");
+
+        memset(c.mem + FB, 0, 16 * 16 * 4);
+        check(hw_begin_draw(&st) != 0, "R7: Draw nach TextureCopy");
+        hw_triangles(quad, 6);
+        hw_flush_to_guest();
+        memcpy(got, c.mem + FB, sizeof(got));
+
+        /* Referenz: dieselbe Textur frisch aus dem Gast hochgeladen. */
+        memset(c.mem + FB, 0, 16 * 16 * 4);
+        hw_invalidate_textures();
+        check(hw_begin_draw(&st) != 0, "R7: Referenz-Draw");
+        hw_triangles(quad, 6);
+        hw_flush_to_guest();
+        memcpy(want, c.mem + FB, sizeof(want));
+        bad = compare_pixels(want, got, (int)sizeof(got), 4, &one, &edge, &first);
+        printf("     R7: %d Pixel abweichend (erster %d)\n", bad, first);
+        check(bad == 0, "R7: TextureCopy invalidiert den Bereich inklusive Gaps");
+    }
+
+    /* (R8) Software-Fallback-Draw im HW-Modus schreibt eine Textur; ein
+       spaeterer HW-Draw derselben Liste muss den neuen Inhalt sampeln. */
+    {
+        static unsigned char hwb[16 * 16 * 4], swb[16 * 16 * 4];
+        uint32_t sz;
+        int bad, one, edge, first;
+
+        gpu_pica_reset();
+        gpu_pica_set_render_hw(0);
+        memset(c.mem + FB, 0, 16 * 16 * 4);
+        sz = scene_v(&c);
+        gpu_run_pica_list(&c, LIST, sz);
+        memcpy(swb, c.mem + FB, sizeof(swb));
+
+        gpu_pica_reset();
+        gpu_pica_set_render_hw(1);
+        memset(c.mem + FB, 0, 16 * 16 * 4);
+        sz = scene_v(&c);
+        gpu_run_pica_list(&c, LIST, sz);
+        memcpy(hwb, c.mem + FB, sizeof(hwb));
+        bad = compare_pixels(swb, hwb, (int)sizeof(swb), 4, &one, &edge, &first);
+        printf("     R8: %d Pixel >1 LSB (erster %d), SW-Mitte %02X%02X%02X%02X "
+               "HW-Mitte %02X%02X%02X%02X\n", bad, first,
+               swb[morton_off(8, 7, 4u)], swb[morton_off(8, 7, 4u) + 1],
+               swb[morton_off(8, 7, 4u) + 2], swb[morton_off(8, 7, 4u) + 3],
+               hwb[morton_off(8, 7, 4u)], hwb[morton_off(8, 7, 4u) + 1],
+               hwb[morton_off(8, 7, 4u) + 2], hwb[morton_off(8, 7, 4u) + 3]);
+        check(any_nonzero(swb, (int)sizeof(swb)), "R8: Software-Referenz zeichnet");
+        check(bad <= 32,
+              "R8: SW-Fallback erhoeht die Texturgeneration (HW sampelt neuen Inhalt)");
     }
 
     /* (E4) Abwechselnd Hardware- und Software-Draws in einer Liste: die
