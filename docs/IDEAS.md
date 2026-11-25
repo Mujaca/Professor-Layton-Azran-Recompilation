@@ -98,3 +98,14 @@ deterministische Abläufe (Grundlage für M18).
 Thread-Start/-Ende, DSP-/GPU-/VBlank-Anbindung. Vorgehen in Stufen auf einem
 Branch, jede Stufe per A/B (Gast-Frames, Musiklücken, Titel/Namenseingabe)
 gegen master; erst mergen, wenn besser und stabil.
+
+**Stand 2026-11-25 (Branch `claude/scheduler`): Stufe 1 umgesetzt.** Ein
+Stab fuer beide Kerne, Leerlauf-Thread, externe Quellen nur als Meldung an
+den Stabhalter, GX-Befehle asynchron im GPU-Worker (ohne Worker brachte der
+Stab allein den Titel ebenfalls frueher, aber weniger Gast-Frames, weil der
+Render-Thread waehrend der GPU-Arbeit blockierte). Messwerte in
+`docs/GAME_NOTES.md`. **Offen: Stufe 2** (Stab je Kern, SysCore parallel,
+`ldrex/strex` per CAS). Der SysCore-Thread laeuft am Titel nur ~11 ms/s,
+der Gewinn waere klein; der Engpass ist die GPU-Arbeit (Vertex-Shader im
+GX-Worker, ~60 % Wandzeit). Seit dem DSP-Takt-Modell laeuft auch der DSP-Frame beim Stabhalter
+(Haenger 2 behoben, Echtzeit-Ton).

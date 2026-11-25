@@ -46,9 +46,7 @@ void arm_call_guest_pub(ArmCpu *c, uint32_t addr);   /* gen_boot.c */
 
 #define TLS_CMD_BUF 0x80u
 
-/* ---- kooperatives Threading: es laeuft immer nur ein Gast-Thread ---- */
-static CRITICAL_SECTION g_guest_lock;
-static int g_guest_lock_init = 0;
+/* ---- Gast-Scheduler: es laeuft immer genau ein Gast-Thread ---- */
 static ArmCpu *g_main_cpu = NULL;
 
 /* GSP-Framebuffer-Zustand. Die Register (GspFbRegs) werden durch
@@ -91,38 +89,7 @@ static void gsp_fb_latch_locked(int screen) {
     gsp_fb_latch(&g_gsp_fb_regs[screen], &g_gsp_display[screen]);
 }
 
-static int g_no_lock = 0;
-
-/* Deterministischer Round-Robin-Scheduler: nur der Thread mit "g_turn"
- * darf laufen (haelt den Guest-Lock). */
-static int g_det_sched = 0;   /* HLE_DET_SCHED=1: festes Round-Robin */
-static int g_turn = 0;
-static int g_thread_alive[16];
-static volatile int g_thread_started[16];
-static _Thread_local int t_tid = -1;
-
-static int sched_next(int from) {
-    for (int i = 1; i <= 16; i++) {
-        int k = (from + i) & 15;
-        if (g_thread_alive[k]) return k;
-    }
-    return from;
-}
-
-static void sched_wait_turn(void) {
-    if (t_tid < 0 || !g_det_sched) return;
-    for (unsigned spin = 0; g_turn != t_tid; spin++) {
-        if (spin > 200000000u) { g_turn = t_tid; break; }
-        Sleep(0);
-    }
-}
-/* Thread-lokales Eigentums-Flag: LeaveCriticalSection darf nur der Besitzer
-   aufrufen, sonst wird der Lock-Count korrupt (Races/Starvation). */
-static _Thread_local int t_lock_owned = 0;
-
-static uint64_t host_us(void);
-/* Diagnose (HLE_YSTAT): Wandzeit in den kooperativen Lock-Abgaben sowie
- * Zeit, in der der Gast-Lock zwischen zwei Gast-Abschnitten frei lag.
+/* Diagnose (HLE_YSTAT): Thread-Wechsel und Leerlaufzeit des Schedulers.
  * Reine Zaehler, kein Gastzustand. */
 static int g_ystat = 0;
 /* Diagnose (HLE_WSTAT): DSP-Zustell- und Aufwachverzoegerungen > 10 ms. */
@@ -131,66 +98,104 @@ static int g_wstat = 0;
  * (Software-Rasterizer) gegen die Gesamtlaufzeit. Reine Zaehler. */
 static int g_gtime = 0;
 static unsigned long long g_gtime_us, g_gtime_lists;
-static unsigned long long g_yield_n, g_yield_us, g_pump_rel_n, g_pump_rel_us;
-static unsigned long long g_lock_idle_us;
-static volatile unsigned long long g_lock_free_us = 0;
+static unsigned long long g_sw_n, g_idle_us;
 static unsigned g_vblank_tick = 0;
+static uint64_t host_us(void);
 
-/* Wartende Gast-Threads (hs_wait, ArbitrateAddress) schlafen auf g_kcv statt
- * im Millisekundentakt um die Gast-Sperre zu pollen. Jeder Thread, der die
- * Sperre nach echter Arbeit abgibt (guest_lock_leave ausserhalb eines
- * Warte-Polls), weckt alle Warter: jede Zustandsaenderung (Event, Mutex,
- * Arbiter, IPC, Timer-Poll im VBlank, DSP/GPU-Interrupts) passiert unter der
- * Sperre und endet mit einer Abgabe. Ein Timeout-Deckel (KWAIT_SLICE_MS)
- * haelt Timer und Zeitlimits ohne weiteren Weckruf aktuell. */
-static CONDITION_VARIABLE g_kcv = CONDITION_VARIABLE_INIT;
-static _Thread_local int t_wait_poll = 0;
-#define KWAIT_SLICE_MS 2u
+/* ---- Staffelstab-Scheduler (nach Azahar kernel/thread.cpp ThreadManager) ----
+ *
+ * Jeder Gast-Thread ist ein Host-Thread (der rekompilierte Code braucht
+ * seinen Stack), laeuft aber nur, solange er den Staffelstab haelt. Jeder
+ * Thread wartet auf ein EIGENES Ereignis; an Scheduling-Punkten (SVC-Rueckkehr,
+ * Warten, Schlafen, Zeitscheibe in hle_pump) waehlt der Stabhalter den
+ * hoechstpriorisierten bereiten Thread und uebergibt direkt (Ereignis setzen,
+ * selbst warten). Bereitschaft ist explizit (sched_ready): wartende Threads
+ * sind erst bereit, wenn ihr Objekt signalisiert ist (kwait), die Deadline
+ * erreicht ist oder der Arbiter sie geweckt hat.
+ *
+ * Wahlregel wie Azahar PopNextReadyThread: kleinster Prioritaetswert gewinnt,
+ * Gleichstand FIFO (qseq). Ein laufender Thread wird nur von einem strikt
+ * besseren verdraengt; ein verdraengter Thread kommt vorne in seine
+ * Prioritaetsklasse (push_front), ein wartender/schlafender hinten.
+ *
+ * Ist niemand bereit, bekommt der Leerlauf-Thread den Stab: er wartet auf
+ * die naechste Deadline (hochaufloesender Wartetimer) oder ein externes
+ * Ereignis. Externe Quellen (VBlank-Takt, DSP-Frames, GPU-Ende) aendern
+ * keinen Kernel-Zustand selbst, sie setzen nur Bits in g_ext_pending und
+ * wecken den Leerlauf; der Stabhalter arbeitet sie in sched_service() ab
+ * (laufender Gastcode prueft das Bit bei jedem Block in hle_pump). Damit
+ * gibt es keine Sperre um den Kernel-Zustand: ihn beruehrt nur der
+ * Stabhalter. Beide 3DS-Kerne teilen sich in dieser Stufe einen Stab; die
+ * processor_id bleibt informativ. */
+enum {
+    ST_FREE = 0,
+    ST_READY,       /* bereit, wartet auf den Stab */
+    ST_RUNNING,     /* haelt den Stab */
+    ST_WAIT_SYNC,   /* WaitSynchronization: kw_slot, deadline_ns */
+    ST_WAIT_ARB,    /* ArbitrateAddress: arb_slot, deadline_ns */
+    ST_SLEEP,       /* SleepThread: deadline_ns */
+    ST_DEAD
+};
+typedef struct {
+    int used;
+    volatile LONG state;
+    int prio;               /* Gast-Prioritaet, kleiner = hoeher */
+    long long qseq;         /* FIFO-Rang innerhalb der Prioritaet */
+    uint64_t deadline_ns;   /* 0 = keine (WAIT_*), sonst host_ns-Zeitpunkt */
+    int kw_slot;
+    int arb_slot;
+    HANDLE ev;              /* eigenes Weck-Ereignis (Auto-Reset) */
+    uint64_t st_since;      /* Diagnose (HLE_YSTAT): Zeit je Zustand */
+    uint64_t st_acc[8];
+    uint32_t tid;
+} SchedThread;
+#define SCHED_MAX 33        /* 0 = Hauptthread, 1..32 = g_threads[i - 1] */
+static SchedThread g_sched[SCHED_MAX];
+static SchedThread g_idle;
+static SchedThread *volatile g_run = NULL;
+static volatile LONGLONG g_qseq = 0;
+static volatile LONGLONG g_qfront = 0;
+static _Thread_local SchedThread *t_self = NULL;
+static _Thread_local int t_has_baton = 0;
+static int g_sched_init = 0;
+#define EXT_VBLANK  1L
+#define EXT_DSP     2L
+#define EXT_GPU     8L
+static volatile LONG g_ext_pending = 0;
+static volatile LONG g_vblank_req = 0;
+static HANDLE g_ext_event = NULL;
+static HANDLE g_idle_timer = NULL;
 
-static void guest_lock_enter(void) {
-    if (!g_guest_lock_init || g_no_lock) return;
-    if (t_lock_owned) return;
-    EnterCriticalSection(&g_guest_lock);
-    t_lock_owned = 1;
+/* Zustandswechsel; mit HLE_YSTAT wird die Zeit je Zustand summiert. */
+static void sched_set(SchedThread *s, LONG st) {
     if (g_ystat) {
-        unsigned long long free_at = g_lock_free_us;
-        if (free_at != 0ull) {
-            g_lock_idle_us += host_us() - free_at;
-            g_lock_free_us = 0ull;
-        }
+        uint64_t now = host_us();
+        LONG old = s->state;
+        if (s->st_since != 0 && old >= 0 && old < 8) s->st_acc[old] += now - s->st_since;
+        s->st_since = now;
     }
+    InterlockedExchange(&s->state, st);
 }
-static void guest_lock_leave(void) {
-    if (!g_guest_lock_init || g_no_lock) return;
-    if (!t_lock_owned) return;
-    t_lock_owned = 0;
-    /* Threadwechsel: der lokale Exklusiv-Monitor eines abgeloesten Threads
-     * darf nicht in einen anderen Thread hineinwirken (Azahar
-     * ThreadManager::SwitchContext -> cpu->ClearExclusiveState()). Wir
-     * invalidieren global, weil der naechste Thread beliebig ist. */
-    arm_excl_clear_all();
-    LeaveCriticalSection(&g_guest_lock);
-    if (!t_wait_poll) WakeAllConditionVariable(&g_kcv);
-    if (g_ystat) g_lock_free_us = host_us();
+
+static void sched_notify(LONG bits) {
+    InterlockedOr(&g_ext_pending, bits);
+    if (g_ext_event != NULL) SetEvent(g_ext_event);
 }
-/* Nicht blockierend (DSP-Thread): 1 = Sperre erhalten. */
-static int guest_lock_try(void) {
-    if (!g_guest_lock_init || g_no_lock) return 1; /* ohne Sperre: sofort zustellen */
-    if (t_lock_owned) return 0;
-    if (!TryEnterCriticalSection(&g_guest_lock)) return 0;
-    t_lock_owned = 1;
-    return 1;
-}
+static void sched_service(uint64_t now);
+static void sched_preempt_check(void);
+static void sched_block(void);
+static void sched_exit(void);
+static SchedThread *sched_pick(SchedThread *excl, uint64_t now);
+static void sched_handover(SchedThread *self, SchedThread *next, int wait);
+static uint64_t host_ns(void);
+static void dsp_notify(void) { sched_notify(EXT_DSP); }
+
 /* GPU-Abschnitte: GSP-GX-Befehle (RequestDma, SubmitCmdList, MemoryFill,
- * DisplayTransfer, TextureCopy) laufen synchron im aufrufenden Gast-Thread
- * (gx_run_inline) unter g_gpu_cs, das alle GPU-Zugriffe serialisiert. Waehrend
- * der GPU-Arbeit wird die Gast-Sperre abgegeben, wenn ein anderer Gast-Thread
- * bereit ist, den echte Hardware jetzt laufen liesse (Sound-Thread auf dem
- * SysCore). Frueher hielt der Software-Rasterizer die Sperre durchgehend und
- * hungerte den Sound-Thread aus (Musikluecken 35..140 ms). Interrupts aus dem
- * Abschnitt werden geordnet vorgemerkt (gpu_irq_push) und unter der
- * Gast-Sperre zugestellt (gsp_flush_pending_irqs). Sperr-Reihenfolge:
- * Gast-Sperre -> g_gpu_cs; wer g_gpu_cs haelt, nimmt die Gast-Sperre nie. */
+ * DisplayTransfer, TextureCopy) laufen im GX-Worker (gx_worker) unter
+ * g_gpu_cs, das alle GPU-Zugriffe serialisiert. Interrupts aus dem Worker
+ * werden geordnet vorgemerkt (gpu_irq_push, weckt den Scheduler) und vom
+ * Stabhalter zugestellt (gsp_flush_pending_irqs). Wer g_gpu_cs haelt, wartet
+ * nie auf den Staffelstab. */
 static CRITICAL_SECTION g_gpu_cs;
 static int g_gpu_cs_init = 0;
 /* Vorgemerkte GPU-Interrupts als geordnete FIFO (Anzahl und Reihenfolge
@@ -208,6 +213,7 @@ static void gpu_irq_push(int id) {
         InterlockedIncrement(&g_gpu_irq_pending);
     }
     ReleaseSRWLockExclusive(&g_gpu_irq_srw);
+    sched_notify(EXT_GPU);
 }
 static _Thread_local int t_gpu_section = 0;
 static void gsp_signal_interrupt(int id);
@@ -215,7 +221,7 @@ static void gsp_signal_interrupt(int id);
 static void gpu_cs_enter(void) { if (g_gpu_cs_init) EnterCriticalSection(&g_gpu_cs); }
 static void gpu_cs_leave(void) { if (g_gpu_cs_init) LeaveCriticalSection(&g_gpu_cs); }
 
-/* Aufrufer haelt die Gast-Sperre (oder es gibt keine). */
+/* Aufrufer haelt den Staffelstab. */
 static void gsp_flush_pending_irqs(void) {
     if (g_gpu_irq_pending == 0) return;
     for (;;) {
@@ -236,124 +242,94 @@ static void gsp_flush_pending_irqs(void) {
 typedef struct { uint32_t w[8]; } GxOp;
 static void gx_exec(const GxOp *op);
 
-/* Synchron im aufrufenden Thread: das Spiel sieht die Fertigmeldung wie
- * bisher direkt nach dem Befehl. Die Gast-Sperre wird fuer die Dauer der
- * GPU-Arbeit nur abgegeben, wenn ein Gast-Thread bereit ist, den echte
- * Hardware jetzt laufen liesse (hoeher priorisiert, oder auf dem anderen Kern:
- * der Sound-Thread dieses Spiels laeuft auf dem SysCore, processor_id 1). Sonst bleibt sie gehalten: parallel
- * laufende Gast-Threads bremsen den Software-Rasterizer messbar (CPU). */
+/* GX-Befehle laufen asynchron in EINEM GPU-Worker in Eingangsreihenfolge,
+ * wie auf echter Hardware: TriggerCmdReqQueue legt sie nur in die Queue, der
+ * Kern ist sofort wieder frei, das Spiel erfaehrt das Ende ueber die
+ * Interrupts (P3D/PSC0/PSC1/PPF/DMA; gezaehlt und geordnet). Azahar fuehrt
+ * sie synchron in emulierter Nullzeit aus; im Port kostet die Ausfuehrung
+ * echte Host-Zeit (Vertex-Shader, Readbacks), die ohne Worker den
+ * aufrufenden Render-Thread blockierte. Mit dem Staffelstab laeuft der
+ * Gastcode (naechster Frame) parallel zur GPU-Arbeit. Lesezugriffe auf
+ * GPU-Register (ReadHWRegs) und Cache-Invalidierungen nehmen g_gpu_cs und
+ * warten damit auf eine laufende Operation. */
+#define GXQ_N 256u
+static GxOp g_gxq[GXQ_N];
+static unsigned g_gxq_head = 0, g_gxq_tail = 0;
+static SRWLOCK g_gxq_srw = SRWLOCK_INIT;
+static CONDITION_VARIABLE g_gxq_cv = CONDITION_VARIABLE_INIT;
+static CONDITION_VARIABLE g_gxq_space = CONDITION_VARIABLE_INIT;
+
+static DWORD WINAPI gx_worker(LPVOID p) {
+    (void)p;
+    t_gpu_section = 1;          /* Interrupts nur vormerken */
+    for (;;) {
+        GxOp op;
+        AcquireSRWLockExclusive(&g_gxq_srw);
+        while (g_gxq_head == g_gxq_tail)
+            SleepConditionVariableSRW(&g_gxq_cv, &g_gxq_srw, INFINITE, 0);
+        op = g_gxq[g_gxq_tail % GXQ_N];
+        ReleaseSRWLockExclusive(&g_gxq_srw);
+        gpu_cs_enter();
+        gx_exec(&op);
+        gpu_cs_leave();
+        AcquireSRWLockExclusive(&g_gxq_srw);
+        g_gxq_tail++;
+        WakeAllConditionVariable(&g_gxq_space);
+        ReleaseSRWLockExclusive(&g_gxq_srw);
+    }
+    return 0;
+}
+
+/* Wartet, bis alle eingereihten GX-Befehle ausgefuehrt sind. GPU-Register-
+ * zugriffe des Gasts (WriteHWRegs/ReadHWRegs) sehen damit wie bei Azahar den
+ * Stand nach allen zuvor abgesetzten Befehlen. */
+static void gx_drain(void) {
+    AcquireSRWLockExclusive(&g_gxq_srw);
+    while (g_gxq_head != g_gxq_tail)
+        SleepConditionVariableSRW(&g_gxq_space, &g_gxq_srw, INFINITE, 0);
+    ReleaseSRWLockExclusive(&g_gxq_srw);
+}
+
 static uint32_t cur_tid(ArmCpu *c);
 static int cur_prio(ArmCpu *c);
-static int kernel_other_should_run(uint32_t tid, int prio);
 static void gx_run_inline(ArmCpu *c, const uint32_t w[8]) {
     GxOp op;
-    int had = 0;
+    (void)c;
     memcpy(op.w, w, sizeof(op.w));
-    if (t_lock_owned) {
-        audio_dsp_flush_events();
-        gsp_flush_pending_irqs();
-        if (kernel_other_should_run(cur_tid(c), cur_prio(c))) {
-            had = 1;
-            guest_lock_leave();
-        }
-    }
-    t_gpu_section = 1;
-    gpu_cs_enter();
-    gx_exec(&op);
-    gpu_cs_leave();
-    t_gpu_section = 0;
-    if (had && g_guest_lock_init && !g_no_lock) {
-        EnterCriticalSection(&g_guest_lock);
-        t_lock_owned = 1;
-    }
-    gsp_flush_pending_irqs();
+    AcquireSRWLockExclusive(&g_gxq_srw);
+    /* Queue voll (256 Befehle): warten, bis der Worker aufholt. */
+    while (g_gxq_head - g_gxq_tail >= GXQ_N)
+        SleepConditionVariableSRW(&g_gxq_space, &g_gxq_srw, INFINITE, 0);
+    g_gxq[g_gxq_head % GXQ_N] = op;
+    g_gxq_head++;
+    WakeConditionVariable(&g_gxq_cv);
+    ReleaseSRWLockExclusive(&g_gxq_srw);
 }
 
-
-/* Wartet garantiert, bis der Lock wieder erlangt ist (kein "ohne Lock
-   weiterlaufen" mehr). */
-static void guest_lock_reacquire(void) {
-    if (!g_guest_lock_init || g_no_lock) return;
-    if (t_lock_owned) return;
-    /* Kurz schlafen und dann BLOCKIEREND eintreten: so bekommt ein wartender
-       Gast-Thread garantiert den Lock (faire Uebergabe statt TryEnter-Rennen). */
-    Sleep(1);
-    EnterCriticalSection(&g_guest_lock);
-    t_lock_owned = 1;
-}
-
-/* Wird bei jedem Gast-Block aufgerufen: verhindert, dass rein
- * CPU-gebundene Gast-Schleifen (ohne SVC) den kooperativen Lock
- * dauerhaft halten und andere Threads aushungern. */
 static volatile unsigned g_pump_count = 0;
 static int gsp_process_cmdqueue(ArmCpu *c);
 static void hid_poll(void);
 /* Y2R-Fertigmeldung (StartConversion -> TransferEnd-Event) faellig? */
 static void y2r_poll(void);
 
-/* Pro Gast-Block: CPU-gebundene Gastschleifen ohne SVC duerfen den
- * kooperativen Lock nicht dauerhaft halten. Alle 0x4000 Bloecke abgeben. */
+/* Pro Gast-Block (arm_trace_block): externe Ereignisse sofort abarbeiten
+ * (DSP-Interrupt, VBlank, GPU-Ende), alle 0x400 Bloecke die Zeitscheibe
+ * pruefen (abgelaufene Deadlines/Timer koennen einen besseren Thread bereit
+ * machen; Azahar prueft nach jeder Zeitscheibe), alle 0x4000 Bloecke die
+ * zeitgesteuerten HID/Y2R-Updates. */
 void hle_pump(void) {
-    if ((++g_pump_count & 0x3FFFu) != 0) return;
-    if (t_lock_owned) { audio_dsp_flush_events(); gsp_flush_pending_irqs(); }
-    hid_poll();
-    y2r_poll();
-    if (!g_guest_lock_init || g_no_lock) return;
-    if (!t_lock_owned) return;
-    {
-        uint64_t t0 = g_ystat ? host_us() : 0;
-        guest_lock_leave();
-        Sleep(0);
-        guest_lock_reacquire();
-        if (g_ystat) {
-            g_pump_rel_n++;
-            g_pump_rel_us += host_us() - t0;
-        }
-    }
-}
-
-static void guest_yield(void) {
-    uint64_t t0;
-    if (!g_guest_lock_init) return;
-    if (g_no_lock) { Sleep(0); return; }
-    if (!t_lock_owned) { Sleep(0); return; }
-    t0 = g_ystat ? host_us() : 0;
-    guest_lock_leave();
-    if (g_det_sched && t_tid >= 0) {
-        g_turn = sched_next(t_tid);
-        sched_wait_turn();
-        guest_lock_reacquire();
+    unsigned n;
+    if (!t_has_baton) return;
+    if (g_ext_pending) {
+        sched_service(host_ns());
+        sched_preempt_check();
         return;
     }
-    Sleep(0);
-    /* Garantiert wieder in den Lock zurueck (bilanziert ueber t_lock_owned). */
-    guest_lock_reacquire();
-    audio_dsp_flush_events();
-    gsp_flush_pending_irqs();
-    if (g_ystat) {
-        g_yield_n++;
-        g_yield_us += host_us() - t0;
-    }
+    n = ++g_pump_count;
+    if ((n & 0x3FFu) != 0) return;
+    if ((n & 0x3FFFu) == 0) { hid_poll(); y2r_poll(); }
+    sched_preempt_check();
 }
-
-static void gsp_flush_pending_irqs(void);
-/* Warte-Poll: Sperre abgeben und schlafen, bis ein anderer Thread nach
- * echter Arbeit abgibt (g_kcv) oder KWAIT_SLICE_MS vergeht. Ohne Sperre bzw.
- * im deterministischen Modus wie bisher guest_yield(). */
-static void guest_wait_change(void) {
-    if (!g_guest_lock_init || g_no_lock || g_det_sched || !t_lock_owned) {
-        guest_yield();
-        return;
-    }
-    arm_excl_clear_all();
-    t_wait_poll = 1;
-    SleepConditionVariableCS(&g_kcv, &g_guest_lock, KWAIT_SLICE_MS);
-    t_wait_poll = 0;
-    /* Sperre ist wieder gehalten (t_lock_owned blieb 1). */
-    audio_dsp_flush_events();
-    gsp_flush_pending_irqs();
-}
-
 
 typedef struct {
     int used;
@@ -372,23 +348,16 @@ static void thread_signal_exit(ArmCpu *c);
 
 static DWORD WINAPI guest_thread_main(LPVOID p) {
     GuestThread *t = (GuestThread *)p;
-    t_tid = (int)t->id;
-    g_thread_alive[t_tid] = 1;
-    g_thread_started[t_tid] = 1;
+    SchedThread *s = &g_sched[(t - g_threads) + 1];
+    t_self = s;
     if (getenv("HLE_THR_LOG"))
-        printf("[thrstart] id=%d entry=%08X\n", t_tid, t->entry);
-    if (!g_no_lock) {
-        sched_wait_turn();
-        guest_lock_enter();
-        if (getenv("HLE_THR_LOG")) printf("[thrlock] id=%d\n", t_tid);
-    }
+        printf("[thrstart] id=%d entry=%08X\n", t->id, t->entry);
+    /* Erst laufen, wenn der Scheduler diesen Thread waehlt. */
+    WaitForSingleObject(s->ev, INFINITE);
+    t_has_baton = 1;
     arm_call_guest_pub(t->cpu, t->entry);
     thread_signal_exit(t->cpu);
-    if (!g_no_lock) {
-        g_thread_alive[t_tid] = 0;
-        if (g_turn == t_tid) g_turn = sched_next(t_tid);
-        guest_lock_leave();
-    }
+    sched_exit();
     return 0;
 }
 
@@ -923,17 +892,6 @@ static int kwait_self_wins(uint32_t tid, const int *slots, int n) {
     return best < 0 || (uint32_t)g_kwait[best].tid == tid;
 }
 
-/* Ist ein hoeher priorisierter registrierter Thread bereit? Wird nach einem
- * SVC als Preemptionspunkt benutzt (Azahar PrepareReschedule/Reschedule). */
-static int kernel_higher_ready(uint32_t tid, int prio) {
-    for (int i = 0; i < KWAIT_MAX; i++) {
-        KernelWaiter *w = &g_kwait[i];
-        if (!w->used || (uint32_t)w->tid == tid || w->prio >= prio) continue;
-        if (kwait_ready(w)) return 1;
-    }
-    return 0;
-}
-
 /* Kern (processor_id) eines Gast-Threads: 0 AppCore, 1 SysCore. */
 static int proc_of_tid(uint32_t tid) {
     if (tid == 0) return g_main_proc;
@@ -942,38 +900,32 @@ static int proc_of_tid(uint32_t tid) {
     return 0;
 }
 
-/* Ist ein Thread bereit, den echte Hardware jetzt laufen liesse, waehrend
- * tid beschaeftigt ist? Hoeher priorisiert auf demselben Kern, oder beliebig
- * auf einem anderen Kern (3DS: AppCore und SysCore laufen parallel). */
-static int kernel_other_should_run(uint32_t tid, int prio) {
-    int mine = proc_of_tid(tid);
-    for (int i = 0; i < KWAIT_MAX; i++) {
-        KernelWaiter *w = &g_kwait[i];
-        if (!w->used || (uint32_t)w->tid == tid) continue;
-        if (w->prio >= prio && proc_of_tid((uint32_t)w->tid) == mine) continue;
-        if (kwait_ready(w)) return 1;
-    }
-    return 0;
-}
-
-/* Abgelaufene Timer signalisieren (Azahar Timer::Signal). Wird aus den
- * Warteschleifen und dem VBlank-Thread gepollt. */
+/* Abgelaufene Timer signalisieren (Azahar Timer::Signal). Wird vom
+ * Stabhalter an Scheduling-Punkten gepollt. g_timer_next_ns ist die naechste
+ * Faelligkeit (Deadline fuer den Leerlauf); SetTimer senkt sie. */
+static uint64_t g_timer_next_ns = 0;   /* 0 = kein Timer aktiv */
 static void kernel_poll_timers(void) {
     uint64_t now = host_ns();
+    uint64_t next = 0;
+    if (g_timer_next_ns == 0 || now < g_timer_next_ns) return;
     for (int i = 1; i < MAX_HANDLES; i++) {
         Handle *h = &g_handles[i];
         if (!h->used || h->kind != HK_TIMER || !h->timer_active) continue;
-        if (now < h->timer_due) continue;
-        h->signaled = 1;
-        if (h->timer_interval != 0) h->timer_due = now + h->timer_interval;
-        else h->timer_active = 0;
+        if (now >= h->timer_due) {
+            h->signaled = 1;
+            if (h->timer_interval != 0) h->timer_due = now + h->timer_interval;
+            else { h->timer_active = 0; continue; }
+        }
+        if (next == 0 || h->timer_due < next) next = h->timer_due;
     }
+    g_timer_next_ns = next;
 }
 
 /* Wartet auf ein oder mehrere Objekte. Rueckgabe: 1 = erfolgreich,
- * 0 = Timeout/Fehler (result gesetzt). Genau ein Gast-Thread laeuft; das
- * Warten gibt den Gast-Lock ueber guest_yield() ab, damit Signalisierer
- * laufen koennen (kooperatives Modell des Ports). */
+ * 0 = Timeout/Fehler (result gesetzt). Kann der Wunsch nicht sofort erfuellt
+ * werden, geht der Thread in ST_WAIT_SYNC und gibt den Stab ab; der
+ * Scheduler waehlt ihn erst wieder, wenn sein Waiter bereit ist und gewinnt
+ * (sched_ready) oder die Deadline erreicht ist. */
 static int hs_wait(ArmCpu *c, Handle **objs, int cnt, int wait_all,
                    uint64_t timeout_ns, int *out_idx, uint32_t *result) {
     uint32_t tid = cur_tid(c);
@@ -1054,7 +1006,16 @@ static int hs_wait(ArmCpu *c, Handle **objs, int cnt, int wait_all,
             return 0;
         }
         yielded = 1;
-        guest_wait_change();
+        {
+            SchedThread *self = t_self;
+            if (self == NULL || !t_has_baton) { Sleep(0); continue; }
+            self->kw_slot = wslot;
+            self->deadline_ns = infinite ? 0 : start + timeout_ns_eff;
+            sched_set(self, ST_WAIT_SYNC);
+            sched_block();
+            self->kw_slot = -1;
+            self->deadline_ns = 0;
+        }
     }
 }
 
@@ -1420,7 +1381,7 @@ typedef struct {
 static HidState g_hid;
 static SRWLOCK g_hid_srw = SRWLOCK_INIT;
 /* Eigener Mutex nur fuer den Host-Eingabepuffer: Fenster-/Hauptthread
- * schreiben hier, hid_poll liest ihn unter dem Gast-Lock. */
+ * schreiben hier, hid_poll liest ihn als Stabhalter. */
 static SRWLOCK g_hid_in_srw = SRWLOCK_INIT;
 static HleHidInput g_hid_input;
 static int g_hid_log = -1;
@@ -1467,8 +1428,8 @@ static void hid_update_gyro_locked(uint64_t tick) {
 }
 
 /* Kopiert genau die Ringbereiche, die Azahar im Shared Memory aktualisiert.
- * Der Aufrufer haelt den Gast-Lock und g_hid_srw: Gast-Speicher wird nur
- * unter dem Gast-Lock geschrieben. */
+ * Der Aufrufer haelt den Staffelstab und g_hid_srw: Gast-Speicher wird nur
+ * vom Stabhalter geschrieben. */
 static void hid_copy_to_guest_locked(void) {
     uint32_t off;
     if (!g_hid.guest_mapped || g_cpu == NULL) return;
@@ -1481,21 +1442,17 @@ static void hid_copy_to_guest_locked(void) {
 }
 
 /* Regelt die Update-Zeitpunkte (Azahar CoreTiming: pad_update_ticks usw.).
- * Wird aus hle_pump, den Warteschleifen und dem VBlank-Thread aufgerufen;
- * verpasste Perioden werden nachgeholt. Der Gast-Lock wird hier genommen,
- * falls der Aufrufer ihn nicht schon haelt, weil der Schatten in den
- * Gast-Shared-Memory kopiert wird. */
+ * Wird vom Stabhalter aus hle_pump, hs_wait, dem Leerlauf und der
+ * VBlank-Abarbeitung aufgerufen; verpasste Perioden werden nachgeholt. Nur
+ * der Stabhalter darf den Schatten in den Gast-Shared-Memory kopieren. */
 static void hid_poll(void) {
     uint64_t now;
     int guard;
-    int had_lock;
     if (!g_hid.initialized) return;
+    /* Schreibt Gast-Shared-Memory: nur der Stabhalter. */
+    if (!t_has_baton) return;
     now = host_system_ticks();
 
-    /* Der Lock ist nicht rekursiv: nur abgeben, wenn hid_poll ihn selbst
-       genommen hat (VBlank-Thread nimmt ihn bereits aussen). */
-    had_lock = t_lock_owned;
-    if (!had_lock) guest_lock_enter();
     AcquireSRWLockExclusive(&g_hid_srw);
     guard = 0;
     while (now >= g_hid.pad_due && guard++ < 64) {
@@ -1540,12 +1497,11 @@ static void hid_poll(void) {
         }
     }
     ReleaseSRWLockExclusive(&g_hid_srw);
-    if (!had_lock) guest_lock_leave();
 }
 
 /* Host-Threads (Fenster/Hauptthread) schreiben nur in diesen Host-Puffer,
  * nie in Gast-Speicher. Angewendet wird er ausschliesslich in hid_poll unter
- * dem Gast-Lock. */
+ * vom Stabhalter. */
 void hle_hid_set_input(const HleHidInput *in) {
     if (in == NULL) return;
     AcquireSRWLockExclusive(&g_hid_in_srw);
@@ -3185,7 +3141,7 @@ static void pica_pair_put(ArmCpu *c, uint32_t a, uint32_t n, uint32_t value,
 /* Verarbeitet den GX-Kommandopuffer des Threads mit GPU-Recht
  * (Azahar GSP_GPU::TriggerCmdReqQueue). Header: Index u8, Anzahl u8,
  * Status u8, ShouldStop u8; Kommandos ab +0x20 je 0x20 Byte. */
-/* GPU-Worker: einen GX-Befehl ausfuehren (ohne Gast-Sperre, unter g_gpu_cs).
+/* GPU-Worker: einen GX-Befehl ausfuehren (ohne Staffelstab, unter g_gpu_cs).
  * Interrupts nur vormerken (t_gpu_section / gpu_irq_push). */
 static void gx_exec(const GxOp *op) {
     ArmCpu *c = g_cpu;
@@ -3395,6 +3351,7 @@ static void gsp_command(Ipc *r, uint32_t *p) {
             }
 
             if (result == 0u && g_cpu != NULL) {
+                gx_drain();
                 gpu_cs_enter();
                 for (i = 0u; i + 4u <= size; i += 4u) {
                     uint32_t val = 0u;
@@ -3450,7 +3407,8 @@ static void gsp_command(Ipc *r, uint32_t *p) {
                 (uint64_t)(dsc_addr & 0x1FFFFFFFu) + size <= g_cpu->mem_size) {
                 for (i = 0u; i < size; i += 4u) {
                     uint32_t v;
-                    gpu_cs_enter();   /* wartet auf eine laufende GPU-Operation */
+                    gx_drain();       /* alle abgesetzten GX-Befehle zuerst */
+                    gpu_cs_enter();
                     v = gpu_gsp_read_reg(g_cpu, 0x1EB00000u + addr + i);
                     gpu_cs_leave();
                     memcpy(g_cpu->mem + ((dsc_addr + i) & 0x1FFFFFFFu), &v, 4);
@@ -4364,43 +4322,267 @@ static void arb_unregister(int slot) {
 }
 
 
-/* Simulierter VBlank im Host-Takt (~60 Hz). Die fruehere pauschale
- * Event-Flut (wa-kernel-signal-all) ist durch echte GSP-Ereignisse ersetzt:
- * PDC0/PDC1 gehen ueber die InterruptRelayQueue an das bei
- * RegisterInterruptRelayQueue registrierte Spiel-Event. */
+/* Simulierter VBlank im Host-Takt (~60 Hz). Der Takt-Thread aendert keinen
+ * Gast- oder Kernel-Zustand: er meldet den VBlank nur an den Scheduler
+ * (EXT_VBLANK); die Arbeit (FrameBufferInfo uebernehmen, PDC0/PDC1 ueber die
+ * InterruptRelayQueue, Azahar GPU::VBlankCallback) macht der Stabhalter in
+ * sched_service(). */
 static DWORD WINAPI vblank_thread(LPVOID p) {
     FrameClock clock;
     (void)p;
     frame_clock_start(&clock);
     while (g_vblank_run) {
         frame_clock_wait(&clock);
-        /* Echte VBlank-Quelle: GSP uebernimmt die FrameBufferInfo aus dem
-         * Shared-Memory und meldet PDC0 (oben) / PDC1 (unten) per RelayQueue
-         * und Event (Azahar GPU::VBlankCallback / GSP_GPU::SignalInterrupt).
-         * Lesen + dirty-Flag loeschen und das Schreiben in Gast-Speicher
-         * (RelayQueue) muessen atomar unter dem Gast-Lock passieren; sonst
-         * kann ein Buffer-Swap des Spiels verloren gehen. */
-        guest_lock_enter();
-        gsp_vblank_fb_update(g_cpu, g_gsp_thread_id);
-        gsp_signal_interrupt(GSP_IRQ_PDC0);
-        gsp_signal_interrupt(GSP_IRQ_PDC1);
-        kernel_poll_timers();
-        hid_poll();
-        audio_dsp_flush_events();
-        gsp_flush_pending_irqs();
-        if (g_ystat && (++g_vblank_tick % 62u) == 0u) {
-            printf("[ystat] vbl=%u t=%llus yields=%llu yield_ms=%llu pumps=%llu pump_ms=%llu idle_ms=%llu\n",
-                   g_vblank_tick,
-                   (unsigned long long)((host_us() - g_boot_ns / 1000ull) / 1000000ull),
-                   g_yield_n, g_yield_us / 1000ull,
-                   g_pump_rel_n, g_pump_rel_us / 1000ull,
-                   g_lock_idle_us / 1000ull);
-            fflush(stdout);
-        }
-        guest_lock_leave();
+        InterlockedIncrement(&g_vblank_req);
+        sched_notify(EXT_VBLANK);
     }
     frame_clock_stop(&clock);
     return 0;
+}
+
+/* ---- Scheduler-Kern (nur der Stabhalter ruft diese Funktionen) ---- */
+
+/* Ist s jetzt lauffaehig? Spiegelbild der Bedingungen, unter denen hs_wait,
+ * ArbitrateAddress und SleepThread zurueckkehren. Fuer WaitSynchronization
+ * zaehlt zusaetzlich, dass dieser Waiter das Objekt bekaeme (Azahar weckt den
+ * hoechstprioren Waiter, kwait_self_wins); sonst liefe der Verlierer an und
+ * legte sich sofort wieder hin. */
+static int sched_ready(SchedThread *s, uint64_t now) {
+    switch (s->state) {
+    case ST_READY:
+        return 1;
+    case ST_WAIT_SYNC:
+        if (s->deadline_ns != 0 && now >= s->deadline_ns) return 1;
+        if (s->kw_slot >= 0 && s->kw_slot < KWAIT_MAX && g_kwait[s->kw_slot].used) {
+            KernelWaiter *w = &g_kwait[s->kw_slot];
+            return kwait_ready(w) && kwait_self_wins((uint32_t)w->tid, w->objs, w->nobj);
+        }
+        return 1;          /* ohne Wartelisten-Eintrag: erneut pruefen */
+    case ST_WAIT_ARB:
+        if (s->deadline_ns != 0 && now >= s->deadline_ns) return 1;
+        return s->arb_slot < 0 || g_arbq[s->arb_slot].woken;
+    case ST_SLEEP:
+        return now >= s->deadline_ns;
+    default:
+        return 0;
+    }
+}
+
+/* Bester bereiter Thread ausser `excl` (Azahar ready_queue.pop_first),
+ * Regel ks_better in kernel_sched.h (getestet in tests/sched_selftest.c). */
+static SchedThread *sched_pick(SchedThread *excl, uint64_t now) {
+    SchedThread *best = NULL;
+    kernel_poll_timers();
+    for (int i = 0; i < SCHED_MAX; i++) {
+        SchedThread *s = &g_sched[i];
+        if (!s->used || s == excl) continue;
+        if (!sched_ready(s, now)) continue;
+        if (best == NULL || ks_better(s->prio, s->qseq, best->prio, best->qseq))
+            best = s;
+    }
+    return best;
+}
+
+/* Stab an `next` uebergeben. wait=1: danach auf das eigene Ereignis warten,
+ * bis der Scheduler diesen Thread wieder waehlt. Threadwechsel loescht den
+ * Exklusiv-Monitor (Azahar SwitchContext -> ClearExclusiveState). */
+static void sched_handover(SchedThread *self, SchedThread *next, int wait) {
+    if (g_ystat) g_sw_n++;
+    sched_set(next, ST_RUNNING);
+    g_run = next;
+    t_has_baton = 0;
+    arm_excl_clear_all();
+    SetEvent(next->ev);
+    if (wait && self != NULL) {
+        WaitForSingleObject(self->ev, INFINITE);
+        t_has_baton = 1;
+    }
+}
+
+/* Aufrufer hat seinen Warte-/Schlafzustand gesetzt. Er kommt hinten in seine
+ * Prioritaetsklasse; ist er selbst schon wieder der Beste (z. B. Deadline
+ * vorbei), laeuft er sofort weiter. Ist niemand bereit, bekommt der
+ * Leerlauf-Thread den Stab. */
+static void sched_block(void) {
+    SchedThread *self = t_self;
+    SchedThread *next;
+    uint64_t now = host_ns();
+    self->qseq = InterlockedIncrement64(&g_qseq);
+    sched_service(now);
+    next = sched_pick(NULL, now);
+    if (next == self) {
+        sched_set(self, ST_RUNNING);
+        return;
+    }
+    sched_handover(self, next != NULL ? next : &g_idle, 1);
+}
+
+/* Preemptionspunkt (SVC-Rueckkehr, Zeitscheibe): nur ein strikt besserer
+ * bereiter Thread verdraengt den laufenden (Azahar pop_first_better); der
+ * verdraengte kommt vorne in seine Klasse (push_front). */
+static void sched_preempt_check(void) {
+    SchedThread *self = t_self;
+    SchedThread *next;
+    if (self == NULL || !t_has_baton || self == &g_idle) return;
+    next = sched_pick(self, host_ns());
+    if (next == NULL || !ks_preempts(next->prio, self->prio)) return;
+    self->qseq = InterlockedDecrement64(&g_qfront);
+    sched_set(self, ST_READY);
+    sched_handover(self, next, 1);
+}
+
+/* Thread-Ende: Stab weitergeben, nicht mehr warten. */
+static void sched_exit(void) {
+    SchedThread *self = t_self;
+    SchedThread *next;
+    if (self == NULL || !t_has_baton) return;
+    sched_set(self, ST_DEAD);
+    self->used = 0;
+    next = sched_pick(NULL, host_ns());
+    sched_handover(self, next != NULL ? next : &g_idle, 0);
+    t_self = NULL;
+}
+
+/* Externe Ereignisse abarbeiten (nur Stabhalter). */
+static void sched_service(uint64_t now) {
+    LONG p;
+    (void)now;
+    if (g_ext_pending == 0) {
+        /* Ein DSP-Frame, der auf die Spielantwort wartet, wird an jedem
+         * Scheduling-Punkt erneut versucht. */
+        if (audio_dsp_due()) audio_dsp_run_due();
+        return;
+    }
+    p = InterlockedExchange(&g_ext_pending, 0);
+    if (p & EXT_VBLANK) {
+        LONG n = InterlockedExchange(&g_vblank_req, 0);
+        if (n > 3) n = 3;   /* verpasste VBlanks nicht endlos nachholen */
+        for (LONG k = 0; k < n; k++) {
+            gsp_vblank_fb_update(g_cpu, g_gsp_thread_id);
+            gsp_signal_interrupt(GSP_IRQ_PDC0);
+            gsp_signal_interrupt(GSP_IRQ_PDC1);
+            if (g_ystat && (++g_vblank_tick % 62u) == 0u) {
+                printf("[ystat] vbl=%u t=%llus switches=%llu idle_ms=%llu\n",
+                       g_vblank_tick,
+                       (unsigned long long)((host_us() - g_boot_ns / 1000ull) / 1000000ull),
+                       g_sw_n, g_idle_us / 1000ull);
+                for (int i = 0; i < SCHED_MAX; i++) {
+                    SchedThread *s = &g_sched[i];
+                    if (s->st_since == 0) continue;
+                    printf("[ystat]   t%-2d p%-2d run=%llu rdy=%llu sync=%llu arb=%llu slp=%llu ms\n",
+                           i, s->prio, s->st_acc[ST_RUNNING] / 1000ull, s->st_acc[ST_READY] / 1000ull,
+                           s->st_acc[ST_WAIT_SYNC] / 1000ull, s->st_acc[ST_WAIT_ARB] / 1000ull,
+                           s->st_acc[ST_SLEEP] / 1000ull);
+                    memset(s->st_acc, 0, sizeof(s->st_acc));
+                }
+                fflush(stdout);
+            }
+        }
+        hid_poll();
+    }
+    /* DSP-Takt (EXT_DSP): Frame atomar zum Gast ausfuehren, Interrupt
+     * zustellen (Azahar AudioTickCallback in core_timing). */
+    audio_dsp_run_due();
+    audio_dsp_flush_events();
+    gsp_flush_pending_irqs();
+    y2r_poll();
+}
+
+/* Naechste Deadline (host_ns) aller wartenden/schlafenden Threads und Timer;
+ * 0 = keine. */
+static uint64_t sched_next_deadline(void) {
+    uint64_t d = g_timer_next_ns;
+    for (int i = 0; i < SCHED_MAX; i++) {
+        SchedThread *s = &g_sched[i];
+        if (!s->used) continue;
+        if (s->state != ST_WAIT_SYNC && s->state != ST_WAIT_ARB && s->state != ST_SLEEP)
+            continue;
+        if (s->deadline_ns == 0) continue;
+        if (d == 0 || s->deadline_ns < d) d = s->deadline_ns;
+    }
+    if (g_y2r_busy) {
+        uint64_t y = g_y2r_due_us * 1000ull;
+        if (d == 0 || y < d) d = y;
+    }
+    return d;
+}
+
+/* Leerlauf-Thread (Azahar: idle, wenn die ready_queue leer ist). Haelt er
+ * den Stab, wartet er auf die naechste Deadline oder ein externes Ereignis,
+ * arbeitet es ab und uebergibt an den besten bereiten Thread. Spaetestens
+ * jede Millisekunde wird HID nachgefuehrt. */
+#define IDLE_MAX_NS 1000000ull
+static DWORD WINAPI idle_thread(LPVOID p) {
+    (void)p;
+    t_self = &g_idle;
+    WaitForSingleObject(g_idle.ev, INFINITE);
+    t_has_baton = 1;
+    for (;;) {
+        uint64_t now = host_ns();
+        uint64_t d;
+        SchedThread *next;
+        sched_service(now);
+        hid_poll();
+        y2r_poll();
+        next = sched_pick(NULL, now);
+        if (next != NULL) {
+            sched_handover(&g_idle, next, 1);
+            continue;
+        }
+        d = sched_next_deadline();
+        if (d == 0 || d > now + IDLE_MAX_NS) d = now + IDLE_MAX_NS;
+        if (d > now) {
+            HANDLE hs[2];
+            DWORD nh = 1;
+            uint64_t t0 = g_ystat ? host_us() : 0;
+            hs[0] = g_ext_event;
+            if (g_idle_timer != NULL) {
+                LARGE_INTEGER due;
+                due.QuadPart = -(LONGLONG)((d - now + 99ull) / 100ull);
+                if (SetWaitableTimer(g_idle_timer, &due, 0, NULL, NULL, FALSE)) {
+                    hs[1] = g_idle_timer;
+                    nh = 2;
+                }
+            }
+            WaitForMultipleObjects(nh, hs, FALSE,
+                                   nh == 2 ? INFINITE : (DWORD)((d - now) / 1000000ull + 1ull));
+            if (g_ystat) g_idle_us += host_us() - t0;
+        }
+    }
+    return 0;
+}
+
+static void sched_init_once(void) {
+    if (g_sched_init) return;
+    g_sched_init = 1;
+    g_ext_event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION (Windows 10 1803+): Deadlines
+     * mit ~0,5 ms Genauigkeit statt Systemtakt. Faellt sonst auf einen
+     * normalen Timer zurueck. */
+    g_idle_timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002u, TIMER_ALL_ACCESS);
+    if (g_idle_timer == NULL) g_idle_timer = CreateWaitableTimerExW(NULL, NULL, 0, TIMER_ALL_ACCESS);
+    memset(&g_idle, 0, sizeof(g_idle));
+    g_idle.used = 0;            /* nie Teil der Wahl */
+    g_idle.prio = 64;
+    g_idle.kw_slot = -1;
+    g_idle.arb_slot = -1;
+    g_idle.ev = CreateEventW(NULL, FALSE, FALSE, NULL);
+    CreateThread(NULL, 0, idle_thread, NULL, 0, NULL);
+    CreateThread(NULL, 0, gx_worker, NULL, 0, NULL);
+}
+
+/* Traegt einen Gast-Thread in die Wahl ein (Index 0 = Hauptthread). */
+static SchedThread *sched_register(int idx, int prio, int state) {
+    SchedThread *s = &g_sched[idx];
+    memset(s, 0, sizeof(*s));
+    s->prio = prio;
+    s->kw_slot = -1;
+    s->arb_slot = -1;
+    s->qseq = InterlockedIncrement64(&g_qseq);
+    s->ev = CreateEventW(NULL, FALSE, FALSE, NULL);
+    s->state = state;
+    s->used = 1;
+    return s;
 }
 
 void hle_init(ArmCpu *c, const char *romfs_dir) {
@@ -4459,43 +4641,41 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     if (getenv("HLE_TRACE"))
         g_trace_file = fopen("out/hle_trace.txt", "w");
 
-    if (!g_guest_lock_init) {
-        InitializeCriticalSection(&g_guest_lock);
+    if (!g_gpu_cs_init) {
         InitializeCriticalSection(&g_gpu_cs);
         g_gpu_cs_init = 1;
-        g_guest_lock_init = 1;
-        /* Kooperatives Threading: genau ein Gast-Thread laeuft. */
-        g_no_lock = getenv("HLE_NO_THREAD_LOCK") != NULL;
-        g_det_sched = getenv("HLE_DET_SCHED") != NULL;
-        if (g_det_sched) g_turn = 1;
     }
-    /* VBlank-Thread erst nach Lock- und HID-Initialisierung starten: er
-       nimmt fuer jeden VBlank den Gast-Lock. */
+    sched_init_once();
+    /* VBlank-Takt erst nach Scheduler- und HID-Initialisierung starten. */
     g_vblank_run = 1;
     CreateThread(NULL, 0, vblank_thread, NULL, 0, NULL);
 
     /* DSP-HLE-Audio: Regionen 0x1FF50000/0x1FF70000 im Gast-Speicher,
-       Gast-Lock fuer den Audio-Thread, Pipe-2-Interrupts je Frame. */
+       Pipe-2-Interrupts je Frame, zugestellt vom Stabhalter. */
     audio_dsp_init(c->mem, c->mem_size);
-    audio_dsp_set_lock(guest_lock_enter, guest_lock_leave);
-    audio_dsp_set_trylock(guest_lock_try);
+    /* DSP-Frames melden sich beim Scheduler; zugestellt wird vom Stabhalter. */
+    audio_dsp_set_notify(dsp_notify);
     audio_dsp_set_interrupt(dsp_interrupt_cb);
     audio_dsp_set_struct_addresses(dsp_audio_struct_addresses);
     audio_dsp_start();
     printf("[hle] romfs=%s log=%d srv-handle=%u\n", g_romfs, g_log, g_srv_handle);
 }
 
-/* Der Gast-Lock wird NICHT hier (Host-Hauptthread/main) genommen, sondern im
- * game_thread vor dem Einstieg in den Gastcode (runtime/main.c). Sonst haelt
- * ein Thread den Lock, der nie Gastcode ausfuehrt, und alle per
- * svcCreateThread gestarteten Gast-Threads blockieren dauerhaft in
- * guest_lock_enter() (Befund 2026-11-24, Commit 60a3682). */
+/* Der Stab gehoert dem Thread, der Gastcode ausfuehrt: game_thread
+ * (runtime/main.c) meldet sich hier als Hauptthread (Index 0) an, nicht der
+ * Host-Hauptthread, der hle_init() ausfuehrt (Befund 2026-11-24, Commit
+ * 60a3682). */
 void hle_guest_enter(void) {
-    guest_lock_enter();
+    SchedThread *s;
+    sched_init_once();
+    s = sched_register(0, g_main_prio, ST_RUNNING);
+    t_self = s;
+    g_run = s;
+    t_has_baton = 1;
 }
 
 void hle_guest_leave(void) {
-    guest_lock_leave();
+    sched_exit();
 }
 
 void hle_tick_stats(int *calls, unsigned long long *tick) {
@@ -4520,8 +4700,10 @@ void hle_report(void) {
                wall_ms ? 100.0 * (double)g_gtime_us / 1000.0 / (double)wall_ms : 0.0,
                frag, tex, lit, fb, pc, pr, sc, sr, up, udec / 1000ull);
     }
-    if (g_log) printf("[audio] frames=%llu host_dropped=%u underruns=%u\n", audio_dsp_frames(),
-                      host_audio_dropped(), host_audio_underruns());
+    if (g_log) printf("[audio] frames=%llu host_dropped=%u underruns=%u late=%llu takt_verworfen=%llu gewartet=%llu\n",
+                      audio_dsp_frames(), host_audio_dropped(), host_audio_underruns(),
+                      audio_dsp_late_frames(), audio_dsp_dropped_due(),
+                      audio_dsp_waited_frames());
     arm_perfmap_report();
     printf("[hle] letzte Ereignisse:\n");
     for (int i = 0; i < HLE_EV_RING; i++) {
@@ -4697,16 +4879,12 @@ static uint32_t hle_svc_dispatch(ArmCpu *c, uint32_t imm) {
                         printf("[thrnew] handle=%u entry=%08X arg=%08X stack=%08X id=%d"
                                " prio=%u proc=%d\n",
                                h, entry, arg, stack, t->id, prio, (int)proc);
+                    /* Azahar CreateThread: neuer Thread ist Ready und steht
+                       hinten in seiner Prioritaetsklasse; ob er sofort
+                       laeuft, entscheidet der Preemptionspunkt nach dem SVC. */
+                    sched_register(g_thread_count + 1, (int)prio, ST_READY);
                     g_thread_count++;
                     CreateThread(NULL, 0, guest_thread_main, t, 0, NULL);
-                    if (g_det_sched && t->id >= 0 && t->id < 16) {
-                        /* Handshake: warten, bis der neue Thread registriert ist
-                           (deterministische Startreihenfolge). */
-                        for (unsigned spin = 0; !g_thread_started[t->id]; spin++) {
-                            if (spin > 2000000u) break;
-                            Sleep(0);
-                        }
-                    }
                 }
             }
             c->r[1] = h;
@@ -4715,8 +4893,8 @@ static uint32_t hle_svc_dispatch(ArmCpu *c, uint32_t imm) {
         case 0x09: /* ExitThread */
             if (c != g_main_cpu) {
                 thread_signal_exit(c);
-                guest_lock_leave();
-                if (g_guest_lock_init) ExitThread(0);
+                sched_exit();
+                ExitThread(0);
             }
             return 0;
         case 0x0B: { /* GetThreadPriority(out*, handle) */
@@ -4741,12 +4919,17 @@ static uint32_t hle_svc_dispatch(ArmCpu *c, uint32_t imm) {
             /* Azahar: ResourceLimit Priority der Kategorie Application = 0x18;
                hoeher (kleinerer Wert) darf eine App nicht setzen. */
             if (c->r[1] < KS_PRIO_APP_MAX) return RESULT_NOT_AUTHORIZED;
-            if (c->r[0] == 0xFFFF8000u) { g_main_prio = (int)c->r[1]; return 0; }
+            if (c->r[0] == 0xFFFF8000u) {
+                g_main_prio = (int)c->r[1];
+                if (g_sched[0].used) g_sched[0].prio = g_main_prio;
+                return 0;
+            }
             hh = get_handle(c->r[0]);
             if (hh == NULL || hh->kind != HK_THREAD) return RESULT_INVALID_HANDLE;
             for (int i = 0; i < 32; i++) {
                 if (g_threads[i].used && g_threads[i].handle == c->r[0]) {
                     g_threads[i].prio = (int)c->r[1];
+                    if (g_sched[i + 1].used) g_sched[i + 1].prio = (int)c->r[1];
                     break;
                 }
             }
@@ -4773,26 +4956,19 @@ static uint32_t hle_svc_dispatch(ArmCpu *c, uint32_t imm) {
         case 0x0A: { /* SleepThread(ns): echte Wartezeit (Azahar svc.cpp:
                         WakeAfterDelay; ns <= 0 = sofort weiter, Yield) */
             int64_t ns = (int64_t)((uint64_t)c->r[0] | ((uint64_t)c->r[1] << 32));
-            uint32_t sleep_ms;
+            SchedThread *self = t_self;
             if (getenv("HLE_SLEEP_LOG") && g_sleeplog_n < 200) {
                 g_sleeplog_n++;
                 printf("[sleep] tid=%u ns=%lld blk=%08X lr=%08X\n",
                        cur_tid(c), (long long)ns, arm_last_block, c->r[14]);
             }
-            if (ns <= 0) {
-                sleep_ms = 0;
-            } else {
-                uint64_t ms = (uint64_t)ns / 1000000ull;
-                if (ms > 0xFFFFFFFFull) ms = 0xFFFFFFFFull;
-                sleep_ms = (uint32_t)ms;
-            }
-            if (g_guest_lock_init && !g_no_lock) {
-                guest_lock_leave();
-                Sleep(sleep_ms);
-                guest_lock_reacquire();
-            } else {
-                Sleep(sleep_ms);
-            }
+            /* Azahar SleepThread: ns == 0 ist ein Yield (hinten in die
+               Prioritaetsklasse), sonst WaitSleep bis zur Deadline. */
+            if (self == NULL || !t_has_baton) { Sleep(0); return 0; }
+            self->deadline_ns = host_ns() + (ns > 0 ? (uint64_t)ns : 0ull);
+            sched_set(self, ST_SLEEP);
+            sched_block();
+            self->deadline_ns = 0;
             return 0;
         }
         case 0x13: { /* CreateMutex(out, initial_locked) */
@@ -4898,6 +5074,8 @@ static uint32_t hle_svc_dispatch(ArmCpu *c, uint32_t imm) {
             } else {
                 hh->timer_due = host_ns() + (uint64_t)initial;
                 hh->timer_active = 1;
+                if (g_timer_next_ns == 0 || hh->timer_due < g_timer_next_ns)
+                    g_timer_next_ns = hh->timer_due;
             }
             return 0;
         }
@@ -4989,19 +5167,25 @@ static uint32_t hle_svc_dispatch(ArmCpu *c, uint32_t imm) {
                     }
                     uint32_t tid = cur_tid(c);
                     int slot = arb_register(addr, tid, cur_prio(c));
-                    uint64_t start = host_us();
+                    uint64_t start = host_ns();
                     /* 1/2 warten ohne Grenze; nur 3/4 werten den Timeout aus. */
                     int infinite = (type == 1 || type == 2) ||
                                    timeout_ns == UINT64_MAX;
-                    uint64_t timeout_us =
-                        infinite ? 0 : ((timeout_ns + 999ull) / 1000ull);
+                    SchedThread *self = t_self;
                     if (getenv("HLE_KLOG"))
                         printf("[karb] tid=%u addr=%08X type=%u val=%d slot=%d"
                                " mem=%d\n", tid, addr, type, value, slot, cur);
                     for (;;) {
                         if (slot < 0 || g_arbq[slot].woken) break;
-                        if (!infinite && (host_us() - start) >= timeout_us) break;
-                        guest_wait_change();
+                        if (!infinite && (host_ns() - start) >= timeout_ns) break;
+                        if (self == NULL || !t_has_baton) { Sleep(0); continue; }
+                        self->arb_slot = slot;
+                        self->deadline_ns = infinite ? 0 : start + timeout_ns;
+                        if (self->deadline_ns == 0 && !infinite) self->deadline_ns = 1;
+                        sched_set(self, ST_WAIT_ARB);
+                        sched_block();
+                        self->arb_slot = -1;
+                        self->deadline_ns = 0;
                     }
                     arb_unregister(slot);
                 }
@@ -5244,13 +5428,14 @@ static uint32_t hle_svc_dispatch(ArmCpu *c, uint32_t imm) {
 /* Oeffentlicher SVC-Einstieg: nach dem eigentlichen Kommando folgt der
  * Preemptionspunkt. Azahar ruft nach jedem SVC system.PrepareReschedule();
  * dort laeuft ein durch das SVC bereiter Thread mit hoeherer Prioritaet vor
- * der Rueckkehr in den Gastcode. Im kooperativen Port ist das ein
- * guest_yield(), das den Gast-Lock kurz abgibt. */
+ * der Rueckkehr in den Gastcode; hier sched_preempt_check() nach dem
+ * Abarbeiten externer Ereignisse. */
 uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
     uint32_t r = hle_svc_dispatch(c, imm);
-    if (g_guest_lock_init && !g_no_lock && !g_det_sched &&
-        kernel_higher_ready(cur_tid(c), cur_prio(c)))
-        guest_yield();
+    if (t_has_baton) {
+        sched_service(host_ns());
+        sched_preempt_check();
+    }
     return r;
 }
 

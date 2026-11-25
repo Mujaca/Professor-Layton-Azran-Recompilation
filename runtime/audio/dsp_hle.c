@@ -194,17 +194,28 @@ typedef struct {
     void (*lock_enter)(void);
     void (*lock_leave)(void);
     int (*lock_try)(void);
-    /* Eigene Sperre fuer den DSP-Zustand (Quellen, Mixer, state). Der
-     * Audio-Thread haelt NICHT die globale Gast-Sperre: echte DSP-Hardware
-     * laeuft parallel zur CPU. Die Gast-Sperre wird nur fuer die Meldungen
-     * an den Gast (Interrupt-Events, Struct-Adressen) gebraucht; diese
-     * werden als pending gesammelt und unter der Gast-Sperre zugestellt
-     * (audio_dsp_flush_events). Sperr-Reihenfolge: Gast-Sperre -> cs. */
+    /* Takt-Modell (audio_dsp_set_notify): der Audio-Thread zaehlt nur
+     * faellige Frames (due) und meldet sie; ausgefuehrt werden sie vom
+     * Gast-Scheduler zwischen Gast-Bloecken (audio_dsp_run_due), also atomar
+     * zum Gast wie Azahars Tick in core_timing. */
+    void (*notify)(void);
+    volatile LONG due;
+    unsigned long long dropped_due;     /* Diagnose: verworfene Takte */
+    /* Eigene Sperre fuer den DSP-Zustand (Quellen, Mixer, state) gegen
+     * Pipe-Schreiber. Ohne Takt-Modell laeuft ein Frame samt Meldung unter
+     * der Gast-Sperre (lock_enter/lock_leave). Reihenfolge: Gast -> cs. */
     CRITICAL_SECTION cs;
     int cs_init;
     volatile LONG pend_struct, pend_int_zero, pend_int_pipe2;
     volatile LONGLONG pend_since_qpc;   /* Diagnose: erster offener Pipe-Interrupt */
     volatile LONGLONG last_flush_delay_us;
+    /* Kopplung an die Spielantwort: Zeitpunkt (QPC) des letzten zugestellten
+     * Pipe-Interrupts und die Frame-Counter beider Regionen in dem Moment. */
+    volatile LONGLONG irq_qpc;
+    uint16_t irq_fc[2];
+    unsigned long long late_frames;     /* Diagnose: Frames ohne Spielantwort */
+    unsigned long long waited_frames;   /* Diagnose: Frames, die auf die Antwort warteten */
+    int deferring;
     void (*interrupt)(int type, int pipe);
     void (*struct_addresses)(void);
     volatile int running;
@@ -1088,7 +1099,78 @@ void audio_dsp_flush_events(void) {
             d->pend_since_qpc = 0;
         }
         if (d->interrupt) d->interrupt(AUDIO_DSP_INT_PIPE, 2);
+        if (d->region[0] != NULL) {
+            LARGE_INTEGER q;
+            d->irq_fc[0] = rd16(d->region[0] + SM_FRAME_COUNTER);
+            d->irq_fc[1] = rd16(d->region[1] + SM_FRAME_COUNTER);
+            QueryPerformanceCounter(&q);
+            d->irq_qpc = q.QuadPart;
+        }
     }
+}
+
+/* Hat das Spiel seit dem letzten Pipe-Interrupt eine neue Region
+ * freigegeben (Frame-Counter geschrieben)? */
+static int game_answered(DspState *d) {
+    return rd16(d->region[0] + SM_FRAME_COUNTER) != d->irq_fc[0] ||
+           rd16(d->region[1] + SM_FRAME_COUNTER) != d->irq_fc[1];
+}
+
+int audio_dsp_due(void) {
+    return g_dsp.due > 0;
+}
+
+/* Vom Gast-Scheduler (Stabhalter/Leerlauf) zwischen Gast-Bloecken: einen
+ * faelligen Frame ausfuehren und seine Meldungen zustellen. Der Frame liest
+ * die Konfiguration einer Region und schreibt den Status aller 24 Quellen in
+ * die andere; weil kein Gast-Thread gleichzeitig laeuft, sieht der
+ * Sound-Thread den Status nie halb aus Frame N und halb aus N+1 (Haenger 2).
+ *
+ * Kopplung: Nach einem Pipe-Interrupt hat der Sound-Thread auf Hardware (und
+ * in Azahar-Gastzeit) eine Frame-Periode, um den Status zu lesen und die
+ * naechste Region freizugeben. Ein sofort folgender Nachhol-Frame wuerde den
+ * Status ueberschreiben, bevor er gelesen ist (current_buffer_id_dirty steht
+ * nur einen Frame). Der naechste Frame wartet daher, bis das Spiel
+ * geantwortet hat (neuer Frame-Counter), hoechstens eine Periode ab
+ * Zustellung. Rueckgabe: 1 = es sind noch Frames faellig. */
+int audio_dsp_run_due(void) {
+    DspState *d = &g_dsp;
+    if (d->due <= 0) return 0;
+#ifndef DSP_NO_COUPLING
+    if (d->irq_qpc != 0 && d->state == AUDIO_DSP_ON && d->region[0] != NULL &&
+        !game_answered(d)) {
+        LARGE_INTEGER q, f;
+        double period = (double)SPF / (double)AUDIO_DSP_SAMPLE_RATE;
+        QueryPerformanceCounter(&q);
+        QueryPerformanceFrequency(&f);
+        if ((double)(q.QuadPart - d->irq_qpc) / (double)f.QuadPart < period) {
+            if (!d->deferring) { d->deferring = 1; d->waited_frames++; }
+            return 1;
+        }
+        d->late_frames++;
+        if (d->verbose)
+            printf("[audio] f=%llu spiel antwortet nicht\n", d->frame_count);
+    }
+#endif
+    d->deferring = 0;
+    InterlockedDecrement(&d->due);
+    cs_enter(d);
+    audio_tick(d);
+    cs_leave(d);
+    audio_dsp_flush_events();
+    return d->due > 0;
+}
+
+unsigned long long audio_dsp_waited_frames(void) {
+    return g_dsp.waited_frames;
+}
+
+unsigned long long audio_dsp_late_frames(void) {
+    return g_dsp.late_frames;
+}
+
+unsigned long long audio_dsp_dropped_due(void) {
+    return g_dsp.dropped_due;
 }
 
 /* Diagnose: Verzoegerung (us) zwischen dem DSP-Frame, der den letzten
@@ -1097,17 +1179,21 @@ long long audio_dsp_last_flush_delay_us(void) {
     return (long long)g_dsp.last_flush_delay_us;
 }
 
-/* Synchroner Takt (Tests): Frame unter der DSP-Sperre, danach Meldungen
- * blockierend unter der Gast-Sperre zustellen. */
+/* Ein Takt synchron (Tests): Frame und Meldungen unter der Gast-Sperre
+ * (falls gesetzt), der Frame zusaetzlich unter der DSP-Sperre. */
 void audio_dsp_tick(void) {
     DspState *d = &g_dsp;
+    if (d->lock_enter) d->lock_enter();
     cs_enter(d);
     audio_tick(d);
     cs_leave(d);
-    if (d->lock_enter) d->lock_enter();
     audio_dsp_flush_events();
     if (d->lock_leave) d->lock_leave();
 }
+
+/* Hoechstens so viele Takte stehen offen; darueber verwirft der Takt-Thread
+ * (der Gast-Scheduler reagiert nicht, z. B. waehrend eines GPU-Drains). */
+#define DSP_DUE_MAX 4
 
 static DWORD WINAPI audio_thread(LPVOID p) {
     DspState *d = (DspState *)p;
@@ -1122,17 +1208,23 @@ static DWORD WINAPI audio_thread(LPVOID p) {
             Sleep(1);
             continue;
         }
-        cs_enter(d);
-        audio_tick(d);
-        cs_leave(d);
-        /* Meldungen sofort zustellen (blockierend), wie die Hardware jeden
-         * 4,9-ms-Frame einzeln meldet. Frueher nur per TryEnter: bei
-         * belegter Gast-Sperre (fast immer) kamen die Interrupts erst mit der
-         * naechsten Pump/VBlank, gebuendelt 15..23 ms spaet (HLE_WSTAT); das
-         * Spiel bekam so ~4 Frames als einen gemeldet. Die DSP-Sperre ist hier
-         * schon frei -> keine Sperr-Umkehr. */
-        if (pending(d) && d->lock_enter) {
-            d->lock_enter();
+        if (d->notify) {
+            /* Takt-Modell: nur melden, der Scheduler fuehrt den Frame
+             * zwischen Gast-Bloecken aus (audio_dsp_run_due). */
+            if (InterlockedIncrement(&d->due) > DSP_DUE_MAX) {
+                InterlockedDecrement(&d->due);
+                d->dropped_due++;
+                if (d->verbose && d->state == AUDIO_DSP_ON)
+                    printf("[audio] f=%llu takt verworfen (Scheduler reagiert nicht)%c", d->frame_count, 10);
+            }
+            d->notify();
+        } else {
+            /* Ohne Scheduler: Frame und Meldung unter der Gast-Sperre, damit
+             * der Gast den Status nie waehrend eines Frames liest. */
+            if (d->lock_enter) d->lock_enter();
+            cs_enter(d);
+            audio_tick(d);
+            cs_leave(d);
             audio_dsp_flush_events();
             if (d->lock_leave) d->lock_leave();
         }
@@ -1169,6 +1261,10 @@ void audio_dsp_init(uint8_t *mem, uint32_t mem_size) {
 void audio_dsp_set_lock(void (*enter)(void), void (*leave)(void)) {
     g_dsp.lock_enter = enter;
     g_dsp.lock_leave = leave;
+}
+
+void audio_dsp_set_notify(void (*notify)(void)) {
+    g_dsp.notify = notify;
 }
 
 void audio_dsp_set_trylock(int (*try_enter)(void)) {

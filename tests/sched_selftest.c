@@ -97,11 +97,51 @@ static void test_wake_order(void) {
           "Reihenfolge 0x18,0x18,0x20,0x30");
 }
 
+/* 5) Staffelstab: Wahl, FIFO in der Prioritaetsklasse, Yield ans Ende,
+ *    Verdraengung nur durch strikt bessere Threads (push_front). */
+static void test_baton(void) {
+    /* 0 = Hauptthread 0x30, 1 = Render 0x1A, 2/3 = zwei Worker 0x31 */
+    int prio[4] = {0x30, 0x1A, 0x31, 0x31};
+    long long qseq[4] = {1, 2, 3, 4};
+    unsigned char ready[4] = {1, 0, 1, 1};
+    long long seq = 4, front = 0;
+    int cur, next;
+
+    cur = ks_pick_ready(prio, qseq, ready, 4, -1);
+    CHECK(cur == 0, "bester bereiter: Hauptthread 0x30 vor 0x31");
+    /* Render-Thread wird bereit: verdraengt den Hauptthread. */
+    ready[1] = 1;
+    next = ks_pick_ready(prio, qseq, ready, 4, cur);
+    CHECK(next == 1 && ks_preempts(prio[next], prio[cur]), "0x1A verdraengt 0x30");
+    qseq[cur] = --front;                 /* verdraengt: vorne in die Klasse */
+    /* Render-Thread wartet wieder -> Hauptthread kommt zurueck. */
+    ready[1] = 0;
+    qseq[1] = ++seq;
+    cur = ks_pick_ready(prio, qseq, ready, 4, -1);
+    CHECK(cur == 0, "nach dem Warten: verdraengter Hauptthread zuerst");
+    /* Gleichstand verdraengt nicht. */
+    CHECK(!ks_preempts(prio[2], prio[3]), "gleiche Prioritaet verdraengt nicht");
+    /* Hauptthread wartet: Worker 2/3 abwechselnd per Yield (Round-Robin). */
+    ready[0] = 0;
+    cur = ks_pick_ready(prio, qseq, ready, 4, -1);
+    CHECK(cur == 2, "Worker 2 zuerst (frueher eingereiht)");
+    qseq[cur] = ++seq;                   /* SleepThread(0): ans Ende */
+    cur = ks_pick_ready(prio, qseq, ready, 4, -1);
+    CHECK(cur == 3, "Yield: Worker 3 ist dran");
+    qseq[cur] = ++seq;
+    cur = ks_pick_ready(prio, qseq, ready, 4, -1);
+    CHECK(cur == 2, "Yield: wieder Worker 2");
+    /* Niemand bereit -> -1 (Leerlauf). */
+    ready[2] = ready[3] = 0;
+    CHECK(ks_pick_ready(prio, qseq, ready, 4, -1) == -1, "niemand bereit: Leerlauf");
+}
+
 int main(void) {
     test_priority();
     test_ticks();
     test_wait_index();
     test_wake_order();
+    test_baton();
     if (fails) {
         printf("%d Fehler\n", fails);
         return 1;

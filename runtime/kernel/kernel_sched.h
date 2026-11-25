@@ -40,6 +40,35 @@ static inline int ks_pick_highest(const int *prio, const unsigned char *used, in
     return best;
 }
 
+/* Staffelstab-Scheduler (hle.c sched_pick/sched_preempt_check), nach Azahar
+ * ThreadManager::PopNextReadyThread und ready_queue:
+ *
+ *   * gewaehlt wird der bereite Thread mit dem kleinsten Prioritaetswert,
+ *     bei Gleichstand der mit dem kleinsten Rang `qseq` (FIFO je Klasse);
+ *   * wer wartet/schlaeft/yieldet, bekommt einen neuen, groessten Rang
+ *     (push_back), ein verdraengter Thread einen kleinsten (push_front);
+ *   * ein laufender Thread wird nur von einem strikt hoeher priorisierten
+ *     verdraengt (pop_first_better). */
+static inline int ks_better(int prio_a, long long qseq_a, int prio_b, long long qseq_b) {
+    return prio_a < prio_b || (prio_a == prio_b && qseq_a < qseq_b);
+}
+
+/* Index des besten bereiten Eintrags ausser `excl` (-1 = keiner). */
+static inline int ks_pick_ready(const int *prio, const long long *qseq,
+                                const unsigned char *ready, int n, int excl) {
+    int best = -1;
+    for (int i = 0; i < n; i++) {
+        if (!ready[i] || i == excl) continue;
+        if (best < 0 || ks_better(prio[i], qseq[i], prio[best], qseq[best])) best = i;
+    }
+    return best;
+}
+
+/* Verdraengt `next_prio` einen laufenden Thread mit `cur_prio`? */
+static inline int ks_preempts(int next_prio, int cur_prio) {
+    return next_prio < cur_prio;
+}
+
 /* Anzahl ARM11-Ticks seit demselben Nullpunkt wie `ns` (Nanosekunden).
  * Aufteilung in Sekunden/Rest verhindert den 64-Bit-Ueberlauf
  * (ns * 268111856 passt ab ca. 68 s nicht mehr in uint64_t). */

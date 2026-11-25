@@ -20,7 +20,6 @@ from . import common, milestones, runner
 def _specs(args) -> List[runner.RunSpec]:
     base_env = common.env_dict(args.env)
     if args.deterministic:
-        base_env.setdefault("HLE_DET_SCHED", "1")
         base_env.setdefault("HLE_TICK_MS", "2")
     combos = runner.parse_matrix(args.matrix or [])
     specs = []
@@ -92,7 +91,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--until", action="append")
     p.add_argument("--label")
     p.add_argument("--deterministic", action="store_true",
-                   help="HLE_DET_SCHED=1 und HLE_TICK_MS=2 setzen")
+                   help="HLE_TICK_MS=2 setzen")
     p.add_argument("--shot", default=str(common.ROOT / "out" / "shot.bmp"))
     p.add_argument("--json-out")
     p.add_argument("--verbose", action="store_true")

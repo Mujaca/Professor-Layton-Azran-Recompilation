@@ -241,6 +241,41 @@ Struktur je Draw statt Registerlesen je Pixel.
   (lr 0x10208C), tid 8 4708x 1 ms, tid 9 8813x 1 ms, tid 10-12 je ~3000x 7 ms.
   Entwurf fuer den naechsten Schritt: docs/IDEAS.md "Scheduler nach
   Azahar-Vorbild".
+* Staffelstab-Scheduler + asynchroner GX-Worker (Branch `claude/scheduler`,
+  2026-11-25 abends, A/B gegen master je 3 Laeufe HW, `--shot-every 100`):
+  Titel ab Host-Frame 2700 statt 3200-3300, Gast-Frames am Titel 108-112
+  statt 100-101 je 300 Host-Frames, gast@3900 1903-1918 statt 1878/1902
+  (zwei master-Laeufe blieben am Titel stehen: 1636 bzw. Bildrate 10),
+  Musikluecken 0/0/0 statt 1/0/4. **Aber gast@1200 nur 623-637 statt
+  ~795:** master zeigt in Frame 700-1050 schwarze, billige Ladeframes mit
+  60 fps, der Stab-Port laedt schneller (Thread 14, Prio 46, laeuft vor dem
+  Hauptthread) und steckt dann schon in der teuren Intro-Szene (~30 fps).
+  Gast-Frames bei festem Host-Frame messen also auch die Ladephase mit;
+  Zeit bis zum Titel und Gast-fps am Titel sind die saubereren Groessen.
+  SW-Renderer (je 1 Lauf): Titel 3500 statt 3400, Gast-fps am Titel gleich
+  (50/300), gast@1200 460 statt 797, gast@3900 1086 statt 1520.
+  Ohne GX-Worker (nur Stab) HW: Titel ebenfalls 2700, gast@3900 ~1780.
+  `HLE_YSTAT` am Titel (HW): Render-Thread 6 (Prio 26) ~640 ms/s in
+  GPU-Arbeit, Hauptthread ~920 ms/s im Arbiter, Leerlauf ~85 %, ~4000
+  Thread-Wechsel/s -> Engpass ist die GPU-Emulation, nicht der Scheduler.
+* DSP-Frame beim Stabhalter (2026-11-25 nachts, gegen master b8a22b6, HW,
+  `HLE_LOG=1 HLE_AUDIO_WAV`, `--shot-every 100`): Der Takt-Thread meldet
+  nur "Frame faellig", der Stabhalter fuehrt ihn zwischen Gast-Bloecken aus
+  (Haenger 2: Status nie mehr halb aus Frame N, halb aus N+1). Stillstand bis
+  Frame 4000: neu 0/8 (4 einzeln, 2x2 parallel), master 2/8. Echtzeit
+  WAV/Laufzeit 0,94 (die ersten ~4 s ist der DSP aus) mit 1 Unterlauf, master
+  0,64-0,84 mit 112-333 Unterlaeufen. Musikluecken 0 (master 0-3). Titel ab
+  2800 statt 3300-3400; Gast-Frames am Titel 107-114 statt 100 je 300
+  Host-Frames; gast@1200 ~610 statt ~870, gast@3900 ~1785 (parallel ~1700)
+  statt ~2000 (master zeigt laenger billige Lade-/Logoframes, siehe oben).
+  Kopplung an den Frame-Counter: in 13 677 Frames warteten nur 7 auf die
+  Spielantwort, 1 lief nach einer Periode ohne Antwort; ohne Kopplung
+  ebenfalls 0/8 Stillstand bei gleicher Echtzeit -> bleibt als Sicherung, weil
+  beide Kerne einen Stab teilen (ein hoeher priorisierter Thread koennte den
+  Sound-Thread zwischen zwei Frames verdraengen). SW (je 2 Laeufe, 7000
+  Frames): Titel 3600/3700 statt 5000, Echtzeit 0,99-1,00 statt 0,43-0,57,
+  gast@3900 ~965 statt ~1415 (master noch in Ladephase), ein master-Lauf
+  blieb stehen. Neues Spiel bis zur Treppenszene (Frame 6300) in beiden.
 
 ## Neues Spiel (M11, 2026-11-25)
 

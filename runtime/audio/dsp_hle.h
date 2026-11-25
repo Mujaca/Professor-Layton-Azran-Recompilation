@@ -64,12 +64,25 @@ enum {
 };
 
 /* Speicher + Gast-Lock. mem ist der Gast-Speicher; mem_size begrenzt die
- * Regionen. Die Frame-Verarbeitung laeuft wie auf Hardware parallel zum
- * Gast (eigene DSP-Sperre); die Gast-Sperre wird nur fuer die Meldungen an
- * den Gast genommen (audio_dsp_flush_events). try_enter: nicht blockierender
- * Versuch, 1 = Sperre erhalten (danach leave). */
+ * Regionen. Ein Frame (Konfiguration lesen, Dirty-Bits loeschen, Status
+ * aller Quellen schreiben) muss atomar zum Gast laufen (Haenger 2: der
+ * Sound-Thread las sonst Quelle 0 aus Frame N und Quelle 1 aus N+1). Im Port
+ * fuehrt ihn der Gast-Scheduler aus (Takt-Modell, audio_dsp_set_notify);
+ * ohne notify laeuft er samt Meldung unter der Gast-Sperre (enter/leave).
+ * try_enter: nicht blockierender Versuch, 1 = Sperre erhalten. */
 void audio_dsp_init(uint8_t *mem, uint32_t mem_size);
 void audio_dsp_set_lock(void (*enter)(void), void (*leave)(void));
+/* Takt-Modell: der Audio-Thread zaehlt nur faellige Frames und ruft
+ * notify(); der Gast-Scheduler fuehrt sie zwischen Gast-Bloecken mit
+ * audio_dsp_run_due() aus (atomar zum Gast, wie Azahars core_timing-Tick).
+ * audio_dsp_due(): 1 = ein Frame steht an. run_due liefert 1, solange noch
+ * Frames anstehen (z. B. weil der naechste auf die Spielantwort wartet). */
+void audio_dsp_set_notify(void (*notify)(void));
+int audio_dsp_due(void);
+int audio_dsp_run_due(void);
+unsigned long long audio_dsp_late_frames(void);
+unsigned long long audio_dsp_waited_frames(void);
+unsigned long long audio_dsp_dropped_due(void);
 void audio_dsp_set_trylock(int (*try_enter)(void));
 
 /* Vorgemerkte DSP-Meldungen (Interrupts, Struct-Adressen) zustellen.

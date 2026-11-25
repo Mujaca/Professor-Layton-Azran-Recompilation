@@ -77,6 +77,87 @@ static void set_counter(int i, unsigned fc) {
     wr16(region(i) + SM_FRAME_COUNTER, fc);
 }
 
+/* --- Takt-Modell: Frames nur zwischen Gast-Bloecken ----------------------
+ * Haenger 2 (2026-11-25, Befund Commit a949191): Der DSP-Thread verarbeitete
+ * Frames parallel zum Gast. Der Sound-Thread des Spiels liest den Status
+ * aller Quellen nacheinander; lief dazwischen ein Frame, kam Quelle 0 aus
+ * Frame N und Quelle 1 aus N+1 (current_buffer_id_dirty steht nur einen
+ * Frame), ein Kanal verpasste den Pufferwechsel, das Spiel haengte einen noch
+ * eingereihten Wellenpuffer erneut an (Selbstverweis, Endlosschleife).
+ * Azahar tickt den DSP in core_timing zwischen Gast-Instruktionen. Im Port
+ * meldet der Takt-Thread nur "Frame faellig"; ausgefuehrt wird der Frame vom
+ * Gast-Scheduler (audio_dsp_run_due). Solange niemand run_due aufruft, darf
+ * sich also kein Frame und kein Byte der Regionen aendern. Danach koppelt
+ * der Folgeframe an die Spielantwort (neuer Frame-Counter). */
+static volatile LONG g_notified;
+static void dsp_notify_test(void) { InterlockedIncrement(&g_notified); }
+
+static void thread_frames_only_via_scheduler(void) {
+    static unsigned char snap[2][0x8000];
+    unsigned char buf[4] = {0, 0, 0, 0};
+    unsigned long long f0, f1;
+    unsigned char *cfg;
+    int ran;
+
+    audio_dsp_set_notify(dsp_notify_test);
+    audio_dsp_set_host_output(0);
+    audio_dsp_pipe_write(buf, 4);     /* Initialize */
+    set_counter(0, 30);
+    set_counter(1, 29);
+
+    /* Zwei loopende PCM16-Quellen (Kanal L/R eines Streams): ihr Status
+     * (buffer_position) aendert sich mit jedem Frame. */
+    for (int i = 0; i < 4000; i++) wr16(g_mem + 0x14000000u + (unsigned)i * 2, (unsigned)i);
+    for (int s = 0; s < 2; s++) {
+        cfg = region(0) + SM_SOURCE_CONFIG + (unsigned)s * 192u;
+        memset(cfg, 0, 192);
+        wr32(cfg + CFG_DIRTY, (1u << 30) | (1u << 16));
+        wr16(cfg + CFG_ENABLE, 1);
+        wr16(cfg + CFG_EMB_FLAGS1, 1u | (1u << 2));  /* Mono, PCM16 */
+        wr_dsp32(cfg + CFG_EMB_PHYS, 0x20000000u);
+        wr_dsp32(cfg + CFG_EMB_LEN, 4000u);
+        wr16(cfg + CFG_EMB_FLAGS2, 2u);              /* is_looping */
+    }
+
+    /* Takt laeuft ueber mehrere Perioden (4,9 ms), niemand fuehrt aus. */
+    f0 = audio_dsp_frames();
+    memcpy(snap[0], region(0), 0x8000);
+    memcpy(snap[1], region(1), 0x8000);
+    audio_dsp_start();
+    Sleep(40);
+    f1 = audio_dsp_frames();
+    check(g_notified >= 3, "takt_meldet_faellige_frames");
+    check(audio_dsp_due(), "frame_faellig");
+    check(f1 == f0, "kein_frame_ohne_scheduler");
+    check(memcmp(snap[0], region(0), 0x8000) == 0 && memcmp(snap[1], region(1), 0x8000) == 0,
+          "regionen_unveraendert_ohne_scheduler");
+
+    /* Scheduler fuehrt einen Frame aus: Status geschrieben, Pipe-Interrupt. */
+    g_int_pipe = 0;
+    audio_dsp_run_due();
+    check(audio_dsp_frames() == f1 + 1, "run_due_ein_frame");
+    check(g_int_pipe == 1, "run_due_meldet_interrupt");
+    /* Spiel hat noch nicht geantwortet: Folgeframe wartet (Kopplung). */
+    ran = 0;
+    if (audio_dsp_due()) {
+        audio_dsp_run_due();
+        ran = audio_dsp_frames() != f1 + 1;
+    }
+    check(!ran, "folgeframe_wartet_auf_spielantwort");
+    /* Spiel gibt die naechste Region frei -> Folgeframe laeuft sofort. */
+    set_counter(1, 31);
+    for (int i = 0; i < 100 && !audio_dsp_due(); i++) Sleep(2);
+    audio_dsp_run_due();
+    check(audio_dsp_frames() == f1 + 2, "folgeframe_nach_spielantwort");
+    /* Ohne Antwort laeuft er spaetestens eine Periode nach der Zustellung. */
+    Sleep(8);
+    audio_dsp_run_due();
+    check(audio_dsp_frames() == f1 + 3, "folgeframe_nach_einer_periode");
+
+    audio_dsp_stop();
+    audio_dsp_set_notify(NULL);
+}
+
 int main(void) {
     const uint32_t mem_size = 0x20000000u;
     unsigned char buf[4] = {0, 0, 0, 0};
@@ -245,6 +326,8 @@ int main(void) {
     buf[0] = 2;                       /* Wakeup */
     audio_dsp_pipe_write(buf, 4);
     check(audio_dsp_recv_data() == 0, "wakeup_after_pending_sleep");
+
+    thread_frames_only_via_scheduler();
 
     VirtualFree(g_mem, 0, MEM_RELEASE);
     if (g_fail) {

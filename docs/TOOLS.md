@@ -242,7 +242,7 @@ durchgerutscht.
 ab `r0`, `r1` und `r5` als `[watchmem]`-Zeile), `ARM_MEMWATCH=<hex>`,
 `ARM_MEMWATCHRD=<hex>[,size]`,
 `ARM_MEMWATCHRANGE=<hex>,<size>`, `ARM_STRICT=1`,
-`HLE_PERFMAP_FILE=<pfad>`, `HLE_DET_SCHED=1`,
+`HLE_PERFMAP_FILE=<pfad>`,
 `HLE_PERF=1` (zählt Gast-Bloecke und meldet beim Prozessende
 `[perf] N blocks in M ms (R/s)`; Format von `tools/g3ds/runner.py`),
 `HLE_PICA_DIAG=1` (PICA-Register-Histogramm je Liste inkl. Kanal-Spruengen,
@@ -254,8 +254,8 @@ und Farbziel),
 `HLE_GSPQ_LOG=1` (GX-Transfers: DisplayTransfer/TextureCopy mit Quelle, Ziel,
 Flags und Groesse sowie MemoryFill-Bereiche),
 `HLE_VRAM_DUMP=<pfad>` (VRAM 0x1F000000..0x1F5FFFFF am Laufende roh sichern),
-`HLE_WSTAT=1` (meldet DSP-Interrupt-Zustellungen > 10 ms nach dem DSP-Frame und Aufwachverzoegerungen wartender Threads > 10 ms nach dem DSP-Signal, je mit Zeitstempel; nur lesend), `HLE_YSTAT=1` (Yield-/Lock-Statistik der kooperativen Gast-Threads: Yields,
-Wandzeit in Lock-Abgaben, Zeit mit freiem Gast-Lock; je ~1 s eine Zeile
+`HLE_WSTAT=1` (meldet DSP-Interrupt-Zustellungen > 10 ms nach dem DSP-Frame und Aufwachverzoegerungen wartender Threads > 10 ms nach dem DSP-Signal, je mit Zeitstempel; nur lesend), `HLE_YSTAT=1` (Scheduler-Statistik: Thread-Wechsel, Leerlaufzeit und je
+Gast-Thread die Zeit in run/rdy/sync/arb/slp; je ~1 s ein Block
 `[ystat]`),
 `HLE_STALLDUMP=1` (bei jedem 300. Host-Frame die letzten 12 Bloecke je
 Gast-Thread auf stderr, um Haenger ohne IPC zu lokalisieren),
