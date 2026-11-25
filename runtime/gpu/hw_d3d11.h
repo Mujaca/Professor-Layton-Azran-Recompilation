@@ -7,7 +7,8 @@
  *
  * Architektur (verbindlich): Vertex- und Geometry-Shader laufen weiter auf
  * der CPU (runtime/gpu/gpu.c). Dieses Modul uebernimmt nur die Rasterisierung
- * und die Fragment-Pipeline (Texturen + TEV + Alpha-Test):
+ * und die Fragment-Pipeline (Texturen + TEV + Alpha-Test + Output-Merger
+ * inkl. Blending/LogicOp/Farbmaske + Stencil + Fog):
  *
  *   hw_begin_draw(state)  Ziel/Viewport/Scissor/Tiefe/TEV setzen und
  *                         Texturen bei Bedarf hochladen
@@ -75,6 +76,29 @@ typedef struct {
     int alpha_test;
     uint32_t alpha_func;
     uint32_t alpha_ref;
+
+    /* Output-Merger 0x100..0x107/0x113. Faktoren/Gleichungen mit den
+     * PICA-Enumerationswerten aus Azahar regs_framebuffer.h; die D3D-
+     * Uebersetzung passiert in hw_d3d11.c. */
+    int blend_enable;
+    uint32_t blend_eq_rgb, blend_eq_a;      /* 0 Add,1 Sub,2 RevSub,3 Min,4 Max */
+    uint32_t blend_src_rgb, blend_dst_rgb;  /* 0..14 */
+    uint32_t blend_src_a, blend_dst_a;
+    uint32_t blend_const;                   /* 0xAABBGGRR */
+    uint32_t logic_op;                      /* 0..15, 3 = Copy */
+    uint32_t color_write_mask;              /* Bit0..3 = r,g,b,a */
+    int color_write_enable;                 /* 0x113 & 0xF != 0 */
+
+    /* Tiefen-/Stenciltest 0x105/0x106 (Stencil nur bei D24S8) */
+    int stencil_enable;
+    uint32_t stencil_func, stencil_ref, stencil_input_mask, stencil_write_mask;
+    uint32_t stencil_fail_op, stencil_zfail_op, stencil_pass_op;
+
+    /* Fog 0xE0/0xE1/0xE6/0xE8..0xEF (LUT-Schnappschuss) */
+    int fog_mode;
+    int fog_flip;
+    uint32_t fog_color;
+    uint32_t fog_lut[128];
 
     /* TEV 0xC0..0xFD: je Stufe sources/modifiers/ops/const_color/scales,
      * dazu Combiner-Buffer-Maske (0xE0) und Pufferfarbe (0xFD). Semantik

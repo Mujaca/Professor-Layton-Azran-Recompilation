@@ -483,6 +483,192 @@ static uint32_t scene_i(ArmCpu *c) {
     return (uint32_t)((unsigned char *)q - (c->mem + LIST));
 }
 
+/* --- Szenen J..O: Output-Merger, Stencil, Fog ------------------------- */
+
+static uint32_t morton_off(int x, int y, uint32_t bpp) {
+    static const uint32_t xlut[8] = {0x00, 0x01, 0x04, 0x05, 0x10, 0x11, 0x14, 0x15};
+    static const uint32_t ylut[8] = {0x00, 0x02, 0x08, 0x0A, 0x20, 0x22, 0x28, 0x2A};
+    uint32_t i = xlut[x & 7] + ylut[y & 7];
+    return (i + (uint32_t)(x & ~7) * 8u) * bpp;
+}
+
+/* Gast-Farbziel (RGBA8, PICA-Kachelung) mit einem Muster vorbelegen. */
+static void fill_fb_rgba8(ArmCpu *c, uint32_t base, int w, int h) {
+    int x, y;
+    for (y = 0; y < h; y++) {
+        int yp = h - 1 - y;
+        for (x = 0; x < w; x++) {
+            uint32_t off = morton_off(x, yp, 4u) + (uint32_t)(yp & ~7) * (uint32_t)w * 4u;
+            unsigned char *p = c->mem + ((base + off) & 0x1FFFFFFFu);
+            p[0] = (unsigned char)(40 + x * 10);       /* a */
+            p[1] = (unsigned char)(200 - y * 8);       /* b */
+            p[2] = (unsigned char)(x * 12 + y * 4);    /* g */
+            p[3] = (unsigned char)(255 - x * 9);       /* r */
+        }
+    }
+}
+
+static uint32_t *emit_blend(uint32_t *q, uint32_t enable, uint32_t eq_rgb,
+                            uint32_t eq_a, uint32_t src_rgb, uint32_t dst_rgb,
+                            uint32_t src_a, uint32_t dst_a, uint32_t cst) {
+    q = emit(q, 0x100, enable ? (1u << 8) : 0u);
+    q = emit(q, 0x101, (eq_rgb & 7u) | ((eq_a & 7u) << 8) |
+                        ((src_rgb & 0xFu) << 16) | ((dst_rgb & 0xFu) << 20) |
+                        ((src_a & 0xFu) << 24) | ((dst_a & 0xFu) << 28));
+    return emit(q, 0x103, cst);
+}
+
+/* Ein Dreieck, konstante TEV-Farbe. z je Vertex fuer Fog/Depth. */
+static uint32_t *emit_tri_color(uint32_t *q, uint32_t cst, float z) {
+    Vtx v[3];
+    v[0].pos[0] = -0.9f; v[0].pos[1] = -0.9f; v[0].pos[2] = z;
+    v[1].pos[0] = 0.9f;  v[1].pos[1] = -0.9f; v[1].pos[2] = z;
+    v[2].pos[0] = 0.0f;  v[2].pos[1] = 0.9f;  v[2].pos[2] = z;
+    q = emit_tev0(q, 0xEu, cst);
+    return q;
+}
+
+/* Szene J: Alpha-Blending SrcAlpha/OneMinusSrcAlpha (nativ). */
+static uint32_t scene_j(ArmCpu *c) {
+    static const Vtx v[3] = {
+        {{-0.9f, -0.9f, 0.0f}, {1, 1, 1, 1}},
+        {{ 0.9f, -0.9f, 0.0f}, {1, 1, 1, 1}},
+        {{ 0.0f,  0.9f, 0.0f}, {1, 1, 1, 1}},
+    };
+    uint32_t *q;
+    fill_fb_rgba8(c, FB, 16, 16);
+    put_vertices(c, v, 3);
+    q = (uint32_t *)(c->mem + LIST);
+    q = emit_attrs(q, 3);
+    q = emit_vs_real(q);
+    q = emit_viewport(q, 16, 16);
+    q = emit_tri_color(q, 0x60C08040u, 0.0f);   /* a=0x60 b=0xC0 g=0x80 r=0x40 */
+    q = emit_blend(q, 1u, 0u, 0u, 6u, 7u, 6u, 7u, 0u);
+    q = emit_target(q, FB, 16, 16, 0u, 0u, 0, 0u);
+    q = emit(q, 0x22E, 0u);
+    return (uint32_t)((unsigned char *)q - (c->mem + LIST));
+}
+
+/* Szene K: LogicOp Xor im Pixelshader. */
+static uint32_t scene_k(ArmCpu *c) {
+    static const Vtx v[3] = {
+        {{-0.9f, -0.9f, 0.0f}, {1, 1, 1, 1}},
+        {{ 0.9f, -0.9f, 0.0f}, {1, 1, 1, 1}},
+        {{ 0.0f,  0.9f, 0.0f}, {1, 1, 1, 1}},
+    };
+    uint32_t *q;
+    fill_fb_rgba8(c, FB, 16, 16);
+    put_vertices(c, v, 3);
+    q = (uint32_t *)(c->mem + LIST);
+    q = emit_attrs(q, 3);
+    q = emit_vs_real(q);
+    q = emit_viewport(q, 16, 16);
+    q = emit_tri_color(q, 0x80706050u, 0.0f);
+    q = emit_target(q, FB, 16, 16, 0u, 0u, 0, 0u);
+    q = emit(q, 0x102, 11u);                    /* Xor */
+    q = emit(q, 0x22E, 0u);
+    return (uint32_t)((unsigned char *)q - (c->mem + LIST));
+}
+
+/* Szene L: Farb-Schreibmaske nur Rot+Alpha. */
+static uint32_t scene_l(ArmCpu *c) {
+    static const Vtx v[3] = {
+        {{-0.9f, -0.9f, 0.0f}, {1, 1, 1, 1}},
+        {{ 0.9f, -0.9f, 0.0f}, {1, 1, 1, 1}},
+        {{ 0.0f,  0.9f, 0.0f}, {1, 1, 1, 1}},
+    };
+    uint32_t *q;
+    fill_fb_rgba8(c, FB, 16, 16);
+    put_vertices(c, v, 3);
+    q = (uint32_t *)(c->mem + LIST);
+    q = emit_attrs(q, 3);
+    q = emit_vs_real(q);
+    q = emit_viewport(q, 16, 16);
+    q = emit_tri_color(q, 0xFF20E010u, 0.0f);
+    q = emit_target(q, FB, 16, 16, 0u, 0u, 0, 0u);
+    q = emit(q, 0x107, (1u << 8) | (1u << 11));  /* nur R + A */
+    q = emit(q, 0x22E, 0u);
+    return (uint32_t)((unsigned char *)q - (c->mem + LIST));
+}
+
+/* Szene M: Stencil Equal 0x0F in D24S8, nur linke Haelfte passend. */
+static uint32_t scene_m(ArmCpu *c) {
+    static const Vtx v[3] = {
+        {{-0.9f, -0.9f, 0.0f}, {1, 1, 1, 1}},
+        {{ 0.9f, -0.9f, 0.0f}, {1, 1, 1, 1}},
+        {{ 0.0f,  0.9f, 0.0f}, {1, 1, 1, 1}},
+    };
+    uint32_t *q;
+    int x, y;
+    for (y = 0; y < 16; y++) {
+        int yp = 15 - y;
+        for (x = 0; x < 16; x++) {
+            uint32_t off = morton_off(x, yp, 4u) + (uint32_t)(yp & ~7) * 16u * 4u;
+            c->mem[((DEPTH + off + 3u) & 0x1FFFFFFFu)] =
+                (unsigned char)(x < 8 ? 0x0F : 0x00);
+        }
+    }
+    put_vertices(c, v, 3);
+    q = (uint32_t *)(c->mem + LIST);
+    q = emit_attrs(q, 3);
+    q = emit_vs_real(q);
+    q = emit_viewport(q, 16, 16);
+    q = emit_tri_color(q, 0xFF20E010u, 0.0f);
+    q = emit_target(q, FB, 16, 16, 0u, 3u, 0, 0u);
+    q = emit(q, 0x116, 3u);                     /* D24S8 */
+    q = emit(q, 0x11C, DEPTH >> 3);
+    q = emit(q, 0x115, 3u);                     /* Schreiben erlaubt */
+    q = emit(q, 0x105, 1u | (2u << 4) | (0xFFu << 8) | (0x0Fu << 16) | (0xFFu << 24));
+    q = emit(q, 0x106, 2u << 8);                /* Pass -> Replace */
+    q = emit(q, 0x22E, 0u);
+    return (uint32_t)((unsigned char *)q - (c->mem + LIST));
+}
+
+/* Szene N: Fog (Mode 5) mit 128 LUT-Eintraegen (value 0..0x7FF Rampe). */
+static uint32_t scene_n(ArmCpu *c) {
+    static const Vtx v[3] = {
+        {{-0.9f, -0.9f, 0.0f}, {1, 1, 1, 1}},
+        {{ 0.9f, -0.9f, -1.0f}, {1, 1, 1, 1}},
+        {{ 0.0f,  0.9f, -0.5f}, {1, 1, 1, 1}},
+    };
+    uint32_t *q;
+    int i;
+    put_vertices(c, v, 3);
+    q = (uint32_t *)(c->mem + LIST);
+    q = emit_attrs(q, 3);
+    q = emit_vs_real(q);
+    q = emit_viewport(q, 16, 16);
+    q = emit_tri_color(q, 0xFF20E010u, 0.0f);
+    q = emit_target(q, FB, 16, 16, 0u, 0u, 0, 0u);
+    q = emit(q, 0xE0, 5u);                      /* Fog, kein Flip */
+    q = emit(q, 0xE1, 0x00204080u);             /* b,g,r */
+    for (i = 0; i < 128; i++)
+        q = emit(q, 0xE8, ((((uint32_t)i * 8u) & 0x7FFu) << 13) | 8u);
+    q = emit(q, 0x22E, 0u);
+    return (uint32_t)((unsigned char *)q - (c->mem + LIST));
+}
+
+/* Szene O: Min-Blending (Shader-Pfad) und Konstantfarbe+Konstantalpha. */
+static uint32_t scene_o(ArmCpu *c) {
+    static const Vtx v[3] = {
+        {{-0.9f, -0.9f, 0.0f}, {1, 1, 1, 1}},
+        {{ 0.9f, -0.9f, 0.0f}, {1, 1, 1, 1}},
+        {{ 0.0f,  0.9f, 0.0f}, {1, 1, 1, 1}},
+    };
+    uint32_t *q;
+    fill_fb_rgba8(c, FB, 16, 16);
+    put_vertices(c, v, 3);
+    q = (uint32_t *)(c->mem + LIST);
+    q = emit_attrs(q, 3);
+    q = emit_vs_real(q);
+    q = emit_viewport(q, 16, 16);
+    q = emit_tri_color(q, 0x60C08040u, 0.0f);
+    q = emit_blend(q, 1u, 3u, 3u, 10u, 12u, 10u, 12u, 0x20304050u);
+    q = emit_target(q, FB, 16, 16, 0u, 0u, 0, 0u);
+    q = emit(q, 0x22E, 0u);
+    return (uint32_t)((unsigned char *)q - (c->mem + LIST));
+}
+
 static int bpp_of(uint32_t fmt) {
     switch (fmt) {
     case 1: return 3;
@@ -551,6 +737,24 @@ static void scene_case(ArmCpu *c, const char *name, SceneFn fn, uint32_t fmt,
     snprintf(msg, sizeof(msg), "%s: Software vs. D3D11 (%s), hoechstens %d Kantenpixel",
              name, hw_driver_name(), max_edge);
     check(bad <= max_edge, msg);
+    if (bad > 0) {
+        int idx, shown = 0;
+        for (idx = 0; idx + bpp_of(fmt) <= bytes && shown < 6; idx += bpp_of(fmt)) {
+            int k, maxdiff = 0;
+            for (k = 0; k < bpp_of(fmt); k++) {
+                int d = (int)sw[idx + k] - (int)hw[idx + k];
+                if (d < 0) d = -d;
+                if (d > maxdiff) maxdiff = d;
+            }
+            if (maxdiff > 1) {
+                printf("       px#%d sw=%02X%02X%02X%02X hw=%02X%02X%02X%02X\n",
+                       idx / bpp_of(fmt),
+                       sw[idx], sw[idx + 1], sw[idx + 2], sw[idx + 3],
+                       hw[idx], hw[idx + 1], hw[idx + 2], hw[idx + 3]);
+                shown++;
+            }
+        }
+    }
 }
 
 int main(int argc, char **argv) {
@@ -580,6 +784,26 @@ int main(int argc, char **argv) {
     scene_case(&c, "Szene G: zwei Texturen Dot3, RGBA8", scene_g, 0u, 0, 16, 16, 32);
     scene_case(&c, "Szene H: ClampToBorder + Alpha-Test, RGBA8", scene_h, 0u, 0, 16, 16, 48);
     scene_case(&c, "Szene I: I8-Textur, RGBA8", scene_i, 0u, 0, 16, 16, 32);
+    scene_case(&c, "Szene J: Alpha-Blending, RGBA8", scene_j, 0u, 0, 16, 16, 16);
+    scene_case(&c, "Szene K: LogicOp Xor, RGBA8", scene_k, 0u, 0, 16, 16, 16);
+    scene_case(&c, "Szene L: Farbmaske R+A, RGBA8", scene_l, 0u, 0, 16, 16, 16);
+    scene_case(&c, "Szene M: Stencil Equal, D24S8", scene_m, 0u, 3, 16, 16, 16);
+    scene_case(&c, "Szene N: Fog, RGBA8", scene_n, 0u, 0, 16, 16, 16);
+    scene_case(&c, "Szene O: Min + Konstantfarben-Blend", scene_o, 0u, 0, 16, 16, 16);
+
+    /* Stencil-Bytes muessen wie im Software-Pfad geschrieben werden. */
+    {
+        static unsigned char sd[16 * 16 * 4], hd[16 * 16 * 4], col[16 * 16 * 4];
+        int diff = 0, k;
+        render(&c, scene_m, 0, col, sizeof(col), 0u, 3, 16, 16);
+        memcpy(sd, c.mem + DEPTH, sizeof(sd));
+        render(&c, scene_m, 1, col, sizeof(col), 0u, 3, 16, 16);
+        memcpy(hd, c.mem + DEPTH, sizeof(hd));
+        for (k = 0; k < 16 * 16 * 4; k += 4)
+            if (sd[k + 3] != hd[k + 3]) diff++;
+        printf("     Stencil-Bytes: %d Abweichungen Software/Hardware\n", diff);
+        check(diff == 0, "Stencil-Rueckschreiben identisch zum Software-Pfad");
+    }
 
     /* Tiefenpuffer muss nach dem Hardware-Draw geschrieben sein. */
     {

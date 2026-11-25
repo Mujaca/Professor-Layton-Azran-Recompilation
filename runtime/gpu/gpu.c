@@ -99,6 +99,15 @@ int gpu_pica_set_render_hw(int on)
 
 int gpu_pica_render_hw(void) { return g_hw_render; }
 
+/* Gast-Host-Schreibzugriffe ausserhalb der PICA-Listen (Y2R, DisplayTransfer,
+ * TextureCopy, MemoryFill) koennen Farb-/Tiefenziel oder Texturdaten
+ * veraendern. Der Hardware-Pfad muss seinen Zielzustand dann aus dem Gast
+ * neu laden, sonst rendert er auf veralteten Bytes. */
+void gpu_pica_invalidate_guest(void)
+{
+    if (g_hw_render) hw_invalidate_guest();
+}
+
 /* ================= echte PICA200-Kommandoliste =================
  * Format (Azahar pica_core.cpp, ProcessCmdList/WriteInternalReg): Strom aus
  * Paaren
@@ -3125,16 +3134,28 @@ static void p_process_tri(ArmCpu *c, const PicaVertex *v0, const PicaVertex *v1,
 }
 
 /* ---- Hardware-Pfad: Dreiecke nach Clipping an D3D11 (M9) ---- */
+static unsigned g_hw_fb_mask;
+static void p_hw_fallback(const char *why, unsigned bit) {
+    if (g_hw_fb_mask & bit) return;
+    g_hw_fb_mask |= bit;
+    printf("[hw] Software-Fallback: %s\n", why);
+}
+
 static int p_hw_supported(void)
 {
     uint32_t u;
-    if ((p_regs[0x1C6] & 1u) == 0u) return 0;     /* kein Fragment-Lighting */
-    if ((p_regs[0xE0] & 7u) != 0u) return 0;      /* kein Fog */
-    if (p_regs[0x100] & (1u << 8)) return 0;      /* kein Blending */
-    if ((p_regs[0x102] & 0xFu) != 3u) return 0;   /* LogicOp Copy */
-    if ((p_regs[0x6D] & 1u) == 0u) return 0;      /* kein W-Buffer */
-    if ((p_regs[0x105] & 1u) && (p_depth_fmt() == 3u)) return 0; /* Stencil */
-    if (p_regs[0x80] & (1u << 10)) return 0;      /* keine prozedurale Textur */
+    if ((p_regs[0x1C6] & 1u) == 0u) {             /* Fragment-Lighting */
+        p_hw_fallback("Fragment-Lighting aktiv", 1u);
+        return 0;
+    }
+    if ((p_regs[0x6D] & 1u) == 0u) {              /* W-Buffer */
+        p_hw_fallback("W-Buffer aktiv", 2u);
+        return 0;
+    }
+    if (p_regs[0x80] & (1u << 10)) {              /* prozedurale Textur */
+        p_hw_fallback("prozedurale Textur aktiv", 4u);
+        return 0;
+    }
     /* Texturen: nur adressierte 2D-Bilder (Typ 0) bzw. disabled (5), alle
        Formate mit 8x8-Kacheln. Cube/Shadow/Projection bleiben Software. */
     for (u = 0; u < 3u; u++) {
@@ -3146,10 +3167,16 @@ static int p_hw_supported(void)
         int w = (int)((size >> 16) & 0x7FFu);
         int h = (int)(size & 0x7FFu);
         if (!(p_regs[0x80] & (1u << u))) continue;
-        if (type != 0u) return 0;
-        if (fmt > 13u) return 0;
-        if (w <= 0 || h <= 0 || (w & 7) || (h & 7)) return 0;
-        if (gpu_pica_tex_tile_size(fmt) == 0u) return 0;
+        if (type != 0u) { p_hw_fallback("Texturtyp != Texture2D", 8u); return 0; }
+        if (fmt > 13u) { p_hw_fallback("Texturformat > 13", 16u); return 0; }
+        if (w <= 0 || h <= 0 || (w & 7) || (h & 7)) {
+            p_hw_fallback("Texturgroesse nicht 8x8-vielfach", 32u);
+            return 0;
+        }
+        if (gpu_pica_tex_tile_size(fmt) == 0u) {
+            p_hw_fallback("Texturformat ohne Kachelgroesse", 64u);
+            return 0;
+        }
     }
     return 1;
 }
@@ -3192,6 +3219,37 @@ static void p_hw_state(HwDrawState *st, ArmCpu *c)
     st->alpha_func = (p_regs[0x104] >> 4) & 7u;
     st->alpha_ref = (p_regs[0x104] >> 8) & 0xFFu;
 
+    /* Output-Merger 0x100..0x107/0x113. */
+    st->blend_enable = (int)((p_regs[0x100] >> 8) & 1u);
+    st->blend_eq_rgb = p_regs[0x101] & 7u;
+    st->blend_eq_a = (p_regs[0x101] >> 8) & 7u;
+    st->blend_src_rgb = (p_regs[0x101] >> 16) & 0xFu;
+    st->blend_dst_rgb = (p_regs[0x101] >> 20) & 0xFu;
+    st->blend_src_a = (p_regs[0x101] >> 24) & 0xFu;
+    st->blend_dst_a = (p_regs[0x101] >> 28) & 0xFu;
+    st->blend_const = p_regs[0x103];
+    st->logic_op = p_regs[0x102] & 0xFu;
+    st->color_write_mask = (p_regs[0x107] >> 8) & 0xFu;
+    st->color_write_enable = (p_regs[0x113] & 0xFu) != 0u;
+
+    /* Stencil 0x105/0x106 (nur bei D24S8 wirksam, wie sw_rasterizer.cpp). */
+    st->stencil_enable = (int)((p_regs[0x105] & 1u) && p_depth_fmt() == 3u);
+    st->stencil_func = (p_regs[0x105] >> 4) & 7u;
+    st->stencil_input_mask = (p_regs[0x105] >> 24) & 0xFFu;
+    st->stencil_ref = (p_regs[0x105] >> 16) & 0xFFu;
+    st->stencil_write_mask = ((p_regs[0x115] & 3u) != 0u)
+                                 ? ((p_regs[0x105] >> 8) & 0xFFu) : 0u;
+    st->stencil_fail_op = p_regs[0x106] & 7u;
+    st->stencil_zfail_op = (p_regs[0x106] >> 4) & 7u;
+    st->stencil_pass_op = (p_regs[0x106] >> 8) & 7u;
+
+    /* Fog 0xE0/0xE1; LUT-Schnappschuss aus den per 0xE8..0xEF geladenen
+       Eintraegen (p_fog_lut_write). */
+    st->fog_mode = (int)(p_regs[0xE0] & 7u);
+    st->fog_flip = (int)((p_regs[0xE0] >> 16) & 1u);
+    st->fog_color = p_regs[0xE1];
+    memcpy(st->fog_lut, g_fog_lut, sizeof(st->fog_lut));
+
     {
         int i;
         for (i = 0; i < 6; i++) {
@@ -3230,8 +3288,11 @@ static void p_hw_state(HwDrawState *st, ArmCpu *c)
             t->wrap_s = (cfg >> 12) & 7u;
             t->wrap_t = (cfg >> 8) & 7u;
             t->border_rgba = p_regs[base];
-            /* PICA mag_filter Bit1/min_filter Bit2; gesetzt = Linear. */
-            t->filter = (cfg & ((1u << 1) | (1u << 2))) ? 1u : 0u;
+            /* Azahar sw_rasterizer.cpp ("TODO: Apply the min and mag
+               filters"): der Software-Renderer filtert nie, es wird immer
+               der naechste Texel genommen. Der Hardware-Pfad muss fuer den
+               Bildvergleich dieselbe Referenz-Semantik nutzen. */
+            t->filter = 0u;
             t->type = (u == 0u) ? ((cfg >> 28) & 7u) : 0u;
             t->offset = gpu_pica_phys_to_guest(addr);
             t->bytes = 0u;
@@ -3239,6 +3300,45 @@ static void p_hw_state(HwDrawState *st, ArmCpu *c)
                 uint64_t n = (uint64_t)(w / 8) * (uint64_t)(h / 8) * ts;
                 if (n <= 64ull * 1024ull * 1024ull)
                     t->bytes = (uint32_t)n;
+            }
+        }
+    }
+
+    /* Diagnose (HLE_HW_STATE): jede neue Kombination der Output-Merger-/
+       Stencil-/Fog-Register einmal melden. Reines Lesen. */
+    {
+        static int on = -1;
+        static uint32_t seen[96];
+        static int nseen;
+        if (on < 0) { const char *e = getenv("HLE_HW_STATE"); on = (e && *e) ? atoi(e) : 0; }
+        if (on) {
+            uint32_t key = p_regs[0x100] * 2654435761u ^ p_regs[0x101]
+                         ^ (p_regs[0x102] << 3) ^ (p_regs[0x103] << 7)
+                         ^ (p_regs[0x107] << 11) ^ (p_regs[0x113] << 15)
+                         ^ (p_regs[0x105] << 17) ^ (p_regs[0x106] << 21)
+                         ^ (p_regs[0xE0] << 23) ^ (p_regs[0xE1] << 27);
+            int i, known = 0;
+            for (i = 0; i < nseen; i++) if (seen[i] == key) { known = 1; break; }
+            if (!known && nseen < 96) {
+                seen[nseen++] = key;
+                printf("[hwstate] om=%08X bl=%08X lop=%X mask=%03X cw=%X "
+                       "sten=%04X/%X dfmt=%X depthmask=%04X fog=%08X/%08X "
+                       "tgt=%08X %ux%u fmt=%u\n",
+                       p_regs[0x100], p_regs[0x101], p_regs[0x102] & 0xFu,
+                       p_regs[0x107] & 0xFFFu, p_regs[0x113] & 0xFu,
+                       p_regs[0x105], p_regs[0x106], p_regs[0x116] & 3u,
+                       p_regs[0x107], p_regs[0xE0], p_regs[0xE1],
+                       (p_regs[0x11D] & 0x0FFFFFFFu) * 8u,
+                       p_regs[0x11E] & 0x7FFu,
+                       ((p_regs[0x11E] >> 12) & 0x3FFu) + 1u,
+                       (p_regs[0x117] >> 16) & 7u);
+                printf("[hwstate] texen=%08X t0=%08X/%08X f=%X t1=%08X/%08X f=%X "
+                       "tev0 src=%08X op=%08X scl=%X tev1 src=%08X op=%08X\n",
+                       p_regs[0x80], p_regs[0x81], p_regs[0x82], p_regs[0x8E] & 0xFu,
+                       p_regs[0x91], p_regs[0x92], p_regs[0x96] & 0xFu,
+                       p_regs[0xC0], p_regs[0xC2], p_regs[0xC4] & 0xFu,
+                       p_regs[0xC8], p_regs[0xCA]);
+                fflush(stdout);
             }
         }
     }
@@ -4941,6 +5041,7 @@ static void p_ext_transfer(ArmCpu *c)
                in_p, out_p, flags, p_ext_regs[0x303], p_ext_regs[0x302],
                (flags >> 3) & 1u);
     p_hw_tex_gen_bump();       /* Kopie kann Texturbytes veraendern */
+    hw_invalidate_guest();       /* ... und Farb-/Tiefenziel */
     if (flags & 8u) {                   /* is_texture_copy */
         /* Azahar regs_external.h DisplayTransferConfig: flags@0x304,
            trigger@0x306, texture_copy.size@0x308, input_size@0x309,
@@ -5091,6 +5192,7 @@ void gpu_gsp_memory_fill_cmd(ArmCpu *c, const uint32_t *w)
         printf("[gpu] memfill s1=%08X e1=%08X v1=%08X c1=%X s2=%08X e2=%08X v2=%08X c2=%X\n",
                start1, end1, value1, ctl1, start2, end2, value2, ctl2);
     p_hw_tex_gen_bump();       /* MemoryFill kann Texturbytes ueberschreiben */
+    hw_invalidate_guest();
     if (start1 != 0u) {
         uint32_t ps = gpu_pica_virt_to_phys(start1);
         p_ext_regs[0x04] = ps >> 3;

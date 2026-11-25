@@ -66,6 +66,10 @@ int gpu_pica_last_vertex(float *pos, float *color, float *uv);
 /* Texturzustand fuer Textureinheit 0 aus dem Engine-Texturobjekt setzen. */
 int gpu_pica_texture_bound(void);
 
+/* Gastspeicher wurde ausserhalb der PICA-Liste geschrieben (Y2R,
+ * DisplayTransfer, TextureCopy, MemoryFill): Hardware-Ziel neu laden. */
+void gpu_pica_invalidate_guest(void);
+
 /* Software-Texeldekoder (alle PICA-Formate inkl. ETC1/ETC1A4) fuer den
    Hardware-Pfad: Groesse einer 8x8-Kachel in Bytes und ein Texel einer
    Kachel (x,y = 0..7 innerhalb der Kachel, Ausgabe RGBA8). */

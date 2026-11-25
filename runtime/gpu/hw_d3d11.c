@@ -19,15 +19,18 @@
  *   - TEV: ein Uber-Pixel-Shader interpretiert die 6 Stufen aus einem
  *     Constant Buffer (Quellen, Modifier, Kombinierer inkl. Dot3, Skalierung,
  *     Combiner-Buffer) mit derselben Integer-Semantik wie p_tev.
- * Noch nicht enthalten: Fragment-Lighting, Fog, Blending/LogicOps, W-Buffer,
- * Stencil, prozedurale Textur, Cube-/Shadow-/Projection-Texturen. gpu.c nutzt
- * den Hardware-Pfad nur, wenn der Draw-Zustand dazu passt, sonst bleibt der
- * Software-Pfad aktiv.
- *
- * Tiefeninitialisierung: Das D3D-Tiefenziel wird beim Binden auf 1.0 (fern)
- * gesetzt; der Software-Pfad erhaelt dagegen vorhandene Gastbytes. Fuer
- * Vergleiche muss der Gast-Tiefenpuffer daher mit 0xFF vorbelegt sein (wie
- * im Selbsttest). Das ist eine dokumentierte Grenze des Grundgeruests.
+ *   - Output-Merger 0x100..0x107: Blending (alle Faktoren/Gleichungen),
+ *     LogicOp, Alpha-Test, Schreibmasken. Blending laeuft native ueber
+ *     D3D11-BlendStates; Mischfaelle (Konstantfarbe+Konstantalpha in einem
+ *     Draw, Min/Max mit Faktoren) und LogicOp werden im Pixelshader gegen
+ *     eine Kopie des Ziels gerechnet (exakt wie sw_framebuffer.cpp).
+ *   - Stencil 0x105/0x106 ueber D3D11-DepthStencilState (D24S8).
+ *   - Fog 0xE0/0xE1/0xE8..0xEF wie WriteFog im Software-Pfad.
+ * Tiefen-/Stencilziel wird aus dem Gastpuffer geladen und beim Flush
+ * zurueckgeschrieben (D16/D24/D24S8).
+ * Noch nicht enthalten: Fragment-Lighting, W-Buffer, prozedurale Textur,
+ * Cube-/Shadow-/Projection-Texturen. gpu.c nutzt den Hardware-Pfad nur, wenn
+ * der Draw-Zustand dazu passt, sonst bleibt der Software-Pfad aktiv.
  */
 #define COBJMACROS
 #include "hw_d3d11.h"
@@ -54,10 +57,10 @@ static ID3D11BlendState *g_bs;
 static ID3D11Texture2D *g_color_tex;
 static ID3D11RenderTargetView *g_color_rtv;
 static ID3D11Texture2D *g_color_stage;
+static ID3D11Texture2D *g_color_shadow;
+static ID3D11ShaderResourceView *g_color_shadow_srv;
 static ID3D11Texture2D *g_depth_dsv_tex;
 static ID3D11DepthStencilView *g_dsv;
-static ID3D11Texture2D *g_depth_rt;
-static ID3D11RenderTargetView *g_depth_rtv;
 static ID3D11Texture2D *g_depth_stage;
 
 static int g_ready;
@@ -69,6 +72,7 @@ static int g_guest_dirty = 1;
 static unsigned long long g_draws, g_flushes;
 static unsigned long long g_tex_uploads;
 static uint32_t g_dss_key = 0xFFFFFFFFu;
+static uint32_t g_bs_key = 0xFFFFFFFFu;
 
 /* ---- Texturcache ------------------------------------------------------- */
 typedef struct {
@@ -112,10 +116,15 @@ static const char *k_hlsl =
     "  uint4  k_tex1[3];\n"
     "  uint4  k_tex2[3];\n"
     "  uint4  k_uint;\n"
+    "  uint4  k_om;\n"
+    "  uint4  k_blend;\n"
+    "  uint4  k_fog;\n"
+    "  uint4  k_fog_lut[128];\n"
     "};\n"
     "Texture2D tex0 : register(t0);\n"
     "Texture2D tex1 : register(t1);\n"
     "Texture2D tex2 : register(t2);\n"
+    "Texture2D tshadow : register(t3);\n"
     "struct VSIn { float4 pos : POSITION; float4 col : COLOR0;\n"
     "              float2 uv0 : TEXCOORD0; float2 uv1 : TEXCOORD1; float2 uv2 : TEXCOORD2; };\n"
     "struct VSOut { float4 pos : SV_Position; float4 col : COLOR0;\n"
@@ -271,6 +280,51 @@ static const char *k_hlsl =
     "  if (src == 15) return prev;\n"
     "  return uint4(0, 0, 0, 0);\n"
     "}\n"
+    "uint logic_op(uint s, uint d, uint op) {\n"
+    "  if (op == 0u) return 0u;\n"
+    "  if (op == 1u) return s & d;\n"
+    "  if (op == 2u) return s & (~d & 0xFFu);\n"
+    "  if (op == 3u) return s;\n"
+    "  if (op == 4u) return 255u;\n"
+    "  if (op == 5u) return (~s) & 0xFFu;\n"
+    "  if (op == 6u) return d;\n"
+    "  if (op == 7u) return (~d) & 0xFFu;\n"
+    "  if (op == 8u) return (~(s & d)) & 0xFFu;\n"
+    "  if (op == 9u) return (s | d) & 0xFFu;\n"
+    "  if (op == 10u) return (~(s | d)) & 0xFFu;\n"
+    "  if (op == 11u) return (s ^ d) & 0xFFu;\n"
+    "  if (op == 12u) return (~(s ^ d)) & 0xFFu;\n"
+    "  if (op == 13u) return ((~s) & d) & 0xFFu;\n"
+    "  if (op == 14u) return (s | (~d)) & 0xFFu;\n"
+    "  return ((~s) | d) & 0xFFu;\n"
+    "}\n"
+    "uint blend_factor(uint f, uint ch, uint4 src, uint4 dst, uint4 cst) {\n"
+    "  uint cc = (cst >> (8u * ch)) & 0xFFu;\n"
+    "  uint ca = (cst >> 24) & 0xFFu;\n"
+    "  if (f == 0u) return 0u;\n"
+    "  if (f == 1u) return 255u;\n"
+    "  if (f == 2u) return src[ch];\n"
+    "  if (f == 3u) return 255u - src[ch];\n"
+    "  if (f == 4u) return dst[ch];\n"
+    "  if (f == 5u) return 255u - dst[ch];\n"
+    "  if (f == 6u) return src.a;\n"
+    "  if (f == 7u) return 255u - src.a;\n"
+    "  if (f == 8u) return dst.a;\n"
+    "  if (f == 9u) return 255u - dst.a;\n"
+    "  if (f == 10u) return cc;\n"
+    "  if (f == 11u) return 255u - cc;\n"
+    "  if (f == 12u) return ca;\n"
+    "  if (f == 13u) return 255u - ca;\n"
+    "  if (f == 14u) return (ch == 3u) ? 255u : min(src.a, 255u - dst.a);\n"
+    "  return src[ch];\n"
+    "}\n"
+    "int blend_eq(uint eq, int s, int d) {\n"
+    "  if (eq == 1u) return (s - d) / 255;\n"
+    "  if (eq == 2u) return (d - s) / 255;\n"
+    "  if (eq == 3u) return (min(s, d)) / 255;\n"
+    "  if (eq == 4u) return (max(s, d)) / 255;\n"
+    "  return (s + d) / 255;\n"
+    "}\n"
     "PSOut PSMain(VSOut i) {\n"
     "  PSOut o;\n"
     "  uint4 prim = (uint4)round(saturate(i.col) * 255.0);\n"
@@ -330,8 +384,46 @@ static const char *k_hlsl =
     "    uint r = (uint)floor(saturate(k_param2.y) * 255.0 + 0.5);\n"
     "    if (!pica_cmp((uint)k_param2.x, res.a, r)) discard;\n"
     "  }\n"
-    "  float d = (1.0 - 2.0 * i.pos.z) * k_param.x + k_param.y;\n"
+    "  float d = (0.0 - i.pos.z) * k_param.x + k_param.y;\n"
     "  d = saturate(d);\n"
+    "  if (k_fog.x == 5u) {\n"
+    "    float fog_index = ((k_fog.y != 0u) ? (1.0 - d) : d) * 128.0;\n"
+    "    float fi = clamp(floor(fog_index), 0.0, 127.0);\n"
+    "    float ff = fog_index - fi;\n"
+    "    uint e = k_fog_lut[(uint)fi].x;\n"
+    "    int rawdiff = (int)(e & 0x1FFFu);\n"
+    "    if ((rawdiff & 0x1000) != 0) rawdiff -= 0x2000;\n"
+    "    float fact = saturate((float)((e >> 13) & 0x7FFu) / 2047.0 +\n"
+    "                          (float)rawdiff / 2047.0 * ff);\n"
+    "    uint3 fc = uint3(k_fog.z & 0xFFu, (k_fog.z >> 8) & 0xFFu, (k_fog.z >> 16) & 0xFFu);\n"
+    "    res.rgb = (uint3)floor((float3)res.rgb * fact +\n"
+    "                           (1.0 - fact) * (float3)fc);\n"
+    "  }\n"
+    "  if (k_om.x != 0u || k_om.y != 0u) {\n"
+    "    uint4 dst = (uint4)round(tshadow.Load(int3((int2)i.pos.xy, 0)) * 255.0);\n"
+    "    if (k_om.x != 0u) {\n"
+    "      uint srgb = k_blend.z & 15u, drgb = (k_blend.z >> 8) & 15u;\n"
+    "      uint sa = k_blend.w & 15u, da = (k_blend.w >> 8) & 15u;\n"
+    "      uint4 cst = uint4(k_om.z & 0xFFu, (k_om.z >> 8) & 0xFFu,\n"
+    "                        (k_om.z >> 16) & 0xFFu, (k_om.z >> 24) & 0xFFu);\n"
+    "      uint4 outb = res;\n"
+    "      [unroll] for (uint k = 0; k < 4u; k++) {\n"
+    "        uint sf = (k == 3u) ? sa : srgb;\n"
+    "        uint df = (k == 3u) ? da : drgb;\n"
+    "        uint eq = (k == 3u) ? k_blend.y : k_blend.x;\n"
+    "        int sv = (int)res[k] * (int)blend_factor(sf, k, res, dst, cst);\n"
+    "        int dv = (int)dst[k] * (int)blend_factor(df, k, res, dst, cst);\n"
+    "        outb[k] = (uint)clamp(blend_eq(eq, sv, dv), 0, 255);\n"
+    "      }\n"
+    "      res = outb;\n"
+    "    }\n"
+    "    if (k_om.y != 0u) {\n"
+    "      res = uint4(logic_op(res.r, dst.r, k_om.y),\n"
+    "                      logic_op(res.g, dst.g, k_om.y),\n"
+    "                      logic_op(res.b, dst.b, k_om.y),\n"
+    "                      logic_op(res.a, dst.a, k_om.y));\n"
+    "    }\n"
+    "  }\n"
     "  o.col = float4(res.rgb, res.a) / 255.0;\n"
     "  o.dep = float4(d, d, d, 1.0);\n"
     "  o.d = d;\n"
@@ -364,6 +456,82 @@ static uint32_t depth_bpp(uint32_t fmt) {
 }
 
 static uint32_t depth_bits(uint32_t fmt) { return (fmt == 0) ? 16u : 24u; }
+
+static DXGI_FORMAT depth_dxgi(uint32_t fmt) {
+    if (fmt == 3) return DXGI_FORMAT_D24_UNORM_S8_UINT;
+    if (fmt == 0) return DXGI_FORMAT_D16_UNORM;
+    return DXGI_FORMAT_D32_FLOAT;
+}
+
+/* Gast-Tiefen-/Stencilpuffer (PICA-Kachelung) in die Staging-Flaeche des
+ * D3D-Tiefenziels dekodieren (bzw. zurueck). Byteordnung wie p_depth_get/
+ * p_depth_set: D16=2 Byte, D24=3 Byte, D24S8=4 Byte (Stencil im 4. Byte). */
+static void depth_from_guest(const HwDrawState *st, unsigned char *base,
+                             uint32_t pitch, int w, int h) {
+    uint32_t bpp = depth_bpp(st->depth_format);
+    uint32_t maxv = (1u << depth_bits(st->depth_format)) - 1u;
+    int x, y;
+    for (y = 0; y < h; y++) {
+        uint32_t yp = (uint32_t)h - 1u - (uint32_t)y;
+        unsigned char *row = base + (size_t)y * pitch;
+        for (x = 0; x < w; x++) {
+            uint32_t off = p_morton_offset((uint32_t)x, yp, bpp) +
+                           (yp & ~7u) * (uint32_t)w * bpp;
+            uint32_t z = maxv, s = 0;
+            if (st->depth_mem != NULL && (size_t)off + bpp <= st->depth_size) {
+                const unsigned char *p = st->depth_mem + off;
+                z = (uint32_t)p[0] | ((uint32_t)p[1] << 8);
+                if (st->depth_format != 0u)
+                    z |= (uint32_t)p[2] << 16;
+                if (st->depth_format == 3u) s = p[3];
+            }
+            if (st->depth_format == 0u) {
+                ((uint16_t *)row)[x] = (uint16_t)z;
+            } else if (st->depth_format == 3u) {
+                ((uint32_t *)row)[x] = (z & 0xFFFFFFu) | (s << 24);
+            } else {
+                ((float *)row)[x] = (float)z / (float)maxv;
+            }
+        }
+    }
+}
+
+static void depth_to_guest(const HwDrawState *st, const unsigned char *base,
+                           uint32_t pitch, int w, int h) {
+    uint32_t bpp = depth_bpp(st->depth_format);
+    int x, y;
+    if (st->depth_mem == NULL) return;
+    for (y = 0; y < h; y++) {
+        uint32_t yp = (uint32_t)h - 1u - (uint32_t)y;
+        const unsigned char *row = base + (size_t)y * pitch;
+        for (x = 0; x < w; x++) {
+            uint32_t off = p_morton_offset((uint32_t)x, yp, bpp) +
+                           (yp & ~7u) * (uint32_t)w * bpp;
+            uint32_t z, s = 0;
+            if ((size_t)off + bpp > st->depth_size) continue;
+            if (st->depth_format == 0u) {
+                z = ((const uint16_t *)row)[x];
+            } else if (st->depth_format == 3u) {
+                uint32_t v = ((const uint32_t *)row)[x];
+                z = v & 0xFFFFFFu;
+                s = (v >> 24) & 0xFFu;
+            } else {
+                float f = ((const float *)row)[x];
+                if (f < 0.0f) f = 0.0f;
+                if (f > 1.0f) f = 1.0f;
+                z = (uint32_t)(f * 16777215.0f);
+                if (z > 0xFFFFFFu) z = 0xFFFFFFu;
+            }
+            st->depth_mem[off] = (unsigned char)(z & 0xFFu);
+            if (st->depth_format != 0u) {
+                st->depth_mem[off + 1u] = (unsigned char)((z >> 8) & 0xFFu);
+                st->depth_mem[off + 2u] = (unsigned char)((z >> 16) & 0xFFu);
+            }
+            if (st->depth_format == 3u)
+                st->depth_mem[off + 3u] = (unsigned char)(s & 0xFFu);
+        }
+    }
+}
 
 static void color_decode(const unsigned char *m, uint32_t fmt,
                          unsigned char out[4]) {
@@ -440,11 +608,11 @@ static int same_target(const HwDrawState *a, const HwDrawState *b) {
 
 static void release_targets(void) {
     if (g_color_stage) { ID3D11Texture2D_Release(g_color_stage); g_color_stage = NULL; }
+    if (g_color_shadow_srv) { ID3D11ShaderResourceView_Release(g_color_shadow_srv); g_color_shadow_srv = NULL; }
+    if (g_color_shadow) { ID3D11Texture2D_Release(g_color_shadow); g_color_shadow = NULL; }
     if (g_color_rtv) { ID3D11RenderTargetView_Release(g_color_rtv); g_color_rtv = NULL; }
     if (g_color_tex) { ID3D11Texture2D_Release(g_color_tex); g_color_tex = NULL; }
     if (g_depth_stage) { ID3D11Texture2D_Release(g_depth_stage); g_depth_stage = NULL; }
-    if (g_depth_rtv) { ID3D11RenderTargetView_Release(g_depth_rtv); g_depth_rtv = NULL; }
-    if (g_depth_rt) { ID3D11Texture2D_Release(g_depth_rt); g_depth_rt = NULL; }
     if (g_dsv) { ID3D11DepthStencilView_Release(g_dsv); g_dsv = NULL; }
     if (g_depth_dsv_tex) { ID3D11Texture2D_Release(g_depth_dsv_tex); g_depth_dsv_tex = NULL; }
     g_target_w = g_target_h = 0;
@@ -454,10 +622,12 @@ static int create_targets(const HwDrawState *st) {
     D3D11_TEXTURE2D_DESC td;
     D3D11_RENDER_TARGET_VIEW_DESC rd;
     D3D11_DEPTH_STENCIL_VIEW_DESC dd;
+    D3D11_MAPPED_SUBRESOURCE map;
     int w = (int)st->color_width, h = (int)st->color_height;
     unsigned char *stage;
     uint32_t bpp = fmt_bpp(st->color_format);
     int x, y;
+    DXGI_FORMAT dfmt = depth_dxgi(st->depth_format);
 
     release_targets();
     if (w <= 0 || h <= 0 || w > 4096 || h > 4096) return 0;
@@ -477,6 +647,20 @@ static int create_targets(const HwDrawState *st) {
     rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
     if (FAILED(ID3D11Device_CreateRenderTargetView(g_dev, (ID3D11Resource *)g_color_tex,
                                                    &rd, &g_color_rtv))) return 0;
+
+    /* Schattenkopie des Farbziels fuer LogicOp und Shader-Blending. */
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &g_color_shadow))) return 0;
+    {
+        D3D11_SHADER_RESOURCE_VIEW_DESC sv;
+        memset(&sv, 0, sizeof(sv));
+        sv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        sv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        sv.Texture2D.MipLevels = 1;
+        if (FAILED(ID3D11Device_CreateShaderResourceView(
+                g_dev, (ID3D11Resource *)g_color_shadow, &sv, &g_color_shadow_srv)))
+            return 0;
+    }
 
     /* Gastinhalt in eine lineare RGBA8-Flaeche dekodieren (PICA-Kachelung). */
     stage = (unsigned char *)calloc((size_t)w * h * 4u, 1);
@@ -499,35 +683,33 @@ static int create_targets(const HwDrawState *st) {
                                           stage, (UINT)w * 4u, 0);
     free(stage);
 
-    /* Tiefenziel D32_FLOAT (nur Test, nicht Rueckgabepfad) + Schatten-R32. */
+    /* Tiefen-/Stencilziel im Gastformat (D16/D24/D24S8) plus Staging fuer
+       Laden und Rueckschreiben. */
     memset(&td, 0, sizeof(td));
     td.Width = (UINT)w; td.Height = (UINT)h; td.MipLevels = 1; td.ArraySize = 1;
-    td.Format = DXGI_FORMAT_R32_TYPELESS;
+    td.Format = dfmt;
     td.SampleDesc.Count = 1;
     td.Usage = D3D11_USAGE_DEFAULT;
     td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
     if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &g_depth_dsv_tex))) return 0;
     memset(&dd, 0, sizeof(dd));
-    dd.Format = DXGI_FORMAT_D32_FLOAT;
+    dd.Format = dfmt;
     dd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
     if (FAILED(ID3D11Device_CreateDepthStencilView(g_dev, (ID3D11Resource *)g_depth_dsv_tex,
                                                     &dd, &g_dsv))) return 0;
-    ID3D11DeviceContext_ClearDepthStencilView(g_ctx, g_dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
 
-    td.Format = DXGI_FORMAT_R32_FLOAT;
-    td.BindFlags = D3D11_BIND_RENDER_TARGET;
-    if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &g_depth_rt))) return 0;
-    memset(&rd, 0, sizeof(rd));
-    rd.Format = DXGI_FORMAT_R32_FLOAT;
-    rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-    if (FAILED(ID3D11Device_CreateRenderTargetView(g_dev, (ID3D11Resource *)g_depth_rt,
-                                                   &rd, &g_depth_rtv))) return 0;
-    {
-        float fval = 1.0f;
-        ID3D11DeviceContext_ClearRenderTargetView(g_ctx, g_depth_rtv, &fval);
-    }
+    td.Usage = D3D11_USAGE_STAGING;
+    td.BindFlags = 0;
+    td.CPUAccessFlags = D3D11_CPU_ACCESS_READ | D3D11_CPU_ACCESS_WRITE;
+    if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &g_depth_stage))) return 0;
+    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_depth_stage, 0,
+                                       D3D11_MAP_WRITE, 0, &map))) return 0;
+    depth_from_guest(st, (unsigned char *)map.pData, map.RowPitch, w, h);
+    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_depth_stage, 0);
+    ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)g_depth_dsv_tex,
+                                     (ID3D11Resource *)g_depth_stage);
 
-    /* Staging-Texturen fuer den Rueckweg. */
+    /* Staging-Textur fuer den Farb-Rueckweg. */
     memset(&td, 0, sizeof(td));
     td.Width = (UINT)w; td.Height = (UINT)h; td.MipLevels = 1; td.ArraySize = 1;
     td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -535,8 +717,6 @@ static int create_targets(const HwDrawState *st) {
     td.Usage = D3D11_USAGE_STAGING;
     td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &g_color_stage))) return 0;
-    td.Format = DXGI_FORMAT_R32_FLOAT;
-    if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &g_depth_stage))) return 0;
 
     g_target_w = w;
     g_target_h = h;
@@ -607,9 +787,10 @@ static int init_pipeline(void) {
     ID3D10Blob_Release(vsb);
     ID3D10Blob_Release(psb);
 
-    /* TEV-Constant-Buffer: 3 float4 + 5*6 uint4 + 1 + 3*3 + 1 = 176 Woerter. */
+    /* TEV-Constant-Buffer: 176 Woerter + k_om/k_blend/k_fog + Fog-LUT
+       (128 x uint4) = 700 Woerter. */
     memset(&bd, 0, sizeof(bd));
-    bd.ByteWidth = 176u * 4u;
+    bd.ByteWidth = 700u * 4u;
     bd.Usage = D3D11_USAGE_DYNAMIC;
     bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -713,11 +894,32 @@ void hw_shutdown(void) {
 }
 
 /* ---- Constant Buffer ---------------------------------------------------
- * Layout exakt wie cbuffer PicaCB in k_hlsl (176 Woerter / 704 Byte). */
+ * Layout exakt wie cbuffer PicaCB in k_hlsl (700 Woerter / 2800 Byte). */
 typedef union {
-    float f[176];
-    uint32_t u[176];
+    float f[700];
+    uint32_t u[700];
 } CbData;
+
+/* Shader-Blending ist noetig, wenn D3D die PICA-Semantik nicht nativ
+ * abbildet: Min/Max werten die Faktoren nicht aus, und Konstantfarbe +
+ * Konstantalpha in einem Draw brauchen verschiedene Blend-Konstanten. */
+static int pica_shader_blend(const HwDrawState *st) {
+    uint32_t f[4];
+    int has_cc = 0, has_ca = 0, i;
+    if (!st->blend_enable) return 0;
+    if (st->blend_eq_rgb >= 3u || st->blend_eq_a >= 3u) return 1;
+    f[0] = st->blend_src_rgb; f[1] = st->blend_dst_rgb;
+    f[2] = st->blend_src_a; f[3] = st->blend_dst_a;
+    for (i = 0; i < 4; i++) {
+        if ((f[i] & 0xFu) == 10u || (f[i] & 0xFu) == 11u) has_cc = 1;
+        if ((f[i] & 0xFu) == 12u || (f[i] & 0xFu) == 13u) has_ca = 1;
+    }
+    return has_cc && has_ca;
+}
+
+static int pica_logic_active(const HwDrawState *st) {
+    return !st->blend_enable && (st->logic_op & 0xFu) != 3u;
+}
 
 static void set_constants(const HwDrawState *st, const ID3D11ShaderResourceView *srv[3]) {
     D3D11_MAPPED_SUBRESOURCE map;
@@ -752,6 +954,17 @@ static void set_constants(const HwDrawState *st, const ID3D11ShaderResourceView 
         cb.u[148 + i * 4 + 3] = st->tex[i].type;
         cb.u[160 + i * 4 + 0] = g_texslot[i].valid ? 1u : 0u;
     }
+    cb.u[176] = (uint32_t)pica_shader_blend(st);
+    cb.u[177] = pica_logic_active(st) ? (st->logic_op & 0xFu) : 0u;
+    cb.u[178] = st->blend_const;
+    cb.u[180] = st->blend_eq_rgb & 7u;
+    cb.u[181] = st->blend_eq_a & 7u;
+    cb.u[182] = (st->blend_src_rgb & 0xFu) | ((st->blend_dst_rgb & 0xFu) << 8);
+    cb.u[183] = (st->blend_src_a & 0xFu) | ((st->blend_dst_a & 0xFu) << 8);
+    cb.u[184] = (uint32_t)(st->fog_mode & 7);
+    cb.u[185] = (uint32_t)(st->fog_flip ? 1 : 0);
+    cb.u[186] = st->fog_color;
+    for (i = 0; i < 128; i++) cb.u[188 + i * 4] = st->fog_lut[i];
     if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_cb, 0,
                                        D3D11_MAP_WRITE_DISCARD, 0, &map)))
         return;
@@ -895,6 +1108,19 @@ int hw_begin_draw(const HwDrawState *st) {
 
     bind_textures(st);
 
+    /* Schattenkopie fuer LogicOp/Shader-Blending: eine Momentaufnahme des
+       Ziels vor diesem Draw (wie fb.GetPixel in sw_rasterizer.cpp). */
+    {
+        int shadow = pica_shader_blend(st) || pica_logic_active(st);
+        if (shadow) {
+            ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)g_color_shadow,
+                                             (ID3D11Resource *)g_color_tex);
+            ID3D11DeviceContext_PSSetShaderResources(g_ctx, 3, 1, &g_color_shadow_srv);
+        } else {
+            ID3D11DeviceContext_PSSetShaderResources(g_ctx, 3, 1, &g_tex_dummy);
+        }
+    }
+
     if (w <= 0.0f) w = 1.0f;
     if (h <= 0.0f) h = 1.0f;
     memset(&vp, 0, sizeof(vp));
@@ -914,15 +1140,42 @@ int hw_begin_draw(const HwDrawState *st) {
     }
     ID3D11DeviceContext_RSSetScissorRects(g_ctx, 1, &rc);
 
-    dkey = (st->depth_test ? 1u : 0u) | (st->depth_write ? 2u : 0u) |
-           ((st->depth_func & 7u) << 4);
+    dkey = (uint32_t)(st->depth_test | (st->depth_write << 1) |
+                      (st->depth_func << 2));
+    dkey = dkey * 33u + (uint32_t)(st->stencil_enable |
+                                   (st->stencil_func << 1) |
+                                   (st->stencil_input_mask << 4) |
+                                   (st->stencil_write_mask << 12) |
+                                   (st->stencil_fail_op << 20) |
+                                   (st->stencil_zfail_op << 23) |
+                                   (st->stencil_pass_op << 26));
     if (dkey != g_dss_key) {
+        static const D3D11_COMPARISON_FUNC cmpf[8] = {
+            D3D11_COMPARISON_NEVER, D3D11_COMPARISON_ALWAYS,
+            D3D11_COMPARISON_EQUAL, D3D11_COMPARISON_NOT_EQUAL,
+            D3D11_COMPARISON_LESS, D3D11_COMPARISON_LESS_EQUAL,
+            D3D11_COMPARISON_GREATER, D3D11_COMPARISON_GREATER_EQUAL,
+        };
+        static const D3D11_STENCIL_OP stop[8] = {
+            D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_ZERO,
+            D3D11_STENCIL_OP_REPLACE, D3D11_STENCIL_OP_INCR_SAT,
+            D3D11_STENCIL_OP_DECR_SAT, D3D11_STENCIL_OP_INVERT,
+            D3D11_STENCIL_OP_INCR, D3D11_STENCIL_OP_DECR,
+        };
         memset(&ds, 0, sizeof(ds));
-        ds.DepthEnable = st->depth_test ? TRUE : FALSE;
+        ds.DepthEnable = (st->depth_test || st->depth_write) ? TRUE : FALSE;
         ds.DepthWriteMask = st->depth_write ? D3D11_DEPTH_WRITE_MASK_ALL
                                             : D3D11_DEPTH_WRITE_MASK_ZERO;
-        ds.DepthFunc = (D3D11_COMPARISON_FUNC)((int[]){1, 8, 3, 6, 2, 4, 5, 7}[st->depth_func & 7u]);
-        ds.StencilEnable = FALSE;
+        ds.DepthFunc = st->depth_test ? cmpf[st->depth_func & 7u]
+                                      : D3D11_COMPARISON_ALWAYS;
+        ds.StencilEnable = st->stencil_enable ? TRUE : FALSE;
+        ds.StencilReadMask = (UINT8)(st->stencil_input_mask & 0xFFu);
+        ds.StencilWriteMask = (UINT8)(st->stencil_write_mask & 0xFFu);
+        ds.FrontFace.StencilFunc = cmpf[st->stencil_func & 7u];
+        ds.FrontFace.StencilFailOp = stop[st->stencil_fail_op & 7u];
+        ds.FrontFace.StencilDepthFailOp = stop[st->stencil_zfail_op & 7u];
+        ds.FrontFace.StencilPassOp = stop[st->stencil_pass_op & 7u];
+        ds.BackFace = ds.FrontFace;
         if (g_dss) { ID3D11DepthStencilState_Release(g_dss); g_dss = NULL; }
         if (FAILED(ID3D11Device_CreateDepthStencilState(g_dev, &ds, &g_dss))) {
             g_dss_key = 0xFFFFFFFFu;
@@ -931,12 +1184,88 @@ int hw_begin_draw(const HwDrawState *st) {
         g_dss_key = dkey;
     }
 
+    /* Blend-/Schreibmaskenzustand 0x100..0x107/0x113. */
     {
-        ID3D11RenderTargetView *rtv[2] = { g_color_rtv, g_depth_rtv };
-        ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 2, rtv, g_dsv);
+        uint32_t bkey, mask;
+        int shader_blend = pica_shader_blend(st);
+        int ca_only = 0;
+        float bf[4];
+        bkey = (uint32_t)(st->blend_enable | (shader_blend << 1) |
+                          ((st->logic_op & 0xFu) << 2) |
+                          ((st->blend_eq_rgb & 7u) << 6) |
+                          ((st->blend_eq_a & 7u) << 9) |
+                          ((st->blend_src_rgb & 0xFu) << 12) |
+                          ((st->blend_dst_rgb & 0xFu) << 16) |
+                          ((st->blend_src_a & 0xFu) << 20) |
+                          ((st->blend_dst_a & 0xFu) << 24) |
+                          ((st->color_write_mask & 0xFu) << 28));
+        bkey = bkey * 33u + (uint32_t)(st->color_write_enable | (st->blend_const << 1));
+        if (bkey != g_bs_key) {
+            static const D3D11_BLEND blendmap[16] = {
+                D3D11_BLEND_ZERO, D3D11_BLEND_ONE,
+                D3D11_BLEND_SRC_COLOR, D3D11_BLEND_INV_SRC_COLOR,
+                D3D11_BLEND_DEST_COLOR, D3D11_BLEND_INV_DEST_COLOR,
+                D3D11_BLEND_SRC_ALPHA, D3D11_BLEND_INV_SRC_ALPHA,
+                D3D11_BLEND_DEST_ALPHA, D3D11_BLEND_INV_DEST_ALPHA,
+                D3D11_BLEND_BLEND_FACTOR, D3D11_BLEND_INV_BLEND_FACTOR,
+                D3D11_BLEND_BLEND_FACTOR, D3D11_BLEND_INV_BLEND_FACTOR,
+                D3D11_BLEND_SRC_ALPHA_SAT, D3D11_BLEND_ONE,
+            };
+            static const D3D11_BLEND_OP eqmap[5] = {
+                D3D11_BLEND_OP_ADD, D3D11_BLEND_OP_SUBTRACT,
+                D3D11_BLEND_OP_REV_SUBTRACT, D3D11_BLEND_OP_MIN,
+                D3D11_BLEND_OP_MAX,
+            };
+            D3D11_BLEND_DESC bl;
+            memset(&bl, 0, sizeof(bl));
+            bl.AlphaToCoverageEnable = FALSE;
+            bl.IndependentBlendEnable = FALSE;
+            bl.RenderTarget[0].BlendEnable = (st->blend_enable && !shader_blend) ? TRUE : FALSE;
+            bl.RenderTarget[0].SrcBlend = blendmap[st->blend_src_rgb & 0xFu];
+            bl.RenderTarget[0].DestBlend = blendmap[st->blend_dst_rgb & 0xFu];
+            bl.RenderTarget[0].BlendOp = eqmap[st->blend_eq_rgb < 5u ? st->blend_eq_rgb : 0u];
+            bl.RenderTarget[0].SrcBlendAlpha = blendmap[st->blend_src_a & 0xFu];
+            bl.RenderTarget[0].DestBlendAlpha = blendmap[st->blend_dst_a & 0xFu];
+            bl.RenderTarget[0].BlendOpAlpha = eqmap[st->blend_eq_a < 5u ? st->blend_eq_a : 0u];
+            mask = st->color_write_enable ? (st->color_write_mask & 0xFu) : 0u;
+            bl.RenderTarget[0].RenderTargetWriteMask =
+                (UINT8)(((mask & 1u) ? D3D11_COLOR_WRITE_ENABLE_RED : 0) |
+                        ((mask & 2u) ? D3D11_COLOR_WRITE_ENABLE_GREEN : 0) |
+                        ((mask & 4u) ? D3D11_COLOR_WRITE_ENABLE_BLUE : 0) |
+                        ((mask & 8u) ? D3D11_COLOR_WRITE_ENABLE_ALPHA : 0));
+            if (g_bs) { ID3D11BlendState_Release(g_bs); g_bs = NULL; }
+            if (FAILED(ID3D11Device_CreateBlendState(g_dev, &bl, &g_bs))) {
+                g_bs_key = 0xFFFFFFFFu;
+                return 0;
+            }
+            g_bs_key = bkey;
+        }
+        /* PICA-Konstanten: 10/11 = Farbe (r,g,b,a), 12/13 = Alpha. Nur
+           wenn beide Familien vorkommen, uebernimmt der Shader. */
+        {
+            uint32_t f[4];
+            int i, has_ca = 0, has_cc = 0;
+            f[0] = st->blend_src_rgb; f[1] = st->blend_dst_rgb;
+            f[2] = st->blend_src_a; f[3] = st->blend_dst_a;
+            for (i = 0; i < 4; i++) {
+                if ((f[i] & 0xFu) == 12u || (f[i] & 0xFu) == 13u) has_ca = 1;
+                if ((f[i] & 0xFu) == 10u || (f[i] & 0xFu) == 11u) has_cc = 1;
+            }
+            ca_only = has_ca && !has_cc;
+        }
+        for (bkey = 0; bkey < 4u; bkey++) {
+            uint32_t v = ca_only ? ((st->blend_const >> 24) & 0xFFu)
+                                 : ((st->blend_const >> (8u * bkey)) & 0xFFu);
+            bf[bkey] = (float)v / 255.0f;
+        }        ID3D11DeviceContext_OMSetBlendState(g_ctx, g_bs, bf, 0xFFFFFFFFu);
     }
-    ID3D11DeviceContext_OMSetDepthStencilState(g_ctx, g_dss, 0);
-    ID3D11DeviceContext_OMSetBlendState(g_ctx, g_bs, NULL, 0xFFFFFFFFu);
+
+    {
+        ID3D11RenderTargetView *rtv[1] = { g_color_rtv };
+        ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, rtv, g_dsv);
+    }
+    ID3D11DeviceContext_OMSetDepthStencilState(g_ctx, g_dss,
+                                               (UINT)(st->stencil_ref & 0xFFu));
     ID3D11DeviceContext_RSSetState(g_ctx, g_rs);
     ID3D11DeviceContext_IASetInputLayout(g_ctx, g_layout);
     ID3D11DeviceContext_VSSetShader(g_ctx, g_vs, NULL, 0);
@@ -975,7 +1304,7 @@ int hw_triangles(const HwVertex *v, int n) {
 int hw_flush_to_guest(void) {
     D3D11_MAPPED_SUBRESOURCE cm, dm;
     unsigned char *cbase, *dbase;
-    uint32_t cbpp, dbpp, i, h, w;
+    uint32_t cbpp, i, h, w;
     int x, y;
 
     (void)i;
@@ -983,7 +1312,6 @@ int hw_flush_to_guest(void) {
     w = (uint32_t)g_target_w;
     h = (uint32_t)g_target_h;
     cbpp = fmt_bpp(g_state.color_format);
-    dbpp = depth_bpp(g_state.depth_format);
 
     ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)g_color_stage,
                                      (ID3D11Resource *)g_color_tex);
@@ -1011,32 +1339,14 @@ int hw_flush_to_guest(void) {
     }
 
     ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)g_depth_stage,
-                                     (ID3D11Resource *)g_depth_rt);
+                                     (ID3D11Resource *)g_depth_dsv_tex);
     if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_depth_stage, 0,
                                        D3D11_MAP_READ, 0, &dm))) {
         ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_color_stage, 0);
         return 0;
     }
     dbase = (unsigned char *)dm.pData;
-    if (g_state.depth_mem != NULL) {
-        uint32_t maxv = (1u << depth_bits(g_state.depth_format)) - 1u;
-        for (y = 0; y < (int)h; y++) {
-            uint32_t yp = h - 1u - (uint32_t)y;
-            const float *row = (const float *)(dbase + (size_t)y * dm.RowPitch);
-            for (x = 0; x < (int)w; x++) {
-                uint32_t off = p_morton_offset((uint32_t)x, yp, dbpp) +
-                               (yp & ~7u) * w * dbpp;
-                uint32_t z = (uint32_t)(row[x] * (float)maxv);
-                if (z > maxv) z = maxv;
-                if ((size_t)off + dbpp > g_state.depth_size) continue;
-                g_state.depth_mem[off] = (unsigned char)(z & 0xFFu);
-                if (g_state.depth_format != 0u) {
-                    g_state.depth_mem[off + 1] = (unsigned char)((z >> 8) & 0xFFu);
-                    g_state.depth_mem[off + 2] = (unsigned char)((z >> 16) & 0xFFu);
-                }
-            }
-        }
-    }
+    depth_to_guest(&g_state, dbase, dm.RowPitch, (int)w, (int)h);
     ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_depth_stage, 0);
     ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_color_stage, 0);
     g_flushes++;
