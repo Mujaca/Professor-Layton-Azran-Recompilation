@@ -146,3 +146,4 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | 2026-11-24 | cosim-sweep | 10/10 | None | 0 |
 | 2026-11-24 | m4-szenenwechsel | 10/10 | None | 0 |
 | 2026-11-24 | m5-bildqualitaet | 10/10 | None | 0 |
+| 2026-11-25 | m10-dsp-abgleich | 10/10 | None | 0 |

@@ -164,6 +164,71 @@ int main(void) {
     /* Erste dekodierte Probe (Adresse maskiert): Sample 0 = 0, Sample 1 = 1. */
     check(st[ST_DIRTY] == 0, "embedded_buffer_not_from_queue");
 
+    /* --- Loopender PCM16: Spiel aktualisiert den Rest live --------------
+     * Azahar 5a1c580d6 (Source::GenerateFrame): bei loopendem PCM16 wird der
+     * noch nicht verbrauchte Rest jeden Frame neu aus dem Gast-Speicher
+     * dekodiert. Ohne diese Aktualisierung spielte der DSP die alten Bytes
+     * weiter (hier 1160 statt der vom Spiel geschriebenen 3000). */
+    buf[0] = 0;                       /* Initialize: RAM null, Quellen reset */
+    audio_dsp_pipe_write(buf, 4);
+    set_counter(0, 20);
+    set_counter(1, 19);               /* read = Region 0, write = Region 1 */
+
+    /* Master-Volume 1.0, Ausgabe Stereo (sonst bleibt der Endmix 0). */
+    {
+        unsigned char *dcfg = region(0) + 0x2860u;
+        union { float f; uint32_t u; } mv;
+        mv.f = 1.0f;
+        wr32(dcfg + 4u, mv.u);
+        wr16(dcfg + 22u, 1);             /* OutputFormat::Stereo */
+        wr32(dcfg + 0u, (1u << 16) | (1u << 26));
+    }
+
+    /* 500 Stereo-Frames, L = 1000+i, R = 2000+i. */
+    for (int i = 0; i < 500; i++) {
+        wr16(g_mem + 0x14000000u + (unsigned)i * 4 + 0, (unsigned)(1000 + i));
+        wr16(g_mem + 0x14000000u + (unsigned)i * 4 + 2, (unsigned)(2000 + i));
+    }
+    cfg = region(0) + SM_SOURCE_CONFIG;
+    memset(cfg, 0, 192);
+    wr32(cfg + CFG_DIRTY, (1u << 30) | (1u << 16) | (1u << 25));
+    wr16(cfg + CFG_ENABLE, 1);
+    wr16(cfg + CFG_EMB_FLAGS1, 2u | (1u << 2));  /* Stereo, PCM16 */
+    wr_dsp32(cfg + CFG_EMB_PHYS, 0x20000000u);
+    wr_dsp32(cfg + CFG_EMB_LEN, 500u);
+    wr16(cfg + CFG_EMB_FLAGS2, 2u);              /* is_looping */
+    {
+        union { float f; uint32_t u; } g;
+        g.f = 1.0f;
+        wr32(cfg + 4u, g.u);                     /* gain0 links */
+        wr32(cfg + 8u, g.u);                     /* gain0 rechts */
+    }
+    audio_dsp_tick();   /* Frame 1: Dequeue, gibt noch keine Samples aus */
+    audio_dsp_tick();   /* Frame 2: 159 Samples verbraucht */
+    st = region(1) + SM_SOURCE_STATUS;
+    /* u32_dsp 159 = 00 00 9F 00. */
+    check(st[ST_POS] == 0x00 && st[ST_POS + 1] == 0x00 && st[ST_POS + 2] == 0x9F &&
+              st[ST_POS + 3] == 0x00,
+          "loop_refresh_vorlauf");
+    /* Das "Spiel" ueberschreibt den Rest ab Sample 160. */
+    for (int i = 160; i < 500; i++) {
+        wr16(g_mem + 0x14000000u + (unsigned)i * 4 + 0, 3000);
+        wr16(g_mem + 0x14000000u + (unsigned)i * 4 + 2, 6000);
+    }
+    audio_dsp_tick();   /* Frame 3: Rest neu dekodiert */
+    {
+        const unsigned char *fs = region(1) + SM_FINAL_SAMPLES;
+        int l0 = (int16_t)(unsigned)(fs[0] | (fs[1] << 8));
+        int r0 = (int16_t)(unsigned)(fs[2] | (fs[3] << 8));
+        int l2 = (int16_t)(unsigned)(fs[8] | (fs[9] << 8));
+        int r2 = (int16_t)(unsigned)(fs[10] | (fs[11] << 8));
+        /* Ausgabe 0/1 sind die zwei letzten alten Samples (Interpolations-
+         * vorlauf), Ausgabe 2 ist Sample 160 aus dem neuen Rest. */
+        check(l0 != l2, "loop_refresh_altes_sample");
+        check(l2 == 3000 && r2 == 6000, "loop_refresh_neue_samples");
+        check(r0 != r2, "loop_refresh_kanal_rechts");
+    }
+
     /* --- Sleep: FinishPendingSleep im naechsten Frame, Reply +2 ----- */
     g_int_zero = 0;
     buf[0] = 3;
