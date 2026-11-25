@@ -1991,3 +1991,17 @@ danach aber vor dem Film haengen**: in 2400 Host-Frames kein einziges
 nicht uebernommen. Der naechste Schritt ist der Deadlock, den die nun
 vollstaendige Decoder-Schleife sichtbar macht (Thread-/Lock-Pfad um
 `0x001449A4`/`0x0040xxxx`).
+
+**Behoben 2026-11-25 (abends).** Es war kein Deadlock, sondern ein zweiter
+Emitter-Fehler: Nach dem Aufruf liess `goto_cont(fortsetzung, nxt=pc+4)`
+den Sprung zur Fortsetzung weg, wenn sie direkt hinter dem `bx` liegt, in
+der Annahme, der naechste ausgegebene Block beginne dort. Derselbe Code
+steht aber auch in `fn_0016A500`, wo die Bloecke anders angeordnet sind:
+dort fiel die Ausfuehrung nach dem Aufruf in den Kopf der aeusseren Schleife
+(`0x16BD68`) statt nach `0x16BD8C` -> Bitstrom versetzt -> endlose
+VLC-Schleife `0x16E4A8/0x16E4B4`. Jetzt springen alle Pseudo-Aufrufe
+(`b` und `bx`) immer explizit zur Fortsetzung. Belege: `tools/cosim.py run`
+ab `0x0016A500` identisch mit Unicorn (7997 Bloecke, Endzustand gleich);
+Logo-Frame gegen FFmpeg-Referenz mittlere Abweichung 0,91 (max 3), Mittel
+212,4/Saettigung 0,3 statt 150/13; Selbsttest `berechneter_aufruf_bx_reg`
+scheitert ohne den Fix.

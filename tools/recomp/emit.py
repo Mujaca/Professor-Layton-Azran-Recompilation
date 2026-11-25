@@ -657,8 +657,7 @@ class Emitter:
                 # raeumt ggf. einen vom Aufrufer selbst gebauten Stack-Frame mit
                 # ab, der SP nach der Rueckkehr ist daher bewusst ein anderer.
                 return (["fn_%08X(c);" % u32(tgt), "if (c->aborted) return;"]
-                        + self.goto_cont(self.pseudo_calls[pc],
-                                         nxt=pc + ins.size))
+                        + self.goto_cont(self.pseudo_calls[pc]))
             if self.block_labels is not None and tgt not in self.block_labels:
                 # Ziel ausserhalb der Funktion (Tail-Call): als Gastaufruf
                 # ausfuehren; das Ziel kehrt ueber LR zum Aufrufer zurueck.
@@ -694,6 +693,18 @@ class Emitter:
             reg = isa.reg_num(ops[0])
             if reg is None:
                 raise Unsupported(ins.op_str)
+            if ins.id == A.ARM_INS_BX and reg != 14 and pc in self.pseudo_calls:
+                # Berechneter Aufruf `add lr, pc, #k; bx rN` (scan.pseudo_call_info):
+                # Ziel als echten Aufruf ausfuehren und danach an der
+                # LR-Fortsetzung weitermachen, statt diese C-Funktion zu
+                # verlassen (sonst endete z. B. die Mobiclip-Schleife nach
+                # dem ersten Durchlauf).
+                return (["arm_call_guest(c, c->r[%d]);" % reg,
+                         "if (c->aborted) return;"]
+                        # immer explizit springen: der naechste ausgegebene
+                        # Block ist nicht zwingend pc+4 (Bloecke koennen in
+                        # einer anderen Funktion anders angeordnet sein).
+                        + self.goto_cont(self.pseudo_calls[pc]))
             if ins.id == A.ARM_INS_BX and reg != 14 and pc in self.ret_bx:
                 # Rueckkehr-Idiom: Ziel wurde aus dem Stack geladen (pop/ldm).
                 # Das ist eine Rueckkehr in den C-Aufrufer; ein Dispatch ueber

@@ -326,7 +326,17 @@ def pseudo_call_info(blk, thumb):
             if ins.cc == A.ARM_CC_AL:
                 lr = None
             continue
-        if (lr is not None and op0_is_pc(ins)
+        if lr is not None and ins.id == A.ARM_INS_BX:
+            # `add lr, pc, #k; bx rN` (Mobiclip 0x16BD84/0x165784/0x15F184):
+            # berechneter Aufruf, das Ziel kehrt per LR hinter den Sprung zurueck.
+            try:
+                reg = isa.reg_num(isa.split_operands(ins.op_str)[0])
+            except Exception:
+                reg = None
+            nxt = ins.address + ins.size
+            if reg is not None and reg != 14 and nxt <= (lr & ~1) <= nxt + 0x100:
+                out[ins.address] = lr & ~1
+        elif (lr is not None and op0_is_pc(ins)
                 and ins.id in (A.ARM_INS_ADD, A.ARM_INS_SUB, A.ARM_INS_LDR, A.ARM_INS_MOV)):
             src = None
             try:

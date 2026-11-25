@@ -157,6 +157,32 @@ CASES = [
         "expect": {"r0": 13, "r13": 0x8000},
     },
     {
+        # Berechneter Aufruf ueber bx (Mobiclip 0x16BD84: `add lr, pc, #0;
+        # bx r4`): das Ziel kehrt per LR zurueck, danach geht es hinter dem
+        # bx weiter (frueher verliess die C-Funktion nach dem ersten Aufruf).
+        "name": "berechneter_aufruf_bx_reg",
+        "asm": """
+            push {lr}
+            mov r0, #1
+            cmp r0, r0
+            blne 0x100100
+            mov r4, #0x100000
+            orr r4, r4, #0x100
+            add lr, pc, #0
+            bx r4
+            add r0, r0, #10
+            pop {pc}
+        """,
+        "extra": {
+            0x100100: """
+                add r0, r0, #2
+                bx lr
+            """,
+        },
+        "regs": {},
+        "expect": {"r0": 13, "r13": 0x8000},
+    },
+    {
         # Bedingter Pseudo-Aufruf (Mobiclip 0x16BE84: `add lr, pc, #0xc;
         # bne 0x16C308`): das Ziel kehrt zur LR-Fortsetzung hinter dem Sprung
         # zurueck, die dazwischenliegende Instruktion wird uebersprungen.
