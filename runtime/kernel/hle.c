@@ -3203,6 +3203,9 @@ static void gx_exec(const GxOp *op) {
                     (uint64_t)s0 + sz <= c->mem_size &&
                     (uint64_t)s1 + sz <= c->mem_size) {
                     memmove(c->mem + s1, c->mem + s0, sz);
+                    /* DMA schreibt Gastbytes: Texturen im Zielbereich muessen
+                       beim naechsten Draw neu geprueft werden. */
+                    gpu_pica_invalidate_tex_range(s1, sz);
                     printf("[gspq] RequestDma %08X -> %08X (%u)\n", w[1], w[2], sz);
                 } else {
                     printf("[gspq] RequestDma ungueltig %08X -> %08X (%u)\n", w[1], w[2], sz);
@@ -3847,6 +3850,8 @@ static void y2r_command(Ipc *r, uint32_t *p) {
                        auf dem alten D3D-Stand). */
                     gpu_cs_enter();   /* nicht parallel zu einer laufenden Liste */
                     gpu_pica_invalidate_guest();
+                    gpu_pica_invalidate_tex_range(g_y2r.dst.address & 0x1FFFFFFFu,
+                                                  g_y2r.dst.image_size);
                     gpu_cs_leave();
                 }
             }
@@ -4368,13 +4373,16 @@ void hle_report(void) {
         unsigned long long wall_ms = (host_us() - g_boot_ns / 1000ull) / 1000ull;
         unsigned long long frag = 0, tex = 0, lit = 0, fb = 0;
         unsigned long long pc = 0, sc = 0, pr = 0, sr = 0;
+        unsigned long long up = 0, udec = 0;
         gpu_pica_work_stats(&frag, &tex, &lit, &fb);
         gpu_pica_par_stats(&pc, &sc, &pr, &sr);
+        gpu_pica_texture_stats(&up, &udec);
         printf("[gtime] lists=%llu raster_ms=%llu wall_ms=%llu (%.1f%%) "
-               "frag=%llu tex=%llu lit=%llu fb=%llu par=%llu/%llu ser=%llu/%llu\n",
+               "frag=%llu tex=%llu lit=%llu fb=%llu par=%llu/%llu ser=%llu/%llu "
+               "texup=%llu texdec_ms=%llu\n",
                g_gtime_lists, g_gtime_us / 1000ull, wall_ms,
                wall_ms ? 100.0 * (double)g_gtime_us / 1000.0 / (double)wall_ms : 0.0,
-               frag, tex, lit, fb, pc, pr, sc, sr);
+               frag, tex, lit, fb, pc, pr, sc, sr, up, udec / 1000ull);
     }
     if (g_log) printf("[audio] frames=%llu host_dropped=%u underruns=%u\n", audio_dsp_frames(),
                       host_audio_dropped(), host_audio_underruns());
