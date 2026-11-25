@@ -37,10 +37,11 @@ Rückfallebene erhalten.
 
 * Texturen der Einheiten 0–2 (`Texture2D` und `Disabled`) in allen 14
   PICA-Formaten. Die Dekodierung nutzt exakt den Software-Dekoder
-  (`gpu_pica_decode_texel`, inkl. ETC1/ETC1A4); der Upload-Cache ist je
-  (Adresse, Format, Größe) geschlüsselt und prüft bei jeder neuen
-  Kommandoliste sowie nach MemoryFill/DisplayTransfer/TextureCopy einen
-  FNV-1a-Hash der Quellbytes (`gpu_pica_tex_generation`).
+  (`gpu_pica_decode_texel`, inkl. ETC1/ETC1A4); der Upload-Cache haelt bis
+  zu 32 Texturen (LRU, 64 MiB) je (Adresse, Format, Größe) und
+  prüft den Inhalt per FNV-1a einmal pro Kommandoliste je Textur sowie nach
+  GX-Schreiboperationen in den Bereich (`gpu_pica_tex_generation`,
+  `hw_invalidate_texture_range`).
 * Wrap-Modi 0–7 inklusive Border-Farbe und Nearest/Linear (PICA mag/min-Bits;
   der Software-Pfad liest weiterhin nur den Nachbartexel, deshalb sind
   Linear-Szenen nicht pixelgleich).
@@ -58,3 +59,42 @@ W-Buffer, Stencil, prozedurale Textur, Cube-/Shadow-/Projection-Texturen und
 Mipmaps. Solange diese Zustände aktiv sind, zeichnet weiterhin der
 Software-Rasterizer (`p_hw_supported` in `runtime/gpu/gpu.c`).
 
+
+## Scheduler nach Azahar-Vorbild (Entwurf 2026-11-25, für M12/M18)
+
+**Befund.** Alle Gast-Threads sind Host-Threads unter einer globalen
+`CRITICAL_SECTION`. Fairness entsteht nur über `Sleep(1)` beim
+Wiedereintritt (`guest_lock_reacquire`), Prioritäten wirken nur teilweise
+(`kwait`). Am Titel sind ~95 % der Thread-Zeit Warten; der Software-Gastcode
+selbst ist kaum sichtbar. Jede lokale Änderung am Timing (Sleep(0),
+Übergabe per Zähler, Pump-Intervall, präziser SleepThread, GPU-Worker,
+SysCore ohne Sperre) war in A/B-Messungen schlechter oder neutral
+(Zahlen in `docs/GAME_NOTES.md`). Das Spiel ist an VBlanks gekoppelt:
+HW-Renderer 20 sichtbare fps (3 VBlanks/Frame), Ziel 30 (2 VBlanks).
+
+**Idee.** Die Sperre durch einen expliziten Staffelstab je 3DS-Kern ersetzen,
+wie Azahars `ThreadManager`:
+
+* Jeder Gast-Thread behält seinen Host-Thread (Stacks des rekompilierten
+  Codes), wartet aber auf ein **eigenes** Ereignis.
+* Ein Scheduler wählt an definierten Punkten (SVC-Rückkehr, Warten,
+  Schlafen, Zeitscheibe in `hle_pump`) den **höchstpriorisierten bereiten**
+  Thread des Kerns und übergibt direkt (Ereignis setzen, selbst warten) – keine
+  Rennen um eine Sperre, kein `Sleep(1)`, Übergabe in Mikrosekunden.
+* Bereitschaft explizit: Objekt signalisiert (`kwait`), Schlaf-Deadline
+  erreicht (Deadline-Tabelle), Arbiter geweckt. Externe Quellen (VBlank,
+  DSP, GPU-Interrupts, Timer) markieren Threads bereit und wecken einen
+  untätigen Kern.
+* Kern 0 und Kern 1 (SysCore) bekommen je einen Stab; Kernel-Zustand bleibt
+  unter einer kurzen Kernel-Sperre, `ldrex/strex` per CAS (ein Prototyp
+  „SysCore ohne Sperre + CAS-Monitor“ lief am 2026-11-25 stabil, brachte ohne
+  Scheduler aber keinen Gewinn und wurde nicht übernommen).
+
+**Nutzen.** Prioritäten wie auf Hardware (Render-/Sound-Thread kommen sofort
+dran), keine verlorenen Millisekunden, und mit fester Zeitscheibe nahezu
+deterministische Abläufe (Grundlage für M18).
+
+**Aufwand und Risiko.** Groß: `hs_wait`, Arbiter, `SleepThread`, Yield,
+Thread-Start/-Ende, DSP-/GPU-/VBlank-Anbindung. Vorgehen in Stufen auf einem
+Branch, jede Stufe per A/B (Gast-Frames, Musiklücken, Titel/Namenseingabe)
+gegen master; erst mergen, wenn besser und stabil.

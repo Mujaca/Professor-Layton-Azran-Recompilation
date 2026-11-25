@@ -111,7 +111,8 @@ out/port.exe [romfs] [--frames N] [--shot datei.bmp] [--shot-every N] [--shot-fr
   WAV (32728 Hz Stereo); `HLE_LOG` meldet am Ende `host_dropped`/`underruns`.
 * `HLE_HW_STATE=1` meldet im Hardware-Pfad jede neue Kombination der
   Output-Merger-/Stencil-/Fog-Register einmal als `[hwstate]` (reines Lesen,
-  keine Zustandsaenderung).
+  keine Zustandsaenderung) sowie alle 5 s `[texcache]` mit Textur-Uploads/s
+  und Dekodierzeit.
 * `--press` haelt eine logische Taste (`a`, `b`, `x`, `y`, `start`,
   `select`, `touch`) fuer `dauer` Host-Frames ab `frame` gedrueckt
   (Standard 10). `touch` nimmt zusaetzlich Koordinaten auf dem unteren

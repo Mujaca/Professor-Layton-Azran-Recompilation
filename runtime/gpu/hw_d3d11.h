@@ -114,7 +114,9 @@ typedef struct {
     /* Texturzustand; guest_mem != NULL ist Voraussetzung fuer Texturen. */
     unsigned char *guest_mem;
     uint32_t guest_size;
-    uint32_t tex_generation;    /* gpu_pica_tex_generation() */
+    /* Feld bleibt aus Kompatibilitaet; hw_begin_draw liest die Generation
+     * selbst NACH dem Flush eines Zielwechsels (Render-to-Texture). */
+    uint32_t tex_generation;
     HwTexture tex[3];
 } HwDrawState;
 
@@ -126,6 +128,13 @@ int hw_available(void);
 /* Zustand uebernehmen; bei geaendertem Ziel wird vorher geflusht und der
  * Gastinhalt neu geladen. Rueckgabe 0 bei Fehler. */
 int hw_begin_draw(const HwDrawState *state);
+
+/* Zu Beginn jeder GX-Kommandoliste aufrufen: prueft per memcmp gegen eine
+ * Schattenkopie, ob die Gast-CPU Farb-/Tiefenziel zwischen den Listen
+ * geaendert hat. Nur dann wird das Ziel verworfen und beim naechsten Draw
+ * neu aus dem Gast geladen (sonst wuerde der Flush die CPU-Bytes mit dem
+ * alten D3D-Stand ueberschreiben). */
+void hw_list_begin(void);
 
 /* n Dreiecke (n Vielfaches von 3). Rueckgabe 0 bei Fehler. */
 int hw_triangles(const HwVertex *v, int n);
@@ -147,11 +156,21 @@ void hw_invalidate_guest(void);
 /* Signalisieren, dass sich Gast-Texturbytes geaendert haben. */
 void hw_invalidate_textures(void);
 
+/* Nur Texturen, die den Gastbereich [offset, offset+bytes) ueberlappen,
+ * beim naechsten Draw neu pruefen (GX-Schreiboperationen). */
+void hw_invalidate_texture_range(uint32_t offset, uint32_t bytes);
+
 /* Diagnose: benutzter Treiber ("hardware"/"warp"), Draws, Flushes,
  * Textur-Uploads. */
 const char *hw_driver_name(void);
 void hw_stats(unsigned long long *draws, unsigned long long *flushes);
+/* hw_list_begin: gehaltene (Gast unveraendert) / neu geladene Ziele. */
+void hw_target_sync_stats(unsigned long long *kept, unsigned long long *reloads);
 unsigned long long hw_texture_uploads(void);
+/* Diagnose: Uploads und Wandzeit der Dekodierung (HLE_GTIME/HLE_HW_STATE). */
+void hw_texture_stats(unsigned long long *uploads, unsigned long long *decode_us);
 unsigned long long hw_depth_writes(void);
+/* Volle Gast->D3D-Ladungen des Ziels (Diagnose fuer HW/SW-Wechsel). */
+unsigned long long hw_target_loads(void);
 
 #endif

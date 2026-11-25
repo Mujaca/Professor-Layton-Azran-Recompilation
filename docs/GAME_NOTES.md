@@ -211,6 +211,11 @@ Struktur je Draw statt Registerlesen je Pixel.
   GPU-Arbeit (`gx_run_inline` in `runtime/kernel/hle.c`).
 * Audiopuffer liegen im Linear-Heap (FCRAM phys 0x20000000+x = virtuell
   0x14000000+x).
+* **Musikaussetzer behoben (2026-11-25 nachmittags):** Ursache waren
+  gebuendelt zugestellte DSP-Pipe-Interrupts (der DSP-Thread stellte nur per
+  TryEnter zu; bei belegter Gast-Sperre kamen ~4 Frames als ein Interrupt,
+  15..23 ms spaet, `HLE_WSTAT`). Seit der blockierenden Zustellung je Frame:
+  Luecken 0/0/1 statt 10/8/12 je ~40 s Titelmusik (A/B je 3 Laeufe).
 * Musik-Stream: je Kanal ein Ring aus 5 ADPCM-Puffern a 8 KB (14336 Samples,
   0,438 s) an festen Adressen um 0x2031xxxx; ein Umlauf dauert 2,19 s. Die
   verbleibenden Null-Luecken der Titelmusik (master 08b773d: 6..13 Luecken je
@@ -228,3 +233,11 @@ Struktur je Draw statt Registerlesen je Pixel.
   Sleep(0) statt Sleep(1) beim Wiedereintritt, Sperr-Uebergabe per Zaehler,
   Abgabe in hle_pump nur bei bereitem hoeher-prioren Thread, 16x groesseres
   hle_pump-Intervall.
+* A/B-Messungen am 2026-11-25 nachmittags (HW-Renderer, Gast-Frames bei
+  Host-Frame 1200, je 3 Laeufe, master ~790): SysCore-Thread ohne Sperre +
+  CAS-Monitor ~705 (kein Gewinn), asynchroner GX-Worker ~684, praeziser
+  SleepThread 0 (Boot-Haenger) bzw. 303. Sichtbare fps: SW 10, HW 20 (Spiel
+  an VBlanks gekoppelt). SleepThread-Nutzer (60 s): tid 0 1702x 1 ms
+  (lr 0x10208C), tid 8 4708x 1 ms, tid 9 8813x 1 ms, tid 10-12 je ~3000x 7 ms.
+  Entwurf fuer den naechsten Schritt: docs/IDEAS.md "Scheduler nach
+  Azahar-Vorbild".

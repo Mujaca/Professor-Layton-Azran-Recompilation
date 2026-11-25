@@ -125,6 +125,8 @@ static uint64_t host_us(void);
  * Zeit, in der der Gast-Lock zwischen zwei Gast-Abschnitten frei lag.
  * Reine Zaehler, kein Gastzustand. */
 static int g_ystat = 0;
+/* Diagnose (HLE_WSTAT): DSP-Zustell- und Aufwachverzoegerungen > 10 ms. */
+static int g_wstat = 0;
 /* Diagnose (HLE_GTIME): Wandzeit der PICA-Kommandolisten-Ausfuehrung
  * (Software-Rasterizer) gegen die Gesamtlaufzeit. Reine Zaehler. */
 static int g_gtime = 0;
@@ -470,6 +472,7 @@ typedef struct {
     int max_count;           /* Semaphore: Maximum */
     int reset_type;          /* Event/Timer: 0 OneShot, 1 Sticky, 2 Pulse */
     uint64_t timer_due;      /* Timer: faellig (Host-ns) */
+    uint64_t sig_us;         /* Diagnose HLE_WSTAT: Zeitpunkt der DSP-Signalisierung */
     uint64_t timer_interval; /* Timer: Wiederholung (Host-ns), 0 = einmalig */
     int timer_active;        /* Timer: laeuft */
     char name[12];
@@ -1011,6 +1014,14 @@ static int hs_wait(ArmCpu *c, Handle **objs, int cnt, int wait_all,
                 if (!hs_should_wait(objs[k], tid)) { hit = k; break; }
             }
             if (hit >= 0 && kwait_self_wins(tid, slots, n)) {
+                if (g_wstat && objs[hit]->sig_us != 0) {
+                    uint64_t lat = host_us() - objs[hit]->sig_us;
+                    objs[hit]->sig_us = 0;
+                    if (lat > 10000)
+                        printf("[wstat] t=%llu tid=%u proc=%d aufwachen %llu ms nach DSP-Signal\n",
+                               (unsigned long long)((host_ns() - g_boot_ns) / 1000000ull),
+                               tid, proc_of_tid(tid), (unsigned long long)(lat / 1000));
+                }
                 hs_acquire(objs[hit], tid);
                 kwait_unregister(wslot);
                 /* Azahar: sofortiger Treffer meldet den ersten Index
@@ -2750,7 +2761,16 @@ static void dsp_signal_events(int type, int pipe) {
     {
         uint32_t ev = g_dsp_events[type][pipe];
         Handle *hh = get_handle(ev);
-        if (hh != NULL) hh->signaled = 1;
+        if (hh != NULL) {
+            hh->signaled = 1;
+            if (g_wstat) {
+                long long fd = audio_dsp_last_flush_delay_us();
+                hh->sig_us = host_us();
+                if (fd > 10000)
+                    printf("[wstat] t=%llu dsp-zustellung %lld ms spaet\n",
+                           (unsigned long long)((host_ns() - g_boot_ns) / 1000000ull), fd / 1000);
+            }
+        }
     }
 }
 
@@ -3183,6 +3203,9 @@ static void gx_exec(const GxOp *op) {
                     (uint64_t)s0 + sz <= c->mem_size &&
                     (uint64_t)s1 + sz <= c->mem_size) {
                     memmove(c->mem + s1, c->mem + s0, sz);
+                    /* DMA schreibt Gastbytes: Texturen im Zielbereich muessen
+                       beim naechsten Draw neu geprueft werden. */
+                    gpu_pica_invalidate_tex_range(s1, sz);
                     printf("[gspq] RequestDma %08X -> %08X (%u)\n", w[1], w[2], sz);
                 } else {
                     printf("[gspq] RequestDma ungueltig %08X -> %08X (%u)\n", w[1], w[2], sz);
@@ -3956,6 +3979,8 @@ static void y2r_command(Ipc *r, uint32_t *p) {
                        auf dem alten D3D-Stand). */
                     gpu_cs_enter();   /* nicht parallel zu einer laufenden Liste */
                     gpu_pica_invalidate_guest();
+                    gpu_pica_invalidate_tex_range(g_y2r.dst.address & 0x1FFFFFFFu,
+                                                  g_y2r.dst.image_size);
                     gpu_cs_leave();
                 }
             }
@@ -4393,6 +4418,7 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     snprintf(g_romfs, sizeof(g_romfs), "%s", romfs_dir ? romfs_dir : "out/romfs");
     g_log = getenv("HLE_LOG") != NULL;
     g_ystat = getenv("HLE_YSTAT") != NULL;
+    g_wstat = getenv("HLE_WSTAT") != NULL;
     g_gtime = getenv("HLE_GTIME") != NULL;
     {
         const char *dd = getenv("HLE_Y2R_DUMP");
@@ -4483,13 +4509,16 @@ void hle_report(void) {
         unsigned long long wall_ms = (host_us() - g_boot_ns / 1000ull) / 1000ull;
         unsigned long long frag = 0, tex = 0, lit = 0, fb = 0;
         unsigned long long pc = 0, sc = 0, pr = 0, sr = 0;
+        unsigned long long up = 0, udec = 0;
         gpu_pica_work_stats(&frag, &tex, &lit, &fb);
         gpu_pica_par_stats(&pc, &sc, &pr, &sr);
+        gpu_pica_texture_stats(&up, &udec);
         printf("[gtime] lists=%llu raster_ms=%llu wall_ms=%llu (%.1f%%) "
-               "frag=%llu tex=%llu lit=%llu fb=%llu par=%llu/%llu ser=%llu/%llu\n",
+               "frag=%llu tex=%llu lit=%llu fb=%llu par=%llu/%llu ser=%llu/%llu "
+               "texup=%llu texdec_ms=%llu\n",
                g_gtime_lists, g_gtime_us / 1000ull, wall_ms,
                wall_ms ? 100.0 * (double)g_gtime_us / 1000.0 / (double)wall_ms : 0.0,
-               frag, tex, lit, fb, pc, pr, sc, sr);
+               frag, tex, lit, fb, pc, pr, sc, sr, up, udec / 1000ull);
     }
     if (g_log) printf("[audio] frames=%llu host_dropped=%u underruns=%u\n", audio_dsp_frames(),
                       host_audio_dropped(), host_audio_underruns());

@@ -203,6 +203,8 @@ typedef struct {
     CRITICAL_SECTION cs;
     int cs_init;
     volatile LONG pend_struct, pend_int_zero, pend_int_pipe2;
+    volatile LONGLONG pend_since_qpc;   /* Diagnose: erster offener Pipe-Interrupt */
+    volatile LONGLONG last_flush_delay_us;
     void (*interrupt)(int type, int pipe);
     void (*struct_addresses)(void);
     volatile int running;
@@ -1051,7 +1053,11 @@ static void audio_tick(DspState *d) {
     on = d->state == AUDIO_DSP_ON && d->region[0] != NULL;
     if (on) {
         generate_frame(d);
-        InterlockedIncrement(&d->pend_int_pipe2);
+        if (InterlockedIncrement(&d->pend_int_pipe2) == 1) {
+            LARGE_INTEGER q;
+            QueryPerformanceCounter(&q);
+            d->pend_since_qpc = q.QuadPart;
+        }
     }
     d->frame_count++;
 }
@@ -1072,7 +1078,23 @@ void audio_dsp_flush_events(void) {
     if (!pending(d)) return;
     if (InterlockedExchange(&d->pend_struct, 0) && d->struct_addresses) d->struct_addresses();
     if (InterlockedExchange(&d->pend_int_zero, 0) && d->interrupt) d->interrupt(AUDIO_DSP_INT_ZERO, 0);
-    if (InterlockedExchange(&d->pend_int_pipe2, 0) && d->interrupt) d->interrupt(AUDIO_DSP_INT_PIPE, 2);
+    if (InterlockedExchange(&d->pend_int_pipe2, 0)) {
+        LONGLONG since = d->pend_since_qpc;
+        if (since != 0) {
+            LARGE_INTEGER q, f;
+            QueryPerformanceCounter(&q);
+            QueryPerformanceFrequency(&f);
+            d->last_flush_delay_us = (q.QuadPart - since) * 1000000 / f.QuadPart;
+            d->pend_since_qpc = 0;
+        }
+        if (d->interrupt) d->interrupt(AUDIO_DSP_INT_PIPE, 2);
+    }
+}
+
+/* Diagnose: Verzoegerung (us) zwischen dem DSP-Frame, der den letzten
+ * zugestellten Pipe-Interrupt ausgeloest hat, und seiner Zustellung. */
+long long audio_dsp_last_flush_delay_us(void) {
+    return (long long)g_dsp.last_flush_delay_us;
 }
 
 /* Synchroner Takt (Tests): Frame unter der DSP-Sperre, danach Meldungen
@@ -1103,10 +1125,14 @@ static DWORD WINAPI audio_thread(LPVOID p) {
         cs_enter(d);
         audio_tick(d);
         cs_leave(d);
-        /* Meldungen nur zustellen, wenn die Gast-Sperre gerade frei ist;
-         * sonst uebernehmen das die Gast-Threads bzw. der VBlank-Thread
-         * (hle.c ruft audio_dsp_flush_events unter der Sperre). */
-        if (d->lock_try && pending(d) && d->lock_try()) {
+        /* Meldungen sofort zustellen (blockierend), wie die Hardware jeden
+         * 4,9-ms-Frame einzeln meldet. Frueher nur per TryEnter: bei
+         * belegter Gast-Sperre (fast immer) kamen die Interrupts erst mit der
+         * naechsten Pump/VBlank, gebuendelt 15..23 ms spaet (HLE_WSTAT); das
+         * Spiel bekam so ~4 Frames als einen gemeldet. Die DSP-Sperre ist hier
+         * schon frei -> keine Sperr-Umkehr. */
+        if (pending(d) && d->lock_enter) {
+            d->lock_enter();
             audio_dsp_flush_events();
             if (d->lock_leave) d->lock_leave();
         }

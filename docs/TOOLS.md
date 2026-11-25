@@ -250,7 +250,7 @@ und Farbziel),
 `HLE_GSPQ_LOG=1` (GX-Transfers: DisplayTransfer/TextureCopy mit Quelle, Ziel,
 Flags und Groesse sowie MemoryFill-Bereiche),
 `HLE_VRAM_DUMP=<pfad>` (VRAM 0x1F000000..0x1F5FFFFF am Laufende roh sichern),
-`HLE_YSTAT=1` (Yield-/Lock-Statistik der kooperativen Gast-Threads: Yields,
+`HLE_WSTAT=1` (meldet DSP-Interrupt-Zustellungen > 10 ms nach dem DSP-Frame und Aufwachverzoegerungen wartender Threads > 10 ms nach dem DSP-Signal, je mit Zeitstempel; nur lesend), `HLE_YSTAT=1` (Yield-/Lock-Statistik der kooperativen Gast-Threads: Yields,
 Wandzeit in Lock-Abgaben, Zeit mit freiem Gast-Lock; je ~1 s eine Zeile
 `[ystat]`),
 `HLE_STALLDUMP=1` (bei jedem 300. Host-Frame die letzten 12 Bloecke je
@@ -266,7 +266,9 @@ Block und LR), `HLE_SLEEP_LOG=1` (die ersten 200 `svcSleepThread`-Aufrufe),
 `HLE_WAITTMO_LOG=1` (erschöpfte endliche Wartezeiten mit Thread/Block/LR),
 `HLE_GTIME=1` (Abschlussbericht `[gtime]`: Wandzeit der PICA-Kommandolisten,
 Anteil an der Laufzeit, Fragmente/Textursamples/Lighting/Farbziel-Zugriffe
-sowie parallele und serielle Dreieckszeilen des Software-Rasterizers),
+sowie parallele und serielle Dreieckszeilen des Software-Rasterizers; im
+Hardware-Pfad zusaetzlich `texup`/`texdec_ms` und alle 5 s eine Zeile
+`[texcache]` mit Uploads/s und Dekodierzeit),
 `HLE_RASTER_THREADS=<n>` (Worker-Threads fuer das parallele Rasterisieren
 grosser Dreiecke; Standard 3, `0` = seriell und pixelgleich).
 `HLE_STALLDUMP=1` (bei jedem 300. Host-Frame die letzten 12 Bloecke, den
