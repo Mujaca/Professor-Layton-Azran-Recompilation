@@ -2682,6 +2682,54 @@ static void boss_command(Ipc *r, uint32_t *p) {
     }
 }
 
+/* cecd:u (StreetPass). Azahar cecd.cpp: Stop, GetCecdState (NdmStatusIdle),
+ * GetCecInfoEventHandle und GetChangeStateEventHandle (je ein eigenes Event
+ * als Copy-Handle). Fehlten diese Antworten, las das Spiel nach dem Speichern
+ * Reste des Kommandopuffers als Zustand bzw. Handle und hing in einer
+ * Warteschleife (Gast-Frames liefen weiter). */
+static uint32_t g_cecd_info_ev = 0, g_cecd_state_ev = 0;
+static uint32_t cecd_event(uint32_t *slot, const char *name) {
+    if (*slot == 0u) {
+        uint32_t h = (uint32_t)alloc_handle(SVC_OTHER, name);
+        Handle *hh = get_handle(h);
+        if (hh != NULL) {
+            hh->kind = HK_EVENT;
+            hh->reset_type = 0;   /* OneShot */
+            hh->signaled = 0;
+        }
+        *slot = h;
+    }
+    return *slot;
+}
+
+static void cecd_command(Ipc *r, uint32_t *p) {
+    (void)p;
+    switch (r->cmd) {
+        case 0x000C: /* Stop(command): Result */
+            ipc_begin(r, 0x000C, 1, 0);
+            put_result(r);
+            break;
+        case 0x000E: /* GetCecdState: Result + CecdState */
+            ipc_begin(r, 0x000E, 2, 0);
+            put_result(r);
+            ipc_put(r, 1u);   /* NdmStatusIdle */
+            break;
+        case 0x000F: /* GetCecInfoEventHandle: Result + Copy-Handle */
+            ipc_begin(r, 0x000F, 1, 2);
+            put_result(r);
+            ipc_put_handle_copy(r, cecd_event(&g_cecd_info_ev, "cecd-info"));
+            break;
+        case 0x0010: /* GetChangeStateEventHandle: Result + Copy-Handle */
+            ipc_begin(r, 0x0010, 1, 2);
+            put_result(r);
+            ipc_put_handle_copy(r, cecd_event(&g_cecd_state_ev, "cecd-state"));
+            break;
+        default:
+            generic_command(r, SVC_CECD);
+            break;
+    }
+}
+
 static void ptm_command(Ipc *r, uint32_t *p) {
     switch (r->cmd) {
         case 0x0005:   /* GetAdapterState: Result + bool */
@@ -3205,7 +3253,7 @@ static void gx_exec(const GxOp *op) {
                         g_gtime_lists++;
                     }
                     /* Frontier-M3: Liste mit Draws ([gpu] list ... draws=N). */
-                    printf("[gpu] list addr=%08X paddr=%08X size=%X ops=%d draws=%llu\n",
+                    if (g_log) printf("[gpu] list addr=%08X paddr=%08X size=%X ops=%d draws=%llu\n",
                            addr, paddr, size, nops, gpu_pica_draw_count() - d0);
                 } else {
                     /* Azahar GPU::SubmitCmdList: ungueltige Liste -> P3D. */
@@ -3279,7 +3327,7 @@ static int gsp_process_cmdqueue(ArmCpu *c) {
                 qops++;
                 break;
             case 0x05: /* FlushCacheRegions: kein CPU-Cache im Port */
-                printf("[gspq] FlushCacheRegions %08X/%X %08X/%X %08X/%X\n",
+                if (g_log) printf("[gspq] FlushCacheRegions %08X/%X %08X/%X %08X/%X\n",
                        w[1], w[2], w[3], w[4], w[5], w[6]);
                 break;
             default:
@@ -4224,6 +4272,9 @@ static void dispatch_ipc(uint32_t handle) {
             break;
         case SVC_BOSS:
             boss_command(&r, params);
+            break;
+        case SVC_CECD:
+            cecd_command(&r, params);
             break;
         case SVC_GSP_GPU:
             gsp_command(&r, params);

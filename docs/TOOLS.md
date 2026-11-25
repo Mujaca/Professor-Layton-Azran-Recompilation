@@ -254,7 +254,7 @@ und Farbziel),
 `HLE_GSPQ_LOG=1` (GX-Transfers: DisplayTransfer/TextureCopy mit Quelle, Ziel,
 Flags und Groesse sowie MemoryFill-Bereiche),
 `HLE_VRAM_DUMP=<pfad>` (VRAM 0x1F000000..0x1F5FFFFF am Laufende roh sichern),
-`HLE_WSTAT=1` (meldet DSP-Interrupt-Zustellungen > 10 ms nach dem DSP-Frame und Aufwachverzoegerungen wartender Threads > 10 ms nach dem DSP-Signal, je mit Zeitstempel; nur lesend), `HLE_YSTAT=1` (Scheduler-Statistik: Thread-Wechsel, Leerlaufzeit und je
+`HLE_STALLDUMP=1` schreibt Thread-Dumps nur noch bei Stillstand (Gast-Zaehler unveraendert); `[gpu] list`/`[gspq] FlushCacheRegions` nur noch mit `HLE_LOG`. `HLE_WSTAT=1` (meldet DSP-Interrupt-Zustellungen > 10 ms nach dem DSP-Frame und Aufwachverzoegerungen wartender Threads > 10 ms nach dem DSP-Signal, je mit Zeitstempel; nur lesend), `HLE_YSTAT=1` (Scheduler-Statistik: Thread-Wechsel, Leerlaufzeit und je
 Gast-Thread die Zeit in run/rdy/sync/arb/slp; je ~1 s ein Block
 `[ystat]`),
 `HLE_STALLDUMP=1` (bei jedem 300. Host-Frame die letzten 12 Bloecke je

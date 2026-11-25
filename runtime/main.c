@@ -286,7 +286,14 @@ int main(int argc, char **argv) {
                 printf("[port] %s\n", line);
                 /* Diagnose (HLE_STALLDUMP): letzte Bloecke je Gast-Thread,
                    um einen Haenger ohne IPC zu lokalisieren. */
-                if (getenv("HLE_STALLDUMP")) {
+                /* Nur bei Stillstand (Gast-Zaehler seit der letzten Pruefung
+                   unveraendert), sonst wuerde das Log alle 5 s um einen
+                   kompletten Dump wachsen. */
+                static unsigned stall_last = 0xFFFFFFFFu;
+                unsigned gnow = hle_gsp_guest_frames();
+                int stalled = (gnow == stall_last);
+                stall_last = gnow;
+                if (getenv("HLE_STALLDUMP") && stalled) {
                     int ti;
                     for (ti = 0; ti < 16; ti++)
                         if (arm_thread_last_pc[ti] != 0u) {

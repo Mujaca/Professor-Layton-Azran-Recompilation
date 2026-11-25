@@ -303,3 +303,27 @@ Struktur je Draw statt Registerlesen je Pixel.
   Gastcode, Hauptthread verhungert). Fix: eindeutige Ids (ks_thread_id, wie
   Azahars next_thread_id), hs_wait traegt sich neu ein, falls der Eintrag
   nicht mehr ihm gehoert, Waechter unter HLE_STALLDUMP.
+
+## Offene Darstellungsfehler (Nutzerbeobachtung 2026-11-25)
+
+* 3D-Modell von Layton (Dialog-/Inworld-Szene, --renderer hw, Host-Frame
+  ~43440) wirkt grob: kantig, sehr dunkle/flache Schattierung, keine
+  Umrisslinie/Cel-Schattierung. Bild: scratch/befunde/layton_modell_hw.png.
+  Zu pruefen: Fragment-Lighting (im HW-Pfad Software-Rueckfall je Draw),
+  Texturfilter/Mip-Stufen, Umriss-Pass (Stencil/Depth/Polygon-Offset), und
+  ob der Software-Renderer dasselbe Bild liefert.
+* 3D-Figuren im Dialog (Froenborg, Host-Frame ~23040, Bild
+  scratch/befunde/figuren_dialog_hw.png): Gesichter/Haare von Layton, Emmy
+  und Luke sind einfarbige Flaechen (orange/braun) ohne Augen-/Haardetails;
+  2D-Hintergrund, Dialogbox und Schrift sind korrekt. Verdacht:
+  Texturkoordinaten bzw. Texturzuordnung der 3D-Modelle (es wird praktisch
+  ein Texel gesampelt) - Vertex-Shader-Ausgabe (texcoord-Zuordnung,
+  0x50-0x56), Textur-Einheit/-Adresse, Mipmaps.
+* Bildrate in 3D-Szenen und Raetseln ~3 fps (Nutzer).
+* Speichern funktioniert seit den cecd:u-Antworten (Stop, GetCecdState,
+  Event-Handles); vorher hing das Spiel nach der Speicherfrage.
+* Laden ("Continue" im Titel) vom Nutzer bestaetigt (2026-11-26): Spiel
+  setzt in Froenborg fort. Spielstand liegt unter
+  out/savedata/savedata/0000000000000000/data/00000001/ (game0.lt6, head.lt6,
+  verschluesselt/komprimiert). Offen: Pfad nutzt Programm-ID 0 statt der
+  echten Titel-ID (nur fuer Austausch mit Konsole/Azahar relevant).
