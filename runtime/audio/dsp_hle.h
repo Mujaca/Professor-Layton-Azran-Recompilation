@@ -75,6 +75,7 @@ void audio_dsp_set_trylock(int (*try_enter)(void));
 /* Vorgemerkte DSP-Meldungen (Interrupts, Struct-Adressen) zustellen.
  * Aufrufer MUSS die Gast-Sperre halten. Billig, wenn nichts ansteht. */
 void audio_dsp_flush_events(void);
+long long audio_dsp_last_flush_delay_us(void);   /* Diagnose */
 
 /* Interrupt-Callback: wird aus dem Audio-Thread gerufen und signalisiert das
  * bei RegisterInterruptEvents gebundene Gast-Ereignis (hle.c). */

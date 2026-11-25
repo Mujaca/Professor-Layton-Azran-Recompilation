@@ -250,7 +250,7 @@ und Farbziel),
 `HLE_GSPQ_LOG=1` (GX-Transfers: DisplayTransfer/TextureCopy mit Quelle, Ziel,
 Flags und Groesse sowie MemoryFill-Bereiche),
 `HLE_VRAM_DUMP=<pfad>` (VRAM 0x1F000000..0x1F5FFFFF am Laufende roh sichern),
-`HLE_YSTAT=1` (Yield-/Lock-Statistik der kooperativen Gast-Threads: Yields,
+`HLE_WSTAT=1` (meldet DSP-Interrupt-Zustellungen > 10 ms nach dem DSP-Frame und Aufwachverzoegerungen wartender Threads > 10 ms nach dem DSP-Signal, je mit Zeitstempel; nur lesend), `HLE_YSTAT=1` (Yield-/Lock-Statistik der kooperativen Gast-Threads: Yields,
 Wandzeit in Lock-Abgaben, Zeit mit freiem Gast-Lock; je ~1 s eine Zeile
 `[ystat]`),
 `HLE_STALLDUMP=1` (bei jedem 300. Host-Frame die letzten 12 Bloecke je
