@@ -58,7 +58,7 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | M9 | teilweise | `--renderer hw` läuft (Titel, Szenen, 3D-Dialog 30 Gast-fps); 3D-Figuren korrekt seit D16-Tiefenfix; Abnahme-Bildvergleich offen (jetzt mit `--deterministic` möglich) |
 | M10 | erreicht | Aussetzer, Hänger und Echtzeit gelöst; Nutzer-Entscheid 2026-11-26: Hörtest („sauber“) genügt als Abnahme, Azahar-Aufnahme entfällt |
 | M11 | erreicht | Namenseingabe → Eröffnungsszene (`--press`-Folge in `docs/GAME_NOTES.md`) |
-| M12 | offen | Titel ~20 sichtbare fps (HW), 3D-Dialog Froenborg 30 Gast-fps (HW, seit fruehem GPU-Flush + Teil-Upload) |
+| M12 | erreicht | 2026-11-26, master 7b1cf2f, `--renderer hw`, Echtzeit, 2 Läufe: Titel (g2100–2700) und Slot-Menü (ab g2900) je 59,8–60,0 Gast-fps (`[port] gast=` je 300 Host-Frames); 3D-Dialog Froenborg 30 Gast-fps |
 | M13 | erreicht | Sichttest Nutzer (Doppelpufferung) |
 | M14 | erreicht | Nutzer: erstes Rätsel gespielt, gespeichert, „Continue“ lädt in Froenborg |
 | M15 | erreicht | Logo gegen FFmpeg mittlere Abweichung 0,91; übrige Filme: Nutzer-Sichttest 2026-11-26 ohne Farbfehler, als Abnahme bestätigt |
@@ -66,7 +66,7 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | M17 | offen | – |
 | M18 | erreicht | `port.exe --deterministic` (virtuelle Zeit, VBlank im Gleichschritt); `tools/scene.py froenborg raetsel1 --repro`: je 89/89 Bilder gleich (alle 50 Gast-Frames bis g4450), hw und soft gleiche VBlank→Gast-Frame-Folge |
 
-1. **Bildrate Titel/Hauptmenü nachmessen** (M12), HW-Renderer.
+1. ~~Bildrate Titel/Hauptmenü~~ (M12 erreicht: 60 Gast-fps).
 2. **Bildvergleich SW gegen HW** auf denselben Gast-Frames (M9, mit
    `tools/scene.py` im deterministischen Modus).
 3. **HW-Renderer als Standard** (M17): Bilder auf der GPU, D3D-Ausgabe,
