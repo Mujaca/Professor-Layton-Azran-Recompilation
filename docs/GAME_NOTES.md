@@ -422,3 +422,41 @@ Struktur je Draw statt Registerlesen je Pixel.
   out/savedata/savedata/0000000000000000/data/00000001/ (game0.lt6, head.lt6,
   verschluesselt/komprimiert). Offen: Pfad nutzt Programm-ID 0 statt der
   echten Titel-ID (nur fuer Austausch mit Konsole/Azahar relevant).
+
+## SW/HW-Bildvergleich (M9, 2026-11-26)
+
+`tools/scene.py froenborg` (g50..g4450) und `fixture-raetsel1 --target 7500`
+(Titel, Namenseingabe, erste Szene, Raetsel-Titelkarte, Raetsel 001), je
+`--every 50` mit `--renderer soft` und `hw`, `--deterministic`;
+`tools/rendercmp.py`. Werte: oben/unten, Maximum ueber alle Bilder.
+
+| Szene | Stand | MAD (Mittel) | max %>8 | max %>32 | Bilder mit Cluster |
+|---|---|---|---|---|---|
+| froenborg (89) | vorher | 0,94 / 0,013 | 7,2 / 0 | 3,4 / 0 | 5 / 0 |
+| froenborg (89) | nachher | 0,60 / 0,002 | 0,03 / 0 | 0,016 / 0 | 0 / 0 |
+| raetsel (150) | vorher | 0,98 / 0,056 | 28,1 / 0,47 | 6,4 / 0,46 | 13 / 4 |
+| raetsel (150) | nachher | 0,48 / 0,021 | 3,0 / 0,47 | 0,87 / 0,46 | 12 / 4 |
+
+Behobene Ursachen (HW-Pfad, runtime/gpu, Tests X0..X2 in hw_selftest.c):
+* D3D rastet Ecken auf 1/256 Pixel ein, die PICA auf 1/16: Sprite-Kanten
+  auf halben Pixeln sprangen um ein Pixel (Titelkarte "001", Ziffern).
+* Festfunktions-Blending rundet, die PICA schneidet ab: je Alpha-Ebene
+  +1 LSB, gestapelte Nebel-Ebenen am Titel bis +5.
+* Nearest-Texelwahl bei Pixelmitte exakt auf Texelgrenze (2:1-Composite der
+  3D-Figuren 512x1024 -> 240x400): die GPU lag knapp unter k, ganze
+  Figurenebene um einen Texel versetzt (Mund-/Augenlinien fehlten).
+  Texelwahl jetzt auf 1/4096 Texel gerundet (1/256: Titel-Ebenen kippen,
+  1/16384: zu fein, Figuren wieder versetzt).
+* Kosten Shader-Blending fuer alle Faktoren ausser Zero/One: Echtzeit
+  froenborg g0..4450 gleiche Gast-fps (59,8 Host-fps, gast 4356 statt 4373
+  am Ende im 3D-Dialog), [hwtime] tri_ms 9 -> 363 je 5 s am Titel.
+
+Rest (kein HW-Fehler): Pixelmitten genau auf Texelgrenzen entscheidet der
+SW-Pfad mit float32-Baryzentren dreiecksabhaengig (Selbsttest X2: 4826 von
+96000 Pixeln auf dem Nachbartexel, je Dreieck eine Haelfte; sichtbar als
+dreieckige 1-LSB-Flaechen im Intro und der Namenseingabe). Daher bleiben:
+Raetsel-Titelkarte (Schrift "Airship's Destination" und Vorhang, 286 px > 32),
+Luftschiff in Raetsel 001 nur in geraden Gast-Frames (halbe Pixelposition,
+285-353 px > 32), oben ein symmetrisches +-1..4-Rauschen auf ~50 % der
+Pixel (MAD 0,6-0,85). Die SW-Rechnung haengt zudem an FMA-Kontraktion des
+Compilers (zig cc nativ: 147 vfmadd in gpu.c).

@@ -424,7 +424,12 @@ mit Distanz, Spot + Fresnel-Alpha, NormalMap + Schatten, TangentMap + CP,
 Blend Max/DstAlpha mit ueberlappenden Dreiecken im selben Batch). Verglichen
 werden die Gast-Framebuffer pixelweise; Toleranz max. 1 LSB je Kanal
 (Lighting-Szenen 2 LSB, Begruendung bei `g_tol`), Kantenpixel
-(Top-Left-/Subpixel-Regel) werden gezaehlt und je Szene begrenzt.
+(Top-Left-/Subpixel-Regel) werden gezaehlt und je Szene begrenzt. Szenen
+X0..X2 (Befunde des M9-Bildvergleichs) laufen ohne Toleranz: drei
+gestapelte Alpha-Ebenen (PICA-Ganzzahlrundung), Kanten auf halben Pixeln
+(1/16-Einrasten) und das 2:1-Dialog-Composite (240x400, Textur 512x1024,
+jede Pixelmitte auf einer Texelgrenze; X2 prueft die exakte Texelwahl und
+schlaegt nur auf echter GPU ohne den Fix fehl, WARP interpoliert exakt).
 
 ```powershell
 python tests/hw_test.py          # D3D11-Hardware, Fallback WARP

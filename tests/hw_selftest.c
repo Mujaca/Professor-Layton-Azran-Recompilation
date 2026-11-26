@@ -1454,6 +1454,123 @@ static void scene_case(ArmCpu *c, const char *name, SceneFn fn, uint32_t fmt,
     }
 }
 
+/* --- Szenen X0..X2: Befunde des M9-Bildvergleichs (tools/rendercmp.py) ---
+ * Laufen mit Toleranz 0 und ohne Kantenbudget: jede Abweichung ist ein
+ * Fehler. */
+
+/* Bildschirmfuellendes Quad aus zwei Dreiecken (Pixel 0..w-1 voll). */
+static const Vtx3 g_full_quad[6] = {
+    {{-1.0f, -1.0f, 0.0f}, {1, 1, 1, 1}, {0.0f, 0.0f}},
+    {{ 1.0f, -1.0f, 0.0f}, {1, 1, 1, 1}, {1.0f, 0.0f}},
+    {{ 1.0f,  1.0f, 0.0f}, {1, 1, 1, 1}, {1.0f, 1.0f}},
+    {{-1.0f, -1.0f, 0.0f}, {1, 1, 1, 1}, {0.0f, 0.0f}},
+    {{ 1.0f,  1.0f, 0.0f}, {1, 1, 1, 1}, {1.0f, 1.0f}},
+    {{-1.0f,  1.0f, 0.0f}, {1, 1, 1, 1}, {0.0f, 1.0f}},
+};
+
+/* Szene X0: drei gestapelte Alpha-Blend-Ebenen (SrcAlpha/OneMinusSrcAlpha)
+ * ueber einem Muster. Die PICA rechnet (s*a + d*(255-a)) / 255 ganzzahlig
+ * und schneidet ab; D3D-Festfunktions-Blending rundet (vor dem Fix: Titel
+ * im Spiel bis +5 LSB, hier je Ebene bis +1). */
+static uint32_t scene_x0(ArmCpu *c) {
+    static const uint32_t layer[3] = {0x60C08041u, 0x3317A9F3u, 0xA5402B7Du};
+    uint32_t *q;
+    int i;
+    fill_fb_rgba8(c, FB, 16, 16);
+    put_vertices3(c, g_full_quad, 6);
+    q = (uint32_t *)(c->mem + LIST);
+    q = emit_attrs3(q, 6);
+    q = emit_vs_tex(q, 0);
+    q = emit_viewport(q, 16, 16);
+    q = emit(q, 0x80, 0u);
+    q = emit_target(q, FB, 16, 16, 0u, 0u, 0, 0u);
+    q = emit_blend(q, 1u, 0u, 0u, 6u, 7u, 6u, 7u, 0u);
+    for (i = 0; i < 3; i++) {
+        q = emit_tev0(q, 0xEu, layer[i]);
+        q = emit(q, 0x22E, 0u);
+    }
+    return (uint32_t)((unsigned char *)q - (c->mem + LIST));
+}
+
+/* Szene X1: Quad mit Kanten knapp neben halben Pixeln (x = n + 0.5 +- 1/64).
+ * Die PICA rastet auf 1/16 Pixel ein, die Kanten liegen dann genau auf den
+ * Pixelmitten (Top-Left-Regel); ohne Einrasten deckt D3D (1/256) eine
+ * Spalte/Zeile weniger bzw. mehr ab (Sprite um ein Pixel versetzt). */
+static uint32_t scene_x1(ArmCpu *c) {
+    const float e = 1.0f / 64.0f;
+    const float x0 = (3.5f + e) / 8.0f - 1.0f, x1 = (12.5f - e) / 8.0f - 1.0f;
+    const float y0 = (2.5f - e) / 8.0f - 1.0f, y1 = (10.5f + e) / 8.0f - 1.0f;
+    Vtx3 v[6];
+    uint32_t *q;
+    int i;
+    for (i = 0; i < 6; i++) v[i] = g_full_quad[i];
+    for (i = 0; i < 6; i++) {
+        v[i].pos[0] = (v[i].pos[0] < 0.0f) ? x0 : x1;
+        v[i].pos[1] = (v[i].pos[1] < 0.0f) ? y0 : y1;
+    }
+    put_vertices3(c, v, 6);
+    q = (uint32_t *)(c->mem + LIST);
+    q = emit_attrs3(q, 6);
+    q = emit_vs_tex(q, 0);
+    q = emit_viewport(q, 16, 16);
+    q = emit(q, 0x80, 0u);
+    q = emit_tev0(q, 0xEu, 0xFF3080E0u);
+    q = emit_target(q, FB, 16, 16, 0u, 0u, 0, 0u);
+    q = emit(q, 0x22E, 0u);
+    return (uint32_t)((unsigned char *)q - (c->mem + LIST));
+}
+
+/* Szene X2: 32x32-Textur 2:1 verkleinert auf 16x16 (Nearest). Jede
+ * Pixelmitte trifft exakt eine Texelgrenze (u*w = 2x+1); der Software-Pfad
+ * nimmt den Texel 2x+1, die D3D-Interpolation lag knapp darunter (2x) -
+ * im Spiel die 3D-Zwischenbilder des Dialogs (Mund-/Augenlinien). */
+/* I8-Testmuster der Szene X2: Nachbartexel unterscheiden sich in s um 7,
+   in t um 13. */
+static int x2_texel(int s, int t) { return (s * 7 + t * 13) & 0xFF; }
+#define X2_FB  0x00200000u
+#define X2_TEX 0x00280000u
+
+static uint32_t scene_x2(ArmCpu *c) {
+    /* Nachbau des Dialog-Composites im Spiel (Werte per Probe aus dem
+       Froenborg-Dialog): Ziel 240x400, Viewport 120/200, Vollbild-Quad mit
+       w = 1, z = -0.5 in derselben Vertex-Reihenfolge, 512x1024-Textur
+       (hier I8), u = 0..0.9375, v = 0.21875..1 -> 2:1, jede Pixelmitte
+       liegt exakt auf einer Texelgrenze (u*w = 2x + 1, v*h = 224 + 2y + 1). */
+    static const float pq[6][4] = {
+        { 1, -1, 1, 0}, {-1, -1, 0, 0}, { 1,  1, 1, 1},
+        {-1,  1, 0, 1}, { 1,  1, 1, 1}, {-1, -1, 0, 0},
+    };
+    Vtx3 v[6];
+    uint32_t *q;
+    int x, y, i;
+    for (y = 0; y < 1024; y++)
+        for (x = 0; x < 512; x++)
+            c->mem[X2_TEX + morton_off(x, y, 1u) + (uint32_t)(y & ~7) * 512u] =
+                (unsigned char)x2_texel(x, y);
+    for (i = 0; i < 6; i++) {
+        v[i] = g_full_quad[0];
+        v[i].pos[0] = pq[i][0];
+        v[i].pos[1] = pq[i][1];
+        v[i].pos[2] = -0.5f;
+        v[i].uv[0] = pq[i][2] > 0.5f ? 0.9375f : 0.0f;
+        v[i].uv[1] = pq[i][3] > 0.5f ? 1.0f : 0.21875f;
+    }
+    put_vertices3(c, v, 6);
+    q = (uint32_t *)(c->mem + LIST);
+    q = emit_attrs3(q, 6);
+    q = emit_vs_tex(q, 0);
+    q = emit(q, 0x41, f24raw(120.0f));
+    q = emit(q, 0x43, f24raw(200.0f));
+    q = emit(q, 0x68, 0u);
+    q = emit(q, 0x80, 1u);
+    q = emit_tex(q, 0, X2_TEX, 512, 1024, 7u, 0u, 0u, 0u, 0u);
+    q = emit_tev_stage(q, 0, 0x00000003u, 0u, 0u, 0u, 0u);
+    q = emit_tev_passthrough(q, 1);
+    q = emit_target(q, X2_FB, 240, 400, 0u, 0u, 0, 0u);
+    q = emit(q, 0x22E, 0u);
+    return (uint32_t)((unsigned char *)q - (c->mem + LIST));
+}
+
 /* Referenz der Ueberlappungspruefung: Pixeltest je Pixel des Ziels nach
    den D3D11-Rasterregeln (16.8-Festkomma, Pixelmitte, Top-Left), wie
    cov_mark vor der Zeilenspannen-Rechnung. */
@@ -1550,7 +1667,7 @@ static void test_cov_spans(void)
 }
 
 int main(int argc, char **argv) {
-    static unsigned char mem[0x100000];
+    static unsigned char mem[0x400000];   /* Szene X2: 240x400-Ziel ab 0x200000 */
     ArmCpu c;
     int i;
 
@@ -1586,6 +1703,51 @@ int main(int argc, char **argv) {
     scene_case(&c, "Szene P: Texturwechsel in einer Liste", scene_p, 0u, 0, 16, 16, 32);
     scene_case(&c, "Szene Q: Tiefe aus dem Gast geladen", scene_q, 0u, 0, 16, 16, 16);
     scene_case(&c, "Szene R: Tiefenziel ohne Schreiben", scene_r, 0u, 2, 16, 16, 16);
+
+    /* M9-Bildvergleich (docs/GAME_NOTES.md): exakt, ohne Kantenbudget. */
+    g_tol = 0;
+    scene_case(&c, "Szene X0: 3 Alpha-Blend-Ebenen, PICA-Ganzzahlrundung",
+               scene_x0, 0u, 0, 16, 16, 0);
+    scene_case(&c, "Szene X1: Kanten auf halben Pixeln (1/16-Einrasten)",
+               scene_x1, 0u, 0, 16, 16, 0);
+    g_tol = 1;
+    {
+        /* Szene X2: exakte Texelgrenzen. Mathematisch trifft jede
+           Pixelmitte u*w = 2x+1 bzw. v*h = 2y+1; der Software-Pfad liegt mit
+           float32-Baryzentren je nach Dreieck mal auf k, mal auf k - ulp
+           (gemessen: in einem der beiden Dreiecke ist die Zeile um eins
+           versetzt) und ist hier deshalb keine Referenz. Geprueft wird, dass
+           der Hardware-Pfad in beiden Dreiecken dieselbe, exakte Wahl trifft
+           (vor dem Fix: Spalten 2x statt 2x+1 = ganze Ebene versetzt). */
+        static unsigned char swb[240 * 400 * 4], hwb[240 * 400 * 4];
+        int x, y, k, bad_hw = 0, off_sw = 0;
+        char msg[200];
+        for (k = 0; k < 2; k++) {
+            uint32_t size;
+            gpu_pica_reset();
+            gpu_pica_set_render_hw(k);
+            memset(c.mem + X2_FB, 0, sizeof(swb));
+            size = scene_x2(&c);
+            gpu_run_pica_list(&c, LIST, size);
+            memcpy(k ? hwb : swb, c.mem + X2_FB, sizeof(swb));
+        }
+        for (y = 0; y < 400; y++) {
+            for (x = 0; x < 240; x++) {
+                uint32_t o = morton_off(x, y, 4u) + (uint32_t)(y & ~7) * 240u * 4u;
+                /* Spalte s = u*w = 2x + 1; Texturzeilen liegen von oben
+                   im Speicher: Zeile 1023 - (224 + 2y' + 1) mit der von
+                   unten gezaehlten Zeile y' = 399 - y ergibt 2y. */
+                int want = x2_texel(2 * x + 1, 2 * y);
+                if (hwb[o + 3] != want) bad_hw++;
+                if (swb[o + 3] != want) off_sw++;
+            }
+        }
+        printf("     Szene X2: HW %d/96000 Pixel abweichend vom exakten Texel, "
+               "SW %d/96000 (float-Rauschen an der Grenze)\n", bad_hw, off_sw);
+        snprintf(msg, sizeof(msg), "Szene X2: 2:1-Verkleinerung, Pixelmitte auf "
+                 "Texelgrenze: D3D11 (%s) waehlt ueberall den exakten Texel", hw_driver_name());
+        check(bad_hw == 0, msg);
+    }
 
     /* Fragment-Lighting auf der GPU gegen p_compute_fragments (Software):
        Toleranz 2 LSB je Kanal (Begruendung bei g_tol), Budget fuer

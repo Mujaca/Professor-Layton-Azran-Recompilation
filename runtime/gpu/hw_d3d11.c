@@ -430,8 +430,19 @@ static const char *k_hlsl =
     "  if (w <= 0 || h <= 0) return uint4(0, 0, 0, 0);\n"
     "  uint border = c1.x;\n"
     "  uint ws = c0.z, wt = c0.w;\n"
-    "  int s = (int)trunc(uv.x * (float)w);\n"
-    "  int t = (int)trunc(uv.y * (float)h);\n"
+    /* Texelwahl (Nearest, wie p_sample_tex: (int)(u * w)) auf einem Raster
+       von 1/4096 Texel: Liegt eine Pixelmitte exakt auf einer Texelgrenze
+       (2:1-Verkleinerung der 3D-Zwischenbilder im Dialog), liefert die
+       D3D-Interpolation der Grafikkarte knapp k - eps und damit ueberall den
+       Nachbartexel (M9-Bildvergleich: ganze 3D-Ebene um einen Texel
+       versetzt, Mund-/Augenlinien fehlten; tests/hw_selftest.c Szene X2,
+       WARP interpoliert dort exakt). Der Software-Pfad trifft k meist, an
+       einzelnen Pixeln mit float32-Baryzentren auch k - ulp.
+       Das Raster ist feiner als die PICA-Texturkoordinaten (f24, 16 Bit
+       Mantisse; Azahar interpoliert Attribute in f24) und groeber als der
+       D3D-Interpolationsfehler; 1/16384 war gemessen zu fein. */
+    "  int s = (int)trunc(round(uv.x * (float)w * 4096.0) / 4096.0);\n"
+    "  int t = (int)trunc(round(uv.y * (float)h * 4096.0) / 4096.0);\n"
     "  bool bs = (ws == 1) ? (s < 0 || s >= w) : (ws == 5 && s >= w);\n"
     "  bool bt = (wt == 1) ? (t < 0 || t >= h) : (wt == 5 && t >= h);\n"
     "  if (bs || bt)\n"
@@ -1488,20 +1499,26 @@ static void set_light_constants(const HwDrawState *st)
 }
 
 /* Shader-Blending ist noetig, wenn D3D die PICA-Semantik nicht nativ
- * abbildet: Min/Max werten die Faktoren nicht aus, und Konstantfarbe +
- * Konstantalpha in einem Draw brauchen verschiedene Blend-Konstanten. */
+ * abbildet:
+ *  - Min/Max werten die Faktoren nicht aus,
+ *  - jeder Faktor ausser Zero/One: die PICA (Azahar sw_framebuffer.cpp
+ *    EvaluateBlendEquation, p_blend_eq) rechnet ganzzahlig
+ *    (s*sf + d*df) / 255 und schneidet ab, das D3D-Festfunktions-Blending
+ *    rechnet in Gleitkomma und rundet zum Naechsten. Je Blend-Ebene ergibt
+ *    das bis zu +1 LSB, bei gestapelten Ebenen (Titel: Nebel-Ebenen)
+ *    gemessen bis +5 (M9-Bildvergleich, docs/GAME_NOTES.md).
+ * Konstantfarbe + Konstantalpha in einem Draw (verschiedene D3D-Blend-
+ * Konstanten) faellt unter den zweiten Punkt. */
 static int pica_shader_blend(const HwDrawState *st) {
     uint32_t f[4];
-    int has_cc = 0, has_ca = 0, i;
+    int i;
     if (!st->blend_enable) return 0;
     if (st->blend_eq_rgb >= 3u || st->blend_eq_a >= 3u) return 1;
     f[0] = st->blend_src_rgb; f[1] = st->blend_dst_rgb;
     f[2] = st->blend_src_a; f[3] = st->blend_dst_a;
-    for (i = 0; i < 4; i++) {
-        if ((f[i] & 0xFu) == 10u || (f[i] & 0xFu) == 11u) has_cc = 1;
-        if ((f[i] & 0xFu) == 12u || (f[i] & 0xFu) == 13u) has_ca = 1;
-    }
-    return has_cc && has_ca;
+    for (i = 0; i < 4; i++)
+        if ((f[i] & 0xFu) > 1u) return 1;       /* nicht Zero/One */
+    return 0;
 }
 
 static int pica_logic_active(const HwDrawState *st) {

@@ -3525,6 +3525,20 @@ static int p_hw_tri_clip(ArmCpu *c, const PicaVertex *in, int n)
         if (!keep) continue;
         for (k = 0; k < 3; k++) {
             memcpy(out[m].pos, t[k]->pos, 4 * sizeof(float));
+            /* PICA rastert auf 1/16 Pixel eingerastete Ecken (Azahar
+               sw_rasterizer.cpp: Fix12P4, wie p_process_tri), D3D11 auf
+               1/256. Ohne dieses Einrasten liegen Kanten von 2D-Sprites auf
+               halben Pixeln (x = n + 0.5 +- 1/64) im SW-Pfad genau auf der
+               Pixelmitte (Top-Left-Regel entscheidet), in D3D knapp daneben:
+               ganze Sprite-Kanten springen um ein Pixel, Atlas-Texel
+               bluten an UV-Kanten (M9-Bildvergleich). Die eingerasteten
+               Ecken werden in Clip-Space zurueckgerechnet (w bleibt fuer
+               die perspektivkorrekte Interpolation erhalten). */
+            if (half_x != 0.0f && half_y != 0.0f) {
+                float w = t[k]->pos[3];
+                out[m].pos[0] = (((float)x[k] * (1.0f / 16.0f) - (float)corner_x) / half_x - 1.0f) * w;
+                out[m].pos[1] = (((float)y[k] * (1.0f / 16.0f) - (float)corner_y) / half_y - 1.0f) * w;
+            }
             memcpy(out[m].color, t[k]->color, 4 * sizeof(float));
             memcpy(out[m].uv, t[k]->uv, sizeof(out[m].uv));
             /* Lighting-Attribute; D3D interpoliert sie wie p_shade_rows
