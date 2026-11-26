@@ -3417,6 +3417,7 @@ static void p_hw_state(HwDrawState *st, ArmCpu *c)
                der naechste Texel genommen. Der Hardware-Pfad muss fuer den
                Bildvergleich dieselbe Referenz-Semantik nutzen. */
             t->filter = 0u;
+            t->mag_linear = (cfg >> 1) & 1u;   /* nur Texturfilter der Anzeige */
             t->type = (u == 0u) ? ((cfg >> 28) & 7u) : 0u;
             t->offset = gpu_pica_phys_to_guest(addr);
             t->bytes = 0u;

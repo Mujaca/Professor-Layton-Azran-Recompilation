@@ -1666,6 +1666,173 @@ static void test_cov_spans(void)
     }
 }
 
+/* --- Texturfilter der internen Aufloesung (docs/FRONTEND.md) -------------
+ * Synthetischer Atlas 16x16 RGBA8: linke Haelfte (s 0..7) ist eine "Glyphe"
+ * mit diagonaler Treppenkante (deckend weiss, wo s + t >= 8; sonst
+ * transparent mit Muell-RGB Rot), rechte Haelfte (s 8..15) ein deckend
+ * gruener Nachbar direkt an der Glyphe. Ein Quad sampelt nur die linke
+ * Haelfte 1:1 in die linke Haelfte eines 16x16-Ziels. Erwartet:
+ *   - Gastbild (nativ) bitgleich fuer Skala 1, Skala 4 ohne/mit Filter,
+ *   - Skala 4 ohne Filter: 4x4-Bloecke (naechster Texel, wie bisher),
+ *   - xbrz: Zwischenwerte an der Kante, Kante naeher an der Geraden
+ *     s + t = 8,5 als die Treppe, kein Gruen aus dem Nachbarn, kein roter
+ *     Saum aus den transparenten Texeln. */
+#define TF_DISP 0x00300000u
+static uint32_t g_tf_mag;                /* tex[0].mag_linear */
+
+static void tf_texel(ArmCpu *c, int s, int t, uint32_t rgba)
+{
+    int y = 15 - t;                         /* Bildzeile im Dekoder */
+    uint32_t off = morton_off(s, y, 4u) + (uint32_t)(y & ~7) * 16u * 4u;
+    unsigned char *p = c->mem + TEX0 + off;
+    p[0] = (unsigned char)rgba;             /* Gastbytes A, B, G, R */
+    p[1] = (unsigned char)(rgba >> 8);      /* (rgba = 0xRRGGBBAA) */
+    p[2] = (unsigned char)(rgba >> 16);
+    p[3] = (unsigned char)(rgba >> 24);
+}
+
+static void tf_draw(ArmCpu *c)
+{
+    static const HwVertex quad[6] = {
+        {{-1.0f, -1.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{0.0f, 0.0f}, {0, 0}, {0, 0}}},
+        {{ 0.0f, -1.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{0.5f, 0.0f}, {0, 0}, {0, 0}}},
+        {{ 0.0f,  1.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{0.5f, 1.0f}, {0, 0}, {0, 0}}},
+        {{-1.0f, -1.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{0.0f, 0.0f}, {0, 0}, {0, 0}}},
+        {{ 0.0f,  1.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{0.5f, 1.0f}, {0, 0}, {0, 0}}},
+        {{-1.0f,  1.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{0.0f, 1.0f}, {0, 0}, {0, 0}}},
+    };
+    HwDrawState st;
+    hw_invalidate_guest();
+    memset(c->mem + FB, 0, 16 * 16 * 4);
+    hw_test_state(&st, c, FB, 0u);
+    st.tex[0].enabled = 1;
+    st.tex[0].offset = TEX0;
+    st.tex[0].bytes = 16u * 16u * 4u;
+    st.tex[0].format = 0u;
+    st.tex[0].width = 16u;
+    st.tex[0].height = 16u;
+    st.tex[0].wrap_s = 0u;                   /* ClampToEdge */
+    st.tex[0].wrap_t = 0u;
+    st.tex[0].mag_linear = g_tf_mag;
+    st.tev_src[0] = 0x00030003u;             /* Replace(Texture0) */
+    hw_begin_draw(&st);
+    hw_triangles(quad, 6);
+    hw_flush_to_guest();
+}
+
+/* Rendert die Szene bei Skala scale mit Filter filt: Gastbild nach guest,
+ * Oberflaeche in interner Aufloesung nach hd (64x64 bei Skala 4). */
+static int tf_render(ArmCpu *c, int scale, int filt, unsigned char *guest,
+                     unsigned char *hd, int hd_cap, int *w, int *h)
+{
+    hw_set_scale(scale);
+    hw_set_texture_filter(filt);
+    gpu_pica_reset();
+    gpu_pica_set_render_hw(1);
+    tf_draw(c);
+    /* Erst ein DisplayTransfer macht das Ziel zum Bildschirminhalt; ab dann
+       zeichnet der Renderer es zusaetzlich in interner Aufloesung. */
+    hw_display_transfer(c->mem + FB, c->mem + TF_DISP, (16u << 16) | 16u,
+                        (16u << 16) | 16u, 0u, 16u * 16u * 4u);
+    tf_draw(c);
+    memcpy(guest, c->mem + FB, 16 * 16 * 4);
+    return hd == NULL || hw_surface_read(c->mem + FB, hd, hd_cap, w, h);
+}
+
+/* Mittlere Abweichung des Alphas (0..1) von der idealen Kante s + t = 8,5
+ * (Flaechenanteil je Ausgabepixel, 8x8 Unterabtastungen) in den Zeilen
+ * t 1..6 der Glyphe; dort laeuft die Treppe, ohne den Rechteckrand. */
+static double tf_edge_err(const unsigned char *hd, int w)
+{
+    double err = 0.0;
+    int n = 0, px, py;
+    for (py = 4; py < 28; py++) {
+        for (px = 0; px < 32; px++) {
+            double cov = 0.0, a;
+            int i, j;
+            for (j = 0; j < 8; j++)
+                for (i = 0; i < 8; i++) {
+                    double s = (px + (i + 0.5) / 8.0) / 4.0;
+                    double t = (py + (j + 0.5) / 8.0) / 4.0;
+                    if (s + t >= 8.5) cov += 1.0 / 64.0;
+                }
+            a = hd[((size_t)py * w + px) * 4 + 3] / 255.0;
+            err += fabs(a - cov);
+            n++;
+        }
+    }
+    return err / n;
+}
+
+static void test_texture_filter(ArmCpu *c)
+{
+    static unsigned char g1[1024], g4n[1024], g4x[1024], g4l[1024];
+    static unsigned char hdn[64 * 64 * 4], hdx[64 * 64 * 4], hdl[64 * 64 * 4];
+    int s, t, w = 0, h = 0, wx = 0, hx = 0, wl = 0, hl = 0, x, y;
+    int blocky = 1, mid_n = 0, mid_x = 0, mid_l = 0, green = 0, halo = 0;
+    double en, ex;
+
+    for (t = 0; t < 16; t++)
+        for (s = 0; s < 16; s++)
+            tf_texel(c, s, t, s >= 8 ? 0x00FF00FFu
+                              : (s + t >= 8 ? 0xFFFFFFFFu : 0xFF000000u));
+
+    hw_texture_filter_sync(1);
+    tf_render(c, 1, HW_TEXFILTER_NONE, g1, NULL, 0, NULL, NULL);
+    check(tf_render(c, 4, HW_TEXFILTER_NONE, g4n, hdn, (int)sizeof(hdn), &w, &h) &&
+              w == 64 && h == 64,
+          "Texturfilter: Oberflaeche 64x64 bei Skala 4 lesbar");
+    check(tf_render(c, 4, HW_TEXFILTER_XBRZ, g4x, hdx, (int)sizeof(hdx), &wx, &hx) &&
+              wx == 64 && hx == 64,
+          "Texturfilter: xbrz-Oberflaeche lesbar");
+    check(tf_render(c, 4, HW_TEXFILTER_LINEAR, g4l, hdl, (int)sizeof(hdl), &wl, &hl) &&
+              wl == 64 && hl == 64,
+          "Texturfilter: linear-Oberflaeche lesbar");
+    check(any_nonzero(g1, 1024) && memcmp(g1, g4n, 1024) == 0 &&
+              memcmp(g1, g4x, 1024) == 0 && memcmp(g1, g4l, 1024) == 0,
+          "Texturfilter: Gastbild bitgleich (Skala 1, Skala 4 none/xbrz/linear)");
+
+    for (y = 0; y < 64; y++)
+        for (x = 0; x < 32; x++) {
+            const unsigned char *pn = hdn + ((size_t)y * 64 + x) * 4;
+            const unsigned char *pb = hdn + ((size_t)(y & ~3) * 64 + (x & ~3)) * 4;
+            const unsigned char *px = hdx + ((size_t)y * 64 + x) * 4;
+            const unsigned char *pl = hdl + ((size_t)y * 64 + x) * 4;
+            if (memcmp(pn, pb, 4) != 0) blocky = 0;
+            if (pn[3] != 0 && pn[3] != 255) mid_n++;
+            if (px[3] != 0 && px[3] != 255) mid_x++;
+            if (pl[3] != 0 && pl[3] != 255) mid_l++;
+            /* Gruen nur aus dem Nachbarn moeglich (Glyphe weiss/transparent) */
+            if ((int)px[1] - (int)px[2] > 8 || (int)pl[1] - (int)pl[2] > 8) green++;
+            /* roter Saum: sichtbares Pixel mit Rot deutlich ueber Gruen/Blau */
+            if ((px[3] > 0 && (int)px[0] - (int)px[1] > 8) ||
+                (pl[3] > 0 && (int)pl[0] - (int)pl[1] > 8)) halo++;
+        }
+    en = tf_edge_err(hdn, 64);
+    ex = tf_edge_err(hdx, 64);
+    printf("     Texturfilter: Zwischenalpha none=%d xbrz=%d linear=%d, "
+           "Kantenfehler none=%.4f xbrz=%.4f, Gruen=%d Saum=%d\n",
+           mid_n, mid_x, mid_l, en, ex, green, halo);
+    check(blocky && mid_n == 0, "Texturfilter none: 4x4-Bloecke wie bisher");
+    check(mid_x > 0 && mid_l > 0, "Texturfilter: glatte Kante (Zwischenwerte) mit xbrz/linear");
+    check(ex < 0.5 * en, "Texturfilter xbrz: Kante naeher an der Geraden als die Treppe");
+    check(green == 0, "Texturfilter: kein Bluten aus dem Nachbarn im Atlas");
+    check(halo == 0, "Texturfilter: kein Farbsaum aus transparenten Texeln");
+    /* Verlangt das Spiel lineare Vergroesserung, die Textur erscheint nativ
+       aber 1:1 (Schrift), gilt trotzdem der gewaehlte Filter. */
+    {
+        static unsigned char gm[1024], hdm[64 * 64 * 4];
+        int wm = 0, hm = 0;
+        g_tf_mag = 1u;
+        tf_render(c, 4, HW_TEXFILTER_XBRZ, gm, hdm, (int)sizeof(hdm), &wm, &hm);
+        g_tf_mag = 0u;
+        check(memcmp(gm, g1, 1024) == 0 && memcmp(hdm, hdx, sizeof(hdm)) == 0,
+              "Texturfilter: Spiel-Linearfilter bei nativ 1:1 -> xbrz wie gewaehlt");
+    }
+    hw_set_texture_filter(HW_TEXFILTER_NONE);
+    hw_set_scale(1);
+}
+
 int main(int argc, char **argv) {
     static unsigned char mem[0x400000];   /* Szene X2: 240x400-Ziel ab 0x200000 */
     ArmCpu c;
@@ -2331,6 +2498,8 @@ int main(int argc, char **argv) {
         check(d1 - d0 >= 2u, "zwei Hardware-Draws im HW/SW-Wechsel");
         check(f1 - f0 >= 2u, "je SW-Draw mit ausstehendem HW-Stand ein Readback");
     }
+
+    test_texture_filter(&c);
 
     {
         unsigned long long nd = 0, nf = 0;

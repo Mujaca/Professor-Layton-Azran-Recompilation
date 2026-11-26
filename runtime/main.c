@@ -236,6 +236,7 @@ int main(int argc, char **argv) {
     int gast_shot_next = 0;
     int renderer_hw = 1;      /* M17: Hardware-Renderer ist Standard */
     int scale = 0;
+    int texfilter = -1;       /* -1 = port.ini [display] texture_filter */
     int det = 0;
     int mods_cli = -1;            /* -1 = port.ini [mods] enabled entscheidet */
     const char *mods_dir = NULL;
@@ -282,6 +283,13 @@ int main(int argc, char **argv) {
                 printf("[port] --scale %d ungueltig (1..4), nehme 1\n", scale);
                 scale = 1;
             }
+        }
+        else if (strcmp(argv[i], "--texture-filter") == 0 && i + 1 < argc) {
+            const char *f = argv[++i];
+            texfilter = hw_texture_filter_parse(f);
+            if (texfilter < 0)
+                printf("[port] --texture-filter '%s' unbekannt (none, linear, xbrz), nehme none\n", f);
+            if (texfilter < 0) texfilter = HW_TEXFILTER_NONE;
         }
         else if (strcmp(argv[i], "--shot-scaled") == 0) g_shot_scaled = 1;
         else if (strcmp(argv[i], "--single-window") == 0) win_set_split(0);
@@ -343,6 +351,22 @@ int main(int argc, char **argv) {
     if (gpu_pica_render_hw()) {
         if (scale <= 0) scale = win_config_scale();
         hw_set_scale(scale > 0 ? scale : 1);
+        /* Texturfilter der internen Aufloesung (nur Anzeige): --texture-filter
+           bzw. port.ini [display] texture_filter, Standard none. */
+        if (texfilter < 0) {
+            char v[32];
+            if (win_config_get("display", "texture_filter", v, sizeof(v)) && v[0]) {
+                texfilter = hw_texture_filter_parse(v);
+                if (texfilter < 0)
+                    printf("[port] port.ini texture_filter '%s' unbekannt, nehme none\n", v);
+            }
+            if (texfilter < 0) texfilter = HW_TEXFILTER_NONE;
+        }
+        hw_texture_filter_sync(det);   /* reproduzierbare hd-Bilder */
+        hw_set_texture_filter(texfilter);
+        if (texfilter != HW_TEXFILTER_NONE)
+            printf("[port] Texturfilter %s%s\n", hw_texture_filter_name(texfilter),
+                   hw_scale() > 1 ? "" : " (wirkt erst ab --scale 2)");
         if (hwp_init(FB_W, FB_H)) win_set_present(present_pane, hwp_detach);
     }
     /* Unterer Screen als Touchflaeche; Tastenbelegung siehe window.h. */

@@ -87,6 +87,11 @@ typedef struct {
     uint32_t border_rgba;       /* 0xAABBGGRR (0x81) */
     uint32_t filter;            /* 0 Nearest, 1 Linear */
     uint32_t type;              /* 0 Texture2D, 5 Disabled */
+    /* Vom Spiel verlangter Vergroesserungsfilter (0x83 Bit 1: 1 = linear).
+     * Der native Durchgang ignoriert ihn (Referenz-Semantik: immer
+     * naechster Texel, siehe filter); nur der Texturfilter der internen
+     * Aufloesung (hw_set_texture_filter) liest ihn. */
+    uint32_t mag_linear;
 } HwTexture;
 
 typedef struct {
@@ -253,6 +258,27 @@ void hw_submit_stats(unsigned long long *batches, unsigned long long *submits);
  * hw_set_scale vor dem ersten Draw aufrufen (1..4, Standard 1). */
 void hw_set_scale(int s);
 int hw_scale(void);
+/* Texturfilter nur fuer den Durchgang in interner Aufloesung (Skala >= 2,
+ * docs/FRONTEND.md "Texturfilter"): wirkt, wo eine 2D-Textur vergroessert
+ * gesampelt wird (ein Texel groesser als ein Ausgabepixel). Der native
+ * Durchgang, Rueckschreiben und alles Gastsichtbare bleiben unveraendert. */
+#define HW_TEXFILTER_NONE   0
+#define HW_TEXFILTER_LINEAR 1
+#define HW_TEXFILTER_XBRZ   2
+void hw_set_texture_filter(int mode);
+int hw_texture_filter(void);
+/* Die Filter-Variante wird im Hintergrund uebersetzt (~13 s); bis dahin
+ * zeigt der interne Durchgang ungefiltert. on = 1: der erste gefilterte
+ * Durchgang wartet stattdessen (--deterministic, Selbsttest). */
+void hw_texture_filter_sync(int on);
+/* "none"/"linear"/"xbrz" -> HW_TEXFILTER_* (-1 = unbekannt) bzw. zurueck. */
+int hw_texture_filter_parse(const char *name);
+const char *hw_texture_filter_name(int mode);
+/* Selbsttest: Oberflaeche in interner Aufloesung zum Farbziel color_mem als
+ * RGBA8 (D3D-Orientierung, Zeile 0 oben) nach out (cap Bytes). Rueckgabe 1
+ * und *w/*h = Groesse, 0 = keine Oberflaeche. */
+int hw_surface_read(const unsigned char *color_mem, unsigned char *out, int cap,
+                    int *w, int *h);
 /* Nach dem CPU-DisplayTransfer (gpu.c): denselben Transfer auf der GPU aus
  * der Oberflaeche der Quelle rechnen (falls vorhanden und gueltig).
  * src/dst = Host-Zeiger in den Gastspeicher, Groessen/Flags wie

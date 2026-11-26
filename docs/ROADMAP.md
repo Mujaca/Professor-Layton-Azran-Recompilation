@@ -114,6 +114,12 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
    Vorgehen: erst profilieren (`[hwtime]`, Host-Profiler), dann je Ursache
    ein Experiment; Bildvergleich (M9-Werte) darf sich nicht verschlechtern.
    Zielwerte legt der Mensch fest.
+9. **Texturfilter der internen Aufloesung** (Branch texture-filter,
+   2026-11-26): `--texture-filter none|linear|xbrz` / `[display]
+   texture_filter`, Standard `none`; nur Anzeige, native Bilder bitgleich
+   (froenborg 89/89 bei Skala 1 und Skala 3 mit xbrz). Details und
+   Kosten: docs/FRONTEND.md "Texturfilter", docs/GAME_NOTES.md
+   "Texturfilter". Sichttest durch den Nutzer offen.
 
 ## Frontier-Verlauf
 
@@ -211,3 +217,4 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | 2026-11-26 | m18-determinism | 10/10 | None | 0 |
 | 2026-11-26 | m9-compare | 10/10 | None | 0 |
 | 2026-11-26 | m17-hw-default | 10/10 | None | 0 |
+| 2026-11-27 | texture-filter | 10/10 | None | 0 |

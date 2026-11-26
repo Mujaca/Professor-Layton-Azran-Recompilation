@@ -69,9 +69,12 @@ bugs, slow scenes and occasional hangs. Progress and milestones are tracked in
    ```
 
    The Direct3D 11 renderer is the default. `--scale 2` (or `3`, `4`)
-   renders at a higher internal resolution, `--split-screens` opens one
-   window per screen, F11 toggles fullscreen. `--renderer soft` selects the
-   software rasterizer (slower, but the reference implementation).
+   renders at a higher internal resolution; with it, `--texture-filter
+   xbrz` (or `linear`) smooths text and 2D graphics that would otherwise
+   show up as blocky pixels (display only, default `none`; also
+   `[display] texture_filter` in `out/port.ini`). `--split-screens` opens
+   one window per screen, F11 toggles fullscreen. `--renderer soft` selects
+   the software rasterizer (slower, but the reference implementation).
 
 ## Controls
 

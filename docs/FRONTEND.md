@@ -51,6 +51,10 @@ und die Fenstergeometrie (Sollwerte mit `Fraction` nachgerechnet).
   wird zusaetzlich in N-facher Aufloesung fuer die Anzeige; alles, was der
   Gast sieht (Rueckschreiben ins VRAM, Transfers), bleibt nativ und
   unveraendert, ebenso Screenshots (`--shot`).
+* **Texturfilter:** `--texture-filter none|linear|xbrz` oder `[display]
+  texture_filter = ...` (Startoption gewinnt, Standard `none`, wirkt ab
+  Skala 2). Glaettet Schrift und 2D-Grafik in der Anzeige, die sonst als
+  NxN-Bloecke erscheinen. Details im Abschnitt "Texturfilter".
 * **Diagnose-Anzeige ist standardmaessig aus:** Titelzeile nur
   "Professor Layton and the Azran Legacy" (unteres Fenster im Split-Layout
   mit " - Touchscreen"), keine Statuszeilen im Fenster. Einschalten mit
@@ -124,6 +128,7 @@ enabled = 1
 [display]
 layout = single
 scale = 1
+texture_filter = none
 
 [debug]
 overlay = 0
@@ -190,7 +195,8 @@ ueber den Spielfenstern aendern (Pfeil/versteckt/Fadenkreuz); mit
 out/port.exe [romfs] [--frames N] [--frames-guest N] [--shot datei.bmp] [--shot-every N]
              [--shot-from M] [--shot-guest] [--press taste@[g]frame[+h][:dauer[:x:y]],...]
              [--savedata ordner] [--renderer hw|soft] [--deterministic]
-             [--scale N] [--shot-scaled] [--split-screens|--single-window]
+             [--scale N] [--texture-filter none|linear|xbrz] [--shot-scaled]
+             [--split-screens|--single-window]
              [--mods | --no-mods] [--mods-dir ordner]
 ```
 
@@ -325,3 +331,53 @@ Aufloesung anzeigen, ohne dass sich irgendetwas Gastsichtbares aendert.
   koennen dort ein Pixel lang gegen eine aeltere Momentaufnahme mischen
   (nur Anzeige). Texturen, die ein frueheres Renderziel sind
   (Render-to-Texture), werden in nativer Aufloesung gesampelt.
+
+## Texturfilter (interne Aufloesung)
+
+Bei `--scale N` (N >= 2) erscheinen Texturen, die das Spiel 1:1 zeichnet
+(Schrift, Menues, 2D-Grafik, unterer Screen), als NxN-Bloecke: der
+Renderer sampelt wie die Referenz immer den naechsten Texel. Der
+Texturfilter glaettet das **nur in der Anzeige**.
+
+* Auswahl: `--texture-filter none|linear|xbrz` oder `port.ini`
+  `[display] texture_filter = ...` (Startoption gewinnt). Standard `none`
+  (Verhalten wie bisher). Ohne interne Aufloesung (Skala 1) wirkungslos.
+* `linear`: bilinear zwischen den vier naechsten Texeln (weich).
+  `xbrz`: kantenerhaltender Filter nach der veroeffentlichten Beschreibung
+  von xBRZ, eigene Umsetzung mit freier Skalierung (`k_hlsl`,
+  `ft_xbrz`): Farbabstand in YCbCr plus Alpha, je 2x2-Block ein Eckentyp
+  (keiner/normal/dominant) aus den Gradienten der beiden Diagonalen, dann
+  je Texelecke eine Mischregion (Diagonale, flache bzw. steile 1:2-Linie,
+  runde Ecke), analytisch gegen die Position im Texel geprueft und ueber
+  eine Ausgabepixelbreite geglaettet. Treppenkanten werden zu Geraden,
+  flaechige Bereiche bleiben scharf.
+* **Wo:** nur im zweiten Zeichendurchgang (interne Aufloesung), nur fuer
+  2D-Texturen und nur, wo ein Texel groesser als ein Ausgabepixel ist
+  (Ableitung der Texturkoordinate, rho < 1). Vergroessert das Spiel eine
+  Textur schon nativ und verlangt dafuer lineare Filterung (Register
+  0x83 Bit 1), wird dort bilinear gefiltert wie auf der Konsole; was nativ
+  1:1 erscheint, bekommt den gewaehlten Filter. Randfarbe
+  (ClampToBorder) bleibt wie nativ.
+* **Atlas:** Ein Geometry-Shader (nur im internen Durchgang) bestimmt je
+  Dreieck das gesampelte Texelrechteck. Ist das Dreieck im Texturraum die
+  Haelfte eines achsparallelen Rechtecks (Sprite-/Glyphen-Quad), klemmt
+  der Filter alle Nachbartexel auf dieses Rechteck: keine Farbe aus
+  benachbarten Glyphen/Sprites. Sonst (3D-Netze, Kacheln) gilt der
+  Wrap-Modus der Textur.
+* **Kein Saum:** gefiltert wird vormultipliziert (rgb * a) und danach
+  zurueckgerechnet; transparente Texel mit beliebigem RGB faerben Kanten
+  nicht ein.
+* **Gastsicht unveraendert:** Der native Durchgang benutzt denselben
+  Pixelshader wie bisher (Filtercode nur unter `#ifdef HW_TEXFILTER`, der
+  Bytecode ohne das Makro ist bitgleich zu vorher); Rueckschreiben,
+  Transfers und `--shot` bleiben nativ. Nachweis: froenborg `--every 50`
+  native Bilder 89/89 gleich zu master bei Skala 1 und bei Skala 3 mit
+  `xbrz`; Skala 3 `none` auch die `hd_`-Bilder 89/89 gleich.
+* **Kosten:** Die Filter-Variante wird beim Start im Hintergrund
+  uebersetzt (~13 s CPU, parallel zum Spielstart); bis dahin zeigt die
+  Anzeige ungefiltert, das Spiel laeuft ohne Halt weiter (Log `[hw]
+  Texturfilter ... bereit`). Mit `--deterministic` wartet der erste
+  gefilterte Durchgang stattdessen (hd-Bilder reproduzierbar, Start ~13 s
+  laenger). GPU-Zeit und fps siehe docs/GAME_NOTES.md "Texturfilter".
+* Selbsttest: `tests/hw_selftest.c` (`test_texture_filter`, WARP):
+  synthetische Glyphe mit Treppenkante neben einem gruenen Atlas-Nachbarn.
