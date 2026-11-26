@@ -63,7 +63,7 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | M14 | erreicht | Nutzer: erstes Rätsel gespielt, gespeichert, „Continue“ lädt in Froenborg |
 | M15 | erreicht | Logo gegen FFmpeg mittlere Abweichung 0,91; übrige Filme: Nutzer-Sichttest 2026-11-26 ohne Farbfehler, als Abnahme bestätigt |
 | M16 | erreicht | Speichern/Laden („Continue“) und Soundeffekte vom Nutzer bestätigt |
-| M17 | offen | – |
+| M17 | teilweise | 2026-11-26, Branch m17-hw-default: HW-Renderer Standard (`--renderer soft` = Referenz); Bilder per GPU-DisplayTransfer aus Oberflaechen in interner Aufloesung, Ausgabe je Fenster ueber D3D11-Swapchain, `--scale 1..4` / `[display] scale`. Bildvergleich: native Bilder bei Skala 1, 2 und 3 bitgleich zu master (froenborg 89/89), M9-Werte damit unveraendert (oben MAD 0,60 / Raetsel 0,48). Gast-fps Echtzeit HW / SW: Titel 59,7-59,8 / 12,0; Slot-Menue 29,9 / 19,9; 3D-Dialog 28,0-29,9 (Skala 2: 21,6-23,6, Skala 3: 21,0-22,1) / 4,3; Raetsel 001 (g7000-8300) 54,6 (Skala 2: 49,7) / 12,3. Sichttest durch den Nutzer offen |
 | M18 | erreicht | `port.exe --deterministic` (virtuelle Zeit, VBlank im Gleichschritt); `tools/scene.py froenborg raetsel1 --repro`: je 89/89 Bilder gleich (alle 50 Gast-Frames bis g4450), hw und soft gleiche VBlank→Gast-Frame-Folge |
 
 1. ~~Bildrate Titel/Hauptmenü~~ (M12 erreicht: 60 Gast-fps).
@@ -201,3 +201,4 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | 2026-11-25 | scheduler-staffelstab | 10/10 | None | 0 |
 | 2026-11-26 | m18-determinism | 10/10 | None | 0 |
 | 2026-11-26 | m9-compare | 10/10 | None | 0 |
+| 2026-11-26 | m17-hw-default | 10/10 | None | 0 |

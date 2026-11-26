@@ -2,8 +2,8 @@
  *
  * Nur Rasterisierung + Fragment-Pipeline liegen auf der Host-GPU; Vertex- und
  * Geometry-Shader bleiben der CPU-Interpreter in runtime/gpu/gpu.c. Das Modul
- * ist eine schmale Schnittstelle (hw_d3d11.h) und wird ausschliesslich ueber
- * `--renderer hw` aktiviert. Ohne diesen Schalter wird kein Device erzeugt.
+ * ist eine schmale Schnittstelle (hw_d3d11.h); runtime/main.c aktiviert es
+ * standardmaessig (M17), `--renderer soft` erzeugt kein Device.
  *
  * Umfang:
  *   - Clip-Space-Dreiecke mit POSITION + PrimaryColor + TEXCOORD0..2
@@ -54,7 +54,7 @@
 
 #include "gpu.h"
 
-/* d3d11.dll/d3dcompiler_47.dll werden erst bei --renderer hw geladen, damit
+/* d3d11.dll/d3dcompiler_47.dll werden erst mit dem HW-Renderer geladen, damit
    der Software-Pfad ohne diese DLLs startet. */
 typedef HRESULT (WINAPI *HwD3D11CreateDeviceFn)(
     IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE, UINT,
@@ -244,6 +244,124 @@ static unsigned long long g_tex_upload_us;
 static unsigned long long g_tex_partial;      /* Teil-Uploads (Diagnose) */
 static unsigned long long g_tex_upload_key, g_tex_upload_hash;  /* Diagnose */
 static int g_tex_diag = -1;         /* HLE_GTIME/HLE_HW_STATE (nur Diagnose) */
+
+/* ---- M17: interne Aufloesung und Anzeige auf der GPU --------------------
+ *
+ * Gastsichtbar bleibt alles wie bisher: gerendert wird weiter in das native
+ * Ziel (g_color_tex, Gastgroesse), und hw_flush_to_guest schreibt dessen
+ * Inhalt ins Gast-VRAM. Zusaetzlich gehoert zu jedem Ziel eine
+ * "Oberflaeche" (HwSurf) in interner Aufloesung (Faktor g_scale): bei
+ * g_scale > 1 zeichnet pend_flush jeden Batch ein zweites Mal hinein
+ * (Viewport/Scissor/Tiefe skaliert), bei g_scale == 1 ist sie eine
+ * GPU-Kopie des nativen Ziels nach dem Rueckschreiben. Die Oberflaeche wird
+ * nie zurueckgelesen; sie dient nur der Anzeige.
+ *
+ * Gueltigkeit: Jede Oberflaeche merkt sich einen Hash der Gastbytes von
+ * Farb- und Tiefenpuffer zu dem Zeitpunkt, an dem GPU-Inhalt und Gast
+ * uebereinstimmten (nach dem Laden bzw. Rueckschreiben). Beim naechsten
+ * Laden desselben Ziels wird nur bei gleichem Hash weitergerendert, sonst
+ * (CPU-/MemoryFill-/Transfer-/Software-Schreibzugriff) wird der neue
+ * Gastinhalt auf die interne Aufloesung vergroessert.
+ *
+ * DisplayTransfer (hw_display_transfer): Liegt die Quelle als gueltige
+ * Oberflaeche vor (Hash der Quellbytes passt), rechnet die GPU denselben
+ * Transfer (Flip, 2x1/2x2-Mittelung, Formatquantisierung) in interner
+ * Aufloesung in eine Anzeigeflaeche (HwDisp) zum Ziel-Framebuffer. Der
+ * CPU-Transfer in den Gastspeicher laeuft unveraendert. Die Anzeige
+ * (runtime/gpu/hw_present.c) nimmt die Anzeigeflaeche nur, wenn der Hash
+ * der aktuellen Framebuffer-Bytes noch dem Stand nach dem Transfer
+ * entspricht; sonst zeigt sie das CPU-Bild aus dem Gastspeicher.
+ *
+ * Sperre: Das Immediate-Context gehoert dem GX-Worker; die Anzeige laeuft im
+ * Fenster-Thread. Alle oeffentlichen Einstiege, die den Context benutzen,
+ * nehmen g_hw_cs (hw_lock). */
+static CRITICAL_SECTION g_hw_cs;
+static volatile LONG g_hw_cs_init;
+/* Diagnose (HLE_HW_STATE): Wartezeit auf die Sperre, nur wenn sie belegt war. */
+static volatile LONG64 g_lock_wait_us;
+static unsigned long long hw_now_us(void);
+static void hw_lock_enter(void)
+{
+    if (!g_hw_cs_init) return;
+    if (!TryEnterCriticalSection(&g_hw_cs)) {
+        unsigned long long t0 = hw_now_us();
+        EnterCriticalSection(&g_hw_cs);
+        InterlockedExchangeAdd64(&g_lock_wait_us, (LONG64)(hw_now_us() - t0));
+    }
+}
+static void hw_lock_leave(void) { if (g_hw_cs_init) LeaveCriticalSection(&g_hw_cs); }
+
+static int g_scale = 1;
+
+typedef struct {
+    int valid;
+    unsigned char *color_mem, *depth_mem;
+    uint32_t color_fmt, depth_fmt;
+    int w, h;                                   /* native Groesse */
+    ID3D11Texture2D *ctex;                      /* w*s x h*s RGBA8 */
+    ID3D11RenderTargetView *crtv;
+    ID3D11ShaderResourceView *csrv;
+    ID3D11Texture2D *dtex;                      /* nur s > 1 */
+    ID3D11DepthStencilView *dsv;
+    uint64_t chash, dhash;
+    uint32_t clen, dlen;
+    int cvalid, dvalid;
+    /* Nur Ziele, die schon einmal Quelle eines DisplayTransfers waren,
+     * werden in interner Aufloesung mitgerendert (shown). Zwischenziele
+     * (Render-to-Texture, z. B. die 3D-Figuren im Dialog) sampelt der
+     * Renderer ohnehin nativ; der zweite Durchgang waere dort nur Last.
+     * hr_skipped: seit dem Laden ohne zweiten Durchgang gezeichnet ->
+     * interne Kopie veraltet. */
+    int shown, hr_skipped;
+    unsigned long long last_use;
+} HwSurf;
+#define HW_SURF_N 8
+static HwSurf g_surf[HW_SURF_N];
+static HwSurf *g_cur_surf;
+static unsigned long long g_surf_clock;
+/* Momentaufnahme fuer Shader-Blending in interner Aufloesung */
+static ID3D11Texture2D *g_hr_shadow;
+static ID3D11ShaderResourceView *g_hr_shadow_srv;
+static int g_hr_shadow_w, g_hr_shadow_h;
+/* Natives Ziel als SRV (nur s > 1: Vergroessern nach dem Laden) */
+static ID3D11ShaderResourceView *g_color_srv, *g_depth_srv, *g_stencil_srv;
+/* Native Bindungen des laufenden Draws (pend_flush wechselt bei s > 1) */
+static D3D11_VIEWPORT g_vp_nat;
+static D3D11_RECT g_rc_nat;
+static int g_shadow_on;
+
+typedef struct {
+    int valid;
+    const unsigned char *dst;                   /* Gast-Framebuffer */
+    uint32_t len, fmt, ow, oh;                  /* Bytes, Format, Zeilenlaenge/Zeilen */
+    ID3D11Texture2D *tex;                       /* ow*s x oh*s, Gast-Orientierung */
+    ID3D11RenderTargetView *rtv;
+    ID3D11ShaderResourceView *srv;
+    int tw, th;
+    uint64_t hash;
+    unsigned long long last_use;
+} HwDisp;
+#define HW_DISP_N 6
+static HwDisp g_disp[HW_DISP_N];
+static unsigned long long g_disp_gpu, g_disp_cpu;   /* Diagnose: GPU-Transfers / ohne Oberflaeche */
+
+/* Hilfspipeline (Vergroessern, Transfer) */
+static ID3D11VertexShader *g_fs_vs;
+static ID3D11PixelShader *g_up_ps, *g_upd_ps, *g_ups_ps, *g_dt_ps;
+static ID3D11Buffer *g_util_cb;
+static ID3D11DepthStencilState *g_dss_upd, *g_dss_ups[8];
+static ID3D11BlendState *g_bs_util;
+static ID3D11RasterizerState *g_rs_util;
+
+static uint64_t fnv1a(const unsigned char *p, uint32_t n);
+static void surf_attach(const HwDrawState *st);
+static void surf_after_flush(int depth_written);
+static void surf_release_all(void);
+static void hr_bind(int hires);
+static int hr_active(void);
+static int util_init(void);
+static void util_release(void);
+static void pend_flush(void);
 /* Diagnose (HLE_GTIME): Wandzeit je Abschnitt des HW-Pfads. */
 static unsigned long long g_dg_flush_us, g_dg_wait_us, g_dg_begin_us, g_dg_tri_us;
 static unsigned long long g_dg_hash_us, g_dg_lists, g_dg_ovl, g_dg_trk;
@@ -289,10 +407,10 @@ void hw_submit_stats(unsigned long long *batches, unsigned long long *submits) {
 }
 unsigned long long hw_target_loads(void) { return g_target_loads; }
 int hw_available(void) { return g_ready; }
-void hw_invalidate_guest(void) {
+static void hw_invalidate_guest_l(void) {
     g_guest_dirty = 1; g_rendered = 0; g_pend_n = 0; g_batch_ok = 0;
 }
-void hw_invalidate_textures(void)
+static void hw_invalidate_textures_l(void)
 {
     int i;
     g_batch_ok = 0;
@@ -301,7 +419,7 @@ void hw_invalidate_textures(void)
 /* Nur Slots, deren Quellbytes den Bereich ueberlappen, muessen neu geprueft
  * werden (GX-Schreiboperationen). Offset/bytes beziehen sich wie
  * HwTexture.offset auf den Gastpuffer. */
-void hw_invalidate_texture_range(uint32_t offset, uint32_t bytes)
+static void hw_invalidate_texture_range_l(uint32_t offset, uint32_t bytes)
 {
     int i;
     if (bytes == 0u) return;
@@ -314,7 +432,7 @@ void hw_invalidate_texture_range(uint32_t offset, uint32_t bytes)
             s->stale = 1;
     }
 }
-void hw_sync_guest(void)
+static void hw_sync_guest_l(void)
 {
     if (g_have_state && g_rendered && !g_guest_dirty) hw_flush_to_guest();
     /* Zielzustand verwerfen: der naechste HW-Draw laedt neu aus dem Gast. */
@@ -1057,6 +1175,10 @@ static int same_target(const HwDrawState *a, const HwDrawState *b) {
 }
 
 static void release_targets(void) {
+    if (g_color_srv) { ID3D11ShaderResourceView_Release(g_color_srv); g_color_srv = NULL; }
+    if (g_depth_srv) { ID3D11ShaderResourceView_Release(g_depth_srv); g_depth_srv = NULL; }
+    if (g_stencil_srv) { ID3D11ShaderResourceView_Release(g_stencil_srv); g_stencil_srv = NULL; }
+    g_cur_surf = NULL;
     if (g_color_stage) { ID3D11Texture2D_Release(g_color_stage); g_color_stage = NULL; }
     if (g_color_shadow_srv) { ID3D11ShaderResourceView_Release(g_color_shadow_srv); g_color_shadow_srv = NULL; }
     if (g_color_shadow) { ID3D11Texture2D_Release(g_color_shadow); g_color_shadow = NULL; }
@@ -1091,12 +1213,17 @@ static int create_targets(const HwDrawState *st) {
     td.SampleDesc.Count = 1;
     td.Usage = D3D11_USAGE_DEFAULT;
     td.BindFlags = D3D11_BIND_RENDER_TARGET;
+    /* M17: bei interner Aufloesung > 1 wird das native Ziel nach dem Laden
+       vergroessert (surf_attach) und braucht dafuer eine SRV. */
+    if (g_scale > 1) td.BindFlags |= D3D11_BIND_SHADER_RESOURCE;
     if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &g_color_tex))) return 0;
     memset(&rd, 0, sizeof(rd));
     rd.Format = td.Format;
     rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
     if (FAILED(ID3D11Device_CreateRenderTargetView(g_dev, (ID3D11Resource *)g_color_tex,
                                                    &rd, &g_color_rtv))) return 0;
+    if (g_scale > 1 && FAILED(ID3D11Device_CreateShaderResourceView(
+            g_dev, (ID3D11Resource *)g_color_tex, NULL, &g_color_srv))) return 0;
 
     /* Schattenkopie des Farbziels fuer LogicOp und Shader-Blending. */
     td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
@@ -1141,7 +1268,32 @@ static int create_targets(const HwDrawState *st) {
     td.SampleDesc.Count = 1;
     td.Usage = D3D11_USAGE_DEFAULT;
     td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    if (g_scale > 1) {
+        /* typenlos, damit surf_upscale_depth Tiefe/Stencil lesen kann */
+        td.Format = (st->depth_format == 0u) ? DXGI_FORMAT_R16_TYPELESS :
+                    (st->depth_format == 3u) ? DXGI_FORMAT_R24G8_TYPELESS :
+                                               DXGI_FORMAT_R32_TYPELESS;
+        td.BindFlags |= D3D11_BIND_SHADER_RESOURCE;
+    }
     if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &g_depth_dsv_tex))) return 0;
+    td.Format = dfmt;
+    td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    if (g_scale > 1) {
+        D3D11_SHADER_RESOURCE_VIEW_DESC sv;
+        memset(&sv, 0, sizeof(sv));
+        sv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        sv.Texture2D.MipLevels = 1;
+        sv.Format = (st->depth_format == 0u) ? DXGI_FORMAT_R16_UNORM :
+                    (st->depth_format == 3u) ? DXGI_FORMAT_R24_UNORM_X8_TYPELESS :
+                                               DXGI_FORMAT_R32_FLOAT;
+        if (FAILED(ID3D11Device_CreateShaderResourceView(
+                g_dev, (ID3D11Resource *)g_depth_dsv_tex, &sv, &g_depth_srv))) return 0;
+        if (st->depth_format == 3u) {
+            sv.Format = DXGI_FORMAT_X24_TYPELESS_G8_UINT;
+            if (FAILED(ID3D11Device_CreateShaderResourceView(
+                    g_dev, (ID3D11Resource *)g_depth_dsv_tex, &sv, &g_stencil_srv))) return 0;
+        }
+    }
     memset(&dd, 0, sizeof(dd));
     dd.Format = dfmt;
     dd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
@@ -1174,6 +1326,7 @@ static int create_targets(const HwDrawState *st) {
     g_guest_dirty = 0;
     g_rendered = 0;
     g_depth_dirty = 0;
+    surf_attach(st);
     return 1;
 }
 
@@ -1333,6 +1486,13 @@ static int init_pipeline(void) {
         return 0;
     }
     ID3D11Texture2D_Release(dummy);
+    /* M17: Hilfspipeline (Vergroessern, GPU-DisplayTransfer). Ohne sie
+       laeuft der Renderer wie bisher (Anzeige ueber das CPU-Bild). */
+    if (!util_init()) {
+        printf("[hw] Hilfspipeline nicht verfuegbar, interne Aufloesung 1\n");
+        util_release();
+        g_scale = 1;
+    }
     return 1;
 }
 
@@ -1341,6 +1501,10 @@ int hw_init(const char *driver) {
     D3D_FEATURE_LEVEL fl;
     HRESULT hr;
     (void)dummy;
+    if (InterlockedCompareExchange(&g_hw_cs_init, 2, 0) == 0) {
+        InitializeCriticalSection(&g_hw_cs);
+        g_hw_cs_init = 1;
+    }
     if (g_ready) return 1;
     if (!hw_load_dlls()) {
         fprintf(stderr, "[hw] D3D11 nicht ladbar, Software-Pfad bleibt aktiv\n");
@@ -1380,6 +1544,8 @@ void hw_shutdown(void) {
     g_texbind[0] = g_texbind[1] = g_texbind[2] = -1;
     if (g_tex_dummy) { ID3D11ShaderResourceView_Release(g_tex_dummy); g_tex_dummy = NULL; }
     release_targets();
+    surf_release_all();
+    util_release();
     if (g_bs) { ID3D11BlendState_Release(g_bs); g_bs = NULL; }
     if (g_dss) { ID3D11DepthStencilState_Release(g_dss); g_dss = NULL; }
     if (g_rs) { ID3D11RasterizerState_Release(g_rs); g_rs = NULL; }
@@ -1898,6 +2064,603 @@ static void bind_textures(const HwDrawState *st)
     ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 3, srv);
 }
 
+/* ---- M17: Hilfspipeline, Oberflaechen, Anzeigeflaechen ----------------- */
+
+/* Vollbild-Dreieck; u0.x = Faktor s. UpPS/UpDPS/UpSPS vergroessern das
+ * native Ziel (naechster Nachbar), DtPS rechnet einen DisplayTransfer wie
+ * p_display_transfer_run (gpu.c) in interner Aufloesung:
+ *   u0 = (s, hs, vs, flip), u1 = (Eingangsformat, Ausgangsformat,
+ *   Ausgabezeilen intern, Quellzeilen intern), Formate in DisplayTransfer-
+ *   Nummerierung (0 RGBA8, 1 RGB8, 2 RGB565, 3 RGB5A1, 4 RGBA4).
+ * Die Ausgabe liegt in Gast-Orientierung: Texel (x, y) = Pixel x der
+ * Framebuffer-Zeile y (eine Zeile = eine Bildschirmspalte). */
+static const char *k_hlsl_util =
+    "cbuffer UtilCB : register(b0) { uint4 u0; uint4 u1; };\n"
+    "Texture2D<float4> usrc : register(t0);\n"
+    "Texture2D<float> udep : register(t1);\n"
+    "Texture2D<uint2> usten : register(t2);\n"
+    "float4 FsVS(uint id : SV_VertexID) : SV_Position {\n"
+    "  float2 t = float2((id << 1) & 2, id & 2);\n"
+    "  return float4(t * float2(2, -2) + float2(-1, 1), 0, 1);\n"
+    "}\n"
+    "float4 UpPS(float4 p : SV_Position) : SV_Target {\n"
+    "  int2 q = int2(p.xy) / (int)u0.x;\n"
+    "  return usrc.Load(int3(q, 0));\n"
+    "}\n"
+    "float UpDPS(float4 p : SV_Position) : SV_Depth {\n"
+    "  int2 q = int2(p.xy) / (int)u0.x;\n"
+    "  return udep.Load(int3(q, 0));\n"
+    "}\n"
+    "void UpSPS(float4 p : SV_Position) {\n"
+    "  int2 q = int2(p.xy) / (int)u0.x;\n"
+    "  uint v = usten.Load(int3(q, 0)).g;\n"
+    "  if (((v >> u0.y) & 1u) == 0u) discard;\n"
+    "}\n"
+    /* Kodieren in das Format und Dekodieren wie p_decode_pixel/fb_decode_pixel
+       (Bitreplikation). */
+    "uint4 q_fb(uint f, uint4 c) {\n"
+    "  if (f == 1u) return uint4(c.rgb, 255u);\n"
+    "  if (f == 2u) {\n"
+    "    uint3 v = uint3(c.r >> 3, c.g >> 2, c.b >> 3);\n"
+    "    return uint4((v.r << 3) | (v.r >> 2), (v.g << 2) | (v.g >> 4), (v.b << 3) | (v.b >> 2), 255u);\n"
+    "  }\n"
+    "  if (f == 3u) {\n"
+    "    uint3 v = c.rgb >> 3;\n"
+    "    return uint4((v << 3) | (v >> 2), (c.a >> 7) * 255u);\n"
+    "  }\n"
+    "  if (f == 4u) { uint4 v = c >> 4; return (v << 4) | v; }\n"
+    "  return c;\n"
+    "}\n"
+    "uint4 dt_fetch(int ix, int iy) {\n"
+    "  uint4 c = (uint4)round(usrc.Load(int3(ix, (int)u1.w - 1 - iy, 0)) * 255.0);\n"
+    "  return q_fb(u1.x, c);\n"
+    "}\n"
+    "float4 DtPS(float4 p : SV_Position) : SV_Target {\n"
+    "  int X = (int)p.x, Y = (int)p.y;\n"
+    "  int yy = (u0.w != 0u) ? ((int)u1.z - 1 - Y) : Y;\n"
+    "  int ix = X << u0.y, iy = yy << u0.z;\n"
+    "  uint4 c = dt_fetch(ix, iy);\n"
+    "  if (u0.y != 0u) {\n"
+    "    uint4 c1 = dt_fetch(ix + 1, iy);\n"
+    "    if (u0.z != 0u) {\n"
+    "      uint4 c2 = dt_fetch(ix, iy + 1);\n"
+    "      uint4 c3 = dt_fetch(ix + 1, iy + 1);\n"
+    "      c = (c + c1 + c2 + c3) / 4u;\n"
+    "    } else {\n"
+    "      c = (c + c1) / 2u;\n"
+    "    }\n"
+    "  }\n"
+    "  c = q_fb(u1.y, c);\n"
+    "  return float4(c) / 255.0;\n"
+    "}\n";
+
+static ID3D11PixelShader *util_ps(const char *entry)
+{
+    ID3DBlob *b = NULL, *err = NULL;
+    ID3D11PixelShader *ps = NULL;
+    if (FAILED(g_pfn_d3d_compile(k_hlsl_util, strlen(k_hlsl_util), "hw_util", NULL, NULL,
+                                 entry, "ps_5_0", 0, 0, &b, &err))) {
+        if (err) {
+            fprintf(stderr, "[hw] %s: %s\n", entry, (char *)ID3D10Blob_GetBufferPointer(err));
+            ID3D10Blob_Release(err);
+        }
+        return NULL;
+    }
+    if (FAILED(ID3D11Device_CreatePixelShader(g_dev, ID3D10Blob_GetBufferPointer(b),
+                                              ID3D10Blob_GetBufferSize(b), NULL, &ps)))
+        ps = NULL;
+    ID3D10Blob_Release(b);
+    return ps;
+}
+
+static int util_init(void)
+{
+    ID3DBlob *b = NULL, *err = NULL;
+    D3D11_BUFFER_DESC bd;
+    D3D11_DEPTH_STENCIL_DESC ds;
+    D3D11_RASTERIZER_DESC rd;
+    D3D11_BLEND_DESC bl;
+    int i;
+    if (FAILED(g_pfn_d3d_compile(k_hlsl_util, strlen(k_hlsl_util), "hw_util", NULL, NULL,
+                                 "FsVS", "vs_5_0", 0, 0, &b, &err))) {
+        if (err) ID3D10Blob_Release(err);
+        return 0;
+    }
+    if (FAILED(ID3D11Device_CreateVertexShader(g_dev, ID3D10Blob_GetBufferPointer(b),
+                                               ID3D10Blob_GetBufferSize(b), NULL, &g_fs_vs))) {
+        ID3D10Blob_Release(b);
+        return 0;
+    }
+    ID3D10Blob_Release(b);
+    g_up_ps = util_ps("UpPS");
+    g_upd_ps = util_ps("UpDPS");
+    g_ups_ps = util_ps("UpSPS");
+    g_dt_ps = util_ps("DtPS");
+    if (!g_up_ps || !g_upd_ps || !g_ups_ps || !g_dt_ps) return 0;
+    memset(&bd, 0, sizeof(bd));
+    bd.ByteWidth = 32;
+    bd.Usage = D3D11_USAGE_DYNAMIC;
+    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_util_cb))) return 0;
+    memset(&ds, 0, sizeof(ds));
+    ds.DepthEnable = TRUE;
+    ds.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+    ds.DepthFunc = D3D11_COMPARISON_ALWAYS;
+    if (FAILED(ID3D11Device_CreateDepthStencilState(g_dev, &ds, &g_dss_upd))) return 0;
+    for (i = 0; i < 8; i++) {
+        memset(&ds, 0, sizeof(ds));
+        ds.DepthEnable = FALSE;
+        ds.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+        ds.DepthFunc = D3D11_COMPARISON_ALWAYS;
+        ds.StencilEnable = TRUE;
+        ds.StencilReadMask = 0xFF;
+        ds.StencilWriteMask = (UINT8)(1u << i);
+        ds.FrontFace.StencilFunc = D3D11_COMPARISON_ALWAYS;
+        ds.FrontFace.StencilFailOp = D3D11_STENCIL_OP_KEEP;
+        ds.FrontFace.StencilDepthFailOp = D3D11_STENCIL_OP_KEEP;
+        ds.FrontFace.StencilPassOp = D3D11_STENCIL_OP_REPLACE;
+        ds.BackFace = ds.FrontFace;
+        if (FAILED(ID3D11Device_CreateDepthStencilState(g_dev, &ds, &g_dss_ups[i]))) return 0;
+    }
+    memset(&rd, 0, sizeof(rd));
+    rd.FillMode = D3D11_FILL_SOLID;
+    rd.CullMode = D3D11_CULL_NONE;
+    rd.DepthClipEnable = FALSE;
+    if (FAILED(ID3D11Device_CreateRasterizerState(g_dev, &rd, &g_rs_util))) return 0;
+    memset(&bl, 0, sizeof(bl));
+    bl.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    if (FAILED(ID3D11Device_CreateBlendState(g_dev, &bl, &g_bs_util))) return 0;
+    return 1;
+}
+
+static void util_release(void)
+{
+    int i;
+    if (g_fs_vs) { ID3D11VertexShader_Release(g_fs_vs); g_fs_vs = NULL; }
+    if (g_up_ps) { ID3D11PixelShader_Release(g_up_ps); g_up_ps = NULL; }
+    if (g_upd_ps) { ID3D11PixelShader_Release(g_upd_ps); g_upd_ps = NULL; }
+    if (g_ups_ps) { ID3D11PixelShader_Release(g_ups_ps); g_ups_ps = NULL; }
+    if (g_dt_ps) { ID3D11PixelShader_Release(g_dt_ps); g_dt_ps = NULL; }
+    if (g_util_cb) { ID3D11Buffer_Release(g_util_cb); g_util_cb = NULL; }
+    if (g_dss_upd) { ID3D11DepthStencilState_Release(g_dss_upd); g_dss_upd = NULL; }
+    for (i = 0; i < 8; i++)
+        if (g_dss_ups[i]) { ID3D11DepthStencilState_Release(g_dss_ups[i]); g_dss_ups[i] = NULL; }
+    if (g_rs_util) { ID3D11RasterizerState_Release(g_rs_util); g_rs_util = NULL; }
+    if (g_bs_util) { ID3D11BlendState_Release(g_bs_util); g_bs_util = NULL; }
+}
+
+/* Gemeinsamer Zustand fuer einen Vollbild-Durchgang (der naechste HW-Draw
+ * bindet seinen Zustand ohnehin vollstaendig neu: hw_begin_draw_impl). */
+static void util_pass(int w, int h, ID3D11PixelShader *ps, const uint32_t u[8])
+{
+    D3D11_VIEWPORT vp;
+    D3D11_MAPPED_SUBRESOURCE map;
+    if (SUCCEEDED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_util_cb, 0,
+                                          D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+        memcpy(map.pData, u, 32);
+        ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_util_cb, 0);
+    }
+    memset(&vp, 0, sizeof(vp));
+    vp.Width = (float)w;
+    vp.Height = (float)h;
+    vp.MaxDepth = 1.0f;
+    ID3D11DeviceContext_RSSetViewports(g_ctx, 1, &vp);
+    ID3D11DeviceContext_RSSetState(g_ctx, g_rs_util);
+    ID3D11DeviceContext_IASetInputLayout(g_ctx, NULL);
+    ID3D11DeviceContext_IASetPrimitiveTopology(g_ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_VSSetShader(g_ctx, g_fs_vs, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(g_ctx, ps, NULL, 0);
+    ID3D11DeviceContext_PSSetConstantBuffers(g_ctx, 0, 1, &g_util_cb);
+    ID3D11DeviceContext_OMSetBlendState(g_ctx, g_bs_util, NULL, 0xFFFFFFFFu);
+    ID3D11DeviceContext_Draw(g_ctx, 3, 0);
+}
+
+static void util_unbind(void)
+{
+    ID3D11ShaderResourceView *null3[3] = { NULL, NULL, NULL };
+    ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 3, null3);
+    ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 0, NULL, NULL);
+    g_batch_ok = 0;
+}
+
+static void surf_free(HwSurf *s)
+{
+    if (s->csrv) { ID3D11ShaderResourceView_Release(s->csrv); s->csrv = NULL; }
+    if (s->crtv) { ID3D11RenderTargetView_Release(s->crtv); s->crtv = NULL; }
+    if (s->ctex) { ID3D11Texture2D_Release(s->ctex); s->ctex = NULL; }
+    if (s->dsv) { ID3D11DepthStencilView_Release(s->dsv); s->dsv = NULL; }
+    if (s->dtex) { ID3D11Texture2D_Release(s->dtex); s->dtex = NULL; }
+    if (g_cur_surf == s) g_cur_surf = NULL;
+    memset(s, 0, sizeof(*s));
+}
+
+static void disp_free(HwDisp *d)
+{
+    if (d->srv) { ID3D11ShaderResourceView_Release(d->srv); d->srv = NULL; }
+    if (d->rtv) { ID3D11RenderTargetView_Release(d->rtv); d->rtv = NULL; }
+    if (d->tex) { ID3D11Texture2D_Release(d->tex); d->tex = NULL; }
+    memset(d, 0, sizeof(*d));
+}
+
+static void surf_release_all(void)
+{
+    int i;
+    for (i = 0; i < HW_SURF_N; i++) surf_free(&g_surf[i]);
+    for (i = 0; i < HW_DISP_N; i++) disp_free(&g_disp[i]);
+    if (g_hr_shadow_srv) { ID3D11ShaderResourceView_Release(g_hr_shadow_srv); g_hr_shadow_srv = NULL; }
+    if (g_hr_shadow) { ID3D11Texture2D_Release(g_hr_shadow); g_hr_shadow = NULL; }
+    g_hr_shadow_w = g_hr_shadow_h = 0;
+    g_cur_surf = NULL;
+}
+
+static int tex_rt_srv(int w, int h, ID3D11Texture2D **tex, ID3D11RenderTargetView **rtv,
+                      ID3D11ShaderResourceView **srv)
+{
+    D3D11_TEXTURE2D_DESC td;
+    memset(&td, 0, sizeof(td));
+    td.Width = (UINT)w;
+    td.Height = (UINT)h;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE | (rtv ? D3D11_BIND_RENDER_TARGET : 0);
+    if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, tex))) { *tex = NULL; return 0; }
+    if (rtv && FAILED(ID3D11Device_CreateRenderTargetView(g_dev, (ID3D11Resource *)*tex,
+                                                          NULL, rtv))) { *rtv = NULL; return 0; }
+    if (srv && FAILED(ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)*tex,
+                                                            NULL, srv))) { *srv = NULL; return 0; }
+    return 1;
+}
+
+/* Laenge des Farb-/Tiefenpuffers im Gast (0 = nicht vollstaendig adressierbar). */
+static uint32_t surf_color_len(const HwDrawState *st, int w, int h)
+{
+    uint64_t n = (uint64_t)w * (uint64_t)h * fmt_bpp(st->color_format);
+    return (st->color_mem != NULL && n <= st->color_size) ? (uint32_t)n : 0u;
+}
+static uint32_t surf_depth_len(const HwDrawState *st, int w, int h)
+{
+    uint64_t n = (uint64_t)w * (uint64_t)h * depth_bpp(st->depth_format);
+    return (st->depth_mem != NULL && n <= st->depth_size) ? (uint32_t)n : 0u;
+}
+
+/* Hochskalierte Tiefe/Stencil aus dem nativen Ziel (s > 1). */
+static void surf_upscale_depth(HwSurf *sf)
+{
+    uint32_t u[8] = {0};
+    int s = g_scale, b;
+    u[0] = (uint32_t)s;
+    ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 0, NULL, sf->dsv);
+    ID3D11DeviceContext_PSSetShaderResources(g_ctx, 1, 1, &g_depth_srv);
+    ID3D11DeviceContext_OMSetDepthStencilState(g_ctx, g_dss_upd, 0);
+    util_pass(sf->w * s, sf->h * s, g_upd_ps, u);
+    if (sf->depth_fmt == 3u && g_stencil_srv) {
+        ID3D11DeviceContext_ClearDepthStencilView(g_ctx, sf->dsv, D3D11_CLEAR_STENCIL, 0.0f, 0);
+        ID3D11DeviceContext_PSSetShaderResources(g_ctx, 2, 1, &g_stencil_srv);
+        for (b = 0; b < 8; b++) {
+            u[1] = (uint32_t)b;
+            ID3D11DeviceContext_OMSetDepthStencilState(g_ctx, g_dss_ups[b], 0xFF);
+            util_pass(sf->w * s, sf->h * s, g_ups_ps, u);
+        }
+    }
+    util_unbind();
+}
+
+/* Aufruf am Ende von create_targets (natives Ziel frisch aus dem Gast). */
+static void surf_attach(const HwDrawState *st)
+{
+    HwSurf *sf = NULL;
+    int i, w = g_target_w, h = g_target_h, s = g_scale;
+    uint32_t clen, dlen;
+    uint64_t ch = 0, dh = 0;
+
+    g_cur_surf = NULL;
+    if (!g_fs_vs || w <= 0 || h <= 0) return;
+    for (i = 0; i < HW_SURF_N; i++) {
+        HwSurf *t = &g_surf[i];
+        if (t->valid && t->color_mem == st->color_mem && t->depth_mem == st->depth_mem &&
+            t->color_fmt == st->color_format && t->depth_fmt == st->depth_format &&
+            t->w == w && t->h == h) { sf = t; break; }
+    }
+    if (sf == NULL) {
+        HwSurf *lru = &g_surf[0];
+        for (i = 0; i < HW_SURF_N; i++) {
+            if (!g_surf[i].valid) { lru = &g_surf[i]; break; }
+            if (g_surf[i].last_use < lru->last_use) lru = &g_surf[i];
+        }
+        sf = lru;
+        surf_free(sf);
+        sf->color_mem = st->color_mem;
+        sf->depth_mem = st->depth_mem;
+        sf->color_fmt = st->color_format;
+        sf->depth_fmt = st->depth_format;
+        sf->w = w;
+        sf->h = h;
+        if (!tex_rt_srv(w * s, h * s, &sf->ctex, &sf->crtv, &sf->csrv)) { surf_free(sf); return; }
+        if (s > 1) {
+            D3D11_TEXTURE2D_DESC td;
+            memset(&td, 0, sizeof(td));
+            td.Width = (UINT)(w * s); td.Height = (UINT)(h * s);
+            td.MipLevels = 1; td.ArraySize = 1;
+            td.Format = depth_dxgi(st->depth_format);
+            td.SampleDesc.Count = 1;
+            td.Usage = D3D11_USAGE_DEFAULT;
+            td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+            if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &sf->dtex)) ||
+                FAILED(ID3D11Device_CreateDepthStencilView(g_dev, (ID3D11Resource *)sf->dtex,
+                                                           NULL, &sf->dsv))) {
+                surf_free(sf);
+                return;
+            }
+        }
+        sf->valid = 1;
+    }
+    clen = surf_color_len(st, w, h);
+    dlen = surf_depth_len(st, w, h);
+    if (clen) ch = fnv1a(st->color_mem, clen);
+    if (dlen) dh = fnv1a(st->depth_mem, dlen);
+    if (!(sf->cvalid && clen != 0u && clen == sf->clen && ch == sf->chash)) {
+        if (s > 1) {
+            uint32_t u[8] = {0};
+            u[0] = (uint32_t)s;
+            ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &sf->crtv, NULL);
+            ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 1, &g_color_srv);
+            util_pass(w * s, h * s, g_up_ps, u);
+            util_unbind();
+        } else {
+            ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)sf->ctex,
+                                             (ID3D11Resource *)g_color_tex);
+        }
+        sf->chash = ch;
+        sf->clen = clen;
+        sf->cvalid = (clen != 0u);
+    }
+    if (s > 1 && !(sf->dvalid && dlen != 0u && dlen == sf->dlen && dh == sf->dhash)) {
+        surf_upscale_depth(sf);
+        sf->dhash = dh;
+        sf->dlen = dlen;
+        sf->dvalid = (dlen != 0u);
+    }
+    sf->last_use = ++g_surf_clock;
+    g_cur_surf = sf;
+    if (s > 1 && (g_hr_shadow_w != w * s || g_hr_shadow_h != h * s)) {
+        if (g_hr_shadow_srv) { ID3D11ShaderResourceView_Release(g_hr_shadow_srv); g_hr_shadow_srv = NULL; }
+        if (g_hr_shadow) { ID3D11Texture2D_Release(g_hr_shadow); g_hr_shadow = NULL; }
+        g_hr_shadow_w = g_hr_shadow_h = 0;
+        if (tex_rt_srv(w * s, h * s, &g_hr_shadow, NULL, &g_hr_shadow_srv)) {
+            g_hr_shadow_w = w * s;
+            g_hr_shadow_h = h * s;
+        }
+    }
+}
+
+/* Nach dem Rueckschreiben: Oberflaeche und Gast stimmen ueberein. */
+static void surf_after_flush(int depth_written)
+{
+    HwSurf *sf = g_cur_surf;
+    uint32_t clen, dlen;
+    if (sf == NULL || !sf->valid) return;
+    if (g_scale == 1)
+        ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)sf->ctex,
+                                         (ID3D11Resource *)g_color_tex);
+    if (g_scale > 1 && sf->hr_skipped) {
+        /* interne Kopie nicht mitgerendert: beim naechsten Laden neu
+           vergroessern, bis dahin kein GPU-Transfer aus ihr */
+        sf->hr_skipped = 0;
+        sf->cvalid = 0;
+        sf->dvalid = 0;
+        sf->last_use = ++g_surf_clock;
+        return;
+    }
+    clen = surf_color_len(&g_state, g_target_w, g_target_h);
+    sf->chash = clen ? fnv1a(g_state.color_mem, clen) : 0;
+    sf->clen = clen;
+    sf->cvalid = (clen != 0u);
+    if (depth_written && g_scale > 1) {
+        dlen = surf_depth_len(&g_state, g_target_w, g_target_h);
+        sf->dhash = dlen ? fnv1a(g_state.depth_mem, dlen) : 0;
+        sf->dlen = dlen;
+        sf->dvalid = (dlen != 0u);
+    }
+    sf->last_use = ++g_surf_clock;
+}
+
+/* Bindungen fuer den nativen (0) bzw. internen (1) Durchgang in pend_flush. */
+static void hr_bind(int hires)
+{
+    if (!hires) {
+        ID3D11RenderTargetView *rtv[1] = { g_color_rtv };
+        ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, rtv, g_dsv);
+        ID3D11DeviceContext_RSSetViewports(g_ctx, 1, &g_vp_nat);
+        ID3D11DeviceContext_RSSetScissorRects(g_ctx, 1, &g_rc_nat);
+        ID3D11DeviceContext_PSSetShaderResources(g_ctx, 3, 1,
+            g_shadow_on ? &g_color_shadow_srv : &g_tex_dummy);
+    } else {
+        int s = g_scale;
+        D3D11_VIEWPORT vp = g_vp_nat;
+        D3D11_RECT rc = g_rc_nat;
+        ID3D11RenderTargetView *rtv[1] = { g_cur_surf->crtv };
+        vp.TopLeftX *= (float)s; vp.TopLeftY *= (float)s;
+        vp.Width *= (float)s; vp.Height *= (float)s;
+        rc.left *= s; rc.top *= s; rc.right *= s; rc.bottom *= s;
+        ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, rtv, g_cur_surf->dsv);
+        ID3D11DeviceContext_RSSetViewports(g_ctx, 1, &vp);
+        ID3D11DeviceContext_RSSetScissorRects(g_ctx, 1, &rc);
+        ID3D11DeviceContext_PSSetShaderResources(g_ctx, 3, 1,
+            g_shadow_on ? &g_hr_shadow_srv : &g_tex_dummy);
+    }
+}
+
+static int hr_active(void)
+{
+    if (g_scale > 1 && g_cur_surf != NULL && !g_cur_surf->shown) {
+        g_cur_surf->hr_skipped = 1;
+        return 0;
+    }
+    return g_scale > 1 && g_cur_surf != NULL && g_cur_surf->crtv != NULL &&
+           g_cur_surf->dsv != NULL && g_hr_shadow != NULL;
+}
+
+/* PICA-Farbzielformat (0x117) -> DisplayTransfer-/Framebuffer-Format. */
+static uint32_t cb_to_fb_fmt(uint32_t f)
+{
+    static const uint32_t m[5] = { 0u, 1u, 3u, 2u, 4u };
+    return f < 5u ? m[f] : 0xFFu;
+}
+
+static uint32_t fb_fmt_bpp(uint32_t f)
+{
+    switch (f & 7u) {
+    case 0: return 4u;
+    case 1: return 3u;
+    case 2: case 3: case 4: return 2u;
+    default: return 0u;
+    }
+}
+
+static void disp_invalidate_range(const unsigned char *dst, uint32_t extent)
+{
+    int i;
+    for (i = 0; i < HW_DISP_N; i++) {
+        HwDisp *d = &g_disp[i];
+        if (!d->valid) continue;
+        if (dst < d->dst + d->len && d->dst < dst + extent) d->valid = 0;
+    }
+}
+
+void hw_display_transfer(const unsigned char *src, const unsigned char *dst,
+                         uint32_t in_size, uint32_t out_size, uint32_t flags,
+                         uint32_t extent)
+{
+    const uint32_t in_w = in_size & 0xFFFFu, in_h = (in_size >> 16) & 0xFFFFu;
+    const uint32_t out_w = out_size & 0xFFFFu, out_h = (out_size >> 16) & 0xFFFFu;
+    const uint32_t in_fmt = (flags >> 8) & 7u, out_fmt = (flags >> 12) & 7u;
+    const uint32_t scaling = (flags >> 24) & 3u;
+    uint32_t hs, vs, ow, oh, len, u[8];
+    HwSurf *sf = NULL;
+    HwDisp *d = NULL;
+    int i, s = g_scale;
+
+    hw_lock_enter();
+    if (!g_ready || !g_dt_ps) goto out;
+    disp_invalidate_range(dst, extent ? extent : 1u);
+    /* Nur der gekachelte -> lineare Standardfall (Bildschirmausgabe). */
+    if ((flags & 2u) || (flags & 0x20u) || ((flags & 1u) && (flags & 4u)) ||
+        scaling > 2u || fb_fmt_bpp(out_fmt) == 0u || in_w == 0u || in_h == 0u)
+        goto cpu;
+    hs = scaling != 0u ? 1u : 0u;
+    vs = scaling == 2u ? 1u : 0u;
+    ow = out_w >> hs;
+    oh = out_h >> vs;
+    if (ow == 0u || oh == 0u || out_w > in_w || out_h > in_h) goto cpu;
+    for (i = 0; i < HW_SURF_N; i++) {
+        HwSurf *t = &g_surf[i];
+        if (!t->valid || t->color_mem != src) continue;
+        if (t->w != (int)in_w || t->h != (int)in_h || cb_to_fb_fmt(t->color_fmt) != in_fmt)
+            continue;
+        if (sf == NULL || t->last_use > sf->last_use) sf = t;
+    }
+    if (sf == NULL) goto cpu;
+    if (g_scale > 1 && !sf->shown) {
+        /* erstes Mal Bildschirmquelle: ab jetzt intern mitrendern */
+        sf->shown = 1;
+        goto cpu;
+    }
+    if (!sf->cvalid || fnv1a(src, sf->clen) != sf->chash) goto cpu;
+    len = ow * oh * fb_fmt_bpp(out_fmt);
+    for (i = 0; i < HW_DISP_N; i++)
+        if (g_disp[i].tex && g_disp[i].dst == dst) { d = &g_disp[i]; break; }
+    if (d == NULL) {
+        d = &g_disp[0];
+        for (i = 0; i < HW_DISP_N; i++) {
+            if (!g_disp[i].tex) { d = &g_disp[i]; break; }
+            if (g_disp[i].last_use < d->last_use) d = &g_disp[i];
+        }
+    }
+    if (!d->tex || d->tw != (int)ow * s || d->th != (int)oh * s) {
+        disp_free(d);
+        if (!tex_rt_srv((int)ow * s, (int)oh * s, &d->tex, &d->rtv, &d->srv)) {
+            disp_free(d);
+            goto cpu;
+        }
+        d->tw = (int)ow * s;
+        d->th = (int)oh * s;
+    }
+    pend_flush();
+    u[0] = (uint32_t)s; u[1] = hs; u[2] = vs; u[3] = flags & 1u;
+    u[4] = in_fmt; u[5] = out_fmt; u[6] = oh * (uint32_t)s; u[7] = in_h * (uint32_t)s;
+    ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &d->rtv, NULL);
+    ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 1, &sf->csrv);
+    util_pass(d->tw, d->th, g_dt_ps, u);
+    util_unbind();
+    d->dst = dst;
+    d->len = len;
+    d->fmt = out_fmt;
+    d->ow = ow;
+    d->oh = oh;
+    d->hash = fnv1a(dst, len);
+    d->valid = 1;
+    d->last_use = ++g_surf_clock;
+    g_disp_gpu++;
+    goto out;
+cpu:
+    g_disp_cpu++;
+out:
+    hw_lock_leave();
+}
+
+/* Anzeigeflaeche zum Framebuffer ptr (Spaltenabstand stride, GSP-Format),
+ * nur wenn die Gastbytes noch dem Stand nach dem GPU-Transfer entsprechen.
+ * Aufrufer haelt hw_lock(). */
+void *hw_display_lookup(const unsigned char *ptr, uint32_t stride, uint32_t fmt,
+                        int columns, int rows, int *tex_w, int *tex_h)
+{
+    int i;
+    uint32_t bpp = fb_fmt_bpp(fmt);
+    if (!g_ready || bpp == 0u || ptr == NULL) return NULL;
+    if (stride != 0u && stride != (uint32_t)rows * bpp) return NULL;
+    for (i = 0; i < HW_DISP_N; i++) {
+        HwDisp *d = &g_disp[i];
+        if (!d->valid || d->dst != ptr || d->fmt != (fmt & 7u)) continue;
+        if (d->ow != (uint32_t)rows || d->oh < (uint32_t)columns) continue;
+        if (fnv1a(ptr, d->len) != d->hash) return NULL;
+        if (tex_w) *tex_w = d->tw;
+        if (tex_h) *tex_h = d->th;
+        return d->srv;
+    }
+    return NULL;
+}
+
+void hw_display_stats(unsigned long long *gpu, unsigned long long *cpu)
+{
+    if (gpu) *gpu = g_disp_gpu;
+    if (cpu) *cpu = g_disp_cpu;
+}
+
+void hw_lock(void) { hw_lock_enter(); }
+void hw_unlock(void) { hw_lock_leave(); }
+void *hw_d3d_device(void) { return g_dev; }
+void *hw_d3d_context(void) { return g_ctx; }
+int hw_scale(void) { return g_scale; }
+
+void hw_set_scale(int s)
+{
+    if (s < 1) s = 1;
+    if (s > 4) s = 4;
+    hw_lock_enter();
+    if (s != g_scale) {
+        if (g_ready) {
+            hw_sync_guest();
+            surf_release_all();
+        }
+        g_scale = s;
+    }
+    hw_lock_leave();
+}
+
 /* Gesammelte Dreiecke mit einem Draw zeichnen (Ringpuffer: anhaengen mit
  * NO_OVERWRITE, bei vollem Puffer DISCARD und von vorn). */
 static void pend_flush(void)
@@ -1906,6 +2669,8 @@ static void pend_flush(void)
     D3D11_MAP mode = D3D11_MAP_WRITE_NO_OVERWRITE;
     UINT stride = sizeof(HwVertex), offset = 0;
     UINT n = (UINT)g_pend_n;
+    D3D11_BOX box;
+    int hires, have_box = 0;
 
     if (n == 0u) return;
     g_pend_n = 0;
@@ -1920,14 +2685,16 @@ static void pend_flush(void)
     ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_vb, 0);
     ID3D11DeviceContext_IASetVertexBuffers(g_ctx, 0, 1, &g_vb, &stride, &offset);
     ID3D11DeviceContext_IASetPrimitiveTopology(g_ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    hires = hr_active();
+    if (hires) hr_bind(0);
     /* Momentaufnahme nur des Rechtecks, das der Batch abdeckt (der Shader
        liest tshadow ausschliesslich an der eigenen Pixelposition). */
     if (g_cov_track && g_color_shadow && g_color_tex && g_cov_x1 >= g_cov_x0 &&
         g_cov_y1 >= g_cov_y0) {
-        D3D11_BOX box;
         box.left = (UINT)g_cov_x0; box.right = (UINT)g_cov_x1 + 1u;
         box.top = (UINT)g_cov_y0; box.bottom = (UINT)g_cov_y1 + 1u;
         box.front = 0; box.back = 1;
+        have_box = 1;
         ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)g_color_shadow,
                                                   0, box.left, box.top, 0,
                                                   (ID3D11Resource *)g_color_tex, 0, &box);
@@ -1935,6 +2702,20 @@ static void pend_flush(void)
     g_cov_x0 = g_cov_y0 = 0x7FFFFFFF;
     g_cov_x1 = g_cov_y1 = -1;
     ID3D11DeviceContext_Draw(g_ctx, n, g_vb_pos);
+    /* M17: derselbe Batch in interner Aufloesung (nur Anzeige). Die
+       Ueberschneidungspruefung laeuft nativ; die Momentaufnahme des
+       skalierten Rechtecks folgt denselben Batch-Grenzen. */
+    if (hires) {
+        UINT s = (UINT)g_scale;
+        hr_bind(1);
+        if (have_box) {
+            box.left *= s; box.right *= s; box.top *= s; box.bottom *= s;
+            ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)g_hr_shadow,
+                                                      0, box.left, box.top, 0,
+                                                      (ID3D11Resource *)g_cur_surf->ctex, 0, &box);
+        }
+        ID3D11DeviceContext_Draw(g_ctx, n, g_vb_pos);
+    }
     g_vb_pos += n;
     g_batches++;
     /* Befehle frueh an die GPU uebergeben: sonst sammelt der Treiber die
@@ -2115,7 +2896,7 @@ int hw_continue_draw(unsigned serial) {
 }
 
 static int hw_begin_draw_impl(const HwDrawState *st);
-int hw_begin_draw(const HwDrawState *st) {
+static int hw_begin_draw_l(const HwDrawState *st) {
     unsigned long long t0;
     int r;
     /* Fast-Path: derselbe Zustand wie der laufende Batch. */
@@ -2174,6 +2955,7 @@ static int hw_begin_draw_impl(const HwDrawState *st) {
        Ziels vor diesem Draw (wie fb.GetPixel in sw_rasterizer.cpp). */
     {
         int shadow = pica_shader_blend(st) || pica_logic_active(st);
+        g_shadow_on = shadow;
         if (shadow) {
             /* Die Kopie selbst entsteht in pend_flush direkt vor dem Draw. */
             ID3D11DeviceContext_PSSetShaderResources(g_ctx, 3, 1, &g_color_shadow_srv);
@@ -2192,6 +2974,7 @@ static int hw_begin_draw_impl(const HwDrawState *st) {
     vp.MinDepth = 0.0f;
     vp.MaxDepth = 1.0f;
     ID3D11DeviceContext_RSSetViewports(g_ctx, 1, &vp);
+    g_vp_nat = vp;
 
     if (st->scissor_mode == 3u) {
         rc.left = st->scissor_x1; rc.top = st->scissor_y1;
@@ -2200,6 +2983,7 @@ static int hw_begin_draw_impl(const HwDrawState *st) {
         rc.left = 0; rc.top = 0; rc.right = g_target_w; rc.bottom = g_target_h;
     }
     ID3D11DeviceContext_RSSetScissorRects(g_ctx, 1, &rc);
+    g_rc_nat = rc;
 
     dkey = (uint32_t)(st->depth_test | (st->depth_write << 1) |
                       (st->depth_func << 2));
@@ -2337,7 +3121,7 @@ static int hw_begin_draw_impl(const HwDrawState *st) {
 }
 
 static int hw_triangles_impl(const HwVertex *v, int n);
-int hw_triangles(const HwVertex *v, int n) {
+static int hw_triangles_l(const HwVertex *v, int n) {
     unsigned long long t0 = tex_diag_on() ? hw_now_us() : 0ull;
     int r = hw_triangles_impl(v, n);
     if (t0) g_dg_tri_us += hw_now_us() - t0;
@@ -2388,7 +3172,7 @@ static int hw_triangles_impl(const HwVertex *v, int n) {
     return 1;
 }
 
-int hw_flush_to_guest(void) {
+static int hw_flush_to_guest_l(void) {
     unsigned long long t0 = 0;
     D3D11_MAPPED_SUBRESOURCE cm, dm;
     unsigned char *cbase, *dbase;
@@ -2473,6 +3257,7 @@ int hw_flush_to_guest(void) {
         g_depth_writes++;
     }
     ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_color_stage, 0);
+    surf_after_flush(g_depth_dirty && g_state.depth_mem != NULL);
     g_flushes++;
     g_rendered = 0;
     g_depth_dirty = 0;
@@ -2485,7 +3270,7 @@ int hw_flush_to_guest(void) {
     return 1;
 }
 
-void hw_list_begin(void) {
+static void hw_list_begin_l(void) {
     /* Neue Kommandoliste: jede gebundene Textur wird hoechstens einmal per
        Byte-Hash gegen den Gastspeicher geprueft (CPU-Schreibzugriffe). */
     g_list_serial++;
@@ -2494,7 +3279,7 @@ void hw_list_begin(void) {
     /* Diagnose (HLE_HW_STATE/HLE_GTIME): Upload- und Dekodierrate. */
     if (tex_diag_on()) {
         static unsigned long long t0, up0, dec0, start;
-        static unsigned long long d0, f0, l0, fl0, wt0, bg0, tr0, hs0, b0, ov0, tk0;
+        static unsigned long long d0, f0, l0, fl0, wt0, bg0, tr0, hs0, b0, ov0, tk0, lw0;
         unsigned long long now = hw_now_us();
         if (start == 0ull) start = now;
         if (t0 == 0ull) { t0 = now; up0 = 0ull; dec0 = 0ull; }
@@ -2508,11 +3293,14 @@ void hw_list_begin(void) {
                    100.0 * (double)(g_tex_upload_us - dec0) / 1000000.0 / sec);
             fflush(stdout);
             printf("[hwtime] listen=%llu draws=%llu batches=%llu flushes=%llu flush_ms=%llu "
-                   "(warten %llu) begin_ms=%llu tri_ms=%llu hash_ms=%llu ovl=%llu/%llu\n",
+                   "(warten %llu) begin_ms=%llu tri_ms=%llu hash_ms=%llu ovl=%llu/%llu "
+                   "sperre_ms=%llu\n",
                    g_dg_lists - l0, g_draws - d0, g_batches - b0, g_flushes - f0,
                    (g_dg_flush_us - fl0) / 1000ull, (g_dg_wait_us - wt0) / 1000ull,
                    (g_dg_begin_us - bg0) / 1000ull, (g_dg_tri_us - tr0) / 1000ull,
-                   (g_dg_hash_us - hs0) / 1000ull, g_dg_ovl - ov0, g_dg_trk - tk0);
+                   (g_dg_hash_us - hs0) / 1000ull, g_dg_ovl - ov0, g_dg_trk - tk0,
+                   ((unsigned long long)g_lock_wait_us - lw0) / 1000ull);
+            lw0 = (unsigned long long)g_lock_wait_us;
             fflush(stdout);
             l0 = g_dg_lists; d0 = g_draws; f0 = g_flushes; fl0 = g_dg_flush_us;
             wt0 = g_dg_wait_us; bg0 = g_dg_begin_us; tr0 = g_dg_tri_us;
@@ -2541,4 +3329,35 @@ void hw_list_begin(void) {
     } else {
         g_sync_kept++;
     }
+}
+
+/* ---- Oeffentliche Einstiege unter der Context-Sperre (M17) ------------- */
+int hw_begin_draw(const HwDrawState *st)
+{ int r; hw_lock_enter(); r = hw_begin_draw_l(st); hw_lock_leave(); return r; }
+int hw_triangles(const HwVertex *v, int n)
+{ int r; hw_lock_enter(); r = hw_triangles_l(v, n); hw_lock_leave(); return r; }
+int hw_flush_to_guest(void)
+{ int r; hw_lock_enter(); r = hw_flush_to_guest_l(); hw_lock_leave(); return r; }
+void hw_list_begin(void) { hw_lock_enter(); hw_list_begin_l(); hw_lock_leave(); }
+void hw_invalidate_guest(void) { hw_lock_enter(); hw_invalidate_guest_l(); hw_lock_leave(); }
+void hw_invalidate_textures(void) { hw_lock_enter(); hw_invalidate_textures_l(); hw_lock_leave(); }
+void hw_invalidate_texture_range(uint32_t offset, uint32_t bytes)
+{ hw_lock_enter(); hw_invalidate_texture_range_l(offset, bytes); hw_lock_leave(); }
+void hw_sync_guest(void) { hw_lock_enter(); hw_sync_guest_l(); hw_lock_leave(); }
+
+/* HLSL-Quelltext uebersetzen (d3dcompiler wird erst mit dem HW-Renderer
+ * geladen); Rueckgabe ID3DBlob* oder NULL. Fuer runtime/gpu/hw_present.c. */
+void *hw_compile_shader(const char *src, const char *entry, const char *profile)
+{
+    ID3DBlob *b = NULL, *err = NULL;
+    if (!g_pfn_d3d_compile) return NULL;
+    if (FAILED(g_pfn_d3d_compile(src, strlen(src), "hw", NULL, NULL, entry, profile, 0, 0,
+                                 &b, &err))) {
+        if (err) {
+            fprintf(stderr, "[hw] %s: %s\n", entry, (char *)ID3D10Blob_GetBufferPointer(err));
+            ID3D10Blob_Release(err);
+        }
+        return NULL;
+    }
+    return b;
 }

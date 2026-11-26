@@ -65,11 +65,13 @@ bugs, slow scenes and occasional hangs. Progress and milestones are tracked in
 4. Run:
 
    ```powershell
-   .\out\port.exe --renderer hw
+   .\out\port.exe
    ```
 
-   Without `--renderer hw` the software rasterizer is used (slower, but the
-   reference implementation).
+   The Direct3D 11 renderer is the default. `--scale 2` (or `3`, `4`)
+   renders at a higher internal resolution, `--split-screens` opens one
+   window per screen, F11 toggles fullscreen. `--renderer soft` selects the
+   software rasterizer (slower, but the reference implementation).
 
 ## Controls
 

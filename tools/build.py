@@ -31,6 +31,7 @@ SOURCES = [
     "kernel/fs_archive.c",
     "gpu/gpu.c",
     "gpu/hw_d3d11.c",
+    "gpu/hw_present.c",
     "gpu/imgc.c",
     "audio/audio_codec.c",
     "audio/dsp_hle.c",

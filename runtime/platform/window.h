@@ -7,6 +7,14 @@
 int win_open(int width, int height, const char *title);
 void win_set_no_activate(int on);                 /* vor win_open: ohne Fokus zeigen */
 void win_set_split(int on);   /* vor win_open: je Screen ein Fenster (ueberstimmt port.ini) */
+/* Diagnose-Anzeige (Statuszeilen im Fenster, fps/Gast-Frames im Titel):
+ * Standard aus; port.ini [debug] overlay = 1 oder --debug. win_set_debug
+ * (Startoption) ueberstimmt port.ini; win_debug gilt nach win_open. */
+void win_set_debug(int on);
+int win_debug(void);
+/* Nur Gast-fps oben links (Statuszeile 0); port.ini [debug] fps = 1 oder
+ * --fps, --no-fps ueberstimmt. Mit Debug-Anzeige ist die Zeile ohnehin da. */
+void win_set_fps_overlay(int on);
 int win_pump(void);                              /* 1 = Fenster offen */
 void win_blit(const uint8_t *rgb, int w, int h);  /* RGB24 -> Fenster */
 void win_status(const char *text, int line);
@@ -43,6 +51,26 @@ static inline WinViewport win_fit_viewport(int client_w, int client_h,
     v.y = (client_h - v.height) / 2;
     return v;
 }
+
+/* Bildausgabe ueber eine andere API (M17: D3D11-Swapchain des
+ * HW-Renderers, runtime/gpu/hw_present.c). Ist ein Hook gesetzt, ruft
+ * WM_PAINT ihn je Fenster auf; gibt er 0 zurueck, zeichnet das Fenster wie
+ * bisher per GDI aus dem Kanvas (win_blit). Viewport, Ausschnitt und
+ * Touch-Umrechnung bleiben in window.c. */
+typedef struct {
+    void *hwnd;
+    int pane;
+    int client_w, client_h;
+    WinViewport vp;                    /* Zielrechteck im Clientbereich */
+    int src_x, src_y, src_w, src_h;    /* Kanvas-Ausschnitt (native Pixel) */
+    const char *const *status;         /* Statuszeilen (nur Fenster 0) */
+    int nstatus;
+} WinPresentInfo;
+typedef int (*WinPresentFn)(const WinPresentInfo *info);
+typedef void (*WinDetachFn)(void *hwnd);
+void win_set_present(WinPresentFn present, WinDetachFn detach);
+/* [display] scale = N aus port.ini (0 = nicht gesetzt), nach win_open. */
+int win_config_scale(void);
 
 /* Momentaufnahme der Host-Eingabe fuer hid. Standardbelegung (ueberschreibbar
  * in port.ini neben port.exe, siehe docs/FRONTEND.md):

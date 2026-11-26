@@ -319,6 +319,10 @@ def run_scene(name, a):
            "--shot", str(shot)]
     if not a.realtime:
         cmd.append("--deterministic")
+    if a.scale:
+        # Interne Aufloesung (M17, nur HW): native Bilder bleiben unveraendert,
+        # zusaetzlich hd_*.png in interner Aufloesung.
+        cmd += ["--scale", str(a.scale), "--shot-scaled"]
     if presses:
         cmd += ["--press", ",".join(presses)]
     if a.every:
@@ -353,6 +357,8 @@ def run_scene(name, a):
         bmp_to_png(shot, out / "ziel.png")
     for b in sorted(out.glob("ziel_*.bmp")):
         bmp_to_png(b, out / ("seq_" + b.stem.split("_")[-1] + ".png"))
+    for b in sorted(out.glob("hd_ziel*.bmp")):
+        bmp_to_png(b, out / ((("hd_" + b.stem.split("_")[-1]) if "_" in b.stem[3:] else "hd_ziel") + ".png"))
     dst = out / "spielstand"
     if dst.exists():
         shutil.rmtree(dst)            # nur eigener Ausgabeordner, keine Junctions darin
@@ -424,6 +430,8 @@ def main():
     ap.add_argument("--repro", action="store_true",
                     help="Szene zweimal fahren und die Bildfolgen (--every, Standard 50) "
                          "vergleichen; Exit 1 bei Abweichung")
+    ap.add_argument("--scale", type=int, default=0,
+                    help="interne Aufloesung 1..4 des HW-Renderers; schreibt zusaetzlich hd_*.png")
     ap.add_argument("--realtime", action="store_true",
                     help="ohne --deterministic (Wanduhr wie im Spiel; Laeufe nicht reproduzierbar, "
                          "Szenen-Zeiten gelten dann nicht)")
