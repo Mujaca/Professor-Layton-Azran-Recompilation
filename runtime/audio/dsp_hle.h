@@ -84,6 +84,14 @@ unsigned long long audio_dsp_late_frames(void);
 unsigned long long audio_dsp_waited_frames(void);
 unsigned long long audio_dsp_dropped_due(void);
 void audio_dsp_set_trylock(int (*try_enter)(void));
+/* Deterministischer Modus (runtime/kernel/vclock.h): Zeitquelle fuer die
+ * Kopplung an die Spielantwort setzen (nach audio_dsp_init, vor
+ * audio_dsp_start). Dann startet kein Takt-Thread; der Scheduler meldet
+ * jeden faelligen Frame mit audio_dsp_add_due(). defer_until_ns: Ende einer
+ * laufenden Wartezeit auf die Spielantwort (0 = keine). */
+void audio_dsp_set_clock(uint64_t (*now_ns)(void));
+void audio_dsp_add_due(void);
+uint64_t audio_dsp_defer_until_ns(void);
 
 /* Vorgemerkte DSP-Meldungen (Interrupts, Struct-Adressen) zustellen.
  * Aufrufer MUSS die Gast-Sperre halten. Billig, wenn nichts ansteht. */

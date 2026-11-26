@@ -455,6 +455,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
 }
 
+/* Testlaeufe (--deterministic): Fenster zeigen, ohne es zu aktivieren, damit
+ * ein Lauf im Hintergrund nicht den Fokus stiehlt. */
+static int g_no_activate = 0;
+void win_set_no_activate(int on) {
+    g_no_activate = on != 0;
+}
+
 int win_open(int width, int height, const char *title) {
     WNDCLASSA wc;
     RECT rc;
@@ -480,12 +487,13 @@ int win_open(int width, int height, const char *title) {
     rc.bottom = g_h * 2;
     AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
     g_hwnd = CreateWindowA("LaytonPortWindow", title,
-                           WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT,
+                           WS_OVERLAPPEDWINDOW | (g_no_activate ? 0 : WS_VISIBLE), CW_USEDEFAULT,
                            CW_USEDEFAULT, rc.right - rc.left,
                            rc.bottom - rc.top, NULL, NULL, wc.hInstance, NULL);
     if (!g_hwnd) {
         return 0;
     }
+    if (g_no_activate) ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
     update_viewport(g_hwnd);
 
     memset(&g_bi, 0, sizeof(g_bi));

@@ -43,6 +43,7 @@ void arm_call_guest_pub(ArmCpu *c, uint32_t addr);   /* gen_boot.c */
 #include <direct.h>
 
 #include "kernel_sched.h"
+#include "vclock.h"
 
 #define TLS_CMD_BUF 0x80u
 
@@ -165,6 +166,20 @@ static volatile LONG g_ext_pending = 0;
 static volatile LONG g_vblank_req = 0;
 static HANDLE g_ext_event = NULL;
 static HANDLE g_idle_timer = NULL;
+
+/* Deterministischer Modus (port.exe --deterministic, runtime/kernel/vclock.h):
+ * eine virtuelle Zeit statt der Wanduhr fuer alle gastsichtbaren Uhren;
+ * VBlank und DSP-Takt sind Ereignisse auf dieser Zeitachse, ausgeloest vom
+ * Stabhalter. Je VBlank haelt der Gast an, bis der Host-Hauptthread das Bild
+ * abgeholt und die Eingabe fuer den naechsten Frame gesetzt hat
+ * (hle_det_wait_vblank/hle_det_release). Nur der Stabhalter aendert g_vc. */
+static int g_det = 0;
+static VClock g_vc;
+static HANDLE g_det_frame_ev = NULL;   /* Gast -> Host: VBlank erreicht */
+static HANDLE g_det_ack_ev = NULL;     /* Host -> Gast: weiter */
+static volatile LONG g_det_quit = 0;
+static uint64_t guest_ns(void);
+static void det_collect(void);
 
 /* Zustandswechsel; mit HLE_YSTAT wird die Zeit je Zustand summiert. */
 static void sched_set(SchedThread *s, LONG st) {
@@ -304,6 +319,10 @@ static void gx_run_inline(ArmCpu *c, const uint32_t w[8]) {
     g_gxq_head++;
     WakeConditionVariable(&g_gxq_cv);
     ReleaseSRWLockExclusive(&g_gxq_srw);
+    /* Deterministisch: der Befehl ist fertig, bevor der Gast weiterlaeuft
+     * (Azahar fuehrt GX-Befehle ebenfalls synchron aus); seine Interrupts
+     * werden damit an einer festen Stelle im Gastablauf zugestellt. */
+    if (g_det) gx_drain();
 }
 
 static volatile unsigned g_pump_count = 0;
@@ -322,8 +341,12 @@ void hle_pump(void) {
     unsigned n;
     if (!t_has_baton) return;
     g_guest_blocks++;
+    if (g_det) {
+        g_vc.now_ns += VCLOCK_NS_PER_BLOCK;
+        if (g_vc.now_ns >= g_vc.next_ns) det_collect();
+    }
     if (g_ext_pending) {
-        sched_service(host_ns());
+        sched_service(guest_ns());
         sched_preempt_check();
         return;
     }
@@ -713,13 +736,45 @@ static uint64_t host_us(void) {
     return host_ns() / 1000ull;
 }
 
+/* Zeitbasis aller gastsichtbaren Uhren: Wanduhr, im deterministischen Modus
+ * die virtuelle Zeit (vclock.h). Nullpunkt ist in beiden Faellen g_boot_ns. */
+static uint64_t guest_ns(void) {
+    return g_det ? g_vc.now_ns : host_ns();
+}
+
+/* Deterministisch, nur Stabhalter: faellige VBlanks/DSP-Frames der
+ * virtuellen Zeit wie die Takt-Threads im Normalbetrieb vormerken. */
+static void det_collect(void) {
+    unsigned vbl, dsp;
+    vclock_collect(&g_vc, &vbl, &dsp);
+    if (vbl != 0) {
+        InterlockedExchangeAdd(&g_vblank_req, (LONG)vbl);
+        InterlockedOr(&g_ext_pending, EXT_VBLANK);
+    }
+    if (dsp != 0) {
+        while (dsp-- != 0) audio_dsp_add_due();
+        InterlockedOr(&g_ext_pending, EXT_DSP);
+    }
+}
+
+/* Deterministisch: der VBlank ist uebernommen (Anzeige gelatcht, PDC
+ * signalisiert). Der Gast steht, bis der Host das Bild abgeholt und die
+ * Eingabe fuer die naechsten Frames gesetzt hat. Der Stabhalter wartet hier;
+ * GX-Befehle sind zu diesem Zeitpunkt abgearbeitet (gx_drain). */
+static void det_host_sync(void) {
+    if (g_det_quit) return;
+    SetEvent(g_det_frame_ev);
+    while (!g_det_quit && WaitForSingleObject(g_det_ack_ev, 100) == WAIT_TIMEOUT) {
+    }
+}
+
 /* Systemticks wie svcGetSystemTick: ARM11-Kern 268.111856 MHz
  * (Azahar core_timing.h BASE_CLOCK_RATE_ARM11). QPC liefert die noetige
  * Aufloesung; GetTickCount64 (~15,6 ms) ist fuer HID-Zeitstempel zu grob. */
 #define SYSCLOCK_ARM11 268111856ull
 /* Gemeinsame Zeitbasis mit svcGetSystemTick (Nullpunkt g_boot_ns). */
 static uint64_t host_system_ticks(void) {
-    return ks_tick_from_ns(host_ns() - g_boot_ns);
+    return ks_tick_from_ns(guest_ns() - g_boot_ns);
 }
 
 /* Thread-Id des aktuell laufenden Gast-Threads (0 = Hauptthread). */
@@ -916,7 +971,7 @@ static int proc_of_tid(uint32_t tid) {
  * Faelligkeit (Deadline fuer den Leerlauf); SetTimer senkt sie. */
 static uint64_t g_timer_next_ns = 0;   /* 0 = kein Timer aktiv */
 static void kernel_poll_timers(void) {
-    uint64_t now = host_ns();
+    uint64_t now = guest_ns();
     uint64_t next = 0;
     if (g_timer_next_ns == 0 || now < g_timer_next_ns) return;
     for (int i = 1; i < MAX_HANDLES; i++) {
@@ -943,7 +998,7 @@ static int hs_wait(ArmCpu *c, Handle **objs, int cnt, int wait_all,
     int prio = cur_prio(c);
     int infinite = (timeout_ns == UINT64_MAX);
     uint64_t timeout_ns_eff = infinite ? 0 : timeout_ns;
-    uint64_t start = host_ns();
+    uint64_t start = guest_ns();
     int yielded = 0;
     int slots[KWAIT_MAX_OBJS];
     int wslot;
@@ -1002,7 +1057,7 @@ static int hs_wait(ArmCpu *c, Handle **objs, int cnt, int wait_all,
             *result = RESULT_TIMEOUT;
             return 0;
         }
-        if (!infinite && (host_ns() - start) >= timeout_ns_eff) {
+        if (!infinite && (guest_ns() - start) >= timeout_ns_eff) {
             if (kwait_owned(wslot, tid)) kwait_unregister(wslot);
             *out_idx = -1;
             *result = RESULT_TIMEOUT;
@@ -3686,7 +3741,7 @@ static char g_y2r_dump_dir[240];
 static int g_y2r_dump_count = 0;
 
 static void y2r_poll(void) {
-    if (g_y2r_busy && host_us() >= g_y2r_due_us) {
+    if (g_y2r_busy && guest_ns() / 1000ull >= g_y2r_due_us) {
         g_y2r_busy = 0;
         {
             Handle *hh = get_handle(g_y2r_event);
@@ -4001,7 +4056,7 @@ static void y2r_command(Ipc *r, uint32_t *p) {
                     g_y2r_busy = 0;
                 } else {
                     g_y2r_busy = 1;
-                    g_y2r_due_us = host_us() + 186;
+                    g_y2r_due_us = guest_ns() / 1000ull + 186;
                     /* Y2R schreibt direkt in Gastpuffer: der Hardware-
                        Renderer muss sein Ziel/Texturen neu aus dem Gast
                        laden (sonst bleibt ein von Y2R beschriebener Puffer
@@ -4480,7 +4535,7 @@ static void sched_handover(SchedThread *self, SchedThread *next, int wait) {
 static void sched_block(void) {
     SchedThread *self = t_self;
     SchedThread *next;
-    uint64_t now = host_ns();
+    uint64_t now = guest_ns();
     self->qseq = InterlockedIncrement64(&g_qseq);
     sched_service(now);
     next = sched_pick(NULL, now);
@@ -4498,7 +4553,7 @@ static void sched_preempt_check(void) {
     SchedThread *self = t_self;
     SchedThread *next;
     if (self == NULL || !t_has_baton || self == &g_idle) return;
-    next = sched_pick(self, host_ns());
+    next = sched_pick(self, guest_ns());
     if (next == NULL || !ks_preempts(next->prio, self->prio)) return;
     self->qseq = InterlockedDecrement64(&g_qfront);
     sched_set(self, ST_READY);
@@ -4512,7 +4567,7 @@ static void sched_exit(void) {
     if (self == NULL || !t_has_baton) return;
     sched_set(self, ST_DEAD);
     self->used = 0;
-    next = sched_pick(NULL, host_ns());
+    next = sched_pick(NULL, guest_ns());
     sched_handover(self, next != NULL ? next : &g_idle, 0);
     t_self = NULL;
 }
@@ -4535,6 +4590,7 @@ static void sched_service(uint64_t now) {
             gsp_vblank_fb_update(g_cpu, g_gsp_thread_id);
             gsp_signal_interrupt(GSP_IRQ_PDC0);
             gsp_signal_interrupt(GSP_IRQ_PDC1);
+            if (g_det) det_host_sync();
             if (g_ystat && (++g_vblank_tick % 62u) == 0u) {
                 printf("[ystat] vbl=%u t=%llus switches=%llu idle_ms=%llu\n",
                        g_vblank_tick,
@@ -4592,7 +4648,7 @@ static DWORD WINAPI idle_thread(LPVOID p) {
     WaitForSingleObject(g_idle.ev, INFINITE);
     t_has_baton = 1;
     for (;;) {
-        uint64_t now = host_ns();
+        uint64_t now = guest_ns();
         uint64_t d;
         SchedThread *next;
         sched_service(now);
@@ -4604,6 +4660,15 @@ static DWORD WINAPI idle_thread(LPVOID p) {
             continue;
         }
         d = sched_next_deadline();
+        if (g_det) {
+            /* Niemand bereit: virtuelle Zeit zur naechsten Deadline bzw. zum
+             * naechsten VBlank/DSP-Frame vorziehen, ohne zu warten. */
+            uint64_t dd = audio_dsp_defer_until_ns();
+            if (dd != 0 && dd > g_vc.now_ns && (d == 0 || dd < d)) d = dd;
+            vclock_idle_jump(&g_vc, d);
+            if (g_vc.now_ns >= g_vc.next_ns) det_collect();
+            continue;
+        }
         if (d == 0 || d > now + IDLE_MAX_NS) d = now + IDLE_MAX_NS;
         if (d > now) {
             HANDLE hs[2];
@@ -4649,7 +4714,7 @@ static const char *sched_state_name(LONG st) {
 }
 
 static void sched_dump(FILE *f, const char *why) {
-    uint64_t now = host_ns();
+    uint64_t now = guest_ns();
     SchedThread *run = g_run;
     fprintf(f, "[sched] %s: stab=%s%d ext=%ld dsp_due=%d gxq=%u/%u kwait_verloren=%llu\n", why,
             run == &g_idle ? "idle" : "t", run == &g_idle || run == NULL ? -1 : (int)(run - g_sched),
@@ -4676,7 +4741,7 @@ static DWORD WINAPI sched_watchdog(LPVOID p) {
         uint64_t now;
         int stuck = -1;
         Sleep(500);
-        now = host_ns();
+        now = guest_ns();
         for (int i = 0; i < SCHED_MAX; i++) {
             SchedThread *s = &g_sched[i];
             int r;
@@ -4750,6 +4815,13 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     g_cpu = c;
     g_main_cpu = c;
     g_boot_ns = host_ns();
+    if (g_det) {
+        vclock_init(&g_vc, g_boot_ns);
+        g_det_frame_ev = CreateEventW(NULL, FALSE, FALSE, NULL);
+        g_det_ack_ev = CreateEventW(NULL, FALSE, FALSE, NULL);
+        printf("[hle] deterministisch: virtuelle Zeit, %llu ns je Block, VBlank im Gleichschritt mit dem Host\n",
+               (unsigned long long)VCLOCK_NS_PER_BLOCK);
+    }
     snprintf(g_romfs, sizeof(g_romfs), "%s", romfs_dir ? romfs_dir : "out/romfs");
     g_log = getenv("HLE_LOG") != NULL;
     g_ystat = getenv("HLE_YSTAT") != NULL;
@@ -4801,7 +4873,7 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     sched_init_once();
     /* VBlank-Takt erst nach Scheduler- und HID-Initialisierung starten. */
     g_vblank_run = 1;
-    CreateThread(NULL, 0, vblank_thread, NULL, 0, NULL);
+    if (!g_det) CreateThread(NULL, 0, vblank_thread, NULL, 0, NULL);
 
     /* DSP-HLE-Audio: Regionen 0x1FF50000/0x1FF70000 im Gast-Speicher,
        Pipe-2-Interrupts je Frame, zugestellt vom Stabhalter. */
@@ -4810,6 +4882,7 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     audio_dsp_set_notify(dsp_notify);
     audio_dsp_set_interrupt(dsp_interrupt_cb);
     audio_dsp_set_struct_addresses(dsp_audio_struct_addresses);
+    if (g_det) audio_dsp_set_clock(guest_ns);
     audio_dsp_start();
     printf("[hle] romfs=%s log=%d srv-handle=%u\n", g_romfs, g_log, g_srv_handle);
 }
@@ -4829,6 +4902,28 @@ void hle_guest_enter(void) {
 
 void hle_guest_leave(void) {
     sched_exit();
+}
+
+void hle_set_deterministic(int on) {
+    g_det = on != 0;
+}
+
+int hle_deterministic(void) {
+    return g_det;
+}
+
+int hle_det_wait_vblank(unsigned timeout_ms) {
+    if (!g_det || g_det_frame_ev == NULL) return 0;
+    return WaitForSingleObject(g_det_frame_ev, timeout_ms) == WAIT_OBJECT_0;
+}
+
+void hle_det_release(void) {
+    if (g_det && g_det_ack_ev != NULL) SetEvent(g_det_ack_ev);
+}
+
+void hle_det_quit(void) {
+    InterlockedExchange(&g_det_quit, 1);
+    hle_det_release();
 }
 
 void hle_tick_stats(int *calls, unsigned long long *tick) {
@@ -5120,7 +5215,7 @@ static uint32_t hle_svc_dispatch(ArmCpu *c, uint32_t imm) {
             /* Azahar SleepThread: ns == 0 ist ein Yield (hinten in die
                Prioritaetsklasse), sonst WaitSleep bis zur Deadline. */
             if (self == NULL || !t_has_baton) { Sleep(0); return 0; }
-            self->deadline_ns = host_ns() + (ns > 0 ? (uint64_t)ns : 0ull);
+            self->deadline_ns = guest_ns() + (ns > 0 ? (uint64_t)ns : 0ull);
             sched_set(self, ST_SLEEP);
             sched_block();
             self->deadline_ns = 0;
@@ -5227,7 +5322,7 @@ static uint32_t hle_svc_dispatch(ArmCpu *c, uint32_t imm) {
                 hh->timer_active = 0;
                 hh->signaled = 1;              /* sofort faellig */
             } else {
-                hh->timer_due = host_ns() + (uint64_t)initial;
+                hh->timer_due = guest_ns() + (uint64_t)initial;
                 hh->timer_active = 1;
                 if (g_timer_next_ns == 0 || hh->timer_due < g_timer_next_ns)
                     g_timer_next_ns = hh->timer_due;
@@ -5322,7 +5417,7 @@ static uint32_t hle_svc_dispatch(ArmCpu *c, uint32_t imm) {
                     }
                     uint32_t tid = cur_tid(c);
                     int slot = arb_register(addr, tid, cur_prio(c));
-                    uint64_t start = host_ns();
+                    uint64_t start = guest_ns();
                     /* 1/2 warten ohne Grenze; nur 3/4 werten den Timeout aus. */
                     int infinite = (type == 1 || type == 2) ||
                                    timeout_ns == UINT64_MAX;
@@ -5332,7 +5427,7 @@ static uint32_t hle_svc_dispatch(ArmCpu *c, uint32_t imm) {
                                " mem=%d\n", tid, addr, type, value, slot, cur);
                     for (;;) {
                         if (slot < 0 || g_arbq[slot].woken) break;
-                        if (!infinite && (host_ns() - start) >= timeout_ns) break;
+                        if (!infinite && (guest_ns() - start) >= timeout_ns) break;
                         if (self == NULL || !t_has_baton) { Sleep(0); continue; }
                         self->arb_slot = slot;
                         self->deadline_ns = infinite ? 0 : start + timeout_ns;
@@ -5588,7 +5683,7 @@ static uint32_t hle_svc_dispatch(ArmCpu *c, uint32_t imm) {
 uint32_t hle_svc(ArmCpu *c, uint32_t imm) {
     uint32_t r = hle_svc_dispatch(c, imm);
     if (t_has_baton) {
-        sched_service(host_ns());
+        sched_service(guest_ns());
         sched_preempt_check();
     }
     return r;

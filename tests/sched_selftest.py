@@ -4,7 +4,8 @@
 
 Baut tests/sched_selftest.c gegen runtime/kernel/kernel_sched.h und fuehrt es
 aus. Geprueft werden Prioritaetswahl, Weck-Reihenfolge,
-WaitSynchronizationN-Index und die SystemTick-Umrechnung (268111856 Hz).
+WaitSynchronizationN-Index, die SystemTick-Umrechnung (268111856 Hz) und die
+virtuelle Zeitbasis des deterministischen Modus (runtime/kernel/vclock.h).
 """
 import os
 import subprocess

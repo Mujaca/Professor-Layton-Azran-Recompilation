@@ -64,7 +64,7 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | M15 | erreicht (Logo) | Logo gegen FFmpeg mittlere Abweichung 0,91; weitere Filme ungeprüft |
 | M16 | erreicht | Speichern/Laden („Continue“) und Soundeffekte vom Nutzer bestätigt |
 | M17 | offen | – |
-| M18 | offen | – |
+| M18 | erreicht | `port.exe --deterministic` (virtuelle Zeit, VBlank im Gleichschritt); `tools/scene.py froenborg raetsel1 --repro`: je 89/89 Bilder gleich (alle 50 Gast-Frames bis g4450), hw und soft gleiche VBlank→Gast-Frame-Folge |
 
 1. **Effizientes Testen**: Szenen ohne Durchklicken erreichen (Spielstände
    als Testfixtures, Eingaben an Gastzeit gekoppelt, Szenen-Skript).
@@ -167,3 +167,4 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | 2026-11-25 | m9-hw-restfehler | 10/10 | None | 0 |
 | 2026-11-25 | m9-hw-texturcache | 10/10 | None | 0 |
 | 2026-11-25 | scheduler-staffelstab | 10/10 | None | 0 |
+| 2026-11-26 | m18-determinism | 10/10 | None | 0 |

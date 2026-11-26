@@ -209,9 +209,15 @@ typedef struct {
     volatile LONG pend_struct, pend_int_zero, pend_int_pipe2;
     volatile LONGLONG pend_since_qpc;   /* Diagnose: erster offener Pipe-Interrupt */
     volatile LONGLONG last_flush_delay_us;
-    /* Kopplung an die Spielantwort: Zeitpunkt (QPC) des letzten zugestellten
-     * Pipe-Interrupts und die Frame-Counter beider Regionen in dem Moment. */
-    volatile LONGLONG irq_qpc;
+    /* Kopplung an die Spielantwort: Zeitpunkt (ns, dsp_now_ns) des letzten
+     * zugestellten Pipe-Interrupts und die Frame-Counter beider Regionen in
+     * dem Moment. */
+    volatile unsigned long long irq_ns;
+    /* Zeitquelle fuer die Kopplung: NULL = Host-QPC (Normalbetrieb), sonst
+     * die virtuelle Gastzeit (hle.c, --deterministic). Mit gesetzter Uhr
+     * gibt es keinen Takt-Thread; der Scheduler meldet faellige Frames per
+     * audio_dsp_add_due. */
+    uint64_t (*clock_ns)(void);
     uint16_t irq_fc[2];
     unsigned long long late_frames;     /* Diagnose: Frames ohne Spielantwort */
     unsigned long long waited_frames;   /* Diagnose: Frames, die auf die Antwort warteten */
@@ -1073,6 +1079,18 @@ static void audio_tick(DspState *d) {
     d->frame_count++;
 }
 
+static uint64_t dsp_now_ns(DspState *d) {
+    LARGE_INTEGER q, f;
+    if (d->clock_ns != NULL) return d->clock_ns();
+    QueryPerformanceCounter(&q);
+    QueryPerformanceFrequency(&f);
+    return (uint64_t)(q.QuadPart / f.QuadPart) * 1000000000ull +
+           (uint64_t)(q.QuadPart % f.QuadPart) * 1000000000ull / (uint64_t)f.QuadPart;
+}
+
+/* Frame-Periode in ns (SPF / AUDIO_DSP_SAMPLE_RATE). */
+#define DSP_PERIOD_NS ((uint64_t)SPF * 1000000000ull / (uint64_t)AUDIO_DSP_SAMPLE_RATE)
+
 static void cs_enter(DspState *d) { if (d->cs_init) EnterCriticalSection(&d->cs); }
 static void cs_leave(DspState *d) { if (d->cs_init) LeaveCriticalSection(&d->cs); }
 
@@ -1100,11 +1118,9 @@ void audio_dsp_flush_events(void) {
         }
         if (d->interrupt) d->interrupt(AUDIO_DSP_INT_PIPE, 2);
         if (d->region[0] != NULL) {
-            LARGE_INTEGER q;
             d->irq_fc[0] = rd16(d->region[0] + SM_FRAME_COUNTER);
             d->irq_fc[1] = rd16(d->region[1] + SM_FRAME_COUNTER);
-            QueryPerformanceCounter(&q);
-            d->irq_qpc = q.QuadPart;
+            d->irq_ns = dsp_now_ns(d);
         }
     }
 }
@@ -1137,13 +1153,9 @@ int audio_dsp_run_due(void) {
     DspState *d = &g_dsp;
     if (d->due <= 0) return 0;
 #ifndef DSP_NO_COUPLING
-    if (d->irq_qpc != 0 && d->state == AUDIO_DSP_ON && d->region[0] != NULL &&
+    if (d->irq_ns != 0 && d->state == AUDIO_DSP_ON && d->region[0] != NULL &&
         !game_answered(d)) {
-        LARGE_INTEGER q, f;
-        double period = (double)SPF / (double)AUDIO_DSP_SAMPLE_RATE;
-        QueryPerformanceCounter(&q);
-        QueryPerformanceFrequency(&f);
-        if ((double)(q.QuadPart - d->irq_qpc) / (double)f.QuadPart < period) {
+        if (dsp_now_ns(d) - d->irq_ns < DSP_PERIOD_NS) {
             if (!d->deferring) { d->deferring = 1; d->waited_frames++; }
             return 1;
         }
@@ -1159,6 +1171,15 @@ int audio_dsp_run_due(void) {
     cs_leave(d);
     audio_dsp_flush_events();
     return d->due > 0;
+}
+
+/* Ende der laufenden Wartezeit auf die Spielantwort (ns der Uhr aus
+ * audio_dsp_set_clock), 0 = es wird nicht gewartet. Der Leerlauf im
+ * deterministischen Modus springt hoechstens bis hierhin. */
+uint64_t audio_dsp_defer_until_ns(void) {
+    DspState *d = &g_dsp;
+    if (d->due <= 0 || !d->deferring || d->irq_ns == 0) return 0;
+    return d->irq_ns + DSP_PERIOD_NS;
 }
 
 unsigned long long audio_dsp_waited_frames(void) {
@@ -1195,6 +1216,25 @@ void audio_dsp_tick(void) {
  * (der Gast-Scheduler reagiert nicht, z. B. waehrend eines GPU-Drains). */
 #define DSP_DUE_MAX 4
 
+/* Einen faelligen Takt melden (Takt-Thread bzw. Scheduler im
+ * deterministischen Modus). */
+static void dsp_add_due(DspState *d) {
+    if (InterlockedIncrement(&d->due) > DSP_DUE_MAX) {
+        InterlockedDecrement(&d->due);
+        d->dropped_due++;
+        if (d->verbose && d->state == AUDIO_DSP_ON)
+            printf("[audio] f=%llu takt verworfen (Scheduler reagiert nicht)%c", d->frame_count, 10);
+    }
+}
+
+void audio_dsp_add_due(void) {
+    dsp_add_due(&g_dsp);
+}
+
+void audio_dsp_set_clock(uint64_t (*now_ns)(void)) {
+    g_dsp.clock_ns = now_ns;
+}
+
 static DWORD WINAPI audio_thread(LPVOID p) {
     DspState *d = (DspState *)p;
     LARGE_INTEGER f, now, next;
@@ -1211,12 +1251,7 @@ static DWORD WINAPI audio_thread(LPVOID p) {
         if (d->notify) {
             /* Takt-Modell: nur melden, der Scheduler fuehrt den Frame
              * zwischen Gast-Bloecken aus (audio_dsp_run_due). */
-            if (InterlockedIncrement(&d->due) > DSP_DUE_MAX) {
-                InterlockedDecrement(&d->due);
-                d->dropped_due++;
-                if (d->verbose && d->state == AUDIO_DSP_ON)
-                    printf("[audio] f=%llu takt verworfen (Scheduler reagiert nicht)%c", d->frame_count, 10);
-            }
+            dsp_add_due(d);
             d->notify();
         } else {
             /* Ohne Scheduler: Frame und Meldung unter der Gast-Sperre, damit
@@ -1332,6 +1367,8 @@ int audio_dsp_recv_data_ready(void) {
 void audio_dsp_start(void) {
     DspState *d = &g_dsp;
     if (d->thread != NULL) return;
+    /* Virtuelle Uhr: Takte kommen vom Scheduler (audio_dsp_add_due). */
+    if (d->clock_ns != NULL) return;
     d->running = 1;
     /* 1-ms-Timer fuer die 4,889-ms-Frames; ohne das rundet Sleep(1) je nach
        System auf ~15,6 ms. */
@@ -1341,7 +1378,10 @@ void audio_dsp_start(void) {
 
 void audio_dsp_stop(void) {
     DspState *d = &g_dsp;
-    if (d->thread == NULL) return;
+    if (d->thread == NULL) {
+        host_audio_close();
+        return;
+    }
     d->running = 0;
     WaitForSingleObject(d->thread, 2000);
     CloseHandle(d->thread);

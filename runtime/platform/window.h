@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 int win_open(int width, int height, const char *title);
+void win_set_no_activate(int on);                 /* vor win_open: ohne Fokus zeigen */
 int win_pump(void);                              /* 1 = Fenster offen */
 void win_blit(const uint8_t *rgb, int w, int h);  /* RGB24 -> Fenster */
 void win_status(const char *text, int line);

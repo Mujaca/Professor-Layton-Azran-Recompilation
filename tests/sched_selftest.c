@@ -11,6 +11,7 @@
 #include <stdint.h>
 
 #include "kernel_sched.h"
+#include "vclock.h"
 
 static int fails = 0;
 
@@ -164,8 +165,63 @@ static void test_thread_ids(void) {
     }
 }
 
+/* Virtuelle Zeit (--deterministic, vclock.h): exakte Ereigniszeiten, keine
+ * kumulierte Rundung, Leerlauf springt nie ueber das naechste Ereignis. */
+static void test_vclock(void) {
+    VClock v;
+    unsigned vbl = 0, dsp = 0;
+    const uint64_t base = 1000000000ull;
+    vclock_init(&v, base);
+    /* VBlank 1 bei 4481136/268111856 s = 16713680 ns (abgerundet),
+     * DSP-Frame 1 bei 1310720/268111856 s = 4888705 ns. */
+    CHECK(vclock_event_ns(0, 1, VCLOCK_VBLANK_TICKS) == 16713680ull, "VBlank-Periode 16713680 ns");
+    CHECK(vclock_event_ns(0, 1, VCLOCK_DSP_TICKS) == 4888705ull, "DSP-Periode 4888705 ns");
+    /* 268111856 Ticks = genau 1 s: nach 59,83 VBlanks keine Drift. */
+    CHECK(vclock_event_ns(0, VCLOCK_TICK_HZ, VCLOCK_VBLANK_TICKS) ==
+              VCLOCK_VBLANK_TICKS * 1000000000ull, "VBlank-Zeitachse ohne Drift");
+    CHECK(v.next_ns == base + 4888705ull, "erstes Ereignis ist der DSP-Frame");
+    /* Leerlauf ohne Deadline: genau zum naechsten Ereignis. */
+    vclock_idle_jump(&v, 0);
+    CHECK(v.now_ns == base + 4888705ull, "Leerlauf springt zum DSP-Frame");
+    vclock_collect(&v, &vbl, &dsp);
+    CHECK(vbl == 0 && dsp == 1, "ein DSP-Frame faellig");
+    /* Deadline vor dem naechsten Ereignis wird genau getroffen. */
+    vclock_idle_jump(&v, base + 5000000ull);
+    CHECK(v.now_ns == base + 5000000ull, "Leerlauf trifft eine fruehere Deadline");
+    /* Deadline in der Vergangenheit: kein Rueckschritt, weiter zum Ereignis. */
+    vclock_idle_jump(&v, base + 1ull);
+    CHECK(v.now_ns == base + 2ull * 4888705ull + 1ull, "keine Zeit rueckwaerts, Fortschritt garantiert");
+    /* Bis 1 s: 59 VBlanks und 204 DSP-Frames insgesamt. */
+    {
+        unsigned tv = 0, td = 1;
+        while (v.next_ns <= base + 1000000000ull) {
+            vclock_idle_jump(&v, 0);
+            vclock_collect(&v, &vbl, &dsp);
+            tv += vbl;
+            td += dsp;
+        }
+        CHECK(tv == 59 && td == 204, "1 s virtuell: 59 VBlanks, 204 DSP-Frames");
+    }
+    /* Gleiche Schrittfolge -> gleiche Ereignisfolge (Reproduzierbarkeit). */
+    {
+        VClock a, b;
+        uint64_t ha = 0, hb = 0;
+        vclock_init(&a, base);
+        vclock_init(&b, base);
+        for (int i = 0; i < 100000; i++) {
+            unsigned x, y;
+            a.now_ns += VCLOCK_NS_PER_BLOCK * (uint64_t)(1 + (i % 7));
+            b.now_ns += VCLOCK_NS_PER_BLOCK * (uint64_t)(1 + (i % 7));
+            if (a.now_ns >= a.next_ns) { vclock_collect(&a, &x, &y); ha = ha * 31u + (uint64_t)i * 4u + x * 2u + y; }
+            if (b.now_ns >= b.next_ns) { vclock_collect(&b, &x, &y); hb = hb * 31u + (uint64_t)i * 4u + x * 2u + y; }
+        }
+        CHECK(ha == hb && ha != 0, "gleiche Bloecke -> gleiche Ereignisfolge");
+    }
+}
+
 int main(void) {
     test_priority();
+    test_vclock();
     test_ticks();
     test_wait_index();
     test_wake_order();

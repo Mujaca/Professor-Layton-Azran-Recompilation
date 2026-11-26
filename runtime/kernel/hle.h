@@ -50,4 +50,19 @@ void hle_gpu_command_list(const uint8_t *data, uint32_t size, uint32_t flags);
 typedef HidRingInput HleHidInput;
 
 void hle_hid_set_input(const HleHidInput *in);
+
+/* Reproduzierbare Laeufe (port.exe --deterministic, runtime/kernel/vclock.h).
+ * hle_set_deterministic vor hle_init: alle gastsichtbaren Uhren laufen dann
+ * auf virtueller Zeit (Gastfortschritt statt Wanduhr), und der Gast haelt
+ * nach jedem VBlank an, bis der Host ihn freigibt:
+ *   hle_det_wait_vblank(ms) - 1, wenn der Gast an einem VBlank steht (Bild
+ *                             und Eingabe gehoeren dann zu genau diesem VBlank)
+ *   hle_det_release()       - weiterlaufen lassen
+ *   hle_det_quit()          - Gleichschritt beenden (Programmende)
+ * Reiner Takt-Modus des Hosts; Gastspeicher und Spielcode bleiben unberuehrt. */
+void hle_set_deterministic(int on);
+int hle_deterministic(void);
+int hle_det_wait_vblank(unsigned timeout_ms);
+void hle_det_release(void);
+void hle_det_quit(void);
 #endif

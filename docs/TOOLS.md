@@ -21,24 +21,33 @@ Faehrt Standard-Szenen reproduzierbar an, ohne Durchklicken:
 
 ```powershell
 python tools/scene.py --list                     # Szenen + vorhandene Fixtures
+python tools/scene.py froenborg raetsel1 --repro # zwei Laeufe je Szene, Bildfolgen vergleichen
 python tools/scene.py titel                      # Titelmenue (~1 min)
 python tools/scene.py namenseingabe              # Tastatur nach "New Game" (~1 min)
 python tools/scene.py erste-szene                # neues Spiel, erste Prolog-Szene (~2 min)
 python tools/scene.py raetsel1-neu               # neues Spiel bis Titelkarte Raetsel 001 (~3 min)
 python tools/scene.py froenborg --renderer soft  # Continue Slot 1: 3D-Dialog Froenborg (~2 min)
 python tools/scene.py raetsel1 --wav --profile   # Continue Slot 2 (Spielstand nach Raetsel 001)
-python tools/scene.py fixture-raetsel1           # erzeugt den Slot-2-Spielstand neu (~13 min)
+python tools/scene.py fixture-raetsel1           # erzeugt den Slot-2-Spielstand neu (~3 min)
 python tools/scene.py froenborg --every 150 --extra 600   # Bildfolge, 600 Gast-Frames laenger
-python tools/scene.py titel --press touch@g1800:20:160:64 --target 2100   # eigene Eingaben
+python tools/scene.py titel --press touch@g2550:20:160:64 --target 2850   # eigene Eingaben
 ```
 
 * Je Lauf wird der Fixture-Spielstand `out/fixtures/saves/<fixture>/`
   (Layout wie `out/savedata`) in einen Temp-Ordner kopiert und per
   `--savedata` benutzt; die Fixture bleibt unveraendert. Fixtures sind
   Nutzer-Spielstaende und liegen deshalb unter `out/` (nicht eingecheckt).
-* Eingaben laufen als `--press` in **Gast-Frames** (`g`-Praefix), das Ende
-  per `--frames-guest`; damit landen die Laeufe auch unter Last am selben
-  Spielzustand. Standard `--renderer hw`.
+* port.exe laeuft mit `--deterministic` (M18, docs/FRONTEND.md): virtuelle
+  Zeit statt Wanduhr, VBlank im Gleichschritt mit der Fensterschleife. Zwei
+  Laeufe liefern dieselbe Bildfolge, unabhaengig von Renderer und Last;
+  `--realtime` schaltet das ab (dann gelten die Szenen-Zeiten nicht).
+  Eingaben laufen als `--press` in **Gast-Frames** (`g`-Praefix), das Ende
+  per `--frames-guest`. Standard `--renderer hw`. Echte Fenstereingaben
+  ignoriert port.exe in diesem Modus (nur `--press` wirkt).
+* `--repro`: Szene zweimal fahren, SHA-1 der Bildfolge (`--every`, Standard
+  50 Gast-Frames) und des Endbilds vergleichen; Exit 1 bei Abweichung.
+  Stand 2026-11-26: `froenborg` und `raetsel1` je 89/89 Bilder gleich
+  (g50..g4450), `fixture-raetsel1` g5000..g7200 in drei Laeufen 45/45.
 * Ausgabe `scratch/scene/<szene>/`: `ziel.png` (Endbild 400x480),
   `seq_<gast>.png` (`--every N [--every-from M]`), `port.log`, `audio.wav`
   (`--wav`, `HLE_AUDIO_WAV`), `profil.txt` (`--profile [--profile-after S]`,
@@ -58,11 +67,14 @@ python tools/scene.py titel --press touch@g1800:20:160:64 --target 2100   # eige
   **nach** Raetsel 001 (Prologende), daher landet `raetsel1` wie
   `froenborg` am Anfang von Kapitel 1; das Raetsel selbst zeigt
   `raetsel1-neu` (Titelkarte) bzw. `--target 5900` (Raster).
-* Grenzen: Auf Standbildern steht der Gast-Zaehler (siehe
-  docs/FRONTEND.md, Form `g<frame>+<host>`); die 3D-Dialogszene liefert nur
-  ~3 Gast-Frames/s, Ziele dort klein halten. Sporadischer Haenger bei
-  Raetsel 001 beobachtet (Gast-Zaehler stand bei g6027, Bloecke
-  0x2E11xx) - dann Lauf wiederholen.
+* Zeiten: Das Titelmenue nimmt Tipps erst ab ~g2450 an (`MENU` = g2550,
+  GAME_NOTES); Continue -> Slot (g2850) -> "The Story So Far" weitertippen
+  (ab g3300 alle 150) -> Froenborg-Dialog bei g4450. Auf Standbildern steht
+  der Gast-Zaehler (Form `g<frame>+<host>`, Host-Frame = VBlank). Haenger
+  bei Raetsel 001 (Bloecke 0x2E11xx) einmal im deterministischen Modus bei
+  g6857 gesehen (damals wirkten Fenstereingaben noch), in fuenf
+  Wiederholungen mit denselben Eingaben nicht (bis g7200 bildgleich); tritt
+  er wieder auf, mit `--repro` pruefen.
 
 ## Recompiler (`tools/recomp`)
 

@@ -12,6 +12,16 @@
  * Schliessen). --savedata ordner ersetzt out/savedata als Spielstand-Wurzel
  * (tools/scene.py arbeitet so auf Fixture-Kopien).
  *
+ * --deterministic: reproduzierbare Laeufe (M18). Alle gastsichtbaren Uhren
+ * laufen auf virtueller Zeit (runtime/kernel/vclock.h), und jeder Durchlauf
+ * der Fensterschleife gehoert zu genau einem VBlank: der Gast steht, waehrend
+ * hier Bild, Screenshots und --press-Eingaben behandelt werden. Host-Frame =
+ * VBlank-Nummer; zwei Laeufe mit denselben Argumenten liefern dieselbe
+ * Bildfolge. Der Lauf ist nicht an die Wanduhr gebunden (Ton nur als WAV
+ * sinnvoll). Echte Maus-/Tasten-/Gamepad-Eingaben werden ignoriert (nur
+ * --press wirkt), das Fenster erscheint ohne Fokus. Ohne den Schalter bleibt
+ * alles beim Echtzeitbetrieb.
+ *
  * Hier gibt es bewusst keine Spieladressen und keine Ersatzbilder: Was im
  * Fenster erscheint, hat das Spiel selbst in seinen Framebuffer geschrieben.
  */
@@ -148,6 +158,7 @@ int main(int argc, char **argv) {
     int shot_guest = 0;
     int gast_shot_next = 0;
     int renderer_hw = 0;
+    int det = 0;
     setvbuf(stdout, NULL, _IONBF, 0);
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) shot = argv[++i];
@@ -159,6 +170,7 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--press") == 0 && i + 1 < argc)
             g_press_n = press_spec_parse(argv[++i], g_press, g_press_n, PRESS_MAX);
         else if (strcmp(argv[i], "--savedata") == 0 && i + 1 < argc) savedata = argv[++i];
+        else if (strcmp(argv[i], "--deterministic") == 0) det = 1;
         else if (strcmp(argv[i], "--renderer") == 0 && i + 1 < argc) {
             const char *r = argv[++i];
             if (strcmp(r, "hw") == 0) renderer_hw = 1;
@@ -188,10 +200,12 @@ int main(int argc, char **argv) {
         hle_set_savedata_dir(savedata);
         printf("[port] Spielstaende: %s\n", savedata);
     }
+    hle_set_deterministic(det);
     hle_init(&g_cpu, romfs);
     arm_set_svc_handler(hle_svc);
     if (renderer_hw) gpu_pica_set_render_hw(1);
 
+    if (det) win_set_no_activate(1);
     if (!win_open(FB_W, FB_H, "Professor Layton and the Azran Legacy")) {
         printf("Fenster konnte nicht geoeffnet werden\n");
         return 3;
@@ -217,6 +231,14 @@ int main(int argc, char **argv) {
         char line[160];
         WinInput wi;
         HleHidInput hi;
+        if (det) {
+            /* Gleichschritt: warten, bis der Gast am naechsten VBlank steht;
+               das Fenster bleibt dabei bedienbar. */
+            int got = 0;
+            while (!(got = hle_det_wait_vblank(20)) && !g_halt)
+                if (!win_pump()) break;
+            if (!got) break;
+        }
         /* --frames-guest N: Ende am N-ten Gast-Frame (unter Last robust,
            tools/scene.py); --frames bleibt als Host-Grenze bestehen. */
         if ((frames_limit >= 0 && frames >= frames_limit) ||
@@ -227,6 +249,9 @@ int main(int argc, char **argv) {
         /* Host-Eingabe je Frame; der Runtime wendet sie in hid_poll unter dem
            Gast-Lock an (nur Host-Puffer, nie direkter Gastzugriff). */
         win_input_poll(&wi);
+        /* Deterministisch: nur --press erreicht den Gast; ein Klick ins
+           Testfenster darf den Lauf nicht veraendern. */
+        if (det) memset(&wi, 0, sizeof(wi));
         memset(&hi, 0, sizeof(hi));
         hi.a = (uint32_t)wi.a; hi.b = (uint32_t)wi.b;
         hi.x = (uint32_t)wi.x; hi.y = (uint32_t)wi.y;
@@ -307,8 +332,10 @@ int main(int argc, char **argv) {
             }
         }
         frames++;
-        frame_clock_wait(&clock);
+        if (det) hle_det_release();
+        else frame_clock_wait(&clock);
     }
+    if (det) hle_det_quit();
     frame_clock_stop(&clock);
     if (shot != NULL && frames_limit < 0) save_shot(shot);
     {

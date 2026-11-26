@@ -40,29 +40,29 @@ Start/A bleibt der Titel stehen (Lauf `runB.log`, siehe unten).
   Reaktion sichtbar). Layout/Takt gemaess `docs/REFERENCE.md` (HID) und
   Azahar `hid/hid.cpp`.
 
-## Offen: Continue-Tipp im Titelmenue greift unzuverlaessig (2026-11-26)
+## Continue-Tipp im Titelmenue: Schwelle haengt an Gastzeit, nicht an Gast-Frames (2026-11-26, geklaert)
 
-Nach den HW-Beschleunigungen (master 2ecf438) erreichen die Szenen
-`froenborg`/`raetsel1` aus `tools/scene.py` das Slot-Menue nicht mehr
-zuverlaessig. Messung mit einem einzelnen Continue-Tipp (160,118),
-Fixture `froenborg`, `--renderer hw`, Bild alle 50 Gast-Frames bis g3200
-(Skript `scratch/scene_test/ab_menu.py`):
+Befund: Das Titelmenue ist ab ~g1900 sichtbar, nimmt Tipps aber erst nach
+einer festen *Gastzeit* an (VBlanks/Systemticks seit Boot, ~46 s), nicht nach
+einer festen Zahl veroeffentlichter Gast-Frames. Im Echtzeitbetrieb liefen
+alle gastsichtbaren Uhren (VBlank-Takt, DSP-Frames, svcGetSystemTick,
+Deadlines) auf der Host-Wanduhr; die Gast-Frame-Nummer, bei der das Menue
+reagiert, hing deshalb von der Host-Geschwindigkeit ab. Messung (Fixture
+`froenborg`, ein Continue-Tipp, `scratch/m18/tap.py`):
 
-| Tipp ab | Dauer | Slot-Menue bis g3200 |
-|---|---|---|
-| g1800 | 20 | einmal ja (~g2300), einmal nein |
-| g1900 | 20 | nein (4 Laeufe, auch Stand vor 9b6cc24) |
-| g1800/1900/2100 | 120 | nein |
-| g2100/g2400 | 20 | nein |
-| g2700 | 20 | ja (≤ g3200) |
-| g2000, danach Tipps alle 100 auf Slot 1 bis g3800 | 20/8 | Slot-Menue erst ~g4200 |
+| Lauf | Tipp | Wandzeit beim Tipp | Slot-Menue |
+|---|---|---|---|
+| Echtzeit, hw | g1900 | ~36 s | nein |
+| Echtzeit, soft (langsamer) | g1900 | ~121 s | ja (g2000) |
+| Echtzeit, hw | g2700 | ~50 s | ja (g2900) |
+| `--deterministic`, hw und soft | g2400 / g2500 / g2700 | – | nein / ja / ja |
 
-Das Menue ist ab ~g1900 sichtbar. Weitere Tipps verzoegern den Wechsel
-offenbar. Keine Regression durch 9b6cc24 (Stand davor verhaelt sich gleich).
-Ungeklaert, ob der Wechsel an Wandzeit/Ton (z. B. Ende eines Effekts) haengt
-oder Touch-Abtastung im Menue verloren geht; naechster Schritt
-`HLE_HID_LOG=1` + Ton-Ereignisse um den Tipp. Bis dahin: Szenen-Zeiten in
-`tools/scene.py` gelten fuer den Stand 92c2cc2 und muessen nachgemessen werden.
+Im deterministischen Modus (virtuelle Zeit, `runtime/kernel/vclock.h`) ist
+die Schwelle fest (zwischen g2400 und g2500) und fuer hw und soft gleich
+(gleiche Zuordnung VBlank -> Gast-Frame in beiden Renderern). "Weitere Tipps
+verzoegern den Wechsel" war derselbe Effekt: spaetere Tipps lagen einfach
+hinter der Schwelle. `tools/scene.py` faehrt seitdem mit `--deterministic`
+und tippt bei g2550 (`MENU`).
 
 ## Offen (Bildauffaelligkeit, keine Diagnose)
 

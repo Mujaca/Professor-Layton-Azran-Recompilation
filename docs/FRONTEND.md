@@ -98,8 +98,22 @@ Tastatur-Circle-Pad nur, wenn er die Deadzone verlaesst.
 ```
 out/port.exe [romfs] [--frames N] [--frames-guest N] [--shot datei.bmp] [--shot-every N]
              [--shot-from M] [--shot-guest] [--press taste@[g]frame[+h][:dauer[:x:y]],...]
-             [--savedata ordner] [--renderer soft|hw]
+             [--savedata ordner] [--renderer soft|hw] [--deterministic]
 ```
+
+* `--deterministic` (M18): reproduzierbare Laeufe. Alle gastsichtbaren Uhren
+  (svcGetSystemTick, Sleep/Timeouts, Kernel-Timer, HID-Abtastung, Y2R-Ende,
+  VBlank, DSP-Frames) laufen auf einer virtuellen Zeit
+  (`runtime/kernel/vclock.h`): 30 ns je Gast-Block, im Leerlauf Sprung zur
+  naechsten Deadline. GX-Befehle laufen synchron, und der Gast steht nach
+  jedem VBlank, bis die Fensterschleife Bild, Screenshots und Eingaben dieses
+  VBlanks erledigt hat (Host-Frame = VBlank-Nummer). Zwei Laeufe mit
+  denselben Argumenten liefern dieselbe Bildfolge - unabhaengig von Renderer
+  und Rechnerlast. Der Lauf ist **nicht** an die Wanduhr gebunden (Fenster
+  laeuft so schnell der Host kann, Ton nur per `HLE_AUDIO_WAV` sinnvoll).
+  Echte Maus-/Tasten-/Gamepad-Eingaben werden ignoriert, nur `--press`
+  erreicht den Gast; das Fenster erscheint ohne Fokus (stiehlt ihn nicht).
+  Ohne den Schalter: Echtzeit wie bisher. `tools/scene.py` setzt ihn standardmaessig.
 
 * `--savedata ordner` nimmt `ordner` statt `out/savedata` als
   Spielstand-Wurzel (gleiches Layout: `savedata/<program-id>/data/00000001/`,

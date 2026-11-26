@@ -3,6 +3,7 @@
   python tools/scene.py titel
   python tools/scene.py erste-szene --renderer soft --wav --profile
   python tools/scene.py froenborg --every 300
+  python tools/scene.py froenborg raetsel1 --repro     # zwei Laeufe, Bildfolgen gleich?
   python tools/scene.py --list
 
 Ablauf je Szene:
@@ -18,6 +19,11 @@ Ablauf je Szene:
     port.log, optional audio.wav (HLE_AUDIO_WAV) und profil.txt
     (Sampling-Profiler, --profile), spielstand/ (Kopie nach dem Lauf, z. B.
     um eine neue Fixture abzuleiten).
+
+port.exe laeuft dabei mit --deterministic (virtuelle Zeit, VBlank im
+Gleichschritt mit dem Host, runtime/kernel/vclock.h): zwei Laeufe liefern
+dieselbe Bildfolge, unabhaengig von Renderer und Rechnerlast. --realtime
+schaltet das ab (Wanduhr; dann gelten die Szenen-Zeiten nicht).
 
 Alle Eingaben gehen ueber die normale HID-Eingabe des Ports (--press); es
 wird kein Gastzustand gesetzt. Die Fixtures liegen unter out/ und werden nicht
@@ -53,7 +59,19 @@ def touch(g, xy, dur=12):
 
 
 # Szenen: fixture, Eingaben (Gast-Frames), Ziel-Gast-Frame, Beschreibung.
-# Zeiten wurden mit --every an Bildfolgen ausgemessen (docs/TOOLS.md).
+# Zeiten wurden mit --every an Bildfolgen ausgemessen (docs/TOOLS.md) und
+# gelten fuer den deterministischen Modus (port.exe --deterministic, Standard
+# hier): dort ist ein Lauf bildgleich wiederholbar, unabhaengig von Renderer
+# und Hostlast.
+#
+# Das Titelmenue ist ab ~g1900 sichtbar, nimmt Tipps aber erst ab ~g2450 an
+# (gemessen: g2400 ignoriert, g2500 angenommen). Im Echtzeitbetrieb haengt
+# diese Schwelle an der Wanduhr, nicht an Gast-Frames (docs/GAME_NOTES.md),
+# deshalb griffen fruehere Zeiten (g1800) nach dem schnelleren HW-Renderer
+# nicht mehr. Die Folgen nach "New Game" wurden um MENU_SHIFT gegenueber den
+# alten Messungen (Menue-Tipp bei g1800) verschoben.
+MENU = 2550
+MENU_SHIFT = MENU - 1800
 NAME_KEYS = [(55, 111), (170, 135), (112, 135)]   # drei Buchstaben
 
 
@@ -80,52 +98,55 @@ def puzzle1_presses():
     """Ab dem Raetsel-Titel "001": Titel antippen, dann Tutorial-Hinweis
     wegtippen (der Gast-Zaehler steht dort, daher g<frame>+<host>), Tipps auf
     das Luftschiff sind harmlos; danach die Route im Abstand von 25
-    Gast-Frames (das Spiel laeuft hier nur mit ~8 Gast-Frames/s, schnellere
-    Tipps fallen in die Zuganimation und gehen verloren)."""
+    Gast-Frames (schnellere Tipps fallen in die Zuganimation und gehen
+    verloren)."""
     ship = (PUZZLE1_X[0], PUZZLE1_Y[0])
-    p = ["touch@g5540+30:12:160:120"]
-    p += ["touch@g5950+%d:8:%d:%d" % (h, ship[0], ship[1]) for h in (60, 120, 180, 240)]
-    p += ["touch@g6030+%d:8:%d:%d" % (h, ship[0], ship[1]) for h in (60, 120)]
-    p += [touch(g, ship, 6) for g in (6070, 6100)]
-    p += [touch(6140 + 25 * i, (PUZZLE1_X[c], PUZZLE1_Y[r]), 6)
+    d = MENU_SHIFT
+    p = ["touch@g%d+30:12:160:120" % (5540 + d)]
+    p += ["touch@g%d+%d:8:%d:%d" % (5950 + d, h, ship[0], ship[1]) for h in (60, 120, 180, 240)]
+    p += ["touch@g%d+%d:8:%d:%d" % (6030 + d, h, ship[0], ship[1]) for h in (60, 120)]
+    p += [touch(g + d, ship, 6) for g in (6070, 6100)]
+    # Im deterministischen Modus liegt der "TOUCH"-Hinweis bis ~g6920 ueber
+    # dem Raster; die Route beginnt deshalb 70 Gast-Frames spaeter als frueher.
+    p += [touch(6210 + d + 25 * i, (PUZZLE1_X[c], PUZZLE1_Y[r]), 6)
           for i, (r, c) in enumerate(PUZZLE1_PATH)]
     return p
 
 
 def continue_presses(slot):
     """Continue -> Slot -> "The Story So Far..." weitertippen -> Froenborg."""
-    p = [touch(1800, CONTINUE, 20), touch(2000, SLOT[slot], 10)]
-    p += [touch(g, (160, 120), 8) for g in range(2450, 3000, 150)]
+    p = [touch(MENU, CONTINUE, 20), touch(MENU + 300, SLOT[slot], 10)]
+    p += [touch(g, (160, 120), 8) for g in range(3300, 4250, 150)]
     return p
 
 
 SCENES = collections.OrderedDict()
 SCENES["titel"] = dict(
-    fixture="froenborg", target=1800, presses=[],
+    fixture="froenborg", target=MENU, presses=[],
     desc="Titelbild mit Menue (New Game / Continue / Bonuses)")
 SCENES["namenseingabe"] = dict(
-    fixture="froenborg", target=2100, presses=[touch(1800, NEW_GAME, 20)],
+    fixture="froenborg", target=MENU + 300, presses=[touch(MENU, NEW_GAME, 20)],
     desc="Bildschirmtastatur nach 'New Game'")
 SCENES["erste-szene"] = dict(
-    fixture="froenborg", target=3300, presses=new_game_presses(1800, 2100),
+    fixture="froenborg", target=3300 + MENU_SHIFT, presses=new_game_presses(MENU, MENU + 300),
     desc="Neues Spiel (Name 'abc'): erste Spielszene des Prologs")
 SCENES["raetsel1-neu"] = dict(
-    fixture="froenborg", target=5520, presses=new_game_presses(1800, 2100),
+    fixture="froenborg", target=5520 + MENU_SHIFT, presses=new_game_presses(MENU, MENU + 300),
     desc="Neues Spiel bis zur Titelkarte von Raetsel 001 (ohne Speichern)")
 SCENES["fixture-raetsel1"] = dict(
-    fixture="froenborg", target=12000,
-    presses=new_game_presses(1800, 2100) + puzzle1_presses() +
-    [touch(g, (160, 120), 8) for g in (7200, 7350, 7550, 7750, 7950)] +   # Erklaerung/Zwischenszenen
-    [touch(11000, KB_OK, 10),            # Mysteries: OK!
-     touch(11400, (100, 147), 10),       # "Save your progress?" -> OK!
-     touch(11700, SLOT[2], 10)],         # Slot 2
+    fixture="froenborg", target=12000 + MENU_SHIFT,
+    presses=new_game_presses(MENU, MENU + 300) + puzzle1_presses() +
+    [touch(g + MENU_SHIFT, (160, 120), 8) for g in (7200, 7350, 7550, 7750, 7950)] +   # Erklaerung/Zwischenszenen
+    [touch(11000 + MENU_SHIFT, KB_OK, 10),            # Mysteries: OK!
+     touch(11400 + MENU_SHIFT, (100, 147), 10),       # "Save your progress?" -> OK!
+     touch(11700 + MENU_SHIFT, SLOT[2], 10)],         # Slot 2
     desc="Neues Spiel, Raetsel 001 loesen, in Slot 2 speichern; "
          "spielstand/ ist dann die Fixture raetsel1 (~13 min)")
 SCENES["froenborg"] = dict(
-    fixture="froenborg", target=3120, presses=continue_presses(1),
+    fixture="froenborg", target=4450, presses=continue_presses(1),
     desc="Continue Slot 1 (Prologue End): 3D-Dialogszene in Froenborg")
 SCENES["raetsel1"] = dict(
-    fixture="raetsel1", target=3120, presses=continue_presses(2),
+    fixture="raetsel1", target=4450, presses=continue_presses(2),
     desc="Continue Slot 2: Spielstand direkt nach Raetsel 001 (erster Speicherpunkt) "
          "-> Kapitel 1, Froenborg")
 
@@ -296,6 +317,8 @@ def run_scene(name, a):
     cmd = [str(PORT), "--renderer", a.renderer, "--savedata", str(save),
            "--frames-guest", str(target), "--frames", str(a.max_host or target * 4 + 3600),
            "--shot", str(shot)]
+    if not a.realtime:
+        cmd.append("--deterministic")
     if presses:
         cmd += ["--press", ",".join(presses)]
     if a.every:
@@ -344,6 +367,40 @@ def run_scene(name, a):
     return rc == 0
 
 
+def frame_hashes(name):
+    """SHA-1 der Bildfolge (seq_*.png, Pixel ohne PNG-Metadaten) und des
+    Endbilds einer Szene."""
+    import hashlib
+    from PIL import Image
+    out = collections.OrderedDict()
+    d = OUTBASE / name
+    for f in sorted(d.glob("seq_*.png")) + [d / "ziel.png"]:
+        if f.exists():
+            with Image.open(f) as im:
+                out[f.name] = hashlib.sha1(im.convert("RGB").tobytes()).hexdigest()
+    return out
+
+
+def check_repro(name, a):
+    """Szene zweimal fahren und die Bildfolgen vergleichen (M18)."""
+    if not a.every:
+        a.every = 50
+    runs = []
+    for i in range(2):
+        if not run_scene(name, a):
+            print("   Lauf %d fehlgeschlagen" % (i + 1))
+            return False
+        runs.append(frame_hashes(name))
+    keys = list(runs[0])
+    same = [k for k in keys if runs[1].get(k) == runs[0][k]]
+    diff = [k for k in keys if k not in same] + [k for k in runs[1] if k not in runs[0]]
+    print("== %s: %d/%d Bilder identisch (alle %d Gast-Frames ab g%d, plus Endbild)" % (
+        name, len(same), len(keys), a.every, a.every_from))
+    for k in diff[:10]:
+        print("   verschieden: %s" % k)
+    return bool(keys) and not diff
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("scene", nargs="*", help="Szene(n): " + ", ".join(SCENES))
@@ -362,6 +419,12 @@ def main():
     ap.add_argument("--profile-after", type=float, default=0.0,
                     help="Profiler erst nach S Sekunden starten")
     ap.add_argument("--max-host", type=int, default=0, help="Notbremse in Host-Frames")
+    ap.add_argument("--repro", action="store_true",
+                    help="Szene zweimal fahren und die Bildfolgen (--every, Standard 50) "
+                         "vergleichen; Exit 1 bei Abweichung")
+    ap.add_argument("--realtime", action="store_true",
+                    help="ohne --deterministic (Wanduhr wie im Spiel; Laeufe nicht reproduzierbar, "
+                         "Szenen-Zeiten gelten dann nicht)")
     ap.add_argument("--timeout", type=float, default=1800.0, help="Sekunden bis Abbruch")
     a = ap.parse_args()
     if a.list or not a.scene:
@@ -372,7 +435,10 @@ def main():
     bad = [s for s in a.scene if s not in SCENES]
     if bad:
         raise SystemExit("unbekannte Szene: %s" % ", ".join(bad))
-    ok = all([run_scene(s, a) for s in a.scene])
+    if a.repro:
+        ok = all([check_repro(s, a) for s in a.scene])
+    else:
+        ok = all([run_scene(s, a) for s in a.scene])
     return 0 if ok else 1
 
 
