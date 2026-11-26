@@ -27,3 +27,4 @@ reports/romfs_listing.tsv
 tools/profiles/
 # Fremdwerkzeug ohne Lizenzangabe (nur lokal als Formatreferenz)
 tools/xfsatool/
+.zigcache/

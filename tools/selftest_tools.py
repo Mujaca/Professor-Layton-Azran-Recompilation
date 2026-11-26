@@ -198,8 +198,21 @@ def test_framecheck():
     struct.pack_into("<H", hdr, 28, 24)
     struct.pack_into("<I", hdr, 34, data_size)
     shot.write_bytes(bytes(hdr) + b"\x00" * data_size)
+    # Eigenes Referenzbild: das Azahar-Bild (reports/azahar_topscreen.png)
+    # ist Spielinhalt und liegt nur lokal, nicht im Repo.
+    import zlib
+    raw = b"".join(b"\x00" + bytes([40, 80, 120]) * w for _ in range(h))
+    def chunk(t, d):
+        return (struct.pack(">I", len(d)) + t + d
+                + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF))
+    ref = OUT / "ref.png"
+    ref.write_bytes(b"\x89PNG\r\n\x1a\n"
+                    + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+                    + chunk(b"IDAT", zlib.compress(raw))
+                    + chunk(b"IEND", b""))
     out = OUT / "frame.json"
-    p = run(["framecheck", "--shot", str(shot), "--json-out", str(out)])
+    p = run(["framecheck", "--shot", str(shot), "--ref", str(ref),
+             "--json-out", str(out)])
     need(p.returncode == 0, "framecheck Exit %d\n%s" % (p.returncode, p.stdout))
     data = load_json(out)
     need(data["placeholder"] is True, "Platzhalter nicht erkannt")
