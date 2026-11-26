@@ -226,6 +226,7 @@ Selbsttest: `python tools/selftest_tools.py`.
 | `python tests/y2r_test.py` | YUV→RGB-Konverter mit synthetischen Bildern |
 | `python tests/fs_archive_test.py` | fs-Archive (SaveData/Ext/Shared/System): Host-Layout, Result-Codes, Datei-/Verzeichnisoperationen, Directory-Eintraege |
 | `python tests/audio_test.py` | DSP-HLE-Dekodierung/Resampling (ADPCM inkl. s16-Verlauf, PCM8/16, lineare Interpolation mit Azahar-Rundung) |
+| `python tests/vs_test.py [n]` | Vertex-Shading je Draw (dedupliziert, auf den Raster-Pool verteilt, `p_vs_shade_draw`) bitgleich gegen den seriellen Pfad (`p_load_attrs` + `p_vs_process` je Position): zufaellige VS-Programme inkl. Flusskontrolle, Swizzles, Uniforms, Sonderwerte (0, inf, NaN, Denormale), u8/u16-Indizes, Rundungsmodus des Aufrufers |
 | `python tests/dsp_hle_test.py` | DSP-HLE-Frame-Verarbeitung: Regionenwahl ueber Frame-Counter (inkl. Wraparound), Dirty-Bits, Status-Rueckschreiben, `u32_dsp`, Sleep-Reply nach zwei Frames, DSP-RAM-Nullung bei Initialize |
 
 Nicht im Gate: `python tests/lighting_test.py [n]` vergleicht das
@@ -237,7 +238,8 @@ D16-Tiefe (Azahar `SetDepth`/`EncodeD16`).
 
 Diese Tests brauchen nur `zig cc` und laufen in Sekunden. Seit 2026-11-25
 laufen `dsp_hle_test`, `audio_test`, `y2r_test`, `framebuffer_test`,
-`fs_archive_test`, `frame_clock_test`, `sched_selftest`, `hid_ring_test` und
+`fs_archive_test`, `frame_clock_test`, `sched_selftest`, `hid_ring_test`, seit
+2026-11-26 `lighting_test` und `vs_test` sowie
 `tests/hw_test.py --warp` (D3D11-Renderer gegen Software-Pfad, WARP ohne
 Grafikkarte) im Gate; vorher war ein HW-Commit mit roten Selbsttests
 durchgerutscht.
@@ -279,9 +281,12 @@ Block und LR), `HLE_SLEEP_LOG=1` (die ersten 200 `svcSleepThread`-Aufrufe),
 Anteil an der Laufzeit, Fragmente/Textursamples/Lighting/Farbziel-Zugriffe
 sowie parallele und serielle Dreieckszeilen des Software-Rasterizers; im
 Hardware-Pfad zusaetzlich `texup`/`texdec_ms` und alle 5 s eine Zeile
-`[texcache]` mit Uploads/s und Dekodierzeit),
+`[texcache]` mit Uploads/s und Dekodierzeit; alle 20 000 Draws eine Zeile
+`[vshade]`: Draw-Positionen, davon gerechnete eindeutige Vertices und wie
+viele davon parallel liefen),
 `HLE_RASTER_THREADS=<n>` (Worker-Threads fuer das parallele Rasterisieren
-grosser Dreiecke; Standard 3, `0` = seriell und pixelgleich).
+grosser Dreiecke und das Vertex-Shading grosser Draws; Standard 3, `0` =
+seriell und pixelgleich).
 `HLE_STALLDUMP=1` (bei jedem 300. Host-Frame die letzten 12 Bloecke, den
 letzten Registerstand (`r0`–`r12`, `sp`, `lr`), acht Woerter an `r0`/`r1`/`r12`
 sowie 40 Stackwoerter je Gast-Thread auf stderr, um Haenger ohne IPC zu
@@ -348,7 +353,8 @@ python tests/hw_test.py --warp   # erzwingt WARP
 Im Port schaltet ausschliesslich `port.exe ... --renderer hw` den
 Hardware-Pfad ein; ohne Schalter bleibt der Software-Rasterizer Standard
 und bitgleich. Der Hardware-Pfad uebernimmt nur Rasterisierung und
-Fragment-Pipeline (Vertex-/Geometry-Shader bleiben CPU); nicht unterstuetzte
+Fragment-Pipeline (Vertex-/Geometry-Shader bleiben CPU; der VS rechnet je
+Draw jeden Index nur einmal und verteilt grosse Draws auf den Raster-Pool); nicht unterstuetzte
 Zustaende (W-Buffer, prozedurale Textur, Cube-/Shadow-/Projection-Texturen)
 fallen je Draw auf den Software-Pfad zurueck. `HLE_GTIME=1` meldet alle 5 s
 zusaetzlich `[hwtime]` (Listen, Draws, D3D-Batches, Flush-/Wartezeit,

@@ -317,6 +317,15 @@ Struktur je Draw statt Registerlesen je Pixel.
   Registeraenderung, schnellerer Texturhash): 50-53 Gast-Frames je 300,
   49 sichtbare Wechsel; Render-Thread p_shader_run (Vertex-Shader auf der
   CPU) 43 %, `[hwtime]`: ~4 500 Batches/s fuer ~130 000 Dreiecke/s.
+* Vertex-Shading je Draw (2026-11-26, `p_vs_shade_draw`): jeder Index nur
+  einmal gerechnet (`[vshade]`: ~34 % der Draw-Positionen sind eindeutig),
+  eindeutige Vertices auf den Raster-Pool verteilt. A/B je 3 Laeufe,
+  Gast-Frames 5700-8400: vorher 467/471/469 (50 je 300), nachher
+  944/970/969 (100 je 300); sichtbare Wechsel 6600-6900: 50/50/49 ->
+  98/100/100, also 10 -> 20 Gast-fps (6 -> 3 VBlanks je Gast-Frame; die
+  Rate rastet auf 50/75/100 je 300 ein, ein 512er-Cache allein gab 75).
+  Danach Render-Thread 62 % aktiv; p_shader_run 11 %, cov_mark 8 %, texslot_upload 8 %,
+  hw_flush_to_guest 6 %, p_clip_edge 6 %, hw_begin_draw 5 % der Samples.
 
 ## Darstellungsfehler 3D-Figuren (Nutzerbeobachtung 2026-11-25, behoben 2026-11-26)
 

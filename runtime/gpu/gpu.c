@@ -761,27 +761,35 @@ static void p_attr_config(PicaAttrCfg *ac)
 }
 
 /* Liest die Attribute von Vertex `vert` (ohne Index-Umrechnung) nach
-   out[attr][0..3]. Nicht geladene/default Attribute kommen aus vs.def_attr. */
-static void p_load_attrs(ArmCpu *c, uint32_t vert, float out[16][4])
+   out[attr][0..3]. Nicht geladene/default Attribute kommen aus vs.def_attr.
+   Mit vorab (je Draw) dekodierter Loader-Konfiguration; reine Lesezugriffe,
+   daher auch aus den Vertex-Workern aufrufbar. */
+static void p_load_attrs_cfg(ArmCpu *c, const PicaAttrCfg *ac, uint32_t vert,
+                             float out[16][4])
 {
-    PicaAttrCfg ac;
     int i, k;
-    p_attr_config(&ac);
     for (i = 0; i < 16; i++) {
         for (k = 0; k < 4; k++) out[i][k] = 0.0f;
-        if (i >= ac.total) continue;
-        if (ac.isdef[i]) {
+        if (i >= ac->total) continue;
+        if (ac->isdef[i]) {
             for (k = 0; k < 4; k++) out[i][k] = g_vs_def_attr[i][k];
             continue;
         }
         {
-            uint32_t a = gpu_pica_phys_to_guest(ac.base + ac.src[i] + ac.stride[i] * vert);
-            int es = p_attr_elem_size(ac.fmt[i]);
-            for (k = 0; k < ac.ncomp[i] && k < 4; k++)
-                out[i][k] = p_attr_comp(c, a + (uint32_t)(k * es), ac.fmt[i]);
+            uint32_t a = gpu_pica_phys_to_guest(ac->base + ac->src[i] + ac->stride[i] * vert);
+            int es = p_attr_elem_size(ac->fmt[i]);
+            for (k = 0; k < ac->ncomp[i] && k < 4; k++)
+                out[i][k] = p_attr_comp(c, a + (uint32_t)(k * es), ac->fmt[i]);
         }
-        for (k = ac.ncomp[i]; k < 4; k++) out[i][k] = (k == 3) ? 1.0f : 0.0f;
+        for (k = ac->ncomp[i]; k < 4; k++) out[i][k] = (k == 3) ? 1.0f : 0.0f;
     }
+}
+
+static void p_load_attrs(ArmCpu *c, uint32_t vert, float out[16][4])
+{
+    PicaAttrCfg ac;
+    p_attr_config(&ac);
+    p_load_attrs_cfg(c, &ac, vert, out);
 }
 
 /* ================= Texturen (0x080..0x09F) =================
@@ -2784,12 +2792,19 @@ typedef struct {
 #define PICA_RASTER_MAX_WORKERS 4
 #define PICA_RASTER_MIN_ROWS 48      /* erst ab ~1/5 Bildhoehe parallel */
 
+/* Vertex-Shading eines Draws (siehe p_draw_arrays): die Worker rechnen
+ * Bereiche der eindeutigen Vertices [v0, v1) eines PicaVsJob. */
+struct PicaVsJob;
+static void p_vs_batch(const struct PicaVsJob *j, unsigned a, unsigned b);
+
 typedef struct {
     HANDLE thread;
     HANDLE wake;
     HANDLE done;
     const PicaRows *job;
     int py0, py1;
+    const struct PicaVsJob *vs_job;   /* != NULL: Vertex-Bereich statt Zeilen */
+    unsigned v0, v1;
 } PicaRasterWorker;
 
 static PicaRasterWorker g_rw[PICA_RASTER_MAX_WORKERS];
@@ -2994,7 +3009,8 @@ static DWORD WINAPI p_raster_worker_main(LPVOID arg)
     PicaRasterWorker *w = (PicaRasterWorker *)arg;
     for (;;) {
         WaitForSingleObject(w->wake, INFINITE);
-        p_shade_rows(w->job, w->py0, w->py1);
+        if (w->vs_job != NULL) p_vs_batch(w->vs_job, w->v0, w->v1);
+        else p_shade_rows(w->job, w->py0, w->py1);
         SetEvent(w->done);
     }
     return 0;
@@ -3054,6 +3070,7 @@ static void p_raster_rows(const PicaRows *j, int py_first, int py_last)
         if (a >= total) break;
         if (b > total) b = total;
         w->job = j;
+        w->vs_job = NULL;
         w->py0 = py_first + a * 16;
         w->py1 = py_first + b * 16;
         if (w->py1 > py_last) w->py1 = py_last;
@@ -4359,6 +4376,155 @@ static void p_vs_draw_immediate(ArmCpu *c)
     if (!g_hw_render) gpu_pica_bump_tex_generation();
 }
 
+/* ---- Vertex-Shading je Draw: eindeutige Vertices, parallel ----
+ * Innerhalb eines Draws sind Attributdaten (Gastspeicher), Loader-
+ * Konfiguration, Programm, Swizzle und Uniforms der Einheit 0 fest, und der
+ * VS ist zustandslos (Register je Aufruf frisch, EMIT/SETEMIT nur in
+ * Einheit 3). Die VS-Ausgabe ist damit eine reine Funktion des Vertex-
+ * Index: gleiche Indizes werden nur einmal gerechnet (Azahar pica_core.cpp
+ * RunDrawCall hat dafuer einen 64er-Vertex-Cache fuer indizierte Draws),
+ * und die eindeutigen Vertices sind voneinander unabhaengig und werden auf
+ * den Raster-Pool verteilt. Primitive Assembly bzw. Geometrie-Pipeline
+ * laufen danach seriell in der urspruenglichen Reihenfolge -- das Ergebnis
+ * ist bitgleich zum seriellen Pfad (tests/vs_test.py). */
+struct PicaVsJob {
+    ArmCpu *c;
+    PicaAttrCfg ac;
+    const uint32_t *verts;        /* eindeutige Vertex-Indizes */
+    float (*outs)[16][4];         /* je eindeutigem Vertex */
+    uint32_t entry, maxa, outmask;
+    uint64_t map;
+    int round;                    /* Rundungsmodus des Aufrufers (fegetround) */
+};
+
+#define PICA_VS_PAR_MIN 96u         /* darunter seriell (Weck-/Warteaufwand) */
+
+static uint32_t *g_vd_slot;         /* je Draw-Position: Index in g_vd_outs */
+static uint32_t *g_vd_uniq;         /* eindeutige Vertex-Indizes */
+static float (*g_vd_outs)[16][4];
+static uint32_t g_vd_cap;
+static uint32_t g_vd_map_stamp[0x10000];   /* Index -> Slot, Stempel je Draw */
+static uint32_t g_vd_map_slot[0x10000];
+static uint32_t g_vd_draw;
+/* Diagnose (HLE_GTIME): Positionen gesamt, gerechnete Vertices, parallel. */
+static unsigned long long g_vd_pos_n, g_vd_run_n, g_vd_par_n;
+static int g_vs_par_enabled = 1;    /* Selbsttest: seriell gegen parallel */
+
+static void p_vs_batch(const struct PicaVsJob *j, unsigned a, unsigned b)
+{
+    unsigned k;
+    /* Worker rechnen im Rundungsmodus des aufrufenden Threads (sonst
+       wichen sie vom seriellen Pfad ab, falls der nicht FE_TONEAREST hat). */
+    int saved = fegetround();
+    if (saved != j->round) fesetround(j->round);
+    for (k = a; k < b; k++) {
+        float attrs[16][4];
+        p_load_attrs_cfg(j->c, &j->ac, j->verts[k], attrs);
+        p_shader_run(j->c, &g_vs, j->entry, (const float (*)[4])attrs,
+                     j->maxa, j->map, j->outmask, j->outs[k]);
+    }
+    if (saved != j->round) fesetround(saved);
+}
+
+static void p_vs_run_all(const struct PicaVsJob *j, unsigned n)
+{
+    int nw = g_vs_par_enabled ? g_raster_threads : 0;
+    unsigned seg;
+    int idx;
+
+    if (nw <= 0 || n < PICA_VS_PAR_MIN) {
+        p_vs_batch(j, 0, n);
+        return;
+    }
+    g_vd_par_n += n;
+    seg = (n + (unsigned)nw) / (unsigned)(nw + 1);
+    for (idx = 0; idx < nw; idx++) {
+        PicaRasterWorker *w = &g_rw[idx];
+        unsigned a = (unsigned)idx * seg, b = a + seg;
+        if (a >= n) break;
+        if (b > n) b = n;
+        w->vs_job = j;
+        w->v0 = a;
+        w->v1 = b;
+        SetEvent(w->wake);
+    }
+    {
+        unsigned a = (unsigned)nw * seg;
+        if (a < n) p_vs_batch(j, a, n);
+    }
+    for (idx = 0; idx < nw; idx++) {
+        if ((unsigned)idx * seg >= n) break;
+        WaitForSingleObject(g_rw[idx].done, INFINITE);
+        g_rw[idx].vs_job = NULL;
+    }
+}
+
+static int p_vd_reserve(uint32_t n)
+{
+    if (n <= g_vd_cap) return 1;
+    {
+        uint32_t cap = n < 1024u ? 1024u : n;
+        uint32_t *s = (uint32_t *)realloc(g_vd_slot, (size_t)cap * sizeof(uint32_t));
+        uint32_t *u;
+        float (*o)[16][4];
+        if (s == NULL) return 0;
+        g_vd_slot = s;
+        u = (uint32_t *)realloc(g_vd_uniq, (size_t)cap * sizeof(uint32_t));
+        if (u == NULL) return 0;
+        g_vd_uniq = u;
+        o = (float (*)[16][4])realloc(g_vd_outs, (size_t)cap * sizeof(*o));
+        if (o == NULL) return 0;
+        g_vd_outs = o;
+        g_vd_cap = cap;
+    }
+    return 1;
+}
+
+/* Vertex-Shading aller nv Positionen eines Draws: danach liefert
+   g_vd_outs[g_vd_slot[i]] die VS-Ausgabe fuer Position i (wie
+   p_load_attrs + p_vs_process seriell). 0 = kein Speicher (seriell weiter). */
+static int p_vs_shade_draw(ArmCpu *c, int indexed, uint32_t nv, uint32_t voff)
+{
+    struct PicaVsJob job;
+    uint32_t nu = 0, i;
+
+    if (!p_vd_reserve(nv)) return 0;
+    if (indexed) {
+        if (++g_vd_draw == 0u) {          /* Stempelueberlauf */
+            memset(g_vd_map_stamp, 0, sizeof(g_vd_map_stamp));
+            g_vd_draw = 1u;
+        }
+        for (i = 0; i < nv; i++) {
+            uint32_t vert = p_index_vertex(c, i) & 0xFFFFu;
+            if (g_vd_map_stamp[vert] != g_vd_draw) {
+                g_vd_map_stamp[vert] = g_vd_draw;
+                g_vd_map_slot[vert] = nu;
+                g_vd_uniq[nu++] = vert;
+            }
+            g_vd_slot[i] = g_vd_map_slot[vert];
+        }
+    } else {
+        for (i = 0; i < nv; i++) {
+            g_vd_uniq[i] = i + voff;
+            g_vd_slot[i] = i;
+        }
+        nu = nv;
+    }
+    job.c = c;
+    p_attr_config(&job.ac);
+    job.verts = g_vd_uniq;
+    job.outs = g_vd_outs;
+    job.entry = p_regs[0x2BA] & 0xFFFFu;
+    job.maxa = p_regs[0x2B9] & 0xFu;
+    job.map = ((uint64_t)p_regs[0x2BC] << 32) | p_regs[0x2BB];
+    job.outmask = p_regs[0x2BD] & 0xFFFFu;
+    job.round = fegetround();
+    p_vs_run_all(&job, nu);
+    g_vd_pos_n += nv;
+    g_vd_run_n += nu;
+    return 1;
+}
+
 static int p_draw_arrays(ArmCpu *c, int indexed)
 {
     static int plog = -1;
@@ -4416,6 +4582,34 @@ static int p_draw_arrays(ArmCpu *c, int indexed)
 
     /* Azahar GeometryPipeline::Reconfigure + Setup je Draw. */
     p_gs_pipeline_reconfigure();
+    /* VariablePrimitive mischt Vertexzahlen in den Indexstrom (abhaengig vom
+       Zustand der Geometrie-Pipeline) -> dort bleibt alles seriell. */
+    if (g_gp.mode != 1 && p_vs_shade_draw(c, indexed, nv, voff)) {
+        static int vlog = -1;
+
+        if (vlog < 0) { const char *e = getenv("HLE_GTIME"); vlog = (e && *e && *e != '0'); }
+        if (vlog && (draws % 20000u) == 0u) {
+            printf("[vshade] draws=%u positionen=%llu gerechnet=%llu (%.1f%%) parallel=%llu\n",
+                   draws, g_vd_pos_n, g_vd_run_n,
+                   100.0 * (double)g_vd_run_n / (double)(g_vd_pos_n + 1ull), g_vd_par_n);
+        }
+
+        for (i = 0; i < nv; i++) {
+            const float (*outs)[4] = (const float (*)[4])g_vd_outs[g_vd_slot[i]];
+            if (g_gp.mode >= 0) {
+                p_gs_pipeline_submit(c, outs);
+            } else {
+                PicaVertex v;
+                p_out_vertex(outs, &v);
+                g_vs_last_vertex = v;
+                g_vs_have_last = 1;
+                p_prim_submit(c, &v);
+            }
+        }
+        draws++;
+        if (!g_hw_render) gpu_pica_bump_tex_generation();
+        return 1;
+    }
 
     for (i = 0; i < nv; i++) {
         uint32_t vert = indexed ? p_index_vertex(c, i) : (i + voff);
