@@ -55,7 +55,7 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | M1–M5, M8 | erreicht | Frontier 10/10, 0 Patches, Titel |
 | M6 | erreicht | Menü, Touch, Namenseingabe, Rätsel-Eingabe (Nutzer) |
 | M7 | erreicht | Ton, Filme, Speichern/Laden, Soundeffekte |
-| M9 | teilweise | `--renderer hw` läuft (Titel, Szenen, ~50 % mehr Gast-Frames); Abnahme-Bildvergleich offen (braucht M18); 3D-Figuren falsch texturiert |
+| M9 | teilweise | `--renderer hw` läuft (Titel, Szenen, ~50 % mehr Gast-Frames); 3D-Figuren korrekt seit D16-Tiefenfix; Abnahme-Bildvergleich offen (braucht M18) |
 | M10 | teilweise | Aussetzer (DSP-Zustellung), Hänger (DSP-Frame beim Stabhalter) und Echtzeit gelöst, Hörtest Nutzer „sauber“; Azahar-Aufnahme fehlt (kein Azahar-Build vorhanden) |
 | M11 | erreicht | Namenseingabe → Eröffnungsszene (`--press`-Folge in `docs/GAME_NOTES.md`) |
 | M12 | offen | Titel ~20 sichtbare fps (HW), 3D-Szenen/Rätsel ~3 fps |
@@ -68,8 +68,7 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 
 1. **Effizientes Testen**: Szenen ohne Durchklicken erreichen (Spielstände
    als Testfixtures, Eingaben an Gastzeit gekoppelt, Szenen-Skript).
-2. **3D-Figuren** (M9): Gesichter/Haare einfarbig - SW/HW-Vergleich, dann
-   Texturkoordinaten/Texturzuordnung der Modelle.
+2. ~~3D-Figuren~~ (erledigt: D16-Tiefe schrieb nur 1 Byte; tests/lighting_test.py).
 3. **Bildrate in 3D-Szenen** (M12/M17): Profil in der Szene, dann
    HW-Renderer-Ausbau (Bilder auf der GPU, D3D-Ausgabe, Vertex-Shader auf
    der GPU, höhere interne Auflösung).

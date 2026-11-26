@@ -304,7 +304,11 @@ Struktur je Draw statt Registerlesen je Pixel.
   Azahars next_thread_id), hs_wait traegt sich neu ein, falls der Eintrag
   nicht mehr ihm gehoert, Waechter unter HLE_STALLDUMP.
 
-## Offene Darstellungsfehler (Nutzerbeobachtung 2026-11-25)
+## Darstellungsfehler 3D-Figuren (Nutzerbeobachtung 2026-11-25, behoben 2026-11-26)
+
+* Ursache: D16-Tiefenpuffer, nur das Low-Byte wurde geschrieben (p_depth_set);
+  Haar-/Hutnetze hinter den Koepfen bestanden den Tiefentest und lagen ueber den
+  Gesichtern. Nebenbei quat/view/tc0_w perspektivkorrekt (Lighting).
 
 * 3D-Modell von Layton (Dialog-/Inworld-Szene, --renderer hw, Host-Frame
   ~43440) wirkt grob: kantig, sehr dunkle/flache Schattierung, keine
