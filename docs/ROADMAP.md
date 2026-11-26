@@ -55,7 +55,7 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | M1–M5, M8 | erreicht | Frontier 10/10, 0 Patches, Titel |
 | M6 | erreicht | Menü, Touch, Namenseingabe, Rätsel-Eingabe (Nutzer) |
 | M7 | erreicht | Ton, Filme, Speichern/Laden, Soundeffekte |
-| M9 | teilweise | `--renderer hw` läuft; Bildvergleich (`tools/rendercmp.py`, 2026-11-26, m9-compare): froenborg 89 Bilder oben MAD 0,60, max 0,03 % Pixel > 8, 0 Cluster; unten MAD 0,002; Rätsel-Lauf 150 Bilder oben MAD 0,48, Cluster > 32 nur Titelkarte (max 286 px) und Luftschiff (max 353 px) - Texelgrenzen-Gleichstände, SW-Rundung (docs/GAME_NOTES.md) |
+| M9 | erreicht | Nutzer-Entscheid 2026-11-26 nach Bildvergleich; `--renderer hw` läuft; Bildvergleich (`tools/rendercmp.py`, 2026-11-26, m9-compare): froenborg 89 Bilder oben MAD 0,60, max 0,03 % Pixel > 8, 0 Cluster; unten MAD 0,002; Rätsel-Lauf 150 Bilder oben MAD 0,48, Cluster > 32 nur Titelkarte (max 286 px) und Luftschiff (max 353 px) - Texelgrenzen-Gleichstände, SW-Rundung (docs/GAME_NOTES.md) |
 | M10 | erreicht | Aussetzer, Hänger und Echtzeit gelöst; Nutzer-Entscheid 2026-11-26: Hörtest („sauber“) genügt als Abnahme, Azahar-Aufnahme entfällt |
 | M11 | erreicht | Namenseingabe → Eröffnungsszene (`--press`-Folge in `docs/GAME_NOTES.md`) |
 | M12 | erreicht | 2026-11-26, master 7b1cf2f, `--renderer hw`, Echtzeit, 2 Läufe: Titel (g2100–2700) und Slot-Menü (ab g2900) je 59,8–60,0 Gast-fps (`[port] gast=` je 300 Host-Frames); 3D-Dialog Froenborg 30 Gast-fps |
@@ -67,8 +67,8 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | M18 | erreicht | `port.exe --deterministic` (virtuelle Zeit, VBlank im Gleichschritt); `tools/scene.py froenborg raetsel1 --repro`: je 89/89 Bilder gleich (alle 50 Gast-Frames bis g4450), hw und soft gleiche VBlank→Gast-Frame-Folge |
 
 1. ~~Bildrate Titel/Hauptmenü~~ (M12 erreicht: 60 Gast-fps).
-2. **Bildvergleich SW gegen HW** auf denselben Gast-Frames (M9): gemessen,
-   drei HW-Fehler behoben; Entscheid Abnahme offen (Mensch).
+2. ~~Bildvergleich SW gegen HW~~ (M9 erreicht: drei HW-Fehler behoben,
+   Restunterschiede an Texelgrenzen-Gleichständen).
 3. **HW-Renderer als Standard** (M17): Bilder auf der GPU, D3D-Ausgabe,
    höhere interne Auflösung.
 4. Offen, niedrige Priorität: seltener Hänger in Rätsel 001 (Nutzer meldet
