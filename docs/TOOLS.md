@@ -375,7 +375,8 @@ aendern (Locks), sind keine Recompiler-Fehler.
 
 ## Assets
 
-`tools/xfsatool/` (Level-5-ARC0/XPCK), `tools/list_xpck.py`,
+`tools/xfsatool/` (Level-5-ARC0/XPCK; Fremdwerkzeug ohne Lizenzangabe, nur
+lokal, per `.gitignore` nicht im Repo), `tools/list_xpck.py`,
 `tools/scan_xpck.py`, `tools/scan_pvb.py`, `tools/fa_index.py`,
 `tools/imgc_check.py`, Test `tools/test_imgc_c.py`, PICA-Test `tools/test_pica_c.py`
 (`--bench` misst zusaetzlich den Software-Rasterizer: 2000 texturierte

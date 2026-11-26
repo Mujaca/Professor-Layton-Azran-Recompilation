@@ -8,3 +8,22 @@ build/
 *.ctrt
 *.pdb
 scratch/
+
+# --- Nicht veroeffentlichen (Urheberrecht / Fremdlizenzen) ---
+# Spielinhalte, aus der ROM gewonnene Daten und Abbilder davon. Werden lokal
+# von den Werkzeugen erzeugt bzw. abgelegt, gehoeren aber nie ins Repo.
+*.3ds.bak
+*.cxi
+*.cfa
+*.bcstm
+*.bcsar
+*.moflex
+*.fa
+*.bin
+*.bmp
+reports/*.png
+reports/code_strings.txt
+reports/romfs_listing.tsv
+tools/profiles/
+# Fremdwerkzeug ohne Lizenzangabe (nur lokal als Formatreferenz)
+tools/xfsatool/
