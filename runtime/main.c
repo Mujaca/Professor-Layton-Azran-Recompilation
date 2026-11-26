@@ -31,6 +31,8 @@
 #include "framebuffer.h"
 #include "gpu.h"
 #include "hle.h"
+#include "hw_d3d11.h"
+#include "hw_present.h"
 #include "press_spec.h"
 #include "window.h"
 
@@ -56,6 +58,8 @@ static unsigned char *g_mem = NULL;
 static ArmCpu g_cpu;
 static volatile int g_halt = 0;
 static unsigned char g_rgb[FB_W * FB_H * 3];
+static HleGspFrame g_top, g_bottom;     /* Stand des letzten compose_frame */
+static int g_shot_scaled = 0;           /* --shot-scaled */
 
 static DWORD WINAPI game_thread(LPVOID unused) {
     (void)unused;
@@ -78,6 +82,8 @@ static void compose_frame(void) {
     FbScreen ft, fb;
     hle_gsp_frame(0, &top);
     hle_gsp_frame(1, &bottom);
+    g_top = top;
+    g_bottom = bottom;
     ft.valid = top.valid;
     ft.address = top.address;
     ft.stride = top.stride;
@@ -89,12 +95,54 @@ static void compose_frame(void) {
     fb_compose(g_rgb, FB_W, FB_H, g_mem, MEM_SIZE, &ft, &fb);
 }
 
+/* M17: Kanvas in interner Aufloesung auf der GPU (HW-Renderer). Dieselben
+ * Framebindungen wie compose_frame; Bildschirme ohne GPU-Anzeigeflaeche
+ * kommen aus g_rgb. */
+static void present_frame(void) {
+    HwpScreen scr[2];
+    memset(scr, 0, sizeof(scr));
+    scr[0].valid = g_top.valid;
+    scr[0].address = g_top.address;
+    scr[0].stride = g_top.stride;
+    scr[0].format = g_top.format;
+    scr[0].dx = 0;
+    scr[0].dy = 0;
+    scr[0].columns = FB_TOP_COLUMNS;
+    scr[0].rows = FB_TOP_ROWS;
+    scr[1].valid = g_bottom.valid;
+    scr[1].address = g_bottom.address;
+    scr[1].stride = g_bottom.stride;
+    scr[1].format = g_bottom.format;
+    scr[1].dx = BOT_X;
+    scr[1].dy = BOT_Y;
+    scr[1].columns = FB_BOTTOM_COLUMNS;
+    scr[1].rows = FB_BOTTOM_ROWS;
+    hwp_frame(g_mem, MEM_SIZE, scr, g_rgb);
+}
+
+static int present_pane(const WinPresentInfo *in) {
+    return hwp_present(in->hwnd, in->client_w, in->client_h, in->vp.x, in->vp.y,
+                       in->vp.width, in->vp.height, in->src_x, in->src_y,
+                       in->src_w, in->src_h, in->status, in->nstatus);
+}
+
 static void save_shot(const char *path) {
     if (fb_write_bmp(path, g_rgb, FB_W, FB_H)) {
         printf("Screenshot: %s (%dx%d: oben %dx%d, unten %dx%d)\n", path, FB_W,
                FB_H, FB_TOP_COLUMNS, FB_TOP_ROWS, FB_BOTTOM_COLUMNS, FB_BOTTOM_ROWS);
     } else {
         printf("Screenshot fehlgeschlagen: %s\n", path);
+    }
+    /* --shot-scaled: zusaetzlich die Anzeige in interner Aufloesung als
+       "hd_<name>" daneben (nur HW-Renderer; das native Bild bleibt die
+       Referenz fuer Vergleiche). */
+    if (g_shot_scaled && hwp_active()) {
+        char hd[600];
+        const char *base = path, *q;
+        for (q = path; *q; q++)
+            if (*q == '/' || *q == '\\') base = q + 1;
+        snprintf(hd, sizeof(hd), "%.*shd_%s", (int)(base - path), path, base);
+        if (hwp_save_bmp(hd)) printf("Screenshot intern: %s\n", hd);
     }
 }
 
@@ -158,6 +206,7 @@ int main(int argc, char **argv) {
     int shot_guest = 0;
     int gast_shot_next = 0;
     int renderer_hw = 0;
+    int scale = 0;
     int det = 0;
     setvbuf(stdout, NULL, _IONBF, 0);
     for (int i = 1; i < argc; i++) {
@@ -172,6 +221,14 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--savedata") == 0 && i + 1 < argc) savedata = argv[++i];
         else if (strcmp(argv[i], "--deterministic") == 0) det = 1;
         else if (strcmp(argv[i], "--split-screens") == 0) win_set_split(1);
+        else if (strcmp(argv[i], "--scale") == 0 && i + 1 < argc) {
+            scale = atoi(argv[++i]);
+            if (scale < 1 || scale > 4) {
+                printf("[port] --scale %d ungueltig (1..4), nehme 1\n", scale);
+                scale = 1;
+            }
+        }
+        else if (strcmp(argv[i], "--shot-scaled") == 0) g_shot_scaled = 1;
         else if (strcmp(argv[i], "--single-window") == 0) win_set_split(0);
         else if (strcmp(argv[i], "--renderer") == 0 && i + 1 < argc) {
             const char *r = argv[++i];
@@ -211,6 +268,14 @@ int main(int argc, char **argv) {
     if (!win_open(FB_W, FB_H, "Professor Layton and the Azran Legacy")) {
         printf("Fenster konnte nicht geoeffnet werden\n");
         return 3;
+    }
+    /* M17: Ausgabe des HW-Renderers ueber eine D3D11-Swapchain je Fenster,
+       interne Aufloesung aus --scale bzw. port.ini [display] scale. Der
+       Software-Renderer bleibt bei GDI. */
+    if (gpu_pica_render_hw()) {
+        if (scale <= 0) scale = win_config_scale();
+        hw_set_scale(scale > 0 ? scale : 1);
+        if (hwp_init(FB_W, FB_H)) win_set_present(present_pane, hwp_detach);
     }
     /* Unterer Screen als Touchflaeche; Tastenbelegung siehe window.h. */
     win_set_touch_rect(BOT_X, BOT_Y, 320, 240);
@@ -269,6 +334,7 @@ int main(int argc, char **argv) {
 
         compose_frame();
         win_blit(g_rgb, FB_W, FB_H);
+        if (hwp_active()) present_frame();
         if (shot != NULL && shot_every > 0) {
             if (shot_guest) {
                 /* Diagnose: Aufnahme an denselben Gast-Frames beider Pfade
@@ -354,6 +420,14 @@ int main(int argc, char **argv) {
         }
     }
     win_close();
+    if (hwp_active()) {
+        unsigned long long sg = 0, sc = 0, tg = 0, tc = 0;
+        hwp_stats(&sg, &sc);
+        hw_display_stats(&tg, &tc);
+        printf("[present] Bildschirme GPU=%llu CPU=%llu, Transfers GPU=%llu CPU=%llu\n",
+               sg, sc, tg, tc);
+        hwp_shutdown();
+    }
     hle_report();
     return 0;
 }

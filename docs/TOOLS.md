@@ -48,6 +48,10 @@ python tools/scene.py froenborg --renderer soft --tag soft --every 50      # -> 
   ignoriert port.exe in diesem Modus (nur `--press` wirkt).
 * `--tag T`: Ausgabe nach `scratch/scene/<szene>-T/` statt `<szene>/`
   (z. B. `soft`/`hw` fuer den Bildvergleich).
+* `--scale N` (M17, nur HW): interne Aufloesung N; die nativen Bilder
+  (`seq_*.png`, `ziel.png`) bleiben unveraendert (pixelgleich zu N = 1),
+  zusaetzlich `hd_<gast>.png`/`hd_ziel.png` mit der Anzeige in
+  interner Aufloesung (`port.exe --shot-scaled`).
 * SW/HW-Bildvergleich (M9): beide Renderer mit `--tag soft`/`--tag hw` und
   derselben `--every`-Folge fahren, dann
   `python tools/rendercmp.py scratch/scene/<szene>-soft scratch/scene/<szene>-hw`.

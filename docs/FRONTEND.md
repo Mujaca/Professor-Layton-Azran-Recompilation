@@ -42,6 +42,15 @@ und die Fenstergeometrie (Sollwerte mit `Fraction` nachgerechnet).
   Monitor und zurueck.
 * Die Maus ueber dem unteren Screen wirkt als Touchscreen; die Umrechnung
   beruecksichtigt Skalierung und Letterbox.
+* **Ausgabe (M17):** Mit dem Hardware-Renderer zeichnet jedes Fenster ueber
+  eine eigene D3D11-Swapchain (Flip-Modell, `runtime/gpu/hw_present.c`), der
+  Software-Renderer weiter per GDI (Abschnitt "Fensterausgabe"). Details im
+  Abschnitt "Bildausgabe des Hardware-Renderers".
+* **Interne Aufloesung:** `--scale N` oder `[display] scale = N` (1..4,
+  Standard 1, nur Hardware-Renderer; die Startoption gewinnt). Gerendert
+  wird zusaetzlich in N-facher Aufloesung fuer die Anzeige; alles, was der
+  Gast sieht (Rueckschreiben ins VRAM, Transfers), bleibt nativ und
+  unveraendert, ebenso Screenshots (`--shot`).
 * Titelzeile: `fps=` ist die tatsaechliche Host-Bildrate (gemessen ueber
   QPC), `Gast-Frames=` zaehlt die VBlanks, in denen das Spiel eine neue
   FrameBufferInfo veroeffentlicht hat (Diagnose, kein Gastzustand).
@@ -77,6 +86,7 @@ enabled = 1
 
 [display]
 layout = single
+scale = 1
 ```
 
 Tastennamen: ein Buchstabe oder eine Ziffer (`X`, `7`), oder `Enter`,
@@ -110,7 +120,13 @@ Tastatur-Circle-Pad nur, wenn er die Deadzone verlaesst.
 out/port.exe [romfs] [--frames N] [--frames-guest N] [--shot datei.bmp] [--shot-every N]
              [--shot-from M] [--shot-guest] [--press taste@[g]frame[+h][:dauer[:x:y]],...]
              [--savedata ordner] [--renderer soft|hw] [--deterministic]
+             [--scale N] [--shot-scaled] [--split-screens|--single-window]
 ```
+
+* `--shot-scaled` (nur HW-Renderer): zu jedem `--shot`-Bild zusaetzlich
+  `hd_<name>.bmp` mit der Anzeige in interner Aufloesung (400N x 480N), so
+  wie sie im Fenster erscheint. Das native Bild bleibt unveraendert die
+  Referenz fuer Bildvergleiche (`tools/rendercmp.py`).
 
 * `--deterministic` (M18): reproduzierbare Laeufe. Alle gastsichtbaren Uhren
   (svcGetSystemTick, Sleep/Timeouts, Kernel-Timer, HID-Abtastung, Y2R-Ende,
@@ -186,3 +202,48 @@ Zwischenstand war das Flackern im Fenster (M13). Screenshots (`--shot`) lesen
 den Bildpuffer vor der Fensterausgabe und zeigten es deshalb nie; die vom
 Spiel erzeugte Bildfolge ist flackerfrei (600 aufeinanderfolgende Frames mit
 `--shot-every 1`, kein A-B-A-Wechsel).
+
+## Bildausgabe des Hardware-Renderers (M17)
+
+Ziel: Bilder bleiben auf der GPU und lassen sich in hoeherer interner
+Aufloesung anzeigen, ohne dass sich irgendetwas Gastsichtbares aendert.
+
+* **Oberflaechen** (`runtime/gpu/hw_d3d11.c`, Abschnitt M17): Zu jedem
+  PICA-Farbziel gibt es eine Kopie in interner Aufloesung (Faktor N). Bei
+  N > 1 zeichnet der Renderer jeden Batch zweimal - nativ (wird wie bisher
+  ins Gast-VRAM zurueckgeschrieben) und skaliert (nur Anzeige). Bei N = 1 ist
+  die Oberflaeche eine GPU-Kopie des nativen Ziels nach dem Rueckschreiben.
+  Jede Oberflaeche merkt sich einen Hash der Gastbytes von Farb- und
+  Tiefenpuffer; laedt der Renderer ein Ziel neu aus dem Gast (CPU,
+  MemoryFill, Transfer oder Software-Draw hat es veraendert), wird der neue
+  Gastinhalt vergroessert (Farbe, Tiefe, Stencil), sonst skaliert
+  weitergerendert.
+* **DisplayTransfer auf der GPU:** Nach dem unveraenderten CPU-Transfer
+  rechnet `hw_display_transfer` denselben Transfer (Flip, 2x1/2x2-Mittelung,
+  Formatquantisierung wie `p_display_transfer_run`) aus der Oberflaeche der
+  Quelle in eine Anzeigeflaeche zum Ziel-Framebuffer - nur wenn der Hash der
+  Quellbytes zur Oberflaeche passt.
+* **Anzeige:** Je Host-Frame baut `hwp_frame` einen Kanvas (400N x 480N).
+  Ein Bildschirm kommt aus der Anzeigeflaeche, wenn der Hash der aktuellen
+  Framebuffer-Bytes noch dem Stand nach dem GPU-Transfer entspricht;
+  sonst (Filme per Y2R, TextureCopy, CPU-Schreibzugriffe, unbekannte
+  Formate) aus dem CPU-Bild, das `main.c` wie bisher aus dem Gastspeicher
+  dekodiert. Bei N = 1 sind beide Wege pixelgleich (gemessen: Titel,
+  `--shot` gegen `hd_`-Bild ohne Abweichung).
+* **Fenster:** Je Fenster eine Swapchain (`DXGI_SWAP_EFFECT_FLIP_DISCARD`,
+  `Present(0, 0)`; der Takt kommt wie bisher aus `frame_clock.h`, kein
+  Tearing im Fenster). Der Kanvas-Ausschnitt des Fensters wird
+  seitenverhaeltnistreu skaliert (gleiche `win_fit_viewport`-Rechnung wie
+  GDI, also auch gleiche Touch-Umrechnung): Vergroessern naechster Nachbar,
+  Verkleinern gegenueber der internen Aufloesung linear. Statuszeilen per
+  GDI auf dem Swapchain-Puffer. F11, `--split-screens` und Fenstergroessen
+  wie oben.
+* **Threading:** Das Immediate Context gehoert dem GX-Worker. Die Anzeige
+  zeichnet in einen Deferred Context und fuehrt die Befehlsliste unter
+  `hw_lock()` mit wiederhergestelltem Context-Zustand aus; alle
+  oeffentlichen `hw_*`-Einstiege nehmen dieselbe Sperre.
+* **Grenzen:** Die Ueberschneidungspruefung fuer Shader-Blending laeuft
+  nativ; Dreiecke, die sich erst in interner Aufloesung ueberschneiden,
+  koennen dort ein Pixel lang gegen eine aeltere Momentaufnahme mischen
+  (nur Anzeige). Texturen, die ein frueheres Renderziel sind
+  (Render-to-Texture), werden in nativer Aufloesung gesampelt.

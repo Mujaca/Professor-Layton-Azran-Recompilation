@@ -44,6 +44,26 @@ static inline WinViewport win_fit_viewport(int client_w, int client_h,
     return v;
 }
 
+/* Bildausgabe ueber eine andere API (M17: D3D11-Swapchain des
+ * HW-Renderers, runtime/gpu/hw_present.c). Ist ein Hook gesetzt, ruft
+ * WM_PAINT ihn je Fenster auf; gibt er 0 zurueck, zeichnet das Fenster wie
+ * bisher per GDI aus dem Kanvas (win_blit). Viewport, Ausschnitt und
+ * Touch-Umrechnung bleiben in window.c. */
+typedef struct {
+    void *hwnd;
+    int pane;
+    int client_w, client_h;
+    WinViewport vp;                    /* Zielrechteck im Clientbereich */
+    int src_x, src_y, src_w, src_h;    /* Kanvas-Ausschnitt (native Pixel) */
+    const char *const *status;         /* Statuszeilen (nur Fenster 0) */
+    int nstatus;
+} WinPresentInfo;
+typedef int (*WinPresentFn)(const WinPresentInfo *info);
+typedef void (*WinDetachFn)(void *hwnd);
+void win_set_present(WinPresentFn present, WinDetachFn detach);
+/* [display] scale = N aus port.ini (0 = nicht gesetzt), nach win_open. */
+int win_config_scale(void);
+
 /* Momentaufnahme der Host-Eingabe fuer hid. Standardbelegung (ueberschreibbar
  * in port.ini neben port.exe, siehe docs/FRONTEND.md):
  *   A=X, B=Z, X=S, Y=A, L=Q, R=W, Start=Enter, Select=Backspace,

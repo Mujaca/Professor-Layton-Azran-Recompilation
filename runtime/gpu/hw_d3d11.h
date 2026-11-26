@@ -246,4 +246,32 @@ unsigned long long hw_texture_partial_uploads(void);
  * Rueckschreiben anfaengt). */
 void hw_submit_stats(unsigned long long *batches, unsigned long long *submits);
 
+/* ---- M17: interne Aufloesung und Anzeige auf der GPU -------------------
+ * Gastsichtbare Ergebnisse (Rueckschreiben, Transfers) bleiben nativ und
+ * unveraendert; die interne Aufloesung betrifft nur die Anzeige.
+ * hw_set_scale vor dem ersten Draw aufrufen (1..4, Standard 1). */
+void hw_set_scale(int s);
+int hw_scale(void);
+/* Nach dem CPU-DisplayTransfer (gpu.c): denselben Transfer auf der GPU aus
+ * der Oberflaeche der Quelle rechnen (falls vorhanden und gueltig).
+ * src/dst = Host-Zeiger in den Gastspeicher, Groessen/Flags wie
+ * Register 0x302..0x304, extent = beschriebene Bytes ab dst. */
+void hw_display_transfer(const unsigned char *src, const unsigned char *dst,
+                         uint32_t in_size, uint32_t out_size, uint32_t flags,
+                         uint32_t extent);
+/* Fuer runtime/gpu/hw_present.c: Context-Sperre, Device/Context
+ * (ID3D11Device* / ID3D11DeviceContext*) und die Anzeigeflaeche
+ * (ID3D11ShaderResourceView*, Gast-Orientierung: Texel (x, y) = Pixel x der
+ * Framebuffer-Zeile y) zu einem Framebuffer, nur solange dessen Gastbytes
+ * dem GPU-Transfer entsprechen. lookup nur unter hw_lock(). */
+void hw_lock(void);
+void hw_unlock(void);
+void *hw_d3d_device(void);
+void *hw_d3d_context(void);
+void *hw_display_lookup(const unsigned char *ptr, uint32_t stride, uint32_t fmt,
+                        int columns, int rows, int *tex_w, int *tex_h);
+void hw_display_stats(unsigned long long *gpu, unsigned long long *cpu);
+/* HLSL uebersetzen (ID3DBlob* oder NULL). */
+void *hw_compile_shader(const char *src, const char *entry, const char *profile);
+
 #endif

@@ -23,6 +23,9 @@ static int g_touch_x = 0, g_touch_y = 240, g_touch_w = 320, g_touch_h = 240;
 static int g_has_touch_rect = 0;
 static int g_xinput_enabled = 1;
 static int g_layout_ini = 0;          /* [display] layout = split -> 1 */
+static int g_scale_ini = 0;           /* [display] scale = N (0 = nicht gesetzt) */
+static WinPresentFn g_present_fn = NULL;
+static WinDetachFn g_detach_fn = NULL;
 
 /* ---- Tastenbelegung (port.ini neben port.exe, siehe docs/FRONTEND.md) ---- */
 typedef struct {
@@ -86,7 +89,9 @@ static void write_default_config(const char *path) {
           "[display]\n"
           "# single = ein Fenster mit beiden Screens, split = je Screen ein\n"
           "# Fenster (auch per Startoption --split-screens).\n"
-          "layout = single\n",
+          "layout = single\n"
+          "# Interne Aufloesung des Hardware-Renderers (1..4, auch --scale N).\n"
+          "scale = 1\n",
           f);
     fclose(f);
 }
@@ -204,6 +209,9 @@ static void load_config(void) {
             } else if (ieq(section, "display") && ieq(key, "layout")) {
                 if (ieq(val, "split")) g_layout_ini = 1;
                 else if (ieq(val, "single")) g_layout_ini = 0;
+            } else if (ieq(section, "display") && ieq(key, "scale")) {
+                int v = atoi(val);
+                if (v >= 1 && v <= 4) g_scale_ini = v;
             }
         }
     }
@@ -449,6 +457,25 @@ static void draw(WinPane *p, HDC dc) {
     RECT rc;
     HDC bdc;
     GetClientRect(p->hwnd, &rc);
+    if (g_present_fn != NULL) {
+        WinPresentInfo info;
+        const char *lines[10];
+        int i;
+        for (i = 0; i < g_status_lines && i < 10; i++) lines[i] = g_status[i];
+        memset(&info, 0, sizeof(info));
+        info.hwnd = p->hwnd;
+        info.pane = (int)(p - g_pane);
+        info.client_w = rc.right - rc.left;
+        info.client_h = rc.bottom - rc.top;
+        info.vp = p->vp;
+        info.src_x = p->src_x;
+        info.src_y = p->src_y;
+        info.src_w = p->src_w;
+        info.src_h = p->src_h;
+        info.status = lines;
+        info.nstatus = (p == &g_pane[0]) ? g_status_lines : 0;
+        if (g_present_fn(&info)) return;
+    }
     bdc = back_buffer(p, dc, rc.right - rc.left, rc.bottom - rc.top);
     if (!bdc) {           /* Fallback: direkt (z. B. minimiert) */
         draw_into(p, dc, &rc);
@@ -675,11 +702,21 @@ void win_set_title(const char *text) {
     }
 }
 
+void win_set_present(WinPresentFn present, WinDetachFn detach) {
+    g_present_fn = present;
+    g_detach_fn = detach;
+}
+
+int win_config_scale(void) {
+    return g_scale_ini;
+}
+
 void win_close(void) {
     int i, n = g_npanes;
     g_npanes = 0;                 /* WndProc sieht ab hier keine Panes mehr */
     for (i = 0; i < n; i++) {
         back_buffer_free(&g_pane[i]);
+        if (g_pane[i].hwnd && g_detach_fn) g_detach_fn(g_pane[i].hwnd);
         if (g_pane[i].hwnd) {
             DestroyWindow(g_pane[i].hwnd);
             g_pane[i].hwnd = NULL;

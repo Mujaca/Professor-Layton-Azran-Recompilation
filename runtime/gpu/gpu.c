@@ -5472,6 +5472,14 @@ static void p_ext_transfer(ArmCpu *c)
         p_display_transfer_run(c, gpu_pica_phys_to_guest(in_p),
                                dst,
                                p_ext_regs[0x303], p_ext_regs[0x302], flags);
+        /* M17: denselben Transfer fuer die Anzeige auf der GPU rechnen
+           (nur Anzeige; der Gastspeicher ist oben bereits beschrieben). */
+        if (g_hw_render)
+            hw_display_transfer(c->mem + (gpu_pica_phys_to_guest(in_p) & 0x1FFFFFFFu),
+                                c->mem + (dst & 0x1FFFFFFFu),
+                                p_ext_regs[0x303], p_ext_regs[0x302], flags,
+                                p_display_transfer_extent(p_ext_regs[0x303],
+                                                          p_ext_regs[0x302], flags));
     }
     p_ext_regs[0x306] &= ~1u;
     if (p_irq_handler) p_irq_handler(4);   /* PPF */
