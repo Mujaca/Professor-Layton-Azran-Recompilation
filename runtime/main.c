@@ -5,11 +5,12 @@
  * uebernommen (runtime/kernel/hle.c), dekodiert in
  * runtime/platform/framebuffer.h.
  *
- *   port.exe [romfs-dir] [--shot datei.bmp] [--frames n]
+ *   port.exe [romfs-dir] [--shot datei.bmp] [--frames n] [--savedata ordner]
  *
  * --shot speichert beide Screens untereinander als BMP; --frames n beendet
  * den Lauf nach n Host-Frames (ohne Angabe laeuft das Fenster bis zum
- * Schliessen).
+ * Schliessen). --savedata ordner ersetzt out/savedata als Spielstand-Wurzel
+ * (tools/scene.py arbeitet so auf Fixture-Kopien).
  *
  * Hier gibt es bewusst keine Spieladressen und keine Ersatzbilder: Was im
  * Fenster erscheint, hat das Spiel selbst in seinen Framebuffer geschrieben.
@@ -20,6 +21,7 @@
 #include "framebuffer.h"
 #include "gpu.h"
 #include "hle.h"
+#include "press_spec.h"
 #include "window.h"
 
 #include <stdio.h>
@@ -103,41 +105,30 @@ static void save_shot_numbered(const char *path, int frame) {
 }
 
 /* Skriptbare Host-Eingabe fuer Testlaeufe: --press start@300:10,a@600
- * (Taste@Host-Frame[:Dauer], Dauer Standard 10 Frames). `touch` nimmt
- * zusaetzlich Koordinaten auf dem unteren Screen:
- * touch@9000:20:160:120 (Standard 160,120). Geht denselben Weg wie
- * Tastatur/Gamepad (hle_hid_set_input), veraendert keinen Gastzustand. */
-typedef struct { char key[8]; int at; int dur; int tx, ty; } PressEv;
-static PressEv g_press[32];
+ * (Taste@Host-Frame[:Dauer], Dauer Standard 10 Frames), mit Praefix `g`
+ * in Gast-Frames (touch@g1200:20:160:118). `touch` nimmt zusaetzlich
+ * Koordinaten auf dem unteren Screen (Standard 160,120). Parser in
+ * runtime/platform/press_spec.h. Geht denselben Weg wie Tastatur/Gamepad
+ * (hle_hid_set_input), veraendert keinen Gastzustand. */
+static PressEv g_press[PRESS_MAX];
 static int g_press_n = 0;
 
-static void press_parse(const char *spec) {
-    char buf[512];
-    char *tok, *save = NULL;
-    snprintf(buf, sizeof(buf), "%s", spec);
-    for (tok = strtok_s(buf, ",", &save); tok && g_press_n < 32; tok = strtok_s(NULL, ",", &save)) {
-        PressEv *e = &g_press[g_press_n];
-        char *at = strchr(tok, '@');
-        if (!at) continue;
-        *at = 0;
-        snprintf(e->key, sizeof(e->key), "%s", tok);
-        e->dur = 10;
-        e->tx = 160;
-        e->ty = 120;
-        if (sscanf(at + 1, "%d:%d:%d:%d", &e->at, &e->dur, &e->tx, &e->ty) >= 1) g_press_n++;
-    }
-}
-
-static void press_apply(HleHidInput *hi, int frame) {
+static void press_apply(HleHidInput *hi, int frame, unsigned guest) {
     for (int i = 0; i < g_press_n; i++) {
         PressEv *e = &g_press[i];
-        if (frame < e->at || frame >= e->at + e->dur) continue;
+        if (!press_ev_active(e, frame, guest)) continue;
         if (!strcmp(e->key, "a")) hi->a = 1;
         else if (!strcmp(e->key, "b")) hi->b = 1;
         else if (!strcmp(e->key, "x")) hi->x = 1;
         else if (!strcmp(e->key, "y")) hi->y = 1;
         else if (!strcmp(e->key, "start")) hi->start = 1;
         else if (!strcmp(e->key, "select")) hi->select = 1;
+        else if (!strcmp(e->key, "l")) hi->l = 1;
+        else if (!strcmp(e->key, "r")) hi->r = 1;
+        else if (!strcmp(e->key, "up")) hi->up = 1;
+        else if (!strcmp(e->key, "down")) hi->down = 1;
+        else if (!strcmp(e->key, "left")) hi->left = 1;
+        else if (!strcmp(e->key, "right")) hi->right = 1;
         else if (!strcmp(e->key, "touch")) {
             hi->touch_pressed = 1;
             hi->touch_x = (uint16_t)(e->tx < 0 ? 0 : e->tx > 319 ? 319 : e->tx);
@@ -149,7 +140,9 @@ static void press_apply(HleHidInput *hi, int frame) {
 int main(int argc, char **argv) {
     const char *romfs = "out/romfs";
     const char *shot = NULL;
+    const char *savedata = NULL;
     int frames_limit = -1;
+    int guest_limit = -1;
     int shot_every = 0;
     int shot_from = 0;
     int shot_guest = 0;
@@ -162,7 +155,10 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--shot-from") == 0 && i + 1 < argc) shot_from = atoi(argv[++i]);
         else if (strcmp(argv[i], "--shot-guest") == 0) shot_guest = 1;
         else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) frames_limit = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--press") == 0 && i + 1 < argc) press_parse(argv[++i]);
+        else if (strcmp(argv[i], "--frames-guest") == 0 && i + 1 < argc) guest_limit = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--press") == 0 && i + 1 < argc)
+            g_press_n = press_spec_parse(argv[++i], g_press, g_press_n, PRESS_MAX);
+        else if (strcmp(argv[i], "--savedata") == 0 && i + 1 < argc) savedata = argv[++i];
         else if (strcmp(argv[i], "--renderer") == 0 && i + 1 < argc) {
             const char *r = argv[++i];
             if (strcmp(r, "hw") == 0) renderer_hw = 1;
@@ -171,7 +167,7 @@ int main(int argc, char **argv) {
         }
         else romfs = argv[i];
     }
-    if (shot != NULL && frames_limit < 0) frames_limit = 600;
+    if (shot != NULL && frames_limit < 0 && guest_limit < 0) frames_limit = 600;
 
     g_mem = (unsigned char *)calloc(1, MEM_SIZE);
     if (!g_mem) { printf("kein Speicher\n"); return 2; }
@@ -188,6 +184,10 @@ int main(int argc, char **argv) {
     g_cpu.r[13] = 0x0FFF0000u;
     g_cpu.tpidruro = 0x1FF82000u;
     g_cpu.r[15] = CODE_BASE;
+    if (savedata != NULL) {
+        hle_set_savedata_dir(savedata);
+        printf("[port] Spielstaende: %s\n", savedata);
+    }
     hle_init(&g_cpu, romfs);
     arm_set_svc_handler(hle_svc);
     if (renderer_hw) gpu_pica_set_render_hw(1);
@@ -217,7 +217,10 @@ int main(int argc, char **argv) {
         char line[160];
         WinInput wi;
         HleHidInput hi;
-        if (frames_limit >= 0 && frames >= frames_limit) {
+        /* --frames-guest N: Ende am N-ten Gast-Frame (unter Last robust,
+           tools/scene.py); --frames bleibt als Host-Grenze bestehen. */
+        if ((frames_limit >= 0 && frames >= frames_limit) ||
+            (guest_limit >= 0 && (int)hle_gsp_guest_frames() >= guest_limit)) {
             if (shot != NULL) save_shot(shot);
             break;
         }
@@ -234,7 +237,7 @@ int main(int argc, char **argv) {
         hi.circle_x = wi.circle_x; hi.circle_y = wi.circle_y;
         hi.touch_pressed = wi.touch_pressed;
         hi.touch_x = (uint16_t)wi.touch_x; hi.touch_y = (uint16_t)wi.touch_y;
-        press_apply(&hi, frames);
+        press_apply(&hi, frames, hle_gsp_guest_frames());
         hle_hid_set_input(&hi);
 
         compose_frame();

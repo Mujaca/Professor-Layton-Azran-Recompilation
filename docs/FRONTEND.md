@@ -96,9 +96,19 @@ Tastatur-Circle-Pad nur, wenn er die Deadzone verlaesst.
 ## Diagnose-CLI fuer Testlaeufe
 
 ```
-out/port.exe [romfs] [--frames N] [--shot datei.bmp] [--shot-every N] [--shot-from M]
-             [--shot-guest] [--press taste@frame[:dauer[:x:y]],...]
+out/port.exe [romfs] [--frames N] [--frames-guest N] [--shot datei.bmp] [--shot-every N]
+             [--shot-from M] [--shot-guest] [--press taste@[g]frame[+h][:dauer[:x:y]],...]
+             [--savedata ordner] [--renderer soft|hw]
 ```
+
+* `--savedata ordner` nimmt `ordner` statt `out/savedata` als
+  Spielstand-Wurzel (gleiches Layout: `savedata/<program-id>/data/00000001/`,
+  `sharedextsavedata/...`, Spiegeldateien wie `head.lt6`). Standard
+  unveraendert. Gedacht fuer Fixture-Kopien (`tools/scene.py`), damit
+  Testlaeufe keine echten Spielstaende ueberschreiben.
+* `--frames-guest N` beendet nach N Gast-Frames (Zaehler `gast=`, siehe
+  unten); `--shot` wird dann dort geschrieben. Zusammen mit `--frames` gilt,
+  was zuerst eintritt (`--frames` als Notbremse, falls der Gast steht).
 
 * `--frames N` beendet nach N Host-Frames (`--shot` allein setzt 600).
 * `--shot datei.bmp` schreibt beim Beenden ein BMP des zusammengesetzten
@@ -115,11 +125,29 @@ out/port.exe [romfs] [--frames N] [--shot datei.bmp] [--shot-every N] [--shot-fr
   Output-Merger-/Stencil-/Fog-Register einmal als `[hwstate]` (reines Lesen,
   keine Zustandsaenderung) sowie alle 5 s `[texcache]` mit Textur-Uploads/s
   und Dekodierzeit.
-* `--press` haelt eine logische Taste (`a`, `b`, `x`, `y`, `start`,
-  `select`, `touch`) fuer `dauer` Host-Frames ab `frame` gedrueckt
-  (Standard 10). `touch` nimmt zusaetzlich Koordinaten auf dem unteren
-  Screen auf (`touch@9000:20:160:120`, Standard 160,120); Werte werden auf
-  0..319 bzw. 0..239 begrenzt.
+* `--press` haelt eine logische Taste (`a`, `b`, `x`, `y`, `l`, `r`,
+  `start`, `select`, `up`, `down`, `left`, `right`, `touch`) fuer `dauer`
+  Host-Frames ab `frame` gedrueckt (Standard 10). `touch` nimmt zusaetzlich
+  Koordinaten auf dem unteren Screen auf (`touch@9000:20:160:120`, Standard
+  160,120); Werte werden auf 0..319 bzw. 0..239 begrenzt. Mehrere
+  `--press`-Angaben werden aneinandergehaengt (hoechstens 64 Ereignisse).
+* **Gast-Zeit:** Mit dem Praefix `g` zaehlen Beginn *und* Dauer in
+  Gast-Frames (`touch@g1800:20:160:64`, `a@g2400`) - also in VBlanks, in
+  denen das Spiel einen eigenen Frame veroeffentlicht hat
+  (`hle_gsp_guest_frames`, Log `[port] ... gast=N`). Das ist unter Last
+  robust: laeuft der Gast langsamer, wandert die Eingabe mit. Steht der Gast
+  (Ladepause), bleibt eine laufende Eingabe gedrueckt, bis er weiterlaeuft.
+  Das Spiel liefert in Menues/Szenen etwa 30 Gast-Frames/s (halbe
+  Host-Rate). Beide Formen lassen sich mischen.
+* **Standbilder:** Wartet das Spiel auf einem unveraenderten Bild auf eine
+  Eingabe (Raetsel-Titel, Tutorial-Hinweis), veroeffentlicht es keine neuen
+  Frames, und der Gast-Zaehler kriecht oder steht ganz - eine dort geplante
+  `g`-Eingabe kaeme nie. Dafuer `taste@g<frame>+<h>[:dauer[:x:y]]`: Start
+  `h` Host-Frames, nachdem der Gast-Zaehler `frame` erreicht hat; Dauer in
+  Host-Frames (`touch@g5950+320:8:97:98`). Verankert am Spielfortschritt,
+  die kurze Wartezeit danach unabhaengig vom Zaehler. Parser:
+  `runtime/platform/press_spec.h`, Selbsttest in
+  `tests/frame_clock_selftest.c` (`python tests/frame_clock_test.py`).
 * Alle drei Optionen sind reine Diagnose: die Eingabe geht denselben Weg wie
   Tastatur/Maus (`hle_hid_set_input`), es wird kein Gastzustand gesetzt.
 

@@ -13,6 +13,56 @@ Alle Python-Tools liegen in `tools/`. Wegwerfskripte gehören nach `scratch/`
 | `python tools/build.py` | Patches → Recompiler → C → `out/port.exe` (`--no-gen`, `--pristine`) |
 | `python tools/frontier.py` | **Fortschrittsmetrik**: natürlicher Boot gegen Azahar-Referenz |
 | `python tools/check.py` | Gate vor jedem Commit (Tests + Build + Frontier) |
+| `python tools/scene.py <szene>` | Standard-Szene aus Fixture-Spielstand anfahren, Bild/Log/WAV/Profil nach `scratch/scene/<szene>/` (siehe unten) |
+
+## Szenen (`tools/scene.py`)
+
+Faehrt Standard-Szenen reproduzierbar an, ohne Durchklicken:
+
+```powershell
+python tools/scene.py --list                     # Szenen + vorhandene Fixtures
+python tools/scene.py titel                      # Titelmenue (~1 min)
+python tools/scene.py namenseingabe              # Tastatur nach "New Game" (~1 min)
+python tools/scene.py erste-szene                # neues Spiel, erste Prolog-Szene (~2 min)
+python tools/scene.py raetsel1-neu               # neues Spiel bis Titelkarte Raetsel 001 (~3 min)
+python tools/scene.py froenborg --renderer soft  # Continue Slot 1: 3D-Dialog Froenborg (~2 min)
+python tools/scene.py raetsel1 --wav --profile   # Continue Slot 2 (Spielstand nach Raetsel 001)
+python tools/scene.py fixture-raetsel1           # erzeugt den Slot-2-Spielstand neu (~13 min)
+python tools/scene.py froenborg --every 150 --extra 600   # Bildfolge, 600 Gast-Frames laenger
+python tools/scene.py titel --press touch@g1800:20:160:64 --target 2100   # eigene Eingaben
+```
+
+* Je Lauf wird der Fixture-Spielstand `out/fixtures/saves/<fixture>/`
+  (Layout wie `out/savedata`) in einen Temp-Ordner kopiert und per
+  `--savedata` benutzt; die Fixture bleibt unveraendert. Fixtures sind
+  Nutzer-Spielstaende und liegen deshalb unter `out/` (nicht eingecheckt).
+* Eingaben laufen als `--press` in **Gast-Frames** (`g`-Praefix), das Ende
+  per `--frames-guest`; damit landen die Laeufe auch unter Last am selben
+  Spielzustand. Standard `--renderer hw`.
+* Ausgabe `scratch/scene/<szene>/`: `ziel.png` (Endbild 400x480),
+  `seq_<gast>.png` (`--every N [--every-from M]`), `port.log`, `audio.wav`
+  (`--wav`, `HLE_AUDIO_WAV`), `profil.txt` (`--profile [--profile-after S]`,
+  Sampling-Profiler: Threads ~1000x/s anhalten, RIP per dbghelp/PDB
+  aufloesen), `spielstand/` (Spielstand nach dem Lauf, z. B. Quelle fuer eine
+  neue Fixture).
+* Touch-Ziele mit vorhandenem Spielstand: New Game (160,64), Continue
+  (160,118); Tastatur-"OK!" (160,225); Slots 1/2/3 (160,35/106/175).
+  Zeitpunkte stehen in `SCENES` und sind an Bildfolgen ausgemessen
+  (`--every N` in Gast-, `--every-host N` in Host-Frames).
+* Fixtures: `froenborg` = Kopie der Nutzer-Spielstaende (Slot 1 "abc",
+  Prologue End, Kapitel 1 Froenborg). `raetsel1` = dieselbe Kopie plus
+  Slot 2, erzeugt mit `fixture-raetsel1` (neues Spiel, Raetsel 001 per
+  Touch geloest, beim ersten Speicherangebot in Slot 2 gespeichert; danach
+  `scratch/scene/fixture-raetsel1/spielstand/` nach
+  `out/fixtures/saves/raetsel1/` kopieren). Der erste Speicherpunkt liegt
+  **nach** Raetsel 001 (Prologende), daher landet `raetsel1` wie
+  `froenborg` am Anfang von Kapitel 1; das Raetsel selbst zeigt
+  `raetsel1-neu` (Titelkarte) bzw. `--target 5900` (Raster).
+* Grenzen: Auf Standbildern steht der Gast-Zaehler (siehe
+  docs/FRONTEND.md, Form `g<frame>+<host>`); die 3D-Dialogszene liefert nur
+  ~3 Gast-Frames/s, Ziele dort klein halten. Sporadischer Haenger bei
+  Raetsel 001 beobachtet (Gast-Zaehler stand bei g6027, Bloecke
+  0x2E11xx) - dann Lauf wiederholen.
 
 ## Recompiler (`tools/recomp`)
 

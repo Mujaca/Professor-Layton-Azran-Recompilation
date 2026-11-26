@@ -9,6 +9,9 @@
 #include "hid_ring.h"
 
 void hle_init(ArmCpu *c, const char *romfs_dir);
+/* Host-Verzeichnis der Spielstaende (Standard "out/savedata"); vor hle_init
+   aufrufen. Nur Host-Pfad, kein Gastzustand (main.c: --savedata). */
+void hle_set_savedata_dir(const char *dir);
 /* Der Gast-Lock gehoert dem Host-Thread, der Gastcode ausfuehrt (bei uns der
    game_thread in runtime/main.c), nicht dem Thread, der hle_init aufruft.
    Nur der Besitzer darf Gast-Bloecke ausfuehren bzw. den Lock kooperativ

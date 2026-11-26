@@ -1,4 +1,4 @@
-"""Prueft die Host-Taktberechnung und die Fenstergeometrie.
+"""Prueft die Host-Taktberechnung, die Fenstergeometrie und den --press-Parser.
 
   python tests/frame_clock_test.py
 
