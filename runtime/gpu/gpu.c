@@ -2491,11 +2491,12 @@ static void p_depth_set(ArmCpu *c, uint32_t x, uint32_t y, uint32_t z)
     uint32_t off = 0;
     if ((p_regs[0x115] & 3u) == 0u) return;      /* allow_depth_stencil_write */
     if (!p_depth_addr(c, x, y, &off)) return;
+    /* Azahar sw_framebuffer.cpp SetDepth: D16 -> EncodeD16 (2 Bytes),
+       D24/D24S8 -> EncodeD24/EncodeD24X8 (3 Bytes, Stencil bleibt). */
     c->mem[off] = (uint8_t)(z & 0xFFu);
-    if (p_depth_fmt() != 0u) {
-        c->mem[off + 1u] = (uint8_t)((z >> 8) & 0xFFu);
+    c->mem[off + 1u] = (uint8_t)((z >> 8) & 0xFFu);
+    if (p_depth_fmt() != 0u)
         c->mem[off + 2u] = (uint8_t)((z >> 16) & 0xFFu);
-    }
 }
 
 static uint32_t p_stencil_get(ArmCpu *c, uint32_t x, uint32_t y)
@@ -3484,9 +3485,18 @@ static void p_raster_tri(ArmCpu *c, const PicaVertex *a, const PicaVertex *b,
         int k, m;
         in[i].pos[3] = invw;
         in[i].pos[2] *= invw;              /* Azahar screenpos.z = z / w */
+        /* Azahar sw_rasterizer.cpp MakeScreenCoords: quat, color, tc0,
+           tc1, tc0_w, view und tc2 werden mit 1/w multipliziert; die
+           Interpolation teilt durch die interpolierte 1/w-Summe
+           (perspektivkorrekt). Ohne das waeren View (Punktlicht-Vektor,
+           Distanzdaempfung) und Quaternion (Normale) affin bzw. um w
+           skaliert interpoliert. */
+        for (k = 0; k < 4; k++) in[i].quat[k] *= invw;
         for (k = 0; k < 4; k++) in[i].color[k] *= invw;
         for (m = 0; m < 3; m++)
             for (k = 0; k < 2; k++) in[i].uv[m][k] *= invw;
+        in[i].tc0_w *= invw;
+        for (k = 0; k < 3; k++) in[i].view[k] *= invw;
         {
             float sx = (in[i].pos[0] * invw + 1.0f) * half_x + (float)corner_x;
             float sy = (in[i].pos[1] * invw + 1.0f) * half_y + (float)corner_y;
