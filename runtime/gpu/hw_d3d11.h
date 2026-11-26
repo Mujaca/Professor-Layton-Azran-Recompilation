@@ -17,8 +17,9 @@
  *   hw_flush_to_guest()   Farb-/Tiefenpuffer ins Gast-VRAM zurueckschreiben
  *                         (PICA-Format, 8x8-Morton, von unten nach oben)
  *
- * Der Software-Rasterizer bleibt Referenz und Standard. Eingeschaltet wird
- * das Modul ausschliesslich per Kommandozeile `--renderer hw` (runtime/main.c).
+ * Der Software-Rasterizer bleibt Referenz. Seit M17 ist dieses Modul der
+ * Standard-Renderer des Ports (runtime/main.c, `--renderer soft` schaltet
+ * es ab); ohne D3D11 faellt der Port auf den Software-Pfad zurueck.
  */
 
 typedef struct {

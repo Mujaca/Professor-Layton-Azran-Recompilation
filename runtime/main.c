@@ -205,7 +205,7 @@ int main(int argc, char **argv) {
     int shot_from = 0;
     int shot_guest = 0;
     int gast_shot_next = 0;
-    int renderer_hw = 0;
+    int renderer_hw = 1;      /* M17: Hardware-Renderer ist Standard */
     int scale = 0;
     int det = 0;
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -235,7 +235,8 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--renderer") == 0 && i + 1 < argc) {
             const char *r = argv[++i];
             if (strcmp(r, "hw") == 0) renderer_hw = 1;
-            else if (strcmp(r, "soft") != 0)
+            else if (strcmp(r, "soft") == 0) renderer_hw = 0;
+            else
                 printf("[port] unbekannter Renderer '%s' (erlaubt: soft, hw)\n", r);
         }
         else romfs = argv[i];

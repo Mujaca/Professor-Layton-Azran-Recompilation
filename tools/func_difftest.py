@@ -408,7 +408,7 @@ def cmd_dump(a):
     log = a.out + ".log"
     with open(log, "wb") as f:
         try:
-            subprocess.run([a.exe, os.path.join(ROOT, "out", "romfs")], cwd=ROOT,
+            subprocess.run([a.exe, os.path.join(ROOT, "out", "romfs"), "--renderer", "soft"], cwd=ROOT,
                            env=env, stdout=f, stderr=subprocess.STDOUT,
                            timeout=a.timeout)
         except subprocess.TimeoutExpired:

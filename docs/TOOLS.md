@@ -440,9 +440,13 @@ python tests/hw_test.py          # D3D11-Hardware, Fallback WARP
 python tests/hw_test.py --warp   # erzwingt WARP
 ```
 
-Im Port schaltet ausschliesslich `port.exe ... --renderer hw` den
-Hardware-Pfad ein; ohne Schalter bleibt der Software-Rasterizer Standard
-und bitgleich. Der Hardware-Pfad uebernimmt nur Rasterisierung und
+Seit M17 ist der Hardware-Pfad im Port Standard; `port.exe ...
+--renderer soft` waehlt den Software-Rasterizer (Referenz, bitgleich wie
+bisher). Werkzeuge, die vom Renderer abhaengen, waehlen ihn ausdruecklich:
+`tools/frontier.py`, `tools/cosim.py`, `tools/func_difftest.py` starten
+mit `--renderer soft` (Ablaufvergleiche wie bisher), `tools/scene.py` mit
+`--renderer hw` (Option `--renderer soft`), die C-Selbsttests nutzen den
+Software-Pfad, `tests/hw_test.py` beide. Der Hardware-Pfad uebernimmt nur Rasterisierung und
 Fragment-Pipeline (Vertex-/Geometry-Shader bleiben CPU; der VS rechnet je
 Draw jeden Index nur einmal und verteilt grosse Draws auf den Raster-Pool); nicht unterstuetzte
 Zustaende (W-Buffer, prozedurale Textur, Cube-/Shadow-/Projection-Texturen)

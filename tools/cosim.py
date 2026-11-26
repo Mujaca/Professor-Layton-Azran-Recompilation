@@ -152,7 +152,7 @@ def cmd_snapshot(a):
     log = a.out + ".log"
     with open(log, "wb") as f:
         try:
-            subprocess.run([a.exe, os.path.join(fd.ROOT, "out", "romfs")],
+            subprocess.run([a.exe, os.path.join(fd.ROOT, "out", "romfs"), "--renderer", "soft"],
                            cwd=fd.ROOT, env=env, stdout=f,
                            stderr=subprocess.STDOUT, timeout=a.timeout)
         except subprocess.TimeoutExpired:

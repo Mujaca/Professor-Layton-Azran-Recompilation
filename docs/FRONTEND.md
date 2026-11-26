@@ -130,10 +130,12 @@ Tastatur-Circle-Pad nur, wenn er die Deadzone verlaesst.
 ```
 out/port.exe [romfs] [--frames N] [--frames-guest N] [--shot datei.bmp] [--shot-every N]
              [--shot-from M] [--shot-guest] [--press taste@[g]frame[+h][:dauer[:x:y]],...]
-             [--savedata ordner] [--renderer soft|hw] [--deterministic]
+             [--savedata ordner] [--renderer hw|soft] [--deterministic]
              [--scale N] [--shot-scaled] [--split-screens|--single-window]
 ```
 
+* `--renderer`: Standard `hw` (D3D11, M17); `soft` = Software-Rasterizer
+  (Referenz, Ausgabe per GDI). Ohne D3D11 faellt `hw` auf `soft` zurueck.
 * `--shot-scaled` (nur HW-Renderer): zu jedem `--shot`-Bild zusaetzlich
   `hd_<name>.bmp` mit der Anzeige in interner Aufloesung (400N x 480N), so
   wie sie im Fenster erscheint. Das native Bild bleibt unveraendert die
@@ -229,6 +231,11 @@ Aufloesung anzeigen, ohne dass sich irgendetwas Gastsichtbares aendert.
   MemoryFill, Transfer oder Software-Draw hat es veraendert), wird der neue
   Gastinhalt vergroessert (Farbe, Tiefe, Stencil), sonst skaliert
   weitergerendert.
+  Den zweiten Durchgang bekommen nur Ziele, die schon einmal Quelle eines
+  DisplayTransfers (also Bildschirminhalt) waren; Zwischenziele wie die
+  3D-Figuren im Dialog (Render-to-Texture, ohnehin nativ gesampelt)
+  bleiben nativ. Gemessen im 3D-Dialog bei N = 2: 19,2-19,9 -> 21,6-23,6
+  Gast-fps.
 * **DisplayTransfer auf der GPU:** Nach dem unveraenderten CPU-Transfer
   rechnet `hw_display_transfer` denselben Transfer (Flip, 2x1/2x2-Mittelung,
   Formatquantisierung wie `p_display_transfer_run`) aus der Oberflaeche der

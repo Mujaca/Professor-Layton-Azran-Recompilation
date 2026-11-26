@@ -17,8 +17,10 @@ int gpu_get_fb_height(void);
 int gpu_run_pica_list(ArmCpu *c, uint32_t addr, uint32_t size);
 void gpu_pica_reset(void);
 
-/* Renderer-Auswahl (nur per Kommandozeile --renderer hw): 1 = Rasterisierung
- * und Fragment-Pipeline auf D3D11, 0 = Software-Rasterizer (Standard). */
+/* Renderer-Auswahl (Kommandozeile --renderer hw|soft, Standard seit M17 hw):
+ * 1 = Rasterisierung und Fragment-Pipeline auf D3D11, 0 = Software-
+ * Rasterizer (Referenz; ohne gpu_pica_set_render_hw(1) aktiv, z. B. in den
+ * Selbsttests). */
 int gpu_pica_set_render_hw(int on);
 int gpu_pica_render_hw(void);
 

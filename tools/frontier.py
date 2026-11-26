@@ -41,7 +41,7 @@ def run_port(exe: Path, timeout: int, log: Path) -> int:
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("wb") as f:
         try:
-            p = subprocess.run([str(exe), str(ROOT / "out" / "romfs")], cwd=str(ROOT),
+            p = subprocess.run([str(exe), str(ROOT / "out" / "romfs"), "--renderer", "soft"], cwd=str(ROOT),
                                env=env, stdout=f, stderr=subprocess.STDOUT, timeout=timeout)
             return p.returncode
         except subprocess.TimeoutExpired:
