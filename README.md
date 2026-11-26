@@ -12,6 +12,21 @@ as a reference for reading and comparing behaviour; none of its code is linked.
 dumped copy of the game; the build turns *your* dump into the executable on
 your machine.
 
+## Disclaimer
+This project was made almost entirely with AI (mainly DeepSeek V4.1-Flash and
+Claude Opus 5.5). It is a personal experiment to explore what AI is capable of.
+If you dislike the use of AI, please don't use this project.
+
+Yes, I am a software engineer, and no, I have almost no experience in this
+field. Part of me simply wanted to try it. I do think AI is a powerful and
+interesting tool, and I find the technology fascinating. At the same time, what
+it is capable of scares me: many questions remain unanswered, and there are
+things that worry me. But exploring those questions wasn't the goal of this
+project.
+
+I am well aware of both the benefits and the downsides of AI. If you just want
+to harass me for using it, I will block you.
+
 ## Status
 
 The game boots, plays its intro films, shows the title screen and menus, lets
