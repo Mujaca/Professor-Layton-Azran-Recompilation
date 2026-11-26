@@ -159,6 +159,8 @@ int main(int argc, char **argv) {
     int gast_shot_next = 0;
     int renderer_hw = 0;
     int det = 0;
+    int mods_cli = -1;            /* -1 = port.ini [mods] enabled entscheidet */
+    const char *mods_dir = NULL;
     setvbuf(stdout, NULL, _IONBF, 0);
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) shot = argv[++i];
@@ -171,6 +173,9 @@ int main(int argc, char **argv) {
             g_press_n = press_spec_parse(argv[++i], g_press, g_press_n, PRESS_MAX);
         else if (strcmp(argv[i], "--savedata") == 0 && i + 1 < argc) savedata = argv[++i];
         else if (strcmp(argv[i], "--deterministic") == 0) det = 1;
+        else if (strcmp(argv[i], "--mods") == 0) mods_cli = 1;
+        else if (strcmp(argv[i], "--no-mods") == 0) mods_cli = 0;
+        else if (strcmp(argv[i], "--mods-dir") == 0 && i + 1 < argc) mods_dir = argv[++i];
         else if (strcmp(argv[i], "--split-screens") == 0) win_set_split(1);
         else if (strcmp(argv[i], "--single-window") == 0) win_set_split(0);
         else if (strcmp(argv[i], "--renderer") == 0 && i + 1 < argc) {
@@ -203,6 +208,19 @@ int main(int argc, char **argv) {
         printf("[port] Spielstaende: %s\n", savedata);
     }
     hle_set_deterministic(det);
+    {
+        /* Mods (docs/MODDING.md): standardmaessig aus; port.ini [mods]
+         * enabled/dir, --mods/--no-mods/--mods-dir ueberstimmen. */
+        static char ini_dir[512];
+        char v[32];
+        int on = 0;
+        if (win_config_get("mods", "enabled", v, sizeof(v))) on = atoi(v) != 0;
+        if (mods_cli >= 0) on = mods_cli;
+        if (mods_dir == NULL && win_config_get("mods", "dir", ini_dir, sizeof(ini_dir)) && ini_dir[0])
+            mods_dir = ini_dir;
+        hle_set_mods(on, mods_dir != NULL ? mods_dir : "mods");
+        if (on) printf("[port] Mods an: %s\n", mods_dir != NULL ? mods_dir : "mods");
+    }
     hle_init(&g_cpu, romfs);
     arm_set_svc_handler(hle_svc);
     if (renderer_hw) gpu_pica_set_render_hw(1);

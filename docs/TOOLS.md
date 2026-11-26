@@ -14,6 +14,7 @@ Alle Python-Tools liegen in `tools/`. Wegwerfskripte gehören nach `scratch/`
 | `python tools/frontier.py` | **Fortschrittsmetrik**: natürlicher Boot gegen Azahar-Referenz |
 | `python tools/check.py` | Gate vor jedem Commit (Tests + Build + Frontier) |
 | `python tools/scene.py <szene>` | Standard-Szene aus Fixture-Spielstand anfahren, Bild/Log/WAV/Profil nach `scratch/scene/<szene>/` (siehe unten) |
+| `python tools/modkit.py <befehl>` | RomFS-Dateien und `.fa`-Eintraege aus dem eigenen Dump auflisten/entpacken, Test-Mod erzeugen (siehe unten) |
 | `python tools/rendercmp.py <A> <B>` | Bildvergleich Software- gegen Hardware-Renderer auf denselben Gast-Frames (M9, siehe Szenen) |
 
 ## Szenen (`tools/scene.py`)
@@ -92,6 +93,36 @@ python tools/scene.py froenborg --renderer soft --tag soft --every 50      # -> 
   g6857 gesehen (damals wirkten Fenstereingaben noch), in fuenf
   Wiederholungen mit denselben Eingaben nicht (bis g7200 bildgleich); tritt
   er wieder auf, mit `--repro` pruefen.
+
+## Modkit (`tools/modkit.py`, docs/MODDING.md)
+
+Liest das eigene RomFS-Abbild `out/romfs_image.bin` (`--image` fuer ein
+anderes); Ausgaben nach `scratch/modkit/` bzw. in den angegebenen Ordner,
+nie ins Repo.
+
+```powershell
+python tools/modkit.py romfs-list [--find arc]                    # Level-3-Dateien
+python tools/modkit.py romfs-extract lt6/arc/lt6_a.fa -o scratch/x.fa
+python tools/modkit.py fa-list lt6/arc/lt6_uk.fa --find txt/uk/01   # ARC0-Eintraege
+python tools/modkit.py fa-extract lt6/arc/lt6_uk.fa txt/uk/01/01_010020.xs --xscr
+python tools/modkit.py make-testmod                 # -> mods/testmod-dialog/
+python tools/modkit.py make-testmod --control --mods scratch/mods/ctl  # Kontrolle
+```
+
+* Level-5-Kompression (Methoden 0..4) ueber `fa_index.decompress`; Kodierer
+  (`compress`) fuer alle Methoden, Huffman nur fuer kleine Alphabete
+  (Selbsttests). `build_romfs`/`build_arc0` bauen synthetische Abbilder fuer
+  die Selbsttests (`tools/selftest_tools.py` "modkit",
+  `tests/romfs_overlay_test.py`).
+* `--xscr` entpackt zusaetzlich die drei Abschnitte eines XSCR-Blocks
+  (`.xs`); Abschnitt 2 enthaelt die Texte.
+* `make-testmod`: Rezept fuer den Test-Mod (erste Dialogzeile nach dem
+  Laden des Test-Spielstands, Szene `froenborg`). Ziel ist nur ueber
+  Archiv/Eintrag/Position benannt (`TESTMOD_*` in modkit.py); der Text kommt
+  aus dem eigenen Dump. Ergebnis liegt in `mods/` (ignoriert).
+* Nachweis mit Szenen: `python tools/scene.py froenborg --tag tm --every 50
+  --every-from 3000 --extra 300 --mods scratch/mods/tm` (bzw. `ctl`) und die
+  Bildfolgen vergleichen (docs/MODDING.md, "Stand").
 
 ## Recompiler (`tools/recomp`)
 

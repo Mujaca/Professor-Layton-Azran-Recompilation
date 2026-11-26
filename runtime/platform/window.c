@@ -86,7 +86,13 @@ static void write_default_config(const char *path) {
           "[display]\n"
           "# single = ein Fenster mit beiden Screens, split = je Screen ein\n"
           "# Fenster (auch per Startoption --split-screens).\n"
-          "layout = single\n",
+          "layout = single\n"
+          "\n"
+          "[mods]\n"
+          "# Mods aus mods/<name>/ laden (docs/MODDING.md), 1 = an.\n"
+          "# --mods / --no-mods beim Start ueberstimmen diesen Wert.\n"
+          "enabled = 0\n"
+          "# dir = mods\n",
           f);
     fclose(f);
 }
@@ -208,6 +214,39 @@ static void load_config(void) {
         }
     }
     fclose(f);
+}
+
+int win_config_get(const char *section, const char *key, char *out, size_t n) {
+    char path[MAX_PATH + 32];
+    char line[512];
+    char cur[32] = "";
+    int found = 0;
+    FILE *f;
+    config_path(path, sizeof(path));
+    f = fopen(path, "rb");
+    if (f == NULL) return 0;
+    while (fgets(line, sizeof(line), f) != NULL) {
+        char *s = trim(line);
+        char *eq;
+        if (*s == '\0' || *s == '#' || *s == ';') continue;
+        if (*s == '[') {
+            char *close = strchr(s, ']');
+            if (close != NULL) {
+                *close = '\0';
+                snprintf(cur, sizeof(cur), "%s", trim(s + 1));
+            }
+            continue;
+        }
+        eq = strchr(s, '=');
+        if (eq == NULL) continue;
+        *eq = '\0';
+        if (ieq(cur, section) && ieq(trim(s), key)) {
+            snprintf(out, n, "%s", trim(eq + 1));
+            found = 1;
+        }
+    }
+    fclose(f);
+    return found;
 }
 
 /* ---- XInput (optional, per LoadLibrary; kein harter Link) ---- */

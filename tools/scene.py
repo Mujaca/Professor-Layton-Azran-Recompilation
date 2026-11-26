@@ -319,6 +319,8 @@ def run_scene(name, a):
            "--shot", str(shot)]
     if not a.realtime:
         cmd.append("--deterministic")
+    # Szenen laufen ohne Mods, ausser --mods DIR (docs/MODDING.md).
+    cmd += ["--mods", "--mods-dir", a.mods] if a.mods else ["--no-mods"]
     if presses:
         cmd += ["--press", ",".join(presses)]
     if a.every:
@@ -424,6 +426,8 @@ def main():
     ap.add_argument("--repro", action="store_true",
                     help="Szene zweimal fahren und die Bildfolgen (--every, Standard 50) "
                          "vergleichen; Exit 1 bei Abweichung")
+    ap.add_argument("--mods", default="",
+                    help="Mods aus diesem Ordner laden (Standard: --no-mods)")
     ap.add_argument("--realtime", action="store_true",
                     help="ohne --deterministic (Wanduhr wie im Spiel; Laeufe nicht reproduzierbar, "
                          "Szenen-Zeiten gelten dann nicht)")

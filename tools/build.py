@@ -29,6 +29,7 @@ SOURCES = [
     "cpu/arm_trace.c",
     "kernel/hle.c",
     "kernel/fs_archive.c",
+    "kernel/romfs_overlay.c",
     "gpu/gpu.c",
     "gpu/hw_d3d11.c",
     "gpu/imgc.c",

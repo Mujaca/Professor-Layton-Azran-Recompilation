@@ -2,7 +2,12 @@
 #ifndef WINDOW_H
 #define WINDOW_H
 
+#include <stddef.h>
 #include <stdint.h>
+
+/* Wert aus port.ini (neben port.exe) lesen, ohne die Datei anzulegen.
+ * Liefert 1, wenn [section] key = ... vorhanden ist. */
+int win_config_get(const char *section, const char *key, char *out, size_t n);
 
 int win_open(int width, int height, const char *title);
 void win_set_no_activate(int on);                 /* vor win_open: ohne Fokus zeigen */

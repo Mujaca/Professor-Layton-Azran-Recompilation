@@ -104,12 +104,35 @@ Belegung:
 Tasten werden mit der Tastatur ODER-verknuepft; der Stick ersetzt das
 Tastatur-Circle-Pad nur, wenn er die Deadzone verlaesst.
 
+## Mods (`[mods]`, `--mods`)
+
+Mods sind standardmaessig **aus** (docs/MODDING.md). `port.ini`:
+
+```
+[mods]
+# 1 = Mods aus mods/<name>/ laden
+enabled = 0
+# Wurzel relativ zum Arbeitsverzeichnis (Repo-Wurzel)
+# dir = mods
+```
+
+Kommentare stehen auf eigenen Zeilen (keine Kommentare hinter Werten).
+
+`--mods` / `--no-mods` ueberstimmen `enabled`, `--mods-dir ordner` den
+Ordner. Die Mods-Wurzel liegt wie `out/romfs_image.bin` relativ zum
+Arbeitsverzeichnis (Standard `mods/` in der Repo-Wurzel, nicht neben
+`out/port.exe`), weil port.exe dort startet. `frontier.py` und `scene.py`
+uebergeben immer `--no-mods` (scene.py: `--mods ordner` fuer Mod-Laeufe).
+Beim Start meldet das Log `[mods] ...` (geladene Mods, Prioritaeten,
+ersetzte Dateien und Archiv-Eintraege, Konflikte).
+
 ## Diagnose-CLI fuer Testlaeufe
 
 ```
 out/port.exe [romfs] [--frames N] [--frames-guest N] [--shot datei.bmp] [--shot-every N]
              [--shot-from M] [--shot-guest] [--press taste@[g]frame[+h][:dauer[:x:y]],...]
              [--savedata ordner] [--renderer soft|hw] [--deterministic]
+             [--mods | --no-mods] [--mods-dir ordner]
 ```
 
 * `--deterministic` (M18): reproduzierbare Laeufe. Alle gastsichtbaren Uhren

@@ -277,6 +277,50 @@ def test_imgc_decoder():
     need("ERGEBNIS: OK" in p.stdout, "IMGC-Checks fehlgeschlagen")
 
 
+def test_modkit():
+    """modkit mit synthetischen Daten: Level-5-Kodierer/Dekodierer, Level-3-
+    Builder/Leser (Hash-Suche), ARC0 und XSCR-Textersetzung (kein Spielinhalt)."""
+    import random
+    import struct
+    import modkit
+    r = random.Random(3)
+    samples = [b"", b"a", b"abcabcabcabc" * 50, bytes(r.randrange(8) for _ in range(999)),
+               bytes(range(256)) * 4]
+    for m in range(5):
+        for data in samples:
+            if m in (2, 3) and len(set(data)) > 16:
+                continue
+            need(modkit.decompress(modkit.compress(data, m)) == data,
+                 "Level-5 Methode %d Rundweg (%d Bytes)" % (m, len(data)))
+    files = {"a/b/c.bin": b"123", "a/d.bin": b"x" * 40, "e.bin": b"", "a/b/f.bin": b"q"}
+    img = OUT / "modkit_romfs.bin"
+    img.parent.mkdir(parents=True, exist_ok=True)
+    img.write_bytes(modkit.build_romfs(files))
+    rf = modkit.RomFS(img, 0)
+    for path, data in files.items():
+        need(rf.lookup(path) == rf.files[path][:2], "Hash-Suche " + path)
+        need(rf.read_file(path) == data, "Inhalt " + path)
+    arc = modkit.Arc0(modkit.build_arc0({"x/1.xs": b"eins", "x/2.xs": b"zwei", "y/3.xs": b"drei"}))
+    need(arc.methods == [2, 0, 3, 1] and arc.read("x/2.xs") == b"zwei", "ARC0 lesen")
+    # XSCR: Kopf 0x14, Abschnitte 0/1/2; Test-Mod ersetzt den ersten Textlauf
+    sec = [modkit.compress(b"\0" * 8, 1), modkit.compress(b"\1" * 12, 0)]
+    text = b"\x01\x02\0<T><M1>Hallo Welt.<W> Rest\r\nZeile\0"
+    body = sec[0] + b"\0" * ((-len(sec[0])) % 4)
+    s1 = 0x14 + len(body)
+    body += sec[1]
+    s2 = 0x14 + len(body)
+    blob = b"XSCR" + struct.pack("<HHIII", 1, 5, 0, s1 // 4, s2 // 4) + body + modkit.compress(text, 1)
+    secs = modkit.xscr_sections(blob)
+    need(secs[2][3] == text and secs[2][2] == 1, "XSCR-Abschnitte")
+    s, e = modkit.first_text_run(text)
+    need(text[s:e] == b"Hallo Welt.", "erster Textlauf")
+    raw = bytearray(text)
+    raw[s:e] = b"TEST".ljust(e - s)
+    new = modkit.xscr_replace_last(blob, bytes(raw), 0)
+    need(modkit.xscr_sections(new)[2][3] == bytes(raw) and new[:s2] == blob[:s2],
+         "XSCR-Textabschnitt ersetzt, Kopf/Abschnitte 0-1 unveraendert")
+
+
 def test_call_mode():
     """BLX wechselt den Instruktionssatz, BL behaelt ihn (Scan-Seeds)."""
     import capstone.arm as A
@@ -528,6 +572,7 @@ TESTS = [
     ("rendercmp SW/HW-Bildvergleich", test_rendercmp),
     ("PICA-Registermap", test_pica_regs),
     ("IMGC ETC1/linear", test_imgc_decoder),
+    ("modkit Level-5/RomFS/ARC0/XSCR", test_modkit),
     ("BLX-Zielmodus im Scan", test_call_mode),
     ("ldr-pc-Veneer-Ziel im Scan", test_ldrpc_veneer),
     ("Veneer-Seed Thumb", test_veneer_thumb_seed),

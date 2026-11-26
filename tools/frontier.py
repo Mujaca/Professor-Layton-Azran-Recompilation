@@ -41,7 +41,8 @@ def run_port(exe: Path, timeout: int, log: Path) -> int:
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("wb") as f:
         try:
-            p = subprocess.run([str(exe), str(ROOT / "out" / "romfs")], cwd=str(ROOT),
+            # Frontier misst immer das unveraenderte Spiel: Mods aus (docs/MODDING.md).
+            p = subprocess.run([str(exe), str(ROOT / "out" / "romfs"), "--no-mods"], cwd=str(ROOT),
                                env=env, stdout=f, stderr=subprocess.STDOUT, timeout=timeout)
             return p.returncode
         except subprocess.TimeoutExpired:

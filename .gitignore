@@ -28,3 +28,7 @@ tools/profiles/
 # Fremdwerkzeug ohne Lizenzangabe (nur lokal als Formatreferenz)
 tools/xfsatool/
 .zigcache/
+
+# Mods des Nutzers bzw. aus dem eigenen Dump erzeugte Test-Mods
+# (tools/modkit.py make-testmod) enthalten Spielinhalte.
+mods/
