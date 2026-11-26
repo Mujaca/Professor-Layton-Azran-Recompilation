@@ -81,6 +81,11 @@ start): A = `X`, B = `Z`, X = `S`, Y = `A`, L = `Q`, R = `W`, Start = `Enter`,
 Select = `Backspace`, D-Pad = arrow keys, Circle Pad = `I`/`J`/`K`/`L`.
 An XInput gamepad works as well. Save games are stored in `out/savedata`.
 
+`port.exe` starts without a console window. Its output is always written to
+`out/logs/port-<date>-<time>-<pid>.log` (the last 10 logs are kept) – attach
+the newest log when reporting a bug. `--console` (or `[debug] console = 1` in
+`out/port.ini`) shows the output live; `--fps` shows the game's frame rate.
+
 ## Mods
 
 The port can load mods: replacement files (text, graphics, music, videos)

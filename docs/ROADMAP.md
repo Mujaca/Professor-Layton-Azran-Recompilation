@@ -102,7 +102,8 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
    ohne Konsole (`--console` bzw. `[debug] console = 1` zeigt sie);
    Konsolenausgabe immer zusaetzlich in `out/logs/port-<Zeit>.log`, die
    letzten 10 bleiben. Tools (check, frontier, scene.py) muessen weiter die
-   Ausgabe lesen koennen.
+   Ausgabe lesen koennen. **Umgesetzt 2026-11-26** (docs/FRONTEND.md
+   "Konsole und Logdatei"); dazu `--fps` (nur Gast-fps).
 8. **Performance** (vom Nutzer aufgenommen 2026-11-26 nach dem M17-Sichttest):
    3D-Dialog Froenborg faellt bei interner Aufloesung x2/x3 auf ~21-24
    Gast-fps (x1: 28-30, Spiel begrenzt auf 30); sichtbar mit `--fps`.

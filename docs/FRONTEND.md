@@ -69,6 +69,29 @@ und die Fenstergeometrie (Sollwerte mit `Fraction` nachgerechnet).
   `--debug` steht dieselbe Zeile ueber den Diagnosezeilen; die Titelzeile
   zeigt dann auch `Gast-fps=`.
 
+## Konsole und Logdatei (Arbeitspaket 7)
+
+* `port.exe` ist ein Windows-Programm **ohne Konsolenfenster**
+  (`-Wl,--subsystem,windows` in `tools/build.py`).
+* Alles, was die Runtime auf stdout/stderr schreibt, steht **immer** in
+  `logs/port-JJJJMMTT-HHMMSS-<pid>.log` neben `port.exe` (also
+  `out/logs/`). Die letzten 10 Logs bleiben, aeltere loescht der Start.
+  Die erste Zeile nennt den Pfad (`[port] Log: ...`).
+* `--console` oder `[debug] console = 1` zeigt die Ausgabe zusaetzlich in
+  einer Konsole: beim Start aus einem Terminal in diesem, sonst in einem
+  eigenen Fenster (dessen Schliessen beendet auch den Port).
+  `--no-console` ueberstimmt die ini.
+* Leitet der Aufrufer stdout/stderr um (Pipes von `check.py`,
+  `frontier.py`, `scene.py`), bekommt er die Ausgabe unveraendert.
+* Startfehler (fehlende Dateien, kein Fenster) erscheinen zusaetzlich als
+  Meldungsfenster mit dem Log-Pfad (nicht mit `--deterministic`).
+* Technik: `runtime/platform/logtee.c` - stdout/stderr gehen in je eine
+  Pipe, ein Lesethread verteilt auf Log, Aufrufer und Konsole. Beim Ende
+  und bei einem Absturz werden die Schreib-Enden geschlossen und die
+  Lesethreads kurz abgewartet (kein Pollen: synchrone Pipe-Handles
+  serialisieren I/O, ein `PeekNamedPipe` wartete auf das blockierende
+  `ReadFile`). Reine Host-Ausgabe, kein Gastzustand.
+
 ## Tastenbelegung: `port.ini` neben `port.exe`
 
 Beim ersten Start legt der Port `port.ini` neben `out/port.exe` mit der
@@ -105,6 +128,7 @@ scale = 1
 [debug]
 overlay = 0
 fps = 0
+console = 0
 ```
 
 Tastennamen: ein Buchstabe oder eine Ziffer (`X`, `7`), oder `Enter`,

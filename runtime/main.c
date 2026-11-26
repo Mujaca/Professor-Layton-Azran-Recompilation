@@ -33,6 +33,7 @@
 #include "hle.h"
 #include "hw_d3d11.h"
 #include "hw_present.h"
+#include "logtee.h"
 #include "lua_host.h"
 #include "press_spec.h"
 #include "window.h"
@@ -203,6 +204,21 @@ static void mods_mouse(MluaMouse *m) {
     m->over_window = win_mouse_touch(&m->x, &m->y, &m->inside_touch, &m->down);
 }
 
+/* Startfehler: port.exe hat ohne --console kein Konsolenfenster, deshalb
+ * zusaetzlich als Meldungsfenster (nicht in deterministischen Testlaeufen,
+ * dort liest das Tool die Ausgabe). */
+static int g_quiet_errors = 0;
+static int fatal(int rc, const char *msg) {
+    printf("%s\n", msg);
+    if (!g_quiet_errors) {
+        char m[1024];
+        snprintf(m, sizeof(m), "%s\n\nLog: %s", msg,
+                 log_path()[0] ? log_path() : "(keins)");
+        MessageBoxA(NULL, m, "Professor Layton - Port", MB_OK | MB_ICONERROR);
+    }
+    return rc;
+}
+
 static int mods_key_det(const char *name) {
     int v = win_key_state(name);
     return v < 0 ? -1 : 0;
@@ -223,8 +239,25 @@ int main(int argc, char **argv) {
     int det = 0;
     int mods_cli = -1;            /* -1 = port.ini [mods] enabled entscheidet */
     const char *mods_dir = NULL;
+    int console_cli = -1;         /* -1 = port.ini [debug] console */
+    /* Arbeitspaket 7: Ausgabe immer in logs/port-*.log (logtee.h). */
+    log_init();
     setvbuf(stdout, NULL, _IONBF, 0);
     for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--console") == 0) console_cli = 1;
+        else if (strcmp(argv[i], "--no-console") == 0) console_cli = 0;
+        else if (strcmp(argv[i], "--deterministic") == 0) g_quiet_errors = 1;
+    }
+    {
+        char v[16];
+        int on = 0;
+        if (win_config_get("debug", "console", v, sizeof(v))) on = atoi(v) != 0;
+        if (console_cli >= 0) on = console_cli;
+        if (on) log_open_console();
+    }
+    if (log_path()[0]) printf("[port] Log: %s\n", log_path());
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--console") == 0 || strcmp(argv[i], "--no-console") == 0) continue;
         if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) shot = argv[++i];
         else if (strcmp(argv[i], "--shot-every") == 0 && i + 1 < argc) shot_every = atoi(argv[++i]);
         else if (strcmp(argv[i], "--shot-from") == 0 && i + 1 < argc) shot_from = atoi(argv[++i]);
@@ -264,11 +297,11 @@ int main(int argc, char **argv) {
     if (shot != NULL && frames_limit < 0 && guest_limit < 0) frames_limit = 600;
 
     g_mem = (unsigned char *)calloc(1, MEM_SIZE);
-    if (!g_mem) { printf("kein Speicher\n"); return 2; }
+    if (!g_mem) return fatal(2, "kein Speicher");
     {
         FILE *f = fopen("out/exefs/code_decomp.bin", "rb");
         size_t n;
-        if (!f) { printf("out/exefs/code_decomp.bin fehlt (python tools/build.py)\n"); return 2; }
+        if (!f) return fatal(2, "out/exefs/code_decomp.bin fehlt (python tools/build.py)");
         n = fread(g_mem + CODE_BASE, 1, CODE_MAX, f);
         fclose(f);
         printf("code: %zu Bytes geladen\n", n);
@@ -302,8 +335,7 @@ int main(int argc, char **argv) {
 
     if (det) win_set_no_activate(1);
     if (!win_open(FB_W, FB_H, "Professor Layton and the Azran Legacy")) {
-        printf("Fenster konnte nicht geoeffnet werden\n");
-        return 3;
+        return fatal(3, "Fenster konnte nicht geoeffnet werden");
     }
     /* M17: Ausgabe des HW-Renderers ueber eine D3D11-Swapchain je Fenster,
        interne Aufloesung aus --scale bzw. port.ini [display] scale. Der
@@ -328,8 +360,7 @@ int main(int argc, char **argv) {
         mlua_set_host_ops(&ops);
     }
     if (!CreateThread(NULL, 0, game_thread, NULL, 0, NULL)) {
-        printf("Thread fehlgeschlagen\n");
-        return 3;
+        return fatal(3, "Thread fehlgeschlagen");
     }
 
     int frames = 0;

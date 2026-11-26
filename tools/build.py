@@ -39,6 +39,7 @@ SOURCES = [
     "audio/dsp_hle.c",
     "audio/host_output.c",
     "platform/window.c",
+    "platform/logtee.c",
     "workarounds.c",
 ]
 INCLUDES = ["", "cpu", "kernel", "gpu", "audio", "platform", "modding"]
@@ -161,7 +162,11 @@ def main():
 
     srcs = [os.path.join(RUNTIME, s) for s in SOURCES] + lua_sources()
     run([zig(), "cc"] + cflags() + lua_flags() + srcs + [gen_o, "-o", os.path.join(ROOT, "out", "port.exe"),
-                                           "-luser32", "-lgdi32", "-lwinmm"])
+                                           "-luser32", "-lgdi32", "-lwinmm",
+                                           # Arbeitspaket 7: Windows-Programm ohne
+                                           # Konsole (--console zeigt sie; Pipes
+                                           # der Tools funktionieren weiter).
+                                           "-Wl,--subsystem,windows"])
     print("gebaut: out/port.exe")
 
 
