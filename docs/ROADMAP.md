@@ -95,6 +95,16 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
    Konsolenausgabe immer zusaetzlich in `out/logs/port-<Zeit>.log`, die
    letzten 10 bleiben. Tools (check, frontier, scene.py) muessen weiter die
    Ausgabe lesen koennen.
+8. **Performance** (vom Nutzer aufgenommen 2026-11-26 nach dem M17-Sichttest):
+   3D-Dialog Froenborg faellt bei interner Aufloesung x2/x3 auf ~21-24
+   Gast-fps (x1: 28-30, Spiel begrenzt auf 30); sichtbar mit `--fps`.
+   Bekannt: GPU-Worker nur ~66 % ausgelastet (Ursache offen: CPU-Seite,
+   zweiter Zeichendurchgang, Synchronisation?); exaktes Shader-Blending
+   kostet ~1 Gast-fps (Snapshot-Kopien serialisieren die GPU, vier
+   allgemeine Alternativen gemessen und verworfen, docs/GAME_NOTES.md).
+   Vorgehen: erst profilieren (`[hwtime]`, Host-Profiler), dann je Ursache
+   ein Experiment; Bildvergleich (M9-Werte) darf sich nicht verschlechtern.
+   Zielwerte legt der Mensch fest.
 
 ## Frontier-Verlauf
 
