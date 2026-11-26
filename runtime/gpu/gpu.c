@@ -185,6 +185,14 @@ static uint32_t g_light_lut[LIGHT_LUT_COUNT][256];
  * Fragment. */
 static float g_light_lut_fval[LIGHT_LUT_COUNT][256];
 static float g_light_lut_fdiff[LIGHT_LUT_COUNT][256];
+/* Aenderungszaehler der Lighting-LUTs (Hardware-Pfad laedt nur dann neu),
+   gesamt und je LUT. */
+static uint32_t g_light_lut_gen = 1u;
+static uint32_t g_light_lut_rowgen[LIGHT_LUT_COUNT];
+
+/* Hardware-Pfad: HwDrawState wird nur nach Registeraenderungen neu gebaut
+   (p_write_reg, MMIO, Reset), nicht je Dreieck. */
+static int g_hw_st_valid;
 
 static void p_vs_reset(void);
 static void p_vs_reset_draw_state(void);
@@ -235,6 +243,12 @@ void gpu_pica_reset(void)
     memset(g_light_lut, 0, sizeof(g_light_lut));
     memset(g_light_lut_fval, 0, sizeof(g_light_lut_fval));
     memset(g_light_lut_fdiff, 0, sizeof(g_light_lut_fdiff));
+    g_light_lut_gen++;
+    {
+        int t;
+        for (t = 0; t < LIGHT_LUT_COUNT; t++) g_light_lut_rowgen[t]++;
+    }
+    g_hw_st_valid = 0;
     p_regs[0x020] = 0x12345678u;
     p_regs[0x030] = 0xFFFFFFF0u;
     p_regs[0x034] = 0x00000001u;
@@ -1466,6 +1480,8 @@ static void p_light_lut_write(uint32_t value)
         g_light_lut[type][idx] = value;
         g_light_lut_fval[type][idx] = (float)(value & 0xFFFu) / 4095.0f;
         g_light_lut_fdiff[type][idx] = diff;
+        g_light_lut_gen++;
+        g_light_lut_rowgen[type]++;
     }
     p_regs[0x1C5] = (cfg & ~0xFFu) | ((idx + 1u) & 0xFFu);
 }
@@ -3174,10 +3190,8 @@ static void p_hw_fallback(const char *why, unsigned bit) {
 static int p_hw_supported(void)
 {
     uint32_t u;
-    if ((p_regs[0x1C6] & 1u) == 0u) {             /* Fragment-Lighting */
-        p_hw_fallback("Fragment-Lighting aktiv", 1u);
-        return 0;
-    }
+    /* Fragment-Lighting laeuft im Pixelshader (hw_d3d11.c light_frag),
+       alle Konfigurationen wie p_compute_fragments. */
     if ((p_regs[0x6D] & 1u) == 0u) {              /* W-Buffer */
         p_hw_fallback("W-Buffer aktiv", 2u);
         return 0;
@@ -3294,6 +3308,69 @@ static void p_hw_state(HwDrawState *st, ArmCpu *c)
     st->tev_buf_in = p_regs[0xE0];
     st->tev_buf_color = p_regs[0xFD];
 
+    /* Fragment-Lighting: dieselben je Draw vorberechneten Werte wie der
+       Software-Pfad (p_light_draw_get). */
+    st->light.enabled = (p_regs[0x1C6] & 1u) == 0u;
+    if (st->light.enabled) {
+        const LightDraw *ld = p_light_draw_get();
+        HwLighting *hl = &st->light;
+        uint32_t li;
+        hl->config0 = ld->config0;
+        hl->config1 = ld->config1;
+        hl->config = ld->config;
+        hl->nlights = ld->nlights;
+        memcpy(hl->gal, ld->gal, sizeof(hl->gal));
+        hl->lut_val = &g_light_lut_fval[0][0];
+        hl->lut_diff = &g_light_lut_fdiff[0][0];
+        hl->lut_rowgen = g_light_lut_rowgen;
+        hl->lut_gen = g_light_lut_gen;
+        {
+            const LightSlot *s0 = &ld->s[0];
+            hl->inputs = (s0->spot_input & 7u) | ((s0->d0_input & 7u) << 4) |
+                         ((s0->d1_input & 7u) << 8) |
+                         ((s0->fresnel_input & 7u) << 12) |
+                         ((s0->refl_input[0] & 7u) << 16) |
+                         ((s0->refl_input[1] & 7u) << 20) |
+                         ((s0->refl_input[2] & 7u) << 24);
+            hl->abs_bits = (s0->spot_abs ? 1u : 0u) | (s0->d0_abs ? 2u : 0u) |
+                           (s0->d1_abs ? 4u : 0u) | (s0->fresnel_abs ? 8u : 0u) |
+                           (s0->refl_abs[0] ? 16u : 0u) |
+                           (s0->refl_abs[1] ? 32u : 0u) |
+                           (s0->refl_abs[2] ? 64u : 0u);
+            hl->scale[0] = s0->spot_scale;
+            hl->scale[1] = s0->d0_scale;
+            hl->scale[2] = s0->d1_scale;
+            hl->scale[3] = s0->fresnel_scale;
+            hl->scale[4] = s0->refl_scale[0];
+            hl->scale[5] = s0->refl_scale[1];
+            hl->scale[6] = s0->refl_scale[2];
+        }
+        for (li = 0; li < ld->nlights && li < 8u; li++) {
+            const LightSlot *ls = &ld->s[li];
+            HwLight *h = &hl->light[li];
+            memcpy(h->position, ls->position, sizeof(h->position));
+            memcpy(h->spot_dir, ls->spot_dir, sizeof(h->spot_dir));
+            memcpy(h->spec0, ls->spec0, sizeof(h->spec0));
+            memcpy(h->spec1, ls->spec1, sizeof(h->spec1));
+            memcpy(h->diffuse, ls->diffuse, sizeof(h->diffuse));
+            memcpy(h->ambient, ls->ambient, sizeof(h->ambient));
+            h->dist_scale = ls->dist_scale;
+            h->dist_bias = ls->dist_bias;
+            h->num = ls->num;
+            h->lcfg = ls->lcfg;
+            h->enables = (ls->dist_on ? HW_LIGHT_DIST : 0u) |
+                         (ls->spot_on ? HW_LIGHT_SPOT : 0u) |
+                         (ls->d0_on ? HW_LIGHT_D0 : 0u) |
+                         (ls->d1_on ? HW_LIGHT_D1 : 0u) |
+                         (ls->fresnel_on ? HW_LIGHT_FRESNEL : 0u) |
+                         (ls->shadow_p_on ? HW_LIGHT_SHADOW_P : 0u) |
+                         (ls->shadow_s_on ? HW_LIGHT_SHADOW_S : 0u) |
+                         (ls->refl_on[0] ? HW_LIGHT_RR : 0u) |
+                         (ls->refl_on[1] ? HW_LIGHT_RG : 0u) |
+                         (ls->refl_on[2] ? HW_LIGHT_RB : 0u);
+        }
+    }
+
     /* Texturzustand fuer den D3D11-Cache (Adresse schon Gast-linear). */
     st->guest_mem = c->mem;
     st->guest_size = (uint32_t)c->mem_size;
@@ -3374,20 +3451,41 @@ static void p_hw_state(HwDrawState *st, ArmCpu *c)
     }
 }
 
-/* Rueckgabe 1 = vom Hardware-Pfad uebernommen, 0 = Software faellt ein. */
+/* Rueckgabe 1 = vom Hardware-Pfad uebernommen, 0 = Software faellt ein.
+ * Zustand (p_hw_supported/p_hw_state) nur nach Registeraenderungen neu
+ * bestimmen; solange hw_continue_draw die Serie bestaetigt, haengt jedes
+ * weitere Dreieck nur an den laufenden Batch an. */
+static HwDrawState g_hw_st;
+static ArmCpu *g_hw_st_cpu;
+static int g_hw_st_ok, g_hw_st_begun;
+static unsigned g_hw_st_serial;
+
 static int p_hw_tri_clip(ArmCpu *c, const PicaVertex *in, int n)
 {
-    HwDrawState st;
+    HwDrawState *stp = &g_hw_st;
     HwVertex out[16 * 4];
     float half_x, half_y;
     int corner_x, corner_y, i, m = 0;
 
-    if (!p_hw_supported()) {
+    if (!g_hw_st_valid || g_hw_st_cpu != c) {
+        g_hw_st_ok = p_hw_supported();
+        if (g_hw_st_ok) p_hw_state(stp, c);
+        g_hw_st_cpu = c;
+        g_hw_st_valid = 1;
+        g_hw_st_begun = 0;
+    }
+    if (!g_hw_st_ok) {
         hw_sync_guest();
         return 0;
     }
-    p_hw_state(&st, c);
-    if (!hw_begin_draw(&st)) return 0;
+    if (!g_hw_st_begun || !hw_continue_draw(g_hw_st_serial)) {
+        if (!hw_begin_draw(stp)) {
+            g_hw_st_begun = 0;
+            return 0;
+        }
+        g_hw_st_serial = hw_draw_serial();
+        g_hw_st_begun = 1;
+    }
 
     half_x = p_f24_to_float(p_regs[0x41]);
     half_y = p_f24_to_float(p_regs[0x43]);
@@ -3405,13 +3503,19 @@ static int p_hw_tri_clip(ArmCpu *c, const PicaVertex *in, int n)
             y[k] = (int)roundf(sy * 16.0f);
         }
         area = p_signed_area(x[0], y[0], x[1], y[1], x[2], y[2]);
-        if (st.cull == 1u) keep = area < 0;
-        else if (st.cull == 2u) keep = area > 0;
+        if (stp->cull == 1u) keep = area < 0;
+        else if (stp->cull == 2u) keep = area > 0;
         if (!keep) continue;
         for (k = 0; k < 3; k++) {
             memcpy(out[m].pos, t[k]->pos, 4 * sizeof(float));
             memcpy(out[m].color, t[k]->color, 4 * sizeof(float));
             memcpy(out[m].uv, t[k]->uv, sizeof(out[m].uv));
+            /* Lighting-Attribute; D3D interpoliert sie wie p_shade_rows
+               perspektivkorrekt (Quaternionen sind schon in p_raster_tri
+               an Vertex 0 ausgerichtet). */
+            memcpy(out[m].quat, t[k]->quat, sizeof(out[m].quat));
+            memcpy(out[m].view, t[k]->view, sizeof(out[m].view));
+            out[m].tc0_w = t[k]->tc0_w;
             if (p_regs[0x80] & (1u << 13)) {   /* texture2_use_coord1 */
                 out[m].uv[2][0] = t[k]->uv[1][0];
                 out[m].uv[2][1] = t[k]->uv[1][1];
@@ -4598,6 +4702,7 @@ static void p_write_reg(ArmCpu *c, uint32_t id, uint32_t value, uint32_t mask,
         if (mask & (1u << b))
             old = (old & ~(0xFFu << (b * 8))) | (value & (0xFFu << (b * 8)));
     p_regs[id] = old;
+    g_hw_st_valid = 0;
     ctx->ops++;
     if (p_diag_mode()) g_diag_hist[id]++;
 
@@ -5246,6 +5351,7 @@ void gpu_gsp_write_reg_masked(ArmCpu *c, uint32_t addr, uint32_t value,
         uint32_t i = (addr - (GPU_MMIO_VADDR + 0x1000u)) / 4u;
         if (i >= PICA_NREGS) return;
         p_regs[i] = p_merge(p_regs[i], value, mask);
+        g_hw_st_valid = 0;
         if (i >= 0x140u && i <= 0x1D9u) p_light_draw_invalidate();
         /* GPU::WriteReg behandelt nur den Kommandopuffer-Trigger als
          * Aktion; Draws/Finalize bleiben Kommandolisten vorbehalten.

@@ -54,9 +54,9 @@ Rückfallebene erhalten.
 (RGBA8-Modulate, zwei Texturen mit Dot3_RGBA, ClampToBorder + Alpha-Test,
 I8-Textur) pixelweise gegen den Software-Pfad; alle Szenen sind identisch.
 
-**Offen im Hardware-Pfad:** Fragment-Lighting, Fog, Blending/LogicOps,
-W-Buffer, Stencil, prozedurale Textur, Cube-/Shadow-/Projection-Texturen und
-Mipmaps. Solange diese Zustände aktiv sind, zeichnet weiterhin der
+**Offen im Hardware-Pfad:** W-Buffer, prozedurale Textur,
+Cube-/Shadow-/Projection-Texturen und Mipmaps (Fragment-Lighting, Fog,
+Blending/LogicOps und Stencil laufen inzwischen auf der GPU). Solange diese Zustände aktiv sind, zeichnet weiterhin der
 Software-Rasterizer (`p_hw_supported` in `runtime/gpu/gpu.c`).
 
 

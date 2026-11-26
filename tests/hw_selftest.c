@@ -825,7 +825,8 @@ static uint32_t scene_half(ArmCpu *c, int right) {
 }
 
 /* Szene U: vier Draws in einer Liste, HW/SW/HW/SW. Der Software-Fallback
- * wird ueber Fragment-Lighting (0x1C6 Bit0 = 0) erzwungen. */
+ * wird ueber den W-Buffer (0x6D Bit0 = 0) erzwungen (Fragment-Lighting
+ * laeuft inzwischen auf der GPU). */
 static uint32_t scene_u(ArmCpu *c) {
     Vtx v[12];
     uint32_t *q;
@@ -849,14 +850,14 @@ static uint32_t scene_u(ArmCpu *c) {
     q = emit_viewport(q, 16, 16);
     q = emit_target(q, FB, 16, 16, 0u, 0u, 0, 0u);
     for (i = 0; i < 4; i++) {
-        q = emit(q, 0x1C6, (i & 1) ? 0u : 1u);   /* 0 = Lighting -> SW */
+        q = emit(q, 0x6D, (i & 1) ? 0u : 1u);    /* 0 = W-Buffer -> SW */
         q = emit_tri_color(q, 0xFFu - (uint32_t)i * 0x30u, 0.0f);
         /* Eigener 16-Byte-Slot je Dreieck (0x200 = addr>>3, Bit0 ignoriert). */
         q = emit(q, 0x200, (VTX + (uint32_t)i * 0x100u) >> 3);
         q = emit(q, 0x228, 3u);
         q = emit(q, 0x22E, 0u);
     }
-    q = emit(q, 0x1C6, 1u);                /* Zustand fuer Folgetests */
+    q = emit(q, 0x6D, 1u);                 /* Zustand fuer Folgetests */
     return (uint32_t)((unsigned char *)q - (c->mem + LIST));
 }
 
@@ -906,10 +907,10 @@ static uint32_t scene_v(ArmCpu *c) {
     q = emit(q, 0x25E, 0u);
     q = emit(q, 0x22E, 0u);
     for (pass = 0; pass < 2; pass++) {
-        /* 2/4: Software-Fallback (Fragment-Lighting) rendert in A. */
+        /* 2/4: Software-Fallback (W-Buffer) rendert in A. */
         q = emit_viewport(q, 8, 8);
         q = emit_target(q, RTTDST, 8, 8, 0u, 0u, 0, 0u);
-        q = emit(q, 0x1C6, 0u);
+        q = emit(q, 0x6D, 0u);
         q = emit(q, 0x40, 0u);
         q = emit_tev_stage(q, 0, 0x000E000Eu, 0u, 0u, col[pass], 0u);
         q = emit_attrs3_at(q, VTX + 0x200u, 6);
@@ -967,6 +968,308 @@ static const HwVertex g_hw_off[3] = {
     {{2.5f, 3.0f, 0.0f, 1.0f}, {1, 1, 1, 1}, {{0, 0}, {0, 0}, {0, 0}}},
 };
 
+/* --- Szenen mit Fragment-Lighting (0x140..0x1D9) --------------------------
+ * Ein 6x6-Gitter (72 Dreiecke, w 1..1.6 fuer perspektivische Interpolation)
+ * mit Halbkugel-Normalen als Quaternionen, VIEW und TEXCOORD0/1 je Vertex.
+ * Der Vertex-Shader reicht die Attribute durch:
+ *   o0 POSITION, o1 (u, v, tc0_w), o2 QUATERNION, o3 VIEW, o4 TEXCOORD1=uv0.
+ * TEV Stufe 0: 0x03210321 (PrimaryFragment, SecondaryFragment, Texture0),
+ * Kombinierer AddMultiply: (Diffus + Spekular) * Textur. */
+
+#define TEX2    0x00052000u
+#define LITVTX  0x00020000u
+#define LITVTX2 0x00028000u
+#define LIT_N   6
+
+static uint32_t lit_f16(float v) {
+    int e;
+    float m;
+    uint32_t sign = 0;
+    if (v == 0.0f) return 0;
+    if (v < 0.0f) { sign = 0x8000u; v = -v; }
+    m = frexpf(v, &e);
+    return sign | ((uint32_t)(e - 1 + 15) << 10) |
+           ((uint32_t)((m * 2.0f - 1.0f) * 1024.0f + 0.5f) & 0x3FFu);
+}
+
+static uint32_t lit_f20(float v) {
+    int e;
+    float m;
+    uint32_t sign = 0;
+    if (v == 0.0f) return 0;
+    if (v < 0.0f) { sign = 0x80000u; v = -v; }
+    m = frexpf(v, &e);
+    return sign | ((uint32_t)(e - 1 + 63) << 12) |
+           ((uint32_t)((m * 2.0f - 1.0f) * 4096.0f + 0.5f) & 0xFFFu);
+}
+
+/* LightColor: 10-Bit-Felder, 255 = 1.0 */
+static uint32_t lit_col(uint32_t r, uint32_t g, uint32_t b) {
+    return (r << 20) | (g << 10) | b;
+}
+
+/* fix1.1.11 (13 Bit) */
+static uint32_t lit_s13(float v) {
+    return (uint32_t)((int)(v * 2047.0f)) & 0x1FFFu;
+}
+
+/* Gitter schreiben: 6x6 Zellen, je zwei Dreiecke, Stride 64 Byte. */
+static int lit_mesh(ArmCpu *c, uint32_t base, float ox, float oy, float zz,
+                    float bend) {
+    int gx, gy, k, n = 0;
+    for (gy = 0; gy < LIT_N; gy++) {
+        for (gx = 0; gx < LIT_N; gx++) {
+            static const int cx[6] = {0, 1, 1, 0, 1, 0};
+            static const int cy[6] = {0, 0, 1, 0, 1, 1};
+            for (k = 0; k < 6; k++) {
+                float f[16];
+                float u = (float)(gx + cx[k]) / (float)LIT_N;
+                float v = (float)(gy + cy[k]) / (float)LIT_N;
+                float px = u * 2.0f - 1.0f, py = v * 2.0f - 1.0f;
+                float w = 1.0f + 0.6f * u;
+                float nx = px * bend, ny = py * bend, nz = 1.0f;
+                float nl = sqrtf(nx * nx + ny * ny + nz * nz);
+                float qx, qy, qz, qw, ql;
+                nx /= nl; ny /= nl; nz /= nl;
+                /* Drehung (0,0,1) -> n */
+                qx = -ny; qy = nx; qz = 0.0f; qw = 1.0f + nz;
+                ql = sqrtf(qx * qx + qy * qy + qz * qz + qw * qw);
+                f[0] = (px * 0.9f + ox) * w;
+                f[1] = (py * 0.9f + oy) * w;
+                f[2] = zz * w;
+                f[3] = w;
+                f[4] = u; f[5] = v; f[6] = 1.0f; f[7] = 0.0f;
+                /* unnormierte Quaternion (Laenge 2): Shader normiert */
+                f[8] = 2.0f * qx / ql; f[9] = 2.0f * qy / ql;
+                f[10] = 2.0f * qz / ql; f[11] = 2.0f * qw / ql;
+                f[12] = -px * 2.0f; f[13] = -py * 1.5f; f[14] = 3.0f + u; f[15] = 0.0f;
+                memcpy(c->mem + ((base + (uint32_t)n * 64u) & 0x1FFFFFFFu), f, 64);
+                n++;
+            }
+        }
+    }
+    return n;
+}
+
+static uint32_t *lit_vs(uint32_t *q) {
+    uint32_t w[6];
+    q = emit(q, 0x2B9, 3u);
+    q = emit(q, 0x2BB, 0x3210u);
+    q = emit(q, 0x4F, 5u);
+    q = emit(q, 0x50, 0x03020100u);        /* POSITION */
+    q = emit(q, 0x51, 0x1F100D0Cu);        /* TEXCOORD0 u,v, TEXCOORD0_W */
+    q = emit(q, 0x52, 0x07060504u);        /* QUATERNION */
+    q = emit(q, 0x53, 0x1F141312u);        /* VIEW */
+    q = emit(q, 0x54, 0x1F1F0F0Eu);        /* TEXCOORD1 */
+    q = emit(q, 0x2BD, 0x1Fu);
+    w[0] = ins_common(0x13u, 0u, 0x00u, 0u, 0u, 0u);
+    w[1] = ins_common(0x13u, 0u, 0x01u, 0u, 1u, 0u);
+    w[2] = ins_common(0x13u, 0u, 0x02u, 0u, 2u, 0u);
+    w[3] = ins_common(0x13u, 0u, 0x03u, 0u, 3u, 0u);
+    w[4] = ins_common(0x13u, 0u, 0x01u, 0u, 4u, 0u);
+    w[5] = 0x22u << 26;
+    q = emit_program(q, w, 6);
+    q = emit(q, 0x2D5, 0);
+    return emit(q, 0x2D6, swz_xyzw());
+}
+
+static uint32_t *lit_draw(uint32_t *q, uint32_t base, int nv) {
+    q = emit(q, 0x200, base >> 3);
+    q = emit(q, 0x201, 0xFFFFu);           /* 4 x float4 */
+    q = emit(q, 0x202, 3u << 28);
+    q = emit(q, 0x203, 0u);
+    q = emit(q, 0x204, 0x3210u);
+    q = emit(q, 0x205, (4u << 28) | (64u << 16));
+    q = emit(q, 0x228, (uint32_t)nv);
+    return emit(q, 0x22E, 0u);
+}
+
+/* Glatte LUT: Eintrag k steht fuer r = k/256 (abs) bzw. int8(k)/128,
+ * Differenz = f(naechster Eintrag) - f(Eintrag) wie die Spiel-LUTs. */
+static float lit_lut_fn(int kind, float r) {
+    float v;
+    switch (kind) {
+    case 0: v = r > 0.0f ? r * r * r * r : 0.0f; break;   /* Glanz */
+    case 1: v = 0.5f + 0.5f * r; break;
+    case 2: v = 1.0f - 0.5f * r; break;
+    case 3: v = r < 0.0f ? -r : r; break;
+    case 4: v = 0.8f; break;
+    case 5: v = 1.0f - r; break;                          /* Distanz */
+    case 6: v = r * 1.2f; break;                          /* Spot */
+    case 7: v = 1.0f - 0.7f * r; break;                   /* Fresnel */
+    default: v = r; break;
+    }
+    if (v < 0.0f) v = 0.0f;
+    if (v > 1.0f) v = 1.0f;
+    return v;
+}
+
+static uint32_t *lit_lut(uint32_t *q, uint32_t lut, int kind, int absmode) {
+    int k;
+    q = emit(q, 0x1C5, lut << 8);
+    for (k = 0; k < 256; k++) {
+        float r0, r1, v0, d;
+        uint32_t val, dif, e;
+        if (absmode) { r0 = (float)k / 256.0f; r1 = (float)(k + 1) / 256.0f; }
+        else { r0 = (float)(int8_t)k / 128.0f; r1 = r0 + 1.0f / 128.0f; }
+        v0 = lit_lut_fn(kind, r0);
+        d = lit_lut_fn(kind, r1) - v0;
+        val = (uint32_t)(v0 * 4095.0f + 0.5f) & 0xFFFu;
+        dif = (uint32_t)((d < 0.0f ? -d : d) * 2047.0f + 0.5f) & 0x7FFu;
+        e = val | (dif << 12) | (d < 0.0f ? (1u << 23) : 0u);
+        q = emit(q, 0x1C8, e);
+    }
+    return q;
+}
+
+static uint32_t *lit_light(uint32_t *q, uint32_t n, uint32_t spec0, uint32_t spec1,
+                           uint32_t diff, uint32_t amb, float x, float y, float z,
+                           float sx, float sy, float sz, uint32_t lcfg,
+                           float dscale, float dbias) {
+    uint32_t b = 0x140u + n * 0x10u;
+    q = emit(q, b + 0u, spec0);
+    q = emit(q, b + 1u, spec1);
+    q = emit(q, b + 2u, diff);
+    q = emit(q, b + 3u, amb);
+    q = emit(q, b + 4u, lit_f16(x) | (lit_f16(y) << 16));
+    q = emit(q, b + 5u, lit_f16(z));
+    q = emit(q, b + 6u, lit_s13(sx) | (lit_s13(sy) << 16));
+    q = emit(q, b + 7u, lit_s13(sz));
+    q = emit(q, b + 9u, lcfg);
+    q = emit(q, b + 0xAu, lit_f20(dbias));
+    return emit(q, b + 0xBu, lit_f20(dscale));
+}
+
+static int g_lit_cfg;
+
+static uint32_t scene_lit(ArmCpu *c) {
+    uint32_t *q;
+    int nv, nv2 = 0;
+    const int cfg = g_lit_cfg;
+    fill_tex_rgba8(c, TEX0, cfg == 5 ? 3 : 1);
+    fill_tex_rgba8(c, TEX1, 2);
+    fill_tex_rgba8(c, TEX2, 4);
+    nv = lit_mesh(c, LITVTX, 0.0f, 0.0f, -0.5f, 0.8f);
+    /* zweites Gitter: D16-Tiefentest (0) bzw. Ueberlappung beim Blending (5) */
+    if (cfg == 0 || cfg == 5)
+        nv2 = lit_mesh(c, LITVTX2, 0.25f, 0.2f, -0.7f, -0.6f);
+
+    q = (uint32_t *)(c->mem + LIST);
+    q = lit_vs(q);
+    q = emit_viewport(q, 32, 32);
+    if (cfg == 0)
+        q = emit_target(q, FB, 32, 32, 0u, 0u, 1, 5u);   /* D16, LessEqual */
+    else
+        q = emit_target(q, FB, 32, 32, 0u, 0u, 0, 0u);
+    if (cfg == 5)   /* wie die Figuren: RGB Add SrcA/1-SrcA, Alpha Max SrcA/DstA */
+        q = emit_blend(q, 1u, 0u, 4u, 6u, 7u, 6u, 8u, 0u);
+    q = emit(q, 0x80, (cfg == 3) ? (7u | (1u << 13)) : (cfg == 4 ? 3u : 1u));
+    q = emit_tex(q, 0, TEX0, 8, 8, 0u, 2u, 2u, 0u, 0u);
+    q = emit_tex(q, 1, TEX1, 8, 8, 0u, 2u, 2u, 0u, 0u);
+    q = emit_tex(q, 2, TEX2, 8, 8, 0u, 2u, 2u, 0u, 0u);
+    q = emit_tev_stage(q, 0, 0x03210321u, 0u, 0x00090009u, 0u, 0u);
+    q = emit_tev_passthrough(q, 1);
+
+    q = emit(q, 0x1C6, 0u);                /* Lighting an */
+    q = emit(q, 0x1C0, lit_col(20, 22, 30));
+    switch (cfg) {
+    case 0:   /* Figur: nur Diffus + Ambient, config1 0xFF7FFFFF */
+    case 5:
+        q = emit(q, 0x1C2, 0u);
+        q = emit(q, 0x1D9, 0u);
+        q = emit(q, 0x1C3, 0u);
+        q = emit(q, 0x1C4, 0xFF7FFFFFu);
+        q = emit(q, 0x1D0, 0u);
+        q = emit(q, 0x1D1, 0u);
+        q = emit(q, 0x1D2, 0u);
+        q = lit_light(q, 0, 0, 0, lit_col(200, 190, 170), lit_col(60, 50, 50),
+                      0.3f, 0.5f, 1.0f, 0, 0, 0, 1u, 0, 0);
+        break;
+    case 1:   /* D0/D1/RR/RG/RB, zwei Lichter, Distanz, Geometriefaktoren */
+        q = emit(q, 0x1C2, 1u);
+        q = emit(q, 0x1D9, 0x10u);
+        q = emit(q, 0x1C3, (4u << 4) | (1u << 27));
+        q = emit(q, 0x1C4, 0xFD08FFFFu);
+        q = emit(q, 0x1D0, 0x20u);          /* D1 ohne Abs */
+        q = emit(q, 0x1D1, 0x00320010u);    /* D0 NH, D1 VH, RB NV, RG LN, RR NH */
+        q = emit(q, 0x1D2, 0x00600070u);    /* D1 x0.5, RG x0.25 */
+        q = lit_light(q, 0, lit_col(255, 240, 200), lit_col(120, 160, 255),
+                      lit_col(150, 150, 150), lit_col(30, 30, 30),
+                      0.2f, 0.4f, 1.0f, 0, 0, 0, 1u | 4u, 0, 0);
+        q = lit_light(q, 1, lit_col(80, 255, 80), lit_col(255, 80, 80),
+                      lit_col(90, 60, 200), lit_col(10, 10, 20),
+                      1.0f, 1.0f, 2.0f, 0, 0, 0, 8u, 0.1f, 0.05f);
+        q = lit_lut(q, 0, 0, 1);
+        q = lit_lut(q, 1, 1, 0);
+        q = lit_lut(q, 6, 2, 1);
+        q = lit_lut(q, 5, 3, 1);
+        q = lit_lut(q, 4, 4, 1);
+        q = lit_lut(q, 17, 5, 1);
+        break;
+    case 2:   /* Spot + Fresnel (Alpha), config 5, Two-Sided */
+        q = emit(q, 0x1C2, 0u);
+        q = emit(q, 0x1D9, 0u);
+        q = emit(q, 0x1C3, (5u << 4) | 4u | 8u);
+        q = emit(q, 0x1C4, 0xFF02FEFFu);
+        q = emit(q, 0x1D0, 0x200u);         /* Spot ohne Abs */
+        q = emit(q, 0x1D1, 0x00142403u);    /* D0 LN, Spot SP, Fresnel NV, RB SP, RG VH, RR NH */
+        q = emit(q, 0x1D2, 0x100u);         /* Spot x2 */
+        q = lit_light(q, 0, lit_col(200, 200, 255), lit_col(255, 200, 100),
+                      lit_col(220, 180, 140), lit_col(40, 40, 40),
+                      0.0f, 0.0f, 3.0f, 0.0f, 0.3f, -1.0f, 2u, 0, 0);
+        q = lit_lut(q, 0, 0, 1);
+        q = lit_lut(q, 8, 6, 0);
+        q = lit_lut(q, 3, 7, 1);
+        q = lit_lut(q, 6, 1, 1);
+        q = lit_lut(q, 5, 2, 1);
+        q = lit_lut(q, 4, 3, 1);
+        break;
+    case 3:   /* NormalMap (Einheit 2) + Schatten (Einheit 1) */
+        q = emit(q, 0x1C2, 0u);
+        q = emit(q, 0x1D9, 0u);
+        q = emit(q, 0x1C3, 1u | (1u << 16) | (1u << 17) | (1u << 19) |
+                           (2u << 22) | (1u << 24) | (1u << 28) | 4u);
+        q = emit(q, 0x1C4, 0xFF7AFFFEu);
+        q = emit(q, 0x1D0, 0u);
+        q = emit(q, 0x1D1, 0u);
+        q = emit(q, 0x1D2, 0u);
+        q = lit_light(q, 0, lit_col(255, 255, 255), 0,
+                      lit_col(200, 200, 200), lit_col(50, 40, 40),
+                      -0.3f, 0.2f, 1.0f, 0, 0, 0, 1u, 0, 0);
+        q = lit_lut(q, 0, 0, 1);
+        break;
+    default:  /* TangentMap + CP (config 8), Lichter 2 und 5 */
+        q = emit(q, 0x1C2, 1u);
+        q = emit(q, 0x1D9, 0x52u);
+        q = emit(q, 0x1C3, (8u << 4) | (2u << 28) | (1u << 22) | (1u << 27));
+        q = emit(q, 0x1C4, 0xFF68FFFFu);
+        q = emit(q, 0x1D0, 0x2u);           /* D0 ohne Abs */
+        q = emit(q, 0x1D1, 0x03000005u);    /* D0 CP, D1 NH, RR LN */
+        q = emit(q, 0x1D2, 0u);
+        q = lit_light(q, 2, lit_col(255, 128, 64), lit_col(64, 128, 255),
+                      lit_col(180, 180, 180), lit_col(20, 30, 20),
+                      0.5f, -0.2f, 1.0f, 0, 0, 0, 1u | 4u | 8u, 0, 0);
+        q = lit_light(q, 5, lit_col(100, 255, 100), lit_col(255, 255, 0),
+                      lit_col(60, 90, 160), lit_col(0, 0, 0),
+                      -0.6f, 0.4f, 0.8f, 0, 0, 0, 1u | 2u, 0, 0);
+        q = lit_lut(q, 0, 1, 0);
+        q = lit_lut(q, 1, 0, 1);
+        q = lit_lut(q, 6, 2, 1);
+        break;
+    }
+    q = lit_draw(q, LITVTX, nv);
+    if (nv2) q = lit_draw(q, LITVTX2, nv2);
+    q = emit(q, 0x1C6, 1u);
+    return (uint32_t)((unsigned char *)q - (c->mem + LIST));
+}
+
+static uint32_t scene_lit0(ArmCpu *c) { g_lit_cfg = 0; return scene_lit(c); }
+static uint32_t scene_lit1(ArmCpu *c) { g_lit_cfg = 1; return scene_lit(c); }
+static uint32_t scene_lit2(ArmCpu *c) { g_lit_cfg = 2; return scene_lit(c); }
+static uint32_t scene_lit3(ArmCpu *c) { g_lit_cfg = 3; return scene_lit(c); }
+static uint32_t scene_lit4(ArmCpu *c) { g_lit_cfg = 4; return scene_lit(c); }
+static uint32_t scene_lit5(ArmCpu *c) { g_lit_cfg = 5; return scene_lit(c); }
+
 static int any_nonzero(const unsigned char *p, int n) {
     int i;
     for (i = 0; i < n; i++) if (p[i]) return 1;
@@ -996,7 +1299,17 @@ static void render(ArmCpu *c, SceneFn fn, int hw, unsigned char *out,
     memcpy(out, c->mem + FB, (size_t)bytes);
 }
 
-/* Vergleicht zwei Farbziele. Rueckgabe: Pixel mit Kanalabweichung > 1. */
+/* Kanaltoleranz in LSB: 1 fuer alle Szenen ohne Fragment-Lighting, 2 fuer
+ * die Lighting-Szenen. Begruendung: die GPU rechnet Normierung, Division und
+ * Wurzel nicht IEEE-exakt (D3D11 erlaubt bei Division/sqrt einige ULP); die
+ * Primaer-/Sekundaerfarbe wird wie im Software-Pfad abgeschnitten
+ * ((u8)(x*255)), ein Unterschied an der Schwelle ergibt dort 1 LSB. Die
+ * TEV-Stufe AddMultiply addiert Primaer- und Sekundaerfarbe; liefert der
+ * Fresnel-Term beiden Alphas denselben Wert (config0 Bit 2+3), werden aus
+ * 1 LSB im Fresnel-Wert 2 LSB im Ergebnis (gemessen: Szene L2, Alpha). */
+static int g_tol = 1;
+
+/* Vergleicht zwei Farbziele. Rueckgabe: Pixel mit Kanalabweichung > g_tol. */
 static int compare_pixels(const unsigned char *a, const unsigned char *b,
                           int nbytes, int bpp, int *one_lsb, int *edge,
                           int *first_bad) {
@@ -1012,12 +1325,12 @@ static int compare_pixels(const unsigned char *a, const unsigned char *b,
             if (d > maxdiff) maxdiff = d;
             if (d != 0) anydiff = 1;
         }
-        if (maxdiff > 1) {
+        if (maxdiff > g_tol) {
             bad++;
             if (*first_bad < 0) *first_bad = i / bpp;
         }
-        if (maxdiff == 1) (*one_lsb)++;
-        if (anydiff && maxdiff > 1) (*edge)++;
+        if (maxdiff >= 1 && maxdiff <= g_tol) (*one_lsb)++;
+        if (anydiff && maxdiff > g_tol) (*edge)++;
     }
     return bad;
 }
@@ -1036,11 +1349,11 @@ static void scene_case(ArmCpu *c, const char *name, SceneFn fn, uint32_t fmt,
     check(any_nonzero(sw, bytes), msg);
     bad = compare_pixels(sw, hw, bytes, bpp_of(fmt), &one_lsb, &edge, &first_bad);
     if (bad > 0)
-        printf("     %s: %d Pixel >1 LSB (erster bei %d), %d Pixel 1 LSB, %d Kantenpixel\n",
-               name, bad, first_bad, one_lsb, edge);
+        printf("     %s: %d Pixel >%d LSB (erster bei %d), %d Pixel 1..%d LSB, %d Kantenpixel\n",
+               name, bad, g_tol, first_bad, one_lsb, g_tol, edge);
     else
-        printf("     %s: identisch/<=1 LSB (%d Pixel 1 LSB, %d Kantenpixel)\n",
-               name, one_lsb, edge);
+        printf("     %s: identisch/<=%d LSB (%d Pixel 1..%d LSB, %d Kantenpixel)\n",
+               name, g_tol, one_lsb, g_tol, edge);
     snprintf(msg, sizeof(msg), "%s: Software vs. D3D11 (%s), hoechstens %d Kantenpixel",
              name, hw_driver_name(), max_edge);
     check(bad <= max_edge, msg);
@@ -1053,7 +1366,7 @@ static void scene_case(ArmCpu *c, const char *name, SceneFn fn, uint32_t fmt,
                 if (d < 0) d = -d;
                 if (d > maxdiff) maxdiff = d;
             }
-            if (maxdiff > 1) {
+            if (maxdiff > g_tol) {
                 printf("       px#%d sw=%02X%02X%02X%02X hw=%02X%02X%02X%02X\n",
                        idx / bpp_of(fmt),
                        sw[idx], sw[idx + 1], sw[idx + 2], sw[idx + 3],
@@ -1100,6 +1413,47 @@ int main(int argc, char **argv) {
     scene_case(&c, "Szene P: Texturwechsel in einer Liste", scene_p, 0u, 0, 16, 16, 32);
     scene_case(&c, "Szene Q: Tiefe aus dem Gast geladen", scene_q, 0u, 0, 16, 16, 16);
     scene_case(&c, "Szene R: Tiefenziel ohne Schreiben", scene_r, 0u, 2, 16, 16, 16);
+
+    /* Fragment-Lighting auf der GPU gegen p_compute_fragments (Software):
+       Toleranz 2 LSB je Kanal (Begruendung bei g_tol), Budget fuer
+       groessere Abweichungen 8 von 1024 Pixeln. */
+    g_tol = 2;
+    scene_case(&c, "Szene L0: Lighting Figur (TEV 0x03210321, D16, cfg1 FF7FFFFF)",
+               scene_lit0, 0u, 0, 32, 32, 8);
+    scene_case(&c, "Szene L1: Lighting D0/D1/RR/RG/RB, 2 Lichter, Distanz",
+               scene_lit1, 0u, 0, 32, 32, 8);
+    scene_case(&c, "Szene L2: Lighting Spot + Fresnel-Alpha, Two-Sided",
+               scene_lit2, 0u, 0, 32, 32, 8);
+    scene_case(&c, "Szene L3: Lighting NormalMap + Schatten",
+               scene_lit3, 0u, 0, 32, 32, 8);
+    scene_case(&c, "Szene L4: Lighting TangentMap + CP (config 8)",
+               scene_lit4, 0u, 0, 32, 32, 8);
+    /* Shader-Blending (Alpha Max mit DstAlpha) ueber zwei sich
+       ueberlappende Gitter: die Dreiecke werden gebuendelt, ein Batch darf
+       aber keine Pixel doppelt enthalten (Momentaufnahme je Batch). */
+    scene_case(&c, "Szene L5: Lighting + Blend Max/DstAlpha, Ueberlappung",
+               scene_lit5, 0u, 0, 32, 32, 8);
+    g_tol = 1;
+    /* D16-Tiefe der Figurenszene: beide Bytes wie p_depth_set. */
+    {
+        static unsigned char col[32 * 32 * 4], sd[32 * 32 * 2], hd[32 * 32 * 2];
+        int k, diff = 0, maxd = 0, written = 0;
+        render(&c, scene_lit0, 0, col, sizeof(col), 0u, 0, 32, 32);
+        memcpy(sd, c.mem + DEPTH, sizeof(sd));
+        render(&c, scene_lit0, 1, col, sizeof(col), 0u, 0, 32, 32);
+        memcpy(hd, c.mem + DEPTH, sizeof(hd));
+        for (k = 0; k < 32 * 32; k++) {
+            int zs = sd[2 * k] | (sd[2 * k + 1] << 8);
+            int zh = hd[2 * k] | (hd[2 * k + 1] << 8);
+            int d = zs > zh ? zs - zh : zh - zs;
+            if (zs != 0xFFFF) written++;
+            if (d > 1) diff++;
+            if (d > maxd) maxd = d;
+        }
+        printf("     D16-Tiefe L0: %d Werte geschrieben, %d weichen > 1 ab (max %d)\n",
+               written, diff, maxd);
+        check(written > 0 && diff <= 24, "D16-Tiefe Hardware wie Software (2 Byte)");
+    }
 
     /* Stencil-Bytes muessen wie im Software-Pfad geschrieben werden. */
     {

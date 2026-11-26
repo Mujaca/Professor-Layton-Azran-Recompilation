@@ -331,8 +331,13 @@ Dreiecke auf 400x240, siehe `docs/GAME_NOTES.md`).
 (`runtime/gpu/gpu.c`) und dem D3D11-Pfad (`runtime/gpu/hw_d3d11.c`) und
 rendert dieselben synthetischen PICA-Kommandolisten einmal je Pfad:
 konstante und vertexgefaerbte Dreiecke, Viewport, Scissor (Include),
-Tiefentest mit Tiefen-Rueckschreiben, RGBA8 und RGB565. Verglichen werden
-die Gast-Framebuffer pixelweise; Toleranz max. 1 LSB je Kanal, Kantenpixel
+Tiefentest mit Tiefen-Rueckschreiben, RGBA8 und RGB565, Texturen/TEV,
+Output-Merger, Stencil, Fog sowie Fragment-Lighting (Szenen L0..L5: Figuren-
+Konfiguration TEV 0x03210321 + D16 + config1 0xFF7FFFFF, LUTs D0/D1/RR/RG/RB
+mit Distanz, Spot + Fresnel-Alpha, NormalMap + Schatten, TangentMap + CP,
+Blend Max/DstAlpha mit ueberlappenden Dreiecken im selben Batch). Verglichen
+werden die Gast-Framebuffer pixelweise; Toleranz max. 1 LSB je Kanal
+(Lighting-Szenen 2 LSB, Begruendung bei `g_tol`), Kantenpixel
 (Top-Left-/Subpixel-Regel) werden gezaehlt und je Szene begrenzt.
 
 ```powershell
@@ -344,8 +349,10 @@ Im Port schaltet ausschliesslich `port.exe ... --renderer hw` den
 Hardware-Pfad ein; ohne Schalter bleibt der Software-Rasterizer Standard
 und bitgleich. Der Hardware-Pfad uebernimmt nur Rasterisierung und
 Fragment-Pipeline (Vertex-/Geometry-Shader bleiben CPU); nicht unterstuetzte
-Zustaende (Texturen, TEV jenseits Replace, Lighting, Fog, Blending,
-Stencil, W-Buffer) fallen je Draw auf den Software-Pfad zurueck.
+Zustaende (W-Buffer, prozedurale Textur, Cube-/Shadow-/Projection-Texturen)
+fallen je Draw auf den Software-Pfad zurueck. `HLE_GTIME=1` meldet alle 5 s
+zusaetzlich `[hwtime]` (Listen, Draws, D3D-Batches, Flush-/Wartezeit,
+Ueberlappungs-Umbrueche).
 
 ## Referenz
 

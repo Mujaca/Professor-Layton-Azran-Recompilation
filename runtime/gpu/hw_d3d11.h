@@ -25,7 +25,54 @@ typedef struct {
     float pos[4];    /* Clip-Space (x,y,z,w), PICA-Konvention z in [-w,0] */
     float color[4];  /* PrimaryColor (bereits abs/saturiert) */
     float uv[3][2];  /* TEXCOORD0..2 (D3D interpoliert perspektivkorrekt) */
+    float quat[4];   /* QUATERNION (Fragment-Lighting, unnormiert) */
+    float view[3];   /* VIEW (Fragment-Lighting) */
+    float tc0_w;     /* TEXCOORD0_W */
 } HwVertex;
+
+/* Fragment-Lighting je Lichtquelle (Werte exakt wie LightSlot in gpu.c,
+ * dort einmal je Draw aus 0x140..0x1D9 berechnet). */
+typedef struct {
+    float position[3];
+    float spot_dir[3];
+    float spec0[3], spec1[3], diffuse[3], ambient[3];
+    float dist_scale, dist_bias;
+    uint32_t num;               /* Lichtnummer (Spot-LUT 8+num, Dist-LUT 16+num) */
+    uint32_t lcfg;              /* LightSrc::config */
+    uint32_t enables;           /* HW_LIGHT_* */
+} HwLight;
+
+#define HW_LIGHT_DIST     (1u << 0)
+#define HW_LIGHT_SPOT     (1u << 1)
+#define HW_LIGHT_D0       (1u << 2)
+#define HW_LIGHT_D1       (1u << 3)
+#define HW_LIGHT_FRESNEL  (1u << 4)
+#define HW_LIGHT_SHADOW_P (1u << 5)
+#define HW_LIGHT_SHADOW_S (1u << 6)
+#define HW_LIGHT_RR       (1u << 7)
+#define HW_LIGHT_RG       (1u << 8)
+#define HW_LIGHT_RB       (1u << 9)
+
+typedef struct {
+    int enabled;                /* 0x1C6 Bit0 == 0 */
+    uint32_t config0, config1;  /* 0x1C3/0x1C4 */
+    uint32_t config;            /* config0 Bits4..7 (LightingConfig) */
+    uint32_t nlights;           /* max_light_index + 1 */
+    float gal[3];               /* global_ambient */
+    /* Fuer alle Lichter gleich (0x1D0..0x1D2): Eingaenge je Sampler in der
+     * Reihenfolge Spot, D0, D1, Fresnel, RR, RG, RB (je 4 Bit), Abs-Flag je
+     * Sampler (Bit i), Skalierung je Sampler. */
+    uint32_t inputs;
+    uint32_t abs_bits;
+    float scale[7];
+    HwLight light[8];
+    /* LUTs (24 x 256, Wert + Differenz als float, exakt wie im
+     * Software-Pfad vorberechnet); lut_gen aendert sich bei jedem Schreiben. */
+    const float *lut_val;
+    const float *lut_diff;
+    const uint32_t *lut_rowgen; /* Aenderungszaehler je LUT (24) */
+    uint32_t lut_gen;
+} HwLighting;
 
 /* Eine adressierte Textur (Einheit 0..2). offset/bytes beziehen sich auf
  * HwDrawState.guest_mem; das Modul dekodiert die Kacheln selbst. */
@@ -118,6 +165,9 @@ typedef struct {
      * selbst NACH dem Flush eines Zielwechsels (Render-to-Texture). */
     uint32_t tex_generation;
     HwTexture tex[3];
+
+    /* Fragment-Lighting 0x140..0x1D9 */
+    HwLighting light;
 } HwDrawState;
 
 /* Device: NULL = Hardware-Treiber, Fallback WARP; "warp" = erzwungen WARP. */
@@ -135,6 +185,13 @@ int hw_begin_draw(const HwDrawState *state);
  * neu aus dem Gast geladen (sonst wuerde der Flush die CPU-Bytes mit dem
  * alten D3D-Stand ueberschreiben). */
 void hw_list_begin(void);
+
+/* Serie des zuletzt vollstaendig uebernommenen Zustands (hw_begin_draw).
+ * hw_continue_draw(serie) == 1 heisst: der Zustand dieser Serie ist noch
+ * gebunden und gueltig (keine Invalidierung, gleiche Texturgeneration);
+ * gpu.c spart sich dann Aufbau und Vergleich des HwDrawState je Dreieck. */
+unsigned hw_draw_serial(void);
+int hw_continue_draw(unsigned serial);
 
 /* n Dreiecke (n Vielfaches von 3). Rueckgabe 0 bei Fehler. */
 int hw_triangles(const HwVertex *v, int n);
