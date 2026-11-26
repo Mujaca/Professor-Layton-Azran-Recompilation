@@ -10,7 +10,7 @@
 * Abgelegt: `src/*.c`, `src/*.h` und `readme.html` des Archivs, **unveraendert**.
   Anpassungen nur ueber Compiler-Defines in `tools/build.py`
   (`LUA_SOURCES`, `LUA_DEFINES`).
-* Verwendet von der Lua-Mod-Schnittstelle (`runtime/mods/lua_host.c`,
+* Verwendet von der Lua-Mod-Schnittstelle (`runtime/modding/lua_host.c`,
   docs/MODDING.md, Stufe B).
 
 Mitgebaut werden nur Kern und die Bibliotheken der Sandbox:

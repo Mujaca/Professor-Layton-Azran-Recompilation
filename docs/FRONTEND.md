@@ -125,6 +125,12 @@ Arbeitsverzeichnis (Standard `mods/` in der Repo-Wurzel, nicht neben
 uebergeben immer `--no-mods` (scene.py: `--mods ordner` fuer Mod-Laeufe).
 Beim Start meldet das Log `[mods] ...` (geladene Mods, Prioritaeten,
 ersetzte Dateien und Archiv-Eintraege, Konflikte).
+Lua-Mods (`mods/<name>/scripts/main.lua`, docs/MODDING.md Stufe B) laufen
+mit denselben Schaltern; ihre Ausgaben stehen als `[mod:<name>] ...` im
+Log. Sie duerfen Maus (auch ohne Klick), Host-Tasten lesen und den Zeiger
+ueber den Spielfenstern aendern (Pfeil/versteckt/Fadenkreuz); mit
+`--deterministic` sehen sie keine Maus und keine Taste. Beispiele:
+`mods-examples/` (in den Mods-Ordner kopieren).
 
 ## Diagnose-CLI fuer Testlaeufe
 

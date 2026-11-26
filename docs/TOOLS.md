@@ -337,6 +337,7 @@ Selbsttest: `python tools/selftest_tools.py`.
 | `python tests/fs_archive_test.py` | fs-Archive (SaveData/Ext/Shared/System): Host-Layout, Result-Codes, Datei-/Verzeichnisoperationen, Directory-Eintraege |
 | `python tests/audio_test.py` | DSP-HLE-Dekodierung/Resampling (ADPCM inkl. s16-Verlauf, PCM8/16, lineare Interpolation mit Azahar-Rundung) |
 | `python tests/vs_test.py [n]` | Vertex-Shading je Draw (dedupliziert, auf den Raster-Pool verteilt, `p_vs_shade_draw`) bitgleich gegen den seriellen Pfad (`p_load_attrs` + `p_vs_process` je Position): zufaellige VS-Programme inkl. Flusskontrolle, Swizzles, Uniforms, Sonderwerte (0, inf, NaN, Denormale), u8/u16-Indizes, Rundungsmodus des Aufrufers |
+| `python tests/lua_host_test.py` | Lua-Mods (`runtime/modding/lua_host.c`, docs/MODDING.md Stufe B) mit synthetischen Skripten und falschem Gastspeicher: Sandbox (kein io/os/debug/package, require nur `scripts/` des Mods, keine Binaer-Chunks, feste Zufallssaat), `mem.*`/`input.*`/`host.*`/`guest.*`, Prioritaet bei `input.set`, Fehler-Isolation mit Traceback, Instruktionsbudget (auch gegen `pcall`/`xpcall`/Koroutinen) |
 | `python tests/dsp_hle_test.py` | DSP-HLE-Frame-Verarbeitung: Regionenwahl ueber Frame-Counter (inkl. Wraparound), Dirty-Bits, Status-Rueckschreiben, `u32_dsp`, Sleep-Reply nach zwei Frames, DSP-RAM-Nullung bei Initialize |
 
 Nicht im Gate: `python tests/lighting_test.py [n]` vergleicht das
@@ -349,7 +350,7 @@ D16-Tiefe (Azahar `SetDepth`/`EncodeD16`).
 Diese Tests brauchen nur `zig cc` und laufen in Sekunden. Seit 2026-11-25
 laufen `dsp_hle_test`, `audio_test`, `y2r_test`, `framebuffer_test`,
 `fs_archive_test`, `frame_clock_test`, `sched_selftest`, `hid_ring_test`, seit
-2026-11-26 `lighting_test` und `vs_test` sowie
+2026-11-26 `lighting_test`, `vs_test`, `romfs_overlay_test` und `lua_host_test` sowie
 `tests/hw_test.py --warp` (D3D11-Renderer gegen Software-Pfad, WARP ohne
 Grafikkarte) im Gate; vorher war ein HW-Commit mit roten Selbsttests
 durchgerutscht.

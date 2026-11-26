@@ -166,6 +166,105 @@ erprobt, laengere Texte brauchen Wissen ueber die Offsets in Abschnitt 1
     (Screenshots unverändert); erst nach M17 (Swapchain-Ausgabe)
   * `log(...)` – in die Logdatei
 
+### Stand Stufe B (2026-11-26, Branch mods-overlay, ohne `draw`)
+
+Umgesetzt: Lua 5.4.7 unveraendert unter `third_party/lua` (Herkunft,
+Pruefsumme und gebaute Dateien: `third_party/README.md`), eine VM in
+`runtime/modding/lua_host.c` (generisch, keine Spieladressen; testbar ohne
+Gast ueber `MluaMemOps`/`MluaHostOps`). Anbindung: `hle.c` (Start in
+`hle_init` nach dem RomFS-Overlay, `mods_frame` im VBlank-Zweig von
+`sched_service` direkt nach `det_host_sync`, Ueberschreibung in
+`hid_update_pad_locked`), `main.c` (Host-Funktionen), `window.c`
+(Maus ohne Klick, Tasten nach Namen, Zeigerform). Schalter wie Stufe A
+(`--mods`/`--no-mods`/`--mods-dir`, `[mods] enabled`); ein Ordner zaehlt als
+Lua-Mod, wenn `scripts/main.lua` existiert. Reihenfolge wie Stufe A
+(`priority` aufsteigend, Gleichstand nach Ordnername).
+
+**Ablauf.** Beim Start (vor dem ersten Gast-Befehl) laeuft je Mod
+`scripts/main.lua` in einer eigenen Umgebung, danach alle `on_load`.
+Einmal je Gast-VBlank am sicheren Punkt (alle anderen Gast-Threads
+geparkt, Stabhalter; mit `--deterministic` nach der Host-Synchronisation,
+also nach `--press`) laufen alle `on_frame` in Mod-Reihenfolge. Lua laeuft
+auf dem Host und fuehrt keine Gast-Bloecke aus: die virtuelle Zeit bleibt
+unberuehrt.
+
+**API** (Lua-Globals je Mod):
+
+| Funktion | Bedeutung |
+|---|---|
+| `on_load(fn)` | `fn()` einmal nach allen Hauptchunks (nur im Hauptchunk aufrufbar) |
+| `on_frame(fn)` | `fn(frame)` einmal je Gast-VBlank; `frame` = Gast-Frame (Bildwechsel des Spiels, bei 30 fps zwei VBlanks je Frame) |
+| `mod.name`, `mod.priority` | Ordnername, Prioritaet aus `mod.ini` |
+| `mem.read_u8/u16/u32/s8/s16/s32/f32(addr)` | Gastspeicher lesen (little-endian, `arm_mem_read`) |
+| `mem.write_u8/u16/u32/f32(addr, v)` | schreiben (`arm_mem_write`, Wert auf die Breite maskiert) |
+| `input.get()` | `{a, b, x, y, l, r, start, select, up, down, left, right, circle_x, circle_y, touch, touch_x, touch_y}` so, wie das Spiel sie bis zum naechsten VBlank sieht (Host-Eingabe + `--press` + bisherige `input.set`) |
+| `input.set{...}` | dieselben Felder ueberschreiben, nur bis zum naechsten VBlank (nur in `on_frame`); Tasten `true/false`, `circle_*` -156..156, `touch_x` 0..319, `touch_y` 0..239 (geklemmt); spaetere (hoehere) Mods gewinnen je Feld |
+| `host.mouse()` | `{x, y, inside_touch, down, over_window}`: Zeiger in Touchscreen-Pixeln, auch ohne Klick, einfaches und geteiltes Layout |
+| `host.key(name)` | Host-Taste gedrueckt? Namen wie in `port.ini` (`"F5"`, `"A"`, `"SPACE"`, `"0x41"`); nur lesend, die Taste wirkt weiter normal |
+| `host.set_cursor(m)` | `"arrow"`, `"hidden"`, `"crosshair"`: Zeiger ueber den Spielfenstern |
+| `guest.frame()`, `guest.vblank()`, `guest.time_ns()` | Gast-Frame, VBlank-Zaehler (ab 1), Gastzeit seit Start (virtuell mit `--deterministic`) |
+| `log(...)`, `print(...)` | Zeile `[mod:<name>] ...` ins Log |
+| `require("name")` | `scripts/name.lua` desselben Mods (`a.b` = `scripts/a/b.lua`), gecacht |
+
+Ungueltige Adressen (ausserhalb des Gastspeichers), falsche Felder oder
+Tastennamen sind Lua-Fehler. Mit `--deterministic` ist `host.*` neutral
+(keine Maus, keine Taste gedrueckt), wie die echte Eingabe dort auch.
+
+**Sandbox.** Geoeffnet: base, string, table, math, utf8, coroutine. Nicht
+gebaut: io, os, debug, package (`liolib.c`, `loslib.c`, `ldblib.c`,
+`loadlib.c`). Entfernt: `dofile`, `loadfile`, `warn`, `string.dump`;
+`load` nimmt nur Text (Standardumgebung = Mod), `require` nur Lua-Dateien
+aus `scripts/` desselben Mods (Name aus `[A-Za-z0-9_.-]`, kein `..`).
+Deterministisch: feste String-Hash-Saat (`LUA_DEFINES` in
+`tools/build.py`), `math.random` fest geseedet (`math.randomseed()` ohne
+Argument = 0), keine Uhr ausser `guest.time_ns()`. Nicht deterministisch
+bleibt nur die `pairs`-Reihenfolge bei Tabellen/Funktionen als Schluessel
+(Adressen) und `tostring` von Tabellen. Jeder Mod hat eigene Globals;
+Bibliothekstabellen (`string`, `math`, ...) sind gemeinsam und sollen nicht
+veraendert werden.
+
+**Grenzen.** Instruktionsbudget 50 Mio. Lua-Instruktionen je Aufruf
+(Hauptchunk, je `on_load`, je `on_frame`), Count-Hook alle 1000; ein
+erschoepftes Budget fangen `pcall`, `xpcall` und `coroutine.resume` nicht
+ab. Speichergrenze 256 MiB fuer die VM. Lange Musterlaeufe in C
+(`string.find` mit Rueckverfolgung) zaehlen nicht als Instruktionen.
+
+**Fehler.** Syntax- und Laufzeitfehler (auch Budget, Speicher) werden als
+`[mod:<name>] Fehler: <Datei:Zeile: Meldung>` mit `stack traceback` geloggt;
+danach ruft die Runtime keine Funktion dieses Mods mehr auf
+(`[mod:<name>] deaktiviert`), das Spiel und die anderen Mods laufen weiter.
+
+**Beispiele** (unser Code, keine Spielinhalte; `mods-examples/`, zum
+Ausprobieren in den Mods-Ordner kopieren):
+
+* `frame-log`: liest nur (Code-Wort am Programmbeginn, `input.get`, Zeit)
+  und loggt alle 300 VBlanks; nutzt `require("fmt")`.
+* `input-demo`: tippt ab Gast-Frame 2550 fuer 20 Gast-Frames auf "New Game"
+  (160/64) wie `--press touch@g2550:20:160:64`; in Echtzeit zusaetzlich:
+  F6 halten = Touchscreen an der Mausposition beruehren, Fadenkreuz ueber
+  dem Touchscreen.
+
+```
+xcopy /E /I mods-examples\input-demo mods\input-demo
+out\port.exe --mods
+```
+
+**Nachweis (deterministisch, Szene `titel`, `--every 50 --every-from 2000
+--target 2900`, 19 Bilder inkl. Endbild; Bilder unter
+`scratch/scene/titel-lua-*`):**
+
+| Lauf | Ergebnis |
+|---|---|
+| `--press touch@g2550:20:160:64` ohne Mods (`lua-press`) gegen denselben `--press` mit `frame-log` (`lua-log`) | 19/19 bytegleich: ein lesender Mod veraendert die Bildfolge nicht |
+| `input-demo` ohne `--press` (`lua-input`) gegen `lua-press` | 19/19 bytegleich: `input.set` wirkt genau wie das gleiche `--press` |
+| ohne Mods und ohne `--press` (`lua-none`) gegen `lua-input` | 12/19 gleich, ab g2600 verschieden (Tipp auf "New Game" wirkt) |
+
+Mit Mods, aber ohne Datei unter `romfs/`/`fa/`, bleibt das RomFS-Overlay
+inaktiv (`[mods] keine wirksame Mod-Datei`); der Vergleich gegen `--no-mods`
+ist deshalb ohne Kontroll-Mod zulaessig.
+
+Gate-Test mit synthetischen Skripten: `tests/lua_host_test.py`.
+
 ## Stufe C – Funktions-Hooks
 
 * Der Recompiler erzeugt am Anfang jeder `fn_XXXXXXXX` eine generische

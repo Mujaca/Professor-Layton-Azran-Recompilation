@@ -506,6 +506,59 @@ static void mouse_to_canvas(WinPane *p, LPARAM lp) {
     g_mouse_y = p->src_y + (int)floor((my - p->vp.y) / p->vp.scale);
 }
 
+/* Mauszeiger ueber den Spielfenstern (host.set_cursor der Lua-Mods):
+ * 0 Pfeil, 1 versteckt, 2 Fadenkreuz. Gesetzt von beliebigem Thread,
+ * angewendet im Fensterthread (WM_SETCURSOR, win_pump). */
+static volatile LONG g_cursor_mode = 0;
+static LONG g_cursor_applied = 0;
+
+static void apply_cursor(void) {
+    LONG m = g_cursor_mode;
+    if (m == 1) SetCursor(NULL);
+    else SetCursor(LoadCursorA(NULL, (LPCSTR)(m == 2 ? IDC_CROSS : IDC_ARROW)));
+}
+
+void win_set_cursor_mode(int mode) {
+    InterlockedExchange(&g_cursor_mode, (LONG)(mode >= 0 && mode <= 2 ? mode : 0));
+}
+
+/* Zeiger ueber dem Clientbereich eines Spielfensters? Liefert das Pane und
+ * die Kanvasposition. */
+static WinPane *cursor_pane(int *cx, int *cy) {
+    POINT pt;
+    HWND h;
+    WinPane *p;
+    RECT rc;
+    if (!GetCursorPos(&pt)) return NULL;
+    h = WindowFromPoint(pt);
+    p = pane_of(h);
+    if (p == NULL || p->vp.scale <= 0) return NULL;
+    ScreenToClient(h, &pt);
+    GetClientRect(h, &rc);
+    if (pt.x < rc.left || pt.y < rc.top || pt.x >= rc.right || pt.y >= rc.bottom) return NULL;
+    *cx = p->src_x + (int)floor((pt.x - p->vp.x) / p->vp.scale);
+    *cy = p->src_y + (int)floor((pt.y - p->vp.y) / p->vp.scale);
+    return p;
+}
+
+int win_mouse_touch(int *tx, int *ty, int *inside, int *down) {
+    int cx = 0, cy = 0, md;
+    WinPane *p = cursor_pane(&cx, &cy);
+    AcquireSRWLockShared(&g_in_srw);
+    md = g_mouse_down;
+    ReleaseSRWLockShared(&g_in_srw);
+    *down = md != 0;
+    if (p == NULL) {
+        *tx = *ty = -1;
+        *inside = 0;
+        return 0;
+    }
+    *tx = cx - g_touch_x;
+    *ty = cy - g_touch_y;
+    *inside = g_has_touch_rect && *tx >= 0 && *tx < g_touch_w && *ty >= 0 && *ty < g_touch_h;
+    return 1;
+}
+
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     WinPane *p = pane_of(hwnd);
     switch (msg) {
@@ -563,6 +616,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ReleaseSRWLockExclusive(&g_in_srw);
             ReleaseCapture();
             return 0;
+        case WM_SETCURSOR:
+            /* Lua-Mods (host.set_cursor): nur ueber dem Clientbereich der
+             * Spielfenster; Rahmen/Titel behalten den Systemzeiger. */
+            if (p != NULL && LOWORD(lp) == HTCLIENT && g_cursor_mode != 0) {
+                apply_cursor();
+                return TRUE;
+            }
+            return DefWindowProcA(hwnd, msg, wp, lp);
         case WM_ERASEBKGND:
             return 1;
         case WM_PAINT: {
@@ -671,6 +732,12 @@ int win_pump(void) {
     for (i = 0; i < g_npanes; i++) {
         InvalidateRect(g_pane[i].hwnd, NULL, FALSE);
         UpdateWindow(g_pane[i].hwnd);
+    }
+    if (g_cursor_applied != g_cursor_mode) {
+        /* Neuer Zeigermodus sofort, nicht erst bei der naechsten Bewegung. */
+        int cx, cy;
+        g_cursor_applied = g_cursor_mode;
+        if (cursor_pane(&cx, &cy) != NULL) apply_cursor();
     }
     return g_npanes > 0 && g_pane[0].hwnd != NULL;
 }
@@ -818,6 +885,15 @@ void win_input_poll(WinInput *out) {
             px >= g_touch_x && px < g_touch_x + g_touch_w &&
             py >= g_touch_y && py < g_touch_y + g_touch_h;
     }
+}
+
+int win_key_state(const char *name) {
+    int vk = key_name_to_vk(name), v;
+    if (vk <= 0 || vk > 255) return -1;
+    AcquireSRWLockShared(&g_in_srw);
+    v = g_key_down[vk] != 0;
+    ReleaseSRWLockShared(&g_in_srw);
+    return v;
 }
 
 int win_key_take(int vk) {

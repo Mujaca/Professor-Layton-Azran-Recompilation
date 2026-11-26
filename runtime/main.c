@@ -31,6 +31,7 @@
 #include "framebuffer.h"
 #include "gpu.h"
 #include "hle.h"
+#include "lua_host.h"
 #include "press_spec.h"
 #include "window.h"
 
@@ -147,6 +148,18 @@ static void press_apply(HleHidInput *hi, int frame, unsigned guest) {
     }
 }
 
+/* Lua-Mods (host.*): Maus/Tasten aus dem Fenster. Im deterministischen
+ * Modus neutral (keine Maus, keine Taste gedrueckt), wie fuer die
+ * Spieleingabe: ein Lauf darf nicht von Fenster oder Tastatur abhaengen. */
+static void mods_mouse(MluaMouse *m) {
+    m->over_window = win_mouse_touch(&m->x, &m->y, &m->inside_touch, &m->down);
+}
+
+static int mods_key_det(const char *name) {
+    int v = win_key_state(name);
+    return v < 0 ? -1 : 0;
+}
+
 int main(int argc, char **argv) {
     const char *romfs = "out/romfs";
     const char *shot = NULL;
@@ -234,6 +247,13 @@ int main(int argc, char **argv) {
     win_set_touch_rect(BOT_X, BOT_Y, 320, 240);
     win_status("Tasten: port.ini neben port.exe (Standard siehe docs/FRONTEND.md)", 2);
     win_status("F11=Vollbild  Touch=Maus ueber dem unteren Screen", 3);
+    {
+        MluaHostOps ops;
+        ops.mouse = det ? NULL : mods_mouse;
+        ops.key = det ? mods_key_det : win_key_state;
+        ops.set_cursor = win_set_cursor_mode;
+        mlua_set_host_ops(&ops);
+    }
     if (!CreateThread(NULL, 0, game_thread, NULL, 0, NULL)) {
         printf("Thread fehlgeschlagen\n");
         return 3;

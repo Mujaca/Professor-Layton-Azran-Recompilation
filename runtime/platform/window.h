@@ -67,6 +67,18 @@ void win_set_touch_rect(int x, int y, int w, int h);
 void win_input_poll(WinInput *out);
 
 int win_key_take(int vk);
+
+/* Fuer Lua-Mods (host.*, docs/MODDING.md). Lesen nur Host-Zustand.
+ * win_mouse_touch: 1 = Zeiger ueber einem Spielfenster; tx/ty in Pixeln
+ *   des Touchscreens (auch ohne Klick), inside = im Touch-Rechteck,
+ *   down = linke Taste (im Fenster gedrueckt).
+ * win_key_state: Taste nach port.ini-Namen ("F5", "A", "SPACE", "0x41");
+ *   -1 unbekannt, sonst 0/1 (nur solange ein Spielfenster den Fokus hat).
+ * win_set_cursor_mode: 0 Pfeil, 1 versteckt, 2 Fadenkreuz (nur ueber den
+ *   Spielfenstern, einfaches und geteiltes Layout). */
+int win_mouse_touch(int *tx, int *ty, int *inside, int *down);
+int win_key_state(const char *name);
+void win_set_cursor_mode(int mode);
 void win_key_push(int vk);
 
 #endif

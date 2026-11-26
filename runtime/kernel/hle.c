@@ -8,6 +8,7 @@
 #include "hle.h"
 #include "fs_archive.h"
 #include "romfs_overlay.h"
+#include "lua_host.h"
 #include "gpu.h"
 #include "gsp_fb.h"
 #include "frame_clock.h"
@@ -1461,6 +1462,10 @@ static SRWLOCK g_hid_srw = SRWLOCK_INIT;
  * schreiben hier, hid_poll liest ihn als Stabhalter. */
 static SRWLOCK g_hid_in_srw = SRWLOCK_INIT;
 static HleHidInput g_hid_input;
+/* Lua-Mods (input.set, docs/MODDING.md): Ueberschreibung einzelner Felder bis
+ * zum naechsten VBlank, gesetzt am sicheren Punkt (mods_frame), geschuetzt
+ * wie g_hid_input. Ohne Mods immer leer. */
+static MluaInputOverride g_hid_mod_ov;
 static int g_hid_log = -1;
 
 static uint32_t hid_rd32(const HidState *s, uint32_t off) {
@@ -1486,6 +1491,7 @@ static void hid_update_pad_locked(uint64_t tick) {
     HidRingInput in;
     AcquireSRWLockShared(&g_hid_in_srw);
     in = g_hid_input;
+    mlua_apply_override(&in, &g_hid_mod_ov);
     ReleaseSRWLockShared(&g_hid_in_srw);
     g_hid.pad_updates++;
     hid_signal_events(hid_ring_write_pad(&g_hid.ring, g_hid.shadow,
@@ -1583,6 +1589,44 @@ void hle_hid_set_input(const HleHidInput *in) {
     if (in == NULL) return;
     AcquireSRWLockExclusive(&g_hid_in_srw);
     g_hid_input = *in;
+    ReleaseSRWLockExclusive(&g_hid_in_srw);
+}
+
+/* Lua-Mods: Gastspeicher ueber die geprueften Zugriffe (arm_mem_read/
+ * arm_mem_write, Busalias wie dort). Ausserhalb des Gastspeichers: 0, der
+ * Mod bekommt einen Lua-Fehler. Nur am sicheren Punkt aufgerufen. */
+static int mods_mem_read(void *ctx, uint32_t addr, int size, uint32_t *out) {
+    uint32_t a = addr >= 0x20000000u ? (addr & 0x1FFFFFFFu) : addr;
+    (void)ctx;
+    if (g_main_cpu == NULL || (uint64_t)a + (uint64_t)size > g_main_cpu->mem_size) return 0;
+    *out = arm_mem_read(g_main_cpu, addr, size);
+    return 1;
+}
+
+static int mods_mem_write(void *ctx, uint32_t addr, int size, uint32_t val) {
+    uint32_t a = addr >= 0x20000000u ? (addr & 0x1FFFFFFFu) : addr;
+    (void)ctx;
+    if (g_main_cpu == NULL || (uint64_t)a + (uint64_t)size > g_main_cpu->mem_size) return 0;
+    arm_mem_write(g_main_cpu, addr, size, val);
+    return 1;
+}
+
+static const MluaMemOps g_mods_mem = {NULL, mods_mem_read, mods_mem_write};
+
+/* Lua on_frame am sicheren Punkt (VBlank-Zweig von sched_service, alle
+ * anderen Gast-Threads geparkt, deterministisch nach det_host_sync): die
+ * Eingabe, die das Spiel ohne Mods saehe, geht an die Skripte; ihre
+ * Ueberschreibung gilt bis zum naechsten VBlank fuer jedes Pad-Update. Lua
+ * fuehrt keine Gast-Bloecke aus, die virtuelle Zeit bleibt unberuehrt. */
+static void mods_frame(void) {
+    HidRingInput base;
+    MluaInputOverride ov;
+    AcquireSRWLockShared(&g_hid_in_srw);
+    base = g_hid_input;
+    ReleaseSRWLockShared(&g_hid_in_srw);
+    mlua_frame(g_gsp_guest_frames, guest_ns() - g_boot_ns, &base, &ov);
+    AcquireSRWLockExclusive(&g_hid_in_srw);
+    g_hid_mod_ov = ov;
     ReleaseSRWLockExclusive(&g_hid_in_srw);
 }
 
@@ -4621,6 +4665,7 @@ static void sched_service(uint64_t now) {
             gsp_signal_interrupt(GSP_IRQ_PDC0);
             gsp_signal_interrupt(GSP_IRQ_PDC1);
             if (g_det) det_host_sync();
+            if (mlua_active()) mods_frame();
             if (g_ystat && (++g_vblank_tick % 62u) == 0u) {
                 printf("[ystat] vbl=%u t=%llus switches=%llu idle_ms=%llu\n",
                        g_vblank_tick,
@@ -4855,7 +4900,12 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
     snprintf(g_romfs, sizeof(g_romfs), "%s", romfs_dir ? romfs_dir : "out/romfs");
     /* Mods (docs/MODDING.md): nur mit --mods bzw. port.ini [mods] enabled = 1.
      * Ohne wirksame Mod-Datei bleibt alles beim Original-Abbild. */
-    if (g_mods_enabled) rfo_init("out/romfs_image.bin", 0x1000, g_mods_dir);
+    if (g_mods_enabled) {
+        rfo_init("out/romfs_image.bin", 0x1000, g_mods_dir);
+        /* Stufe B: scripts/main.lua je Mod (Hauptchunk + on_load laufen hier,
+         * vor dem ersten Gast-Befehl). */
+        mlua_init(g_mods_dir, &g_mods_mem);
+    }
     g_log = getenv("HLE_LOG") != NULL;
     g_ystat = getenv("HLE_YSTAT") != NULL;
     g_wstat = getenv("HLE_WSTAT") != NULL;
