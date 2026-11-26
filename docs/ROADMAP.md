@@ -82,6 +82,13 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
    QoL-Ideen (als Beispiel-Mods, nicht in der Runtime):
    - Lupenmodus: Lupe folgt dem Mauszeiger, Klick untersucht; eigener
      Cursor nur in diesem Modus (braucht Spielzustand -> Lua, Stufe B).
+6. **Builder-Paket fuer Endnutzer** (vom Nutzer aufgenommen 2026-11-26):
+   ein Download (ZIP mit kleinem Starter), der Python (Embeddable), die
+   Build-Abhaengigkeiten (pyctr, capstone, ziglang) und die Quellen buendelt;
+   Nutzer waehlt seinen entschluesselten Dump, der Builder prueft ihn und
+   baut port.exe ohne weitere Installation oder Downloads. Enthaelt keine
+   Spielinhalte; Lizenztexte der gebuendelten Teile liegen bei. Bau des
+   Pakets reproduzierbar (Skript, spaeter GitHub-Release per CI).
 
 ## Frontier-Verlauf
 
