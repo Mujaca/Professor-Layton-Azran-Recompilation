@@ -223,6 +223,8 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--split-screens") == 0) win_set_split(1);
         else if (strcmp(argv[i], "--debug") == 0) win_set_debug(1);
         else if (strcmp(argv[i], "--no-debug") == 0) win_set_debug(0);
+        else if (strcmp(argv[i], "--fps") == 0) win_set_fps_overlay(1);
+        else if (strcmp(argv[i], "--no-fps") == 0) win_set_fps_overlay(0);
         else if (strcmp(argv[i], "--scale") == 0 && i + 1 < argc) {
             scale = atoi(argv[++i]);
             if (scale < 1 || scale > 4) {
@@ -298,6 +300,8 @@ int main(int argc, char **argv) {
     uint64_t fps_t0;
     int fps_frames0 = 0;
     double host_fps = 0.0;
+    unsigned fps_guest0 = 0;
+    double guest_fps = 0.0;
     frame_clock_start(&clock);
     fps_t0 = frame_clock_now_qpc();
     while (win_pump()) {
@@ -368,13 +372,22 @@ int main(int argc, char **argv) {
                 host_fps = (double)(frames - fps_frames0) * (double)clock.freq /
                            (double)elapsed;
             }
+            guest_frames = hle_gsp_guest_frames();
+            /* Gast-fps: VBlanks mit neuem Spielbild je Sekunde Wandzeit
+               (die Bildrate des Spiels, nicht die des Host-Fensters). */
+            if (elapsed > 0) {
+                guest_fps = (double)(guest_frames - fps_guest0) *
+                            (double)clock.freq / (double)elapsed;
+            }
             fps_t0 = now;
             fps_frames0 = frames;
-            guest_frames = hle_gsp_guest_frames();
+            fps_guest0 = guest_frames;
+            snprintf(line, sizeof(line), "%.1f FPS", guest_fps);
+            win_status(line, 0);
             snprintf(title, sizeof(title),
                      "Professor Layton and the Azran Legacy  |  fps=%.1f  |  "
-                     "Gast-Frames=%u  |  F11=Vollbild",
-                     host_fps, guest_frames);
+                     "Gast-fps=%.1f  |  Gast-Frames=%u  |  F11=Vollbild",
+                     host_fps, guest_fps, guest_frames);
             if (win_debug()) win_set_title(title);
             snprintf(line, sizeof(line),
                      "frames=%d  fps=%.1f gast=%u  block=0x%08X  halted=%d  "

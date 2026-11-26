@@ -467,6 +467,11 @@ int hwp_present(void *hwnd, int cw, int ch, int dst_x, int dst_y, int dst_w, int
             if (SUCCEEDED(IDXGISurface1_GetDC(surf, FALSE, &dc)) && dc) {
                 int i;
                 SetBkMode(dc, TRANSPARENT);
+                /* Schwarzer Schatten, damit der Text auch auf hellen
+                   Szenen lesbar bleibt. */
+                SetTextColor(dc, RGB(0, 0, 0));
+                for (i = 0; i < nlines; i++)
+                    if (lines[i]) TextOutA(dc, 9, 9 + i * 16, lines[i], (int)strlen(lines[i]));
                 SetTextColor(dc, RGB(255, 255, 255));
                 for (i = 0; i < nlines; i++)
                     if (lines[i]) TextOutA(dc, 8, 8 + i * 16, lines[i], (int)strlen(lines[i]));

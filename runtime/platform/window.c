@@ -26,6 +26,21 @@ static int g_layout_ini = 0;          /* [display] layout = split -> 1 */
 static int g_scale_ini = 0;           /* [display] scale = N (0 = nicht gesetzt) */
 static int g_debug_ini = 0;           /* [debug] overlay = 1 */
 static int g_debug_cli = -1;          /* --debug/--no-debug, -1 = port.ini */
+static int g_fps_ini = 0;             /* [debug] fps = 1 */
+static int g_fps_cli = -1;            /* --fps/--no-fps, -1 = port.ini */
+
+static int win_fps_overlay(void) {
+    return (g_fps_cli >= 0) ? g_fps_cli : g_fps_ini;
+}
+
+void win_set_fps_overlay(int on) {
+    g_fps_cli = on != 0;
+}
+
+/* Zeilen fuer das Overlay (nur erstes Fenster): mit Debug alle
+ * Statuszeilen, sonst bei FPS-Anzeige nur Zeile 0 (Gast-fps). */
+int win_debug(void);
+static int overlay_lines(const void *pane, const char *out[10]);
 static WinPresentFn g_present_fn = NULL;
 static WinDetachFn g_detach_fn = NULL;
 
@@ -98,7 +113,10 @@ static void write_default_config(const char *path) {
           "[debug]\n"
           "# 1 = Diagnosezeilen im Fenster und fps/Gast-Frames in der Titelzeile\n"
           "# (auch per Startoption --debug / --no-debug).\n"
-          "overlay = 0\n",
+          "overlay = 0\n"
+          "# 1 = nur die Gast-fps (Bildrate des Spiels) oben links im Fenster\n"
+          "# (auch per Startoption --fps / --no-fps).\n"
+          "fps = 0\n",
           f);
     fclose(f);
 }
@@ -218,6 +236,8 @@ static void load_config(void) {
                 else if (ieq(val, "single")) g_layout_ini = 0;
             } else if (ieq(section, "debug") && ieq(key, "overlay")) {
                 g_debug_ini = (atoi(val) != 0);
+            } else if (ieq(section, "debug") && ieq(key, "fps")) {
+                g_fps_ini = (atoi(val) != 0);
             } else if (ieq(section, "display") && ieq(key, "scale")) {
                 int v = atoi(val);
                 if (v >= 1 && v <= 4) g_scale_ini = v;
@@ -434,6 +454,17 @@ static void back_buffer_free(WinPane *p) {
     }
 }
 
+static int overlay_lines(const void *pane, const char *out[10]) {
+    int i, n = 0;
+    if (pane != (const void *)&g_pane[0]) return 0;
+    if (win_debug()) {
+        for (i = 0; i < g_status_lines && i < 10; i++) out[n++] = g_status[i];
+    } else if (win_fps_overlay() && g_status_lines > 0 && g_status[0][0]) {
+        out[n++] = g_status[0];
+    }
+    return n;
+}
+
 static void draw_into(WinPane *p, HDC dc, const RECT *rc) {
     FillRect(dc, rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
     if (g_dib) {
@@ -453,12 +484,16 @@ static void draw_into(WinPane *p, HDC dc, const RECT *rc) {
                       g_dib + (size_t)p->src_y * g_w * 4, &p->bi,
                       DIB_RGB_COLORS, SRCCOPY);
     }
-    if (p == &g_pane[0] && win_debug()) {   /* Statustext nur im ersten Fenster */
+    {
+        const char *lines[10];
+        int n = overlay_lines(p, lines);
         SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, RGB(0, 0, 0));          /* Schatten */
+        for (int i = 0; i < n; i++)
+            TextOutA(dc, 9, 9 + i * 16, lines[i], (int)strlen(lines[i]));
         SetTextColor(dc, RGB(255, 255, 255));
-        for (int i = 0; i < g_status_lines; i++) {
-            TextOutA(dc, 8, 8 + i * 16, g_status[i], (int)strlen(g_status[i]));
-        }
+        for (int i = 0; i < n; i++)
+            TextOutA(dc, 8, 8 + i * 16, lines[i], (int)strlen(lines[i]));
     }
 }
 
@@ -469,8 +504,7 @@ static void draw(WinPane *p, HDC dc) {
     if (g_present_fn != NULL) {
         WinPresentInfo info;
         const char *lines[10];
-        int i;
-        for (i = 0; i < g_status_lines && i < 10; i++) lines[i] = g_status[i];
+        int nlines = overlay_lines(p, lines);
         memset(&info, 0, sizeof(info));
         info.hwnd = p->hwnd;
         info.pane = (int)(p - g_pane);
@@ -482,7 +516,7 @@ static void draw(WinPane *p, HDC dc) {
         info.src_w = p->src_w;
         info.src_h = p->src_h;
         info.status = lines;
-        info.nstatus = (p == &g_pane[0] && win_debug()) ? g_status_lines : 0;
+        info.nstatus = nlines;
         if (g_present_fn(&info)) return;
     }
     bdc = back_buffer(p, dc, rc.right - rc.left, rc.bottom - rc.top);

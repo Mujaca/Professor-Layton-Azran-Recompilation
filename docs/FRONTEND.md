@@ -62,6 +62,12 @@ und die Fenstergeometrie (Sollwerte mit `Fraction` nachgerechnet).
   Die Konsolenausgabe (`[port] frames= ... gast=`, von `tools/scene.py`
   und Messungen gelesen) ist davon unabhaengig und bleibt. Reine Anzeige,
   kein Gastzustand.
+* **Nur FPS:** `--fps` oder `[debug] fps = 1` (`--no-fps` schaltet aus)
+  zeigt oben links nur die **Gast-fps** (`29.9 FPS`): Spielbilder je
+  Sekunde Wandzeit, gezaehlt wie `Gast-Frames=` und alle ~0,5 s neu
+  berechnet - die Bildrate des Spiels, nicht die des Fensters. Mit
+  `--debug` steht dieselbe Zeile ueber den Diagnosezeilen; die Titelzeile
+  zeigt dann auch `Gast-fps=`.
 
 ## Tastenbelegung: `port.ini` neben `port.exe`
 
@@ -98,6 +104,7 @@ scale = 1
 
 [debug]
 overlay = 0
+fps = 0
 ```
 
 Tastennamen: ein Buchstabe oder eine Ziffer (`X`, `7`), oder `Enter`,

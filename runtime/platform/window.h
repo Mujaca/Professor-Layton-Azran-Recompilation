@@ -12,6 +12,9 @@ void win_set_split(int on);   /* vor win_open: je Screen ein Fenster (ueberstimm
  * (Startoption) ueberstimmt port.ini; win_debug gilt nach win_open. */
 void win_set_debug(int on);
 int win_debug(void);
+/* Nur Gast-fps oben links (Statuszeile 0); port.ini [debug] fps = 1 oder
+ * --fps, --no-fps ueberstimmt. Mit Debug-Anzeige ist die Zeile ohnehin da. */
+void win_set_fps_overlay(int on);
 int win_pump(void);                              /* 1 = Fenster offen */
 void win_blit(const uint8_t *rgb, int w, int h);  /* RGB24 -> Fenster */
 void win_status(const char *text, int line);
