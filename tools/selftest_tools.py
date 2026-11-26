@@ -221,6 +221,44 @@ def test_framecheck():
          "Screenshotgroesse: %s" % data["shot_bytes"])
 
 
+def test_rendercmp():
+    """tools/rendercmp.py auf synthetischen Bildern: Rauschen von 1 LSB
+    zaehlt nicht als Befund, ein 6x6-Block mit +100 ist ein Cluster mit
+    richtiger Groesse/Lage im richtigen Screen."""
+    import numpy as np
+    from PIL import Image
+    import rendercmp
+    d = OUT / "rendercmp"
+    for sub in ("a", "b", "cmp"):
+        (d / sub).mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(1)
+    a = rng.integers(0, 150, (480, 400, 3), dtype=np.uint8)
+    b = a.copy()
+    b[:240:2, ::3, 0] += 1                     # Rauschen oben, 1 LSB
+    b[300:306, 100:106] += 100                 # Cluster unten (x 60..65)
+    Image.fromarray(a).save(d / "a" / "seq_000050.png")
+    Image.fromarray(b).save(d / "b" / "seq_000050.png")
+    Image.fromarray(a).save(d / "a" / "ziel.png")
+    Image.fromarray(a).save(d / "b" / "ziel.png")
+    rc = rendercmp.main([str(d / "a"), str(d / "b"), "--out", str(d / "cmp"),
+                         "--fail-cluster", "30"])
+    need(rc == 1, "Cluster >= 30 nicht gemeldet (rc %s)" % rc)
+    res = load_json(d / "cmp" / "cmp.json")
+    top, bot = res["seq_000050"]["top"], res["seq_000050"]["bottom"]
+    need(top["max"] == 1 and top["p8"] == 0.0 and not top["clusters"],
+         "Rauschen falsch bewertet: %s" % top)
+    need(abs(top["mad"][0] - 120 * 134 / 96000.0) < 0.01, "MAD oben: %s" % top["mad"])
+    cl = bot["clusters"]
+    need(len(cl) == 1 and cl[0]["pixels"] == 36 and
+         (cl[0]["x0"], cl[0]["y0"], cl[0]["x1"], cl[0]["y1"]) == (60, 60, 65, 65),
+         "Cluster unten: %s" % cl)
+    need(bot["max"] == 100 and abs(bot["p32"] - 100.0 * 36 / 76800) < 0.001,
+         "Kennzahlen unten: %s" % bot)
+    need(res["ziel"]["top"]["max"] == 0, "gleiche Bilder nicht gleich")
+    need((d / "cmp" / "sheet_seq_000050.png").is_file(), "Kontaktbogen fehlt")
+    need(not (d / "cmp" / "sheet_ziel.png").exists(), "Kontaktbogen ohne Befund")
+
+
 def test_pica_regs():
     p = subprocess.run(
         [sys.executable, str(ROOT / "tools" / "test_pica_c.py")],
@@ -487,6 +525,7 @@ TESTS = [
     ("diff-trace Anker + Missing", test_diff_trace),
     ("milestones Fixture", test_milestones),
     ("framecheck Platzhalter", test_framecheck),
+    ("rendercmp SW/HW-Bildvergleich", test_rendercmp),
     ("PICA-Registermap", test_pica_regs),
     ("IMGC ETC1/linear", test_imgc_decoder),
     ("BLX-Zielmodus im Scan", test_call_mode),

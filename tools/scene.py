@@ -303,7 +303,7 @@ def run_scene(name, a):
         raise SystemExit("Fixture fehlt: %s (siehe docs/TOOLS.md, Abschnitt Szenen)" % fix)
     if not PORT.is_file():
         raise SystemExit("out/port.exe fehlt (python tools/build.py)")
-    out = OUTBASE / name
+    out = OUTBASE / (name + ("-" + a.tag if a.tag else ""))
     out.mkdir(parents=True, exist_ok=True)
     for f in out.glob("*"):          # nur Dateien der letzten Szene, keine Ordner-Rekursion
         if f.is_file():
@@ -390,7 +390,7 @@ def check_repro(name, a):
         if not run_scene(name, a):
             print("   Lauf %d fehlgeschlagen" % (i + 1))
             return False
-        runs.append(frame_hashes(name))
+        runs.append(frame_hashes(name + ("-" + a.tag if a.tag else "")))
     keys = list(runs[0])
     same = [k for k in keys if runs[1].get(k) == runs[0][k]]
     diff = [k for k in keys if k not in same] + [k for k in runs[1] if k not in runs[0]]
@@ -406,6 +406,8 @@ def main():
     ap.add_argument("scene", nargs="*", help="Szene(n): " + ", ".join(SCENES))
     ap.add_argument("--list", action="store_true", help="Szenen und Fixtures auflisten")
     ap.add_argument("--renderer", choices=["hw", "soft"], default="hw")
+    ap.add_argument("--tag", default="",
+                    help="Ausgabe nach scratch/scene/<szene>-<tag>/ (z. B. soft/hw fuer tools/imgcmp.py)")
     ap.add_argument("--every", type=int, default=0, help="zusaetzlich alle N Gast-Frames ein Bild")
     ap.add_argument("--every-host", type=int, default=0,
                     help="Bildfolge alle N Host-Frames (Standbilder: Gast-Zaehler steht)")

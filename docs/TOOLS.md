@@ -14,6 +14,7 @@ Alle Python-Tools liegen in `tools/`. Wegwerfskripte gehören nach `scratch/`
 | `python tools/frontier.py` | **Fortschrittsmetrik**: natürlicher Boot gegen Azahar-Referenz |
 | `python tools/check.py` | Gate vor jedem Commit (Tests + Build + Frontier) |
 | `python tools/scene.py <szene>` | Standard-Szene aus Fixture-Spielstand anfahren, Bild/Log/WAV/Profil nach `scratch/scene/<szene>/` (siehe unten) |
+| `python tools/rendercmp.py <A> <B>` | Bildvergleich Software- gegen Hardware-Renderer auf denselben Gast-Frames (M9, siehe Szenen) |
 
 ## Szenen (`tools/scene.py`)
 
@@ -31,6 +32,7 @@ python tools/scene.py raetsel1 --wav --profile   # Continue Slot 2 (Spielstand n
 python tools/scene.py fixture-raetsel1           # erzeugt den Slot-2-Spielstand neu (~3 min)
 python tools/scene.py froenborg --every 150 --extra 600   # Bildfolge, 600 Gast-Frames laenger
 python tools/scene.py titel --press touch@g2550:20:160:64 --target 2850   # eigene Eingaben
+python tools/scene.py froenborg --renderer soft --tag soft --every 50      # -> scratch/scene/froenborg-soft/
 ```
 
 * Je Lauf wird der Fixture-Spielstand `out/fixtures/saves/<fixture>/`
@@ -44,6 +46,21 @@ python tools/scene.py titel --press touch@g2550:20:160:64 --target 2850   # eige
   Eingaben laufen als `--press` in **Gast-Frames** (`g`-Praefix), das Ende
   per `--frames-guest`. Standard `--renderer hw`. Echte Fenstereingaben
   ignoriert port.exe in diesem Modus (nur `--press` wirkt).
+* `--tag T`: Ausgabe nach `scratch/scene/<szene>-T/` statt `<szene>/`
+  (z. B. `soft`/`hw` fuer den Bildvergleich).
+* SW/HW-Bildvergleich (M9): beide Renderer mit `--tag soft`/`--tag hw` und
+  derselben `--every`-Folge fahren, dann
+  `python tools/rendercmp.py scratch/scene/<szene>-soft scratch/scene/<szene>-hw`.
+  Je Bild und Screen (oben 400x240, unten 320x240): mittlere absolute
+  Abweichung je Kanal, Anteil Pixel mit max. Kanalabweichung > 8 und > 32,
+  Maximum und Cluster grosser Abweichungen (> 32, zusammenhaengend nach
+  3x3-Dilatation, ab `--cluster-min` Pixeln, Standard 16) mit Bounding-Box.
+  Ausgabe `<B>-cmp/`: `cmp.txt`, `cmp.json`, `heat_*.png` (schwarz gleich,
+  dunkelblau 1..8, gelb 9..32, rot > 32) und `sheet_*.png` (A | B |
+  Heatmap) fuer Bilder mit Cluster (`--sheets all`: alle). `--fail-cluster
+  N`: Exit 1 ab einem Cluster mit N Pixeln. Spielbilder nur in `scratch/`.
+  Selbsttest: `tools/selftest_tools.py` (synthetische Bilder). Stand und
+  Befunde: `docs/GAME_NOTES.md`, Abschnitt "SW/HW-Bildvergleich".
 * `--repro`: Szene zweimal fahren, SHA-1 der Bildfolge (`--every`, Standard
   50 Gast-Frames) und des Endbilds vergleichen; Exit 1 bei Abweichung.
   Stand 2026-11-26: `froenborg` und `raetsel1` je 89/89 Bilder gleich
