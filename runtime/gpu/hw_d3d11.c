@@ -27,9 +27,16 @@
  *     eine Kopie des Ziels gerechnet (exakt wie sw_framebuffer.cpp).
  *   - Stencil 0x105/0x106 ueber D3D11-DepthStencilState (D24S8).
  *   - Fog 0xE0/0xE1/0xE8..0xEF wie WriteFog im Software-Pfad.
+ *   - Fragment-Lighting 0x140..0x1D9 im Pixelshader (light_frag), Schritt
+ *     fuer Schritt wie p_compute_fragments (Azahar sw_lighting.cpp
+ *     ComputeFragmentsColors): bis 8 Lichter, alle 24 LUTs (Wert+Differenz
+ *     als Buffer<float2>, nur geaenderte Zeilen werden hochgeladen),
+ *     Abs/Skalierung/Eingaenge 0x1D0..0x1D2, Bump-/Tangenten-Modi,
+ *     Clamp-Highlights, Geometriefaktoren, Schatten, Fresnel.
+ *     Quaternion/View/tc0_w interpoliert D3D perspektivkorrekt.
  * Tiefen-/Stencilziel wird aus dem Gastpuffer geladen und beim Flush
  * zurueckgeschrieben (D16/D24/D24S8).
- * Noch nicht enthalten: Fragment-Lighting, W-Buffer, prozedurale Textur,
+ * Noch nicht enthalten: W-Buffer, prozedurale Textur,
  * Cube-/Shadow-/Projection-Texturen. gpu.c nutzt den Hardware-Pfad nur, wenn
  * der Draw-Zustand dazu passt, sonst bleibt der Software-Pfad aktiv.
  */
@@ -40,6 +47,7 @@
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <dxgi.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -93,6 +101,64 @@ static ID3D11VertexShader *g_vs;
 static ID3D11PixelShader *g_ps;
 static ID3D11InputLayout *g_layout;
 static ID3D11Buffer *g_cb;
+static ID3D11Buffer *g_lcb;                 /* Lighting-Constant-Buffer (b1) */
+static ID3D11Buffer *g_lut_buf;             /* 24 x 256 float2 (t4) */
+static ID3D11ShaderResourceView *g_lut_srv;
+static float g_lut_cpu[24][256][2];         /* Stand des GPU-Buffers */
+static uint32_t g_lut_gen_seen;
+static uint32_t g_lut_rowgen_seen[24];
+static int g_lut_valid;
+
+/* Layout exakt wie cbuffer LightCB in k_hlsl (69 x 16 Byte). */
+typedef struct {
+    uint32_t cfg[4];
+    float gal[4];
+    uint32_t in[4];
+    float scl[8];
+    float pos[8][4];
+    float spot[8][4];
+    float spec0[8][4];
+    float spec1[8][4];
+    float diff[8][4];
+    float amb[8][4];
+    float dist[8][4];
+    uint32_t flag[8][4];
+} LightCbData;
+
+static LightCbData g_lcb_last;
+static int g_lcb_valid;
+
+/* ---- Dreiecks-Batching -------------------------------------------------
+ * gpu.c uebergibt jedes geclippte Dreieck einzeln (hw_begin_draw +
+ * hw_triangles). Solange der Eingangszustand byte-gleich bleibt (memcmp
+ * gegen g_state_in, dieselbe Texturgeneration, keine Invalidierung
+ * dazwischen), werden die Dreiecke nur gesammelt und spaeter mit EINEM
+ * Draw aus einem dynamischen Vertexpuffer gezeichnet. D3D11 haelt die
+ * Reihenfolge der Primitive innerhalb eines Draws ein (Tiefe, Stencil,
+ * Blending), das Ergebnis ist dasselbe wie mit Einzel-Draws.
+ * LogicOp/Shader-Blending lesen eine Momentaufnahme des Ziels (g_color_shadow)
+ * vor dem Draw. Die Momentaufnahme entsteht deshalb direkt vor jedem
+ * Batch-Draw, und ein Batch nimmt nur Dreiecke auf, deren Pixel sich nicht
+ * mit einem frueheren Dreieck desselben Batches ueberschneiden (Abdeckung
+ * je Pixel in g_cov nach den D3D11-Rasterregeln: 16.8-Festkomma,
+ * Pixelmitte, Top-Left-Regel). Ueberschneidung -> Batch zeichnen,
+ * neue Momentaufnahme. So liest jedes Fragment genau den Zielwert, den
+ * Einzel-Draws (und der Software-Pfad) sehen wuerden. */
+#define HW_PEND_CAP 6144                 /* Vertices im CPU-Puffer */
+#define HW_VB_CAP   (HW_PEND_CAP * 16)   /* Vertices im D3D-Ringpuffer */
+static ID3D11Buffer *g_vb;
+static UINT g_vb_pos;
+static HwVertex g_pend[HW_PEND_CAP];
+static int g_pend_n;
+static HwDrawState g_state_in;           /* Eingangszustand des Batches */
+static int g_batch_ok;                   /* g_state_in gilt fuer den Fast-Path */
+static unsigned long long g_batches;     /* tatsaechliche D3D-Draws */
+static int g_cov_track;                  /* Batch braucht Momentaufnahme */
+static unsigned g_begin_serial;          /* volle hw_begin_draw-Aufrufe */
+static uint16_t *g_cov;                  /* Batch-Id je Pixel */
+static int g_cov_w, g_cov_h;
+static uint16_t g_cov_id = 1;
+static int g_cov_x0, g_cov_y0, g_cov_x1 = -1, g_cov_y1 = -1;  /* Batch-Rechteck */
 static ID3D11RasterizerState *g_rs;
 static ID3D11DepthStencilState *g_dss;
 static ID3D11BlendState *g_bs;
@@ -172,6 +238,9 @@ static uint32_t g_list_serial;      /* hw_list_begin() */
 static unsigned long long g_tex_upload_us;
 static unsigned long long g_tex_upload_key, g_tex_upload_hash;  /* Diagnose */
 static int g_tex_diag = -1;         /* HLE_GTIME/HLE_HW_STATE (nur Diagnose) */
+/* Diagnose (HLE_GTIME): Wandzeit je Abschnitt des HW-Pfads. */
+static unsigned long long g_dg_flush_us, g_dg_wait_us, g_dg_begin_us, g_dg_tri_us;
+static unsigned long long g_dg_hash_us, g_dg_lists, g_dg_ovl, g_dg_trk;
 
 static unsigned long long hw_now_us(void)
 {
@@ -209,10 +278,13 @@ void hw_texture_stats(unsigned long long *uploads, unsigned long long *decode_us
 unsigned long long hw_depth_writes(void) { return g_depth_writes; }
 unsigned long long hw_target_loads(void) { return g_target_loads; }
 int hw_available(void) { return g_ready; }
-void hw_invalidate_guest(void) { g_guest_dirty = 1; g_rendered = 0; }
+void hw_invalidate_guest(void) {
+    g_guest_dirty = 1; g_rendered = 0; g_pend_n = 0; g_batch_ok = 0;
+}
 void hw_invalidate_textures(void)
 {
     int i;
+    g_batch_ok = 0;
     for (i = 0; i < HW_TEX_CACHE_N; i++) g_texcache[i].stale = 1;
 }
 /* Nur Slots, deren Quellbytes den Bereich ueberlappen, muessen neu geprueft
@@ -222,6 +294,7 @@ void hw_invalidate_texture_range(uint32_t offset, uint32_t bytes)
 {
     int i;
     if (bytes == 0u) return;
+    g_batch_ok = 0;
     for (i = 0; i < HW_TEX_CACHE_N; i++) {
         HwTexSlot *s = &g_texcache[i];
         if (!s->valid) continue;
@@ -234,6 +307,8 @@ void hw_sync_guest(void)
 {
     if (g_have_state && g_rendered && !g_guest_dirty) hw_flush_to_guest();
     /* Zielzustand verwerfen: der naechste HW-Draw laedt neu aus dem Gast. */
+    g_pend_n = 0;
+    g_batch_ok = 0;
     g_have_state = 0;
     g_rendered = 0;
     g_guest_dirty = 0;
@@ -262,20 +337,38 @@ static const char *k_hlsl =
     "  uint4  k_fog;\n"
     "  uint4  k_fog_lut[128];\n"
     "};\n"
+    "cbuffer LightCB : register(b1) {\n"
+    "  uint4  l_cfg;\n"
+    "  float4 l_gal;\n"
+    "  uint4  l_in;\n"
+    "  float4 l_scl[2];\n"
+    "  float4 l_pos[8];\n"
+    "  float4 l_spot[8];\n"
+    "  float4 l_spec0[8];\n"
+    "  float4 l_spec1[8];\n"
+    "  float4 l_diff[8];\n"
+    "  float4 l_amb[8];\n"
+    "  float4 l_dist[8];\n"
+    "  uint4  l_flag[8];\n"
+    "};\n"
     "Texture2D tex0 : register(t0);\n"
     "Texture2D tex1 : register(t1);\n"
     "Texture2D tex2 : register(t2);\n"
     "Texture2D tshadow : register(t3);\n"
+    "Buffer<float2> g_lut : register(t4);\n"
     "struct VSIn { float4 pos : POSITION; float4 col : COLOR0;\n"
-    "              float2 uv0 : TEXCOORD0; float2 uv1 : TEXCOORD1; float2 uv2 : TEXCOORD2; };\n"
+    "              float2 uv0 : TEXCOORD0; float2 uv1 : TEXCOORD1; float2 uv2 : TEXCOORD2;\n"
+    "              float4 quat : TEXCOORD3; float4 vt : TEXCOORD4; };\n"
     "struct VSOut { float4 pos : SV_Position; float4 col : COLOR0;\n"
-    "               float2 uv0 : TEXCOORD0; float2 uv1 : TEXCOORD1; float2 uv2 : TEXCOORD2; };\n"
+    "               float2 uv0 : TEXCOORD0; float2 uv1 : TEXCOORD1; float2 uv2 : TEXCOORD2;\n"
+    "               float4 quat : TEXCOORD3; float4 vt : TEXCOORD4; };\n"
     "struct PSOut { float4 col : SV_Target0; float4 dep : SV_Target1; float d : SV_Depth; };\n"
     "VSOut VSMain(VSIn i) {\n"
     "  VSOut o;\n"
     "  o.pos = float4(i.pos.x, -i.pos.y, -i.pos.z, i.pos.w);\n"
     "  o.col = i.col;\n"
     "  o.uv0 = i.uv0; o.uv1 = i.uv1; o.uv2 = i.uv2;\n"
+    "  o.quat = i.quat; o.vt = i.vt;\n"
     "  return o;\n"
     "}\n"
     "bool pica_cmp(uint fn, uint a, uint b) {\n"
@@ -466,6 +559,141 @@ static const char *k_hlsl =
     "  if (eq == 4u) return (max(s, d)) / 255;\n"
     "  return (s + d) / 255;\n"
     "}\n"
+    "/* ---- Fragment-Lighting: p_compute_fragments (gpu.c) Schritt fuer Schritt */\n"
+    "float lut_get(uint l, uint idx, float delta) {\n"
+    "  float2 e = g_lut.Load((int)(l * 256u + (idx & 255u)));\n"
+    "  return e.x + e.y * delta;\n"
+    "}\n"
+    "float3 safe_norm(float3 v) {\n"
+    "  float l = sqrt(dot(v, v));\n"
+    "  return (l != 0.0) ? v / l : v;\n"
+    "}\n"
+    "float3 qrot(float4 q, float3 v) {\n"
+    "  float3 t = cross(q.xyz, v) + v * q.w;\n"
+    "  return v + 2.0 * cross(q.xyz, t);\n"
+    "}\n"
+    "uint4 pick_tex(uint s, uint4 t0, uint4 t1, uint4 t2) {\n"
+    "  if (s == 0u) return t0;\n"
+    "  if (s == 1u) return t1;\n"
+    "  if (s == 2u) return t2;\n"
+    "  return uint4(0, 0, 0, 0);\n"
+    "}\n"
+    "float lut_sample(uint slot, uint lut, uint lcfg, float3 N, float3 H, float3 V,\n"
+    "                 float3 L, float3 S, float3 T) {\n"
+    "  uint inp = (l_in.x >> (4u * slot)) & 7u;\n"
+    "  float r = 0.0;\n"
+    "  if (inp == 0u) r = dot(N, safe_norm(H));\n"
+    "  else if (inp == 1u) r = dot(V, safe_norm(H));\n"
+    "  else if (inp == 2u) r = dot(N, V);\n"
+    "  else if (inp == 3u) r = dot(L, N);\n"
+    "  else if (inp == 4u) r = dot(L, S);\n"
+    "  else if (inp == 5u && l_cfg.z == 8u) {\n"
+    "    float3 nh = safe_norm(H);\n"
+    "    float3 pr = nh - N * dot(N, nh);\n"
+    "    r = dot(pr, T);\n"
+    "  }\n"
+    "  uint idx;\n"
+    "  float delta;\n"
+    "  if (((l_in.y >> slot) & 1u) != 0u) {\n"
+    "    if ((lcfg & 2u) != 0u) r = abs(r);\n"
+    "    else if (r < 0.0) r = 0.0;\n"
+    "    float f = clamp(floor(r * 256.0), 0.0, 255.0);\n"
+    "    idx = (uint)f;\n"
+    "    delta = r * 256.0 - f;\n"
+    "  } else {\n"
+    "    float f = clamp(floor(r * 128.0), -128.0, 127.0);\n"
+    "    int si = (int)f;\n"
+    "    delta = r * 128.0 - f;\n"
+    "    idx = ((uint)si) & 255u;\n"
+    "  }\n"
+    "  return l_scl[slot >> 2][slot & 3u] * lut_get(lut, idx, delta);\n"
+    "}\n"
+    "void light_frag(float4 quat_in, float3 view, uint4 t0, uint4 t1, uint4 t2,\n"
+    "                out uint4 pfc, out uint4 sfc) {\n"
+    "  uint c0 = l_cfg.x;\n"
+    "  float4 q = quat_in;\n"
+    "  float ql = sqrt(dot(q, q));\n"
+    "  if (ql != 0.0) q = q / ql;\n"
+    "  float4 shadow = float4(1.0, 1.0, 1.0, 1.0);\n"
+    "  if ((c0 & 1u) != 0u) {\n"
+    "    shadow = (float4)pick_tex((c0 >> 24) & 3u, t0, t1, t2) / 255.0;\n"
+    "    if ((c0 & (1u << 18)) != 0u) shadow = 1.0 - shadow;\n"
+    "  }\n"
+    "  float3 sn = float3(0.0, 0.0, 0.0), st = float3(0.0, 0.0, 0.0);\n"
+    "  uint bump = (c0 >> 28) & 3u;\n"
+    "  if (bump != 0u) {\n"
+    "    float3 pert = (float3)pick_tex((c0 >> 22) & 3u, t0, t1, t2).rgb / 127.5 - 1.0;\n"
+    "    if (bump == 1u) {\n"
+    "      if ((c0 & (1u << 30)) == 0u) {\n"
+    "        float z2 = 1.0 - (pert.x * pert.x + pert.y * pert.y);\n"
+    "        pert.z = sqrt(z2 > 0.0 ? z2 : 0.0);\n"
+    "      }\n"
+    "      sn = pert;\n"
+    "      st = float3(1.0, 0.0, 0.0);\n"
+    "    } else if (bump == 2u) {\n"
+    "      sn = float3(0.0, 0.0, 1.0);\n"
+    "      st = pert;\n"
+    "    }\n"
+    "  } else {\n"
+    "    sn = float3(0.0, 0.0, 1.0);\n"
+    "    st = float3(1.0, 0.0, 0.0);\n"
+    "  }\n"
+    "  float3 N = qrot(q, sn);\n"
+    "  float3 T = qrot(q, st);\n"
+    "  float3 V = safe_norm(view);\n"
+    "  float4 dsum = float4(0.0, 0.0, 0.0, 1.0);\n"
+    "  float4 ssum = float4(0.0, 0.0, 0.0, 1.0);\n"
+    "  [loop] for (uint li = 0u; li < l_cfg.w; li++) {\n"
+    "    uint lcfg = l_flag[li].x, num = l_flag[li].y, en = l_flag[li].z;\n"
+    "    float3 lv = ((lcfg & 1u) != 0u) ? l_pos[li].xyz : l_pos[li].xyz + view;\n"
+    "    float len = sqrt(dot(lv, lv));\n"
+    "    if (len != 0.0) lv = lv / len;\n"
+    "    float3 hv = V + lv;\n"
+    "    float3 S = l_spot[li].xyz;\n"
+    "    float dist = 1.0, spot = 1.0, d0 = 1.0, d1 = 1.0;\n"
+    "    if ((en & 1u) != 0u) {\n"
+    "      float sl = saturate(l_dist[li].x * len + l_dist[li].y);\n"
+    "      float f = clamp(floor(sl * 256.0), 0.0, 255.0);\n"
+    "      dist = lut_get(16u + num, (uint)f, sl * 256.0 - f);\n"
+    "    }\n"
+    "    if ((en & 2u) != 0u) spot = lut_sample(0u, 8u + num, lcfg, N, hv, V, lv, S, T);\n"
+    "    if ((en & 4u) != 0u) d0 = lut_sample(1u, 0u, lcfg, N, hv, V, lv, S, T);\n"
+    "    float3 s0 = d0 * l_spec0[li].rgb;\n"
+    "    float3 refl;\n"
+    "    refl.r = ((en & 128u) != 0u) ? lut_sample(4u, 6u, lcfg, N, hv, V, lv, S, T) : 1.0;\n"
+    "    refl.g = ((en & 256u) != 0u) ? lut_sample(5u, 5u, lcfg, N, hv, V, lv, S, T) : refl.r;\n"
+    "    refl.b = ((en & 512u) != 0u) ? lut_sample(6u, 4u, lcfg, N, hv, V, lv, S, T) : refl.r;\n"
+    "    if ((en & 8u) != 0u) d1 = lut_sample(2u, 1u, lcfg, N, hv, V, lv, S, T);\n"
+    "    float3 s1 = d1 * refl * l_spec1[li].rgb;\n"
+    "    if ((en & 16u) != 0u) {\n"
+    "      float fr = lut_sample(3u, 3u, lcfg, N, hv, V, lv, S, T);\n"
+    "      if ((c0 & 4u) != 0u) dsum.a = fr;\n"
+    "      if ((c0 & 8u) != 0u) ssum.a = fr;\n"
+    "    }\n"
+    "    float dp = dot(lv, N);\n"
+    "    if ((lcfg & 2u) != 0u) dp = abs(dp);\n"
+    "    else if (dp < 0.0) dp = 0.0;\n"
+    "    float clampf = 1.0;\n"
+    "    if ((c0 & (1u << 27)) != 0u) clampf = (dp == 0.0) ? 0.0 : 1.0;\n"
+    "    if ((lcfg & 0xCu) != 0u) {\n"
+    "      float g = dot(hv, hv);\n"
+    "      g = (g == 0.0) ? 0.0 : min(dp / g, 1.0);\n"
+    "      if ((lcfg & 4u) != 0u) s0 = s0 * g;\n"
+    "      if ((lcfg & 8u) != 0u) s1 = s1 * g;\n"
+    "    }\n"
+    "    float3 sp = ((en & 32u) != 0u) ? shadow.rgb : float3(1.0, 1.0, 1.0);\n"
+    "    float3 ss = ((en & 64u) != 0u) ? shadow.rgb : float3(1.0, 1.0, 1.0);\n"
+    "    dsum.rgb += (l_diff[li].rgb * dp * sp + l_amb[li].rgb) * dist * spot;\n"
+    "    ssum.rgb += (s0 + s1) * clampf * dist * spot * ss;\n"
+    "  }\n"
+    "  if ((c0 & (1u << 19)) != 0u) {\n"
+    "    if ((c0 & 4u) != 0u) dsum.a *= shadow.a;\n"
+    "    if ((c0 & 8u) != 0u) ssum.a *= shadow.a;\n"
+    "  }\n"
+    "  dsum.rgb += l_gal.rgb;\n"
+    "  pfc = (uint4)(saturate(dsum) * 255.0);\n"
+    "  sfc = (uint4)(saturate(ssum) * 255.0);\n"
+    "}\n"
     "PSOut PSMain(VSOut i) {\n"
     "  PSOut o;\n"
     "  uint4 prim = (uint4)round(saturate(i.col) * 255.0);\n"
@@ -474,6 +702,7 @@ static const char *k_hlsl =
     "  uint4 t0 = sample_unit(0, i.uv0);\n"
     "  uint4 t1 = sample_unit(1, i.uv1);\n"
     "  uint4 t2 = sample_unit(2, i.uv2);\n"
+    "  if (l_cfg.w != 0u) light_frag(i.quat, i.vt.xyz, t0, t1, t2, pfc, sfc);\n"
     "  uint4 res = zero;\n"
     "  uint bcol = k_buf.y;\n"
     "  uint4 nxt = uint4(bcol & 0xFFu, (bcol >> 8) & 0xFFu, (bcol >> 16) & 0xFFu, (bcol >> 24) & 0xFFu);\n"
@@ -527,6 +756,7 @@ static const char *k_hlsl =
     "  }\n"
     "  float d = (0.0 - i.pos.z) * k_param.x + k_param.y;\n"
     "  d = saturate(d);\n"
+    "  float dq = (k_param.z > 0.0) ? floor(d * k_param.z) / k_param2.z : d;\n"
     "  if (k_fog.x == 5u) {\n"
     "    float fog_index = ((k_fog.y != 0u) ? (1.0 - d) : d) * 128.0;\n"
     "    float fi = clamp(floor(fog_index), 0.0, 127.0);\n"
@@ -566,8 +796,8 @@ static const char *k_hlsl =
     "    }\n"
     "  }\n"
     "  o.col = float4(res.rgb, res.a) / 255.0;\n"
-    "  o.dep = float4(d, d, d, 1.0);\n"
-    "  o.d = d;\n"
+    "  o.dep = float4(dq, dq, dq, 1.0);\n"
+    "  o.d = dq;\n"
     "  return o;\n"
     "}\n";
 
@@ -670,11 +900,11 @@ static void depth_to_guest(const HwDrawState *st, const unsigned char *base,
                 z = (uint32_t)(f * 16777216.0f);
                 if (z > 0xFFFFFFu) z = 0xFFFFFFu;
             }
+            /* Wie p_depth_set: D16 = 2 Byte, D24/D24S8 = 3 Byte. */
             st->depth_mem[off] = (unsigned char)(z & 0xFFu);
-            if (st->depth_format != 0u) {
-                st->depth_mem[off + 1u] = (unsigned char)((z >> 8) & 0xFFu);
+            st->depth_mem[off + 1u] = (unsigned char)((z >> 8) & 0xFFu);
+            if (st->depth_format != 0u)
                 st->depth_mem[off + 2u] = (unsigned char)((z >> 16) & 0xFFu);
-            }
             if (st->depth_format == 3u)
                 st->depth_mem[off + 3u] = (unsigned char)(s & 0xFFu);
         }
@@ -926,7 +1156,7 @@ static int create_targets(const HwDrawState *st) {
 }
 
 static int init_pipeline(void) {
-    D3D11_INPUT_ELEMENT_DESC elems[5];
+    D3D11_INPUT_ELEMENT_DESC elems[7];
     ID3DBlob *vsb = NULL, *psb = NULL, *err = NULL;
     D3D11_BUFFER_DESC bd;
     D3D11_RASTERIZER_DESC rd;
@@ -970,7 +1200,14 @@ static int init_pipeline(void) {
     elems[4].SemanticName = "TEXCOORD"; elems[4].SemanticIndex = 2;
     elems[4].Format = DXGI_FORMAT_R32G32_FLOAT;
     elems[4].AlignedByteOffset = 48;
+    elems[5].SemanticName = "TEXCOORD"; elems[5].SemanticIndex = 3;
+    elems[5].Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    elems[5].AlignedByteOffset = 56;           /* quat */
+    elems[6].SemanticName = "TEXCOORD"; elems[6].SemanticIndex = 4;
+    elems[6].Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    elems[6].AlignedByteOffset = 72;           /* view.xyz, tc0_w */
     elems[2].InputSlotClass = elems[3].InputSlotClass = elems[4].InputSlotClass =
+        elems[5].InputSlotClass = elems[6].InputSlotClass =
         D3D11_INPUT_PER_VERTEX_DATA;
     if (FAILED(ID3D11Device_CreateVertexShader(g_dev, ID3D10Blob_GetBufferPointer(vsb),
                                                ID3D10Blob_GetBufferSize(vsb), NULL, &g_vs))) {
@@ -980,7 +1217,7 @@ static int init_pipeline(void) {
                                               ID3D10Blob_GetBufferSize(psb), NULL, &g_ps))) {
         ID3D10Blob_Release(vsb); ID3D10Blob_Release(psb); return 0;
     }
-    if (FAILED(ID3D11Device_CreateInputLayout(g_dev, elems, 5,
+    if (FAILED(ID3D11Device_CreateInputLayout(g_dev, elems, 7,
                                               ID3D10Blob_GetBufferPointer(vsb),
                                               ID3D10Blob_GetBufferSize(vsb), &g_layout))) {
         ID3D10Blob_Release(vsb); ID3D10Blob_Release(psb); return 0;
@@ -996,6 +1233,42 @@ static int init_pipeline(void) {
     bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_cb))) return 0;
+
+    /* Dynamischer Vertex-Ringpuffer fuer die gebuendelten Dreiecke. */
+    {
+        D3D11_BUFFER_DESC vd;
+        memset(&vd, 0, sizeof(vd));
+        vd.ByteWidth = (UINT)(sizeof(HwVertex) * (size_t)HW_VB_CAP);
+        vd.Usage = D3D11_USAGE_DYNAMIC;
+        vd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        vd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (FAILED(ID3D11Device_CreateBuffer(g_dev, &vd, NULL, &g_vb))) return 0;
+        g_vb_pos = 0;
+    }
+
+    /* Lighting-Constant-Buffer (LightCB, b1) */
+    bd.ByteWidth = (UINT)sizeof(LightCbData);
+    if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_lcb))) return 0;
+
+    /* Lighting-LUTs: 24 x 256 float2 (Wert, Differenz) */
+    {
+        D3D11_BUFFER_DESC lb;
+        D3D11_SHADER_RESOURCE_VIEW_DESC lv;
+        memset(&lb, 0, sizeof(lb));
+        lb.ByteWidth = (UINT)sizeof(g_lut_cpu);
+        lb.Usage = D3D11_USAGE_DEFAULT;
+        lb.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(ID3D11Device_CreateBuffer(g_dev, &lb, NULL, &g_lut_buf))) return 0;
+        memset(&lv, 0, sizeof(lv));
+        lv.Format = DXGI_FORMAT_R32G32_FLOAT;
+        lv.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+        lv.Buffer.FirstElement = 0;
+        lv.Buffer.NumElements = 24u * 256u;
+        if (FAILED(ID3D11Device_CreateShaderResourceView(
+                g_dev, (ID3D11Resource *)g_lut_buf, &lv, &g_lut_srv)))
+            return 0;
+        g_lut_valid = 0;
+    }
 
     memset(&rd, 0, sizeof(rd));
     rd.FillMode = D3D11_FILL_SOLID;
@@ -1089,6 +1362,15 @@ void hw_shutdown(void) {
     if (g_dss) { ID3D11DepthStencilState_Release(g_dss); g_dss = NULL; }
     if (g_rs) { ID3D11RasterizerState_Release(g_rs); g_rs = NULL; }
     if (g_cb) { ID3D11Buffer_Release(g_cb); g_cb = NULL; }
+    if (g_lcb) { ID3D11Buffer_Release(g_lcb); g_lcb = NULL; }
+    if (g_vb) { ID3D11Buffer_Release(g_vb); g_vb = NULL; }
+    free(g_cov); g_cov = NULL; g_cov_w = g_cov_h = 0;
+    g_pend_n = 0;
+    g_batch_ok = 0;
+    if (g_lut_srv) { ID3D11ShaderResourceView_Release(g_lut_srv); g_lut_srv = NULL; }
+    if (g_lut_buf) { ID3D11Buffer_Release(g_lut_buf); g_lut_buf = NULL; }
+    g_lut_valid = 0;
+    g_lcb_valid = 0;
     if (g_layout) { ID3D11InputLayout_Release(g_layout); g_layout = NULL; }
     if (g_ps) { ID3D11PixelShader_Release(g_ps); g_ps = NULL; }
     if (g_vs) { ID3D11VertexShader_Release(g_vs); g_vs = NULL; }
@@ -1114,6 +1396,85 @@ typedef union {
     float f[700];
     uint32_t u[700];
 } CbData;
+
+/* LUT-Zeilen nur bei geaenderter Generation pruefen und nur geaenderte
+ * Zeilen (2 KB) hochladen: der Titel laedt LUTs oft je Material neu. */
+static void light_upload_luts(const HwLighting *hl)
+{
+    static float row[256][2];
+    uint32_t l, i;
+    if (hl->lut_val == NULL || hl->lut_diff == NULL) return;
+    if (g_lut_valid && hl->lut_gen == g_lut_gen_seen) return;
+    for (l = 0; l < 24u; l++) {
+        /* Nur LUTs mit neuen Schreibzugriffen pruefen (der Titel laedt
+           LUTs je Material neu, meist mit demselben Inhalt). */
+        if (g_lut_valid && hl->lut_rowgen != NULL &&
+            hl->lut_rowgen[l] == g_lut_rowgen_seen[l])
+            continue;
+        if (hl->lut_rowgen != NULL) g_lut_rowgen_seen[l] = hl->lut_rowgen[l];
+        for (i = 0; i < 256u; i++) {
+            row[i][0] = hl->lut_val[l * 256u + i];
+            row[i][1] = hl->lut_diff[l * 256u + i];
+        }
+        if (!g_lut_valid || memcmp(row, g_lut_cpu[l], sizeof(row)) != 0) {
+            D3D11_BOX box;
+            memcpy(g_lut_cpu[l], row, sizeof(row));
+            box.left = (UINT)(l * sizeof(row));
+            box.right = (UINT)((l + 1u) * sizeof(row));
+            box.top = 0; box.bottom = 1; box.front = 0; box.back = 1;
+            ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)g_lut_buf,
+                                                  0, &box, row, 0, 0);
+        }
+    }
+    g_lut_valid = 1;
+    g_lut_gen_seen = hl->lut_gen;
+}
+
+static void set_light_constants(const HwDrawState *st)
+{
+    LightCbData cb;
+    D3D11_MAPPED_SUBRESOURCE map;
+    const HwLighting *hl = &st->light;
+    uint32_t i;
+
+    memset(&cb, 0, sizeof(cb));
+    if (hl->enabled) {
+        light_upload_luts(hl);
+        cb.cfg[0] = hl->config0;
+        cb.cfg[1] = hl->config1;
+        cb.cfg[2] = hl->config;
+        cb.cfg[3] = hl->nlights > 8u ? 8u : hl->nlights;
+        cb.gal[0] = hl->gal[0]; cb.gal[1] = hl->gal[1]; cb.gal[2] = hl->gal[2];
+        cb.in[0] = hl->inputs;
+        cb.in[1] = hl->abs_bits;
+        for (i = 0; i < 7u; i++) cb.scl[i] = hl->scale[i];
+        for (i = 0; i < cb.cfg[3]; i++) {
+            const HwLight *h = &hl->light[i];
+            memcpy(cb.pos[i], h->position, 3 * sizeof(float));
+            memcpy(cb.spot[i], h->spot_dir, 3 * sizeof(float));
+            memcpy(cb.spec0[i], h->spec0, 3 * sizeof(float));
+            memcpy(cb.spec1[i], h->spec1, 3 * sizeof(float));
+            memcpy(cb.diff[i], h->diffuse, 3 * sizeof(float));
+            memcpy(cb.amb[i], h->ambient, 3 * sizeof(float));
+            cb.dist[i][0] = h->dist_scale;
+            cb.dist[i][1] = h->dist_bias;
+            cb.flag[i][0] = h->lcfg;
+            cb.flag[i][1] = h->num & 7u;
+            cb.flag[i][2] = h->enables;
+        }
+    }
+    if (!g_lcb_valid || memcmp(&cb, &g_lcb_last, sizeof(cb)) != 0) {
+        if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_lcb, 0,
+                                           D3D11_MAP_WRITE_DISCARD, 0, &map)))
+            return;
+        memcpy(map.pData, &cb, sizeof(cb));
+        ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_lcb, 0);
+        g_lcb_last = cb;
+        g_lcb_valid = 1;
+    }
+    ID3D11DeviceContext_PSSetConstantBuffers(g_ctx, 1, 1, &g_lcb);
+    ID3D11DeviceContext_PSSetShaderResources(g_ctx, 4, 1, &g_lut_srv);
+}
 
 /* Shader-Blending ist noetig, wenn D3D die PICA-Semantik nicht nativ
  * abbildet: Min/Max werten die Faktoren nicht aus, und Konstantfarbe +
@@ -1145,7 +1506,19 @@ static void set_constants(const HwDrawState *st, const ID3D11ShaderResourceView 
     memset(&cb, 0, sizeof(cb));
     cb.f[4] = st->depth_range;
     cb.f[5] = st->depth_near;
-    cb.f[6] = 0.0f;
+    /* Tiefe wie p_depth_stencil_test: z = (uint)(depth * (2^bits - 1)).
+       D16/D24S8 (UNORM) runden beim Schreiben auf genau diese Ganzzahl,
+       D24 liegt als D32_FLOAT mit Skala 2^24 vor (depth_from_guest). */
+    if (st->depth_format == 0u) {
+        cb.f[6] = 65535.0f;
+        cb.f[10] = 65535.0f;
+    } else if (st->depth_format == 3u) {
+        cb.f[6] = 16777215.0f;
+        cb.f[10] = 16777215.0f;
+    } else {
+        cb.f[6] = 16777215.0f;
+        cb.f[10] = 16777216.0f;
+    }
     cb.f[7] = st->alpha_test ? 1.0f : 0.0f;
     cb.f[8] = (float)st->alpha_func;
     cb.f[9] = (float)st->alpha_ref / 255.0f;
@@ -1189,15 +1562,33 @@ static void set_constants(const HwDrawState *st, const ID3D11ShaderResourceView 
 }
 
 /* ---- Textur-Upload / Cache -------------------------------------------- */
+/* Inhaltshash der Texturbytes: vier unabhaengige 64-Bit-Spuren (Wort fuer
+ * Wort multiplizieren + Xorshift), Rest byteweise FNV-1a. Rund 8x schneller
+ * als reines FNV-1a; die Texturen werden je Kommandoliste und nach jedem
+ * Rueckschreiben neu geprueft. */
 static uint64_t fnv1a(const unsigned char *p, uint32_t n)
 {
-    uint64_t h = 1469598103934665603ULL;
-    uint32_t i;
-    for (i = 0; i < n; i++) {
-        h ^= (uint64_t)p[i];
-        h *= 1099511628211ULL;
+    const uint64_t m = 0xFF51AFD7ED558CCDULL;
+    uint64_t h0 = 1469598103934665603ULL, h1 = 0x9E3779B97F4A7C15ULL;
+    uint64_t h2 = 0xC2B2AE3D27D4EB4FULL, h3 = 0x165667B19E3779F9ULL;
+    uint32_t i = 0;
+    for (; i + 32u <= n; i += 32u) {
+        uint64_t w0, w1, w2, w3;
+        memcpy(&w0, p + i, 8);
+        memcpy(&w1, p + i + 8u, 8);
+        memcpy(&w2, p + i + 16u, 8);
+        memcpy(&w3, p + i + 24u, 8);
+        h0 = (h0 ^ w0) * m; h0 ^= h0 >> 29;
+        h1 = (h1 ^ w1) * m; h1 ^= h1 >> 29;
+        h2 = (h2 ^ w2) * m; h2 ^= h2 >> 29;
+        h3 = (h3 ^ w3) * m; h3 ^= h3 >> 29;
     }
-    return h;
+    h0 ^= (h1 * 31u) ^ (h2 * 961u) ^ (h3 * 29791u) ^ (uint64_t)n;
+    for (; i < n; i++) {
+        h0 ^= (uint64_t)p[i];
+        h0 *= 1099511628211ULL;
+    }
+    return h0;
 }
 
 /* Gibt die D3D-Ressourcen eines Cache-Eintrags frei. */
@@ -1375,7 +1766,9 @@ static void bind_textures(const HwDrawState *st)
             s = &g_texcache[idx];
             if (s->gen_seen != st->tex_generation || s->stale ||
                 s->list_seen != g_list_serial) {
+                unsigned long long th = tex_diag_on() ? hw_now_us() : 0ull;
                 uint64_t h = fnv1a(st->guest_mem + t->offset, t->bytes);
+                if (th) g_dg_hash_us += hw_now_us() - th;
                 if (s->hash != h) {
                     if (!texslot_upload(s, st, t)) {
                         texslot_release(s);
@@ -1396,7 +1789,175 @@ static void bind_textures(const HwDrawState *st)
     ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 3, srv);
 }
 
+/* Gesammelte Dreiecke mit einem Draw zeichnen (Ringpuffer: anhaengen mit
+ * NO_OVERWRITE, bei vollem Puffer DISCARD und von vorn). */
+static void pend_flush(void)
+{
+    D3D11_MAPPED_SUBRESOURCE map;
+    D3D11_MAP mode = D3D11_MAP_WRITE_NO_OVERWRITE;
+    UINT stride = sizeof(HwVertex), offset = 0;
+    UINT n = (UINT)g_pend_n;
+
+    if (n == 0u) return;
+    g_pend_n = 0;
+    if (!g_ready || g_vb == NULL) return;
+    if (g_vb_pos + n > (UINT)HW_VB_CAP) {
+        mode = D3D11_MAP_WRITE_DISCARD;
+        g_vb_pos = 0;
+    }
+    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_vb, 0, mode, 0, &map)))
+        return;
+    memcpy((HwVertex *)map.pData + g_vb_pos, g_pend, sizeof(HwVertex) * (size_t)n);
+    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_vb, 0);
+    ID3D11DeviceContext_IASetVertexBuffers(g_ctx, 0, 1, &g_vb, &stride, &offset);
+    ID3D11DeviceContext_IASetPrimitiveTopology(g_ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    /* Momentaufnahme nur des Rechtecks, das der Batch abdeckt (der Shader
+       liest tshadow ausschliesslich an der eigenen Pixelposition). */
+    if (g_cov_track && g_color_shadow && g_color_tex && g_cov_x1 >= g_cov_x0 &&
+        g_cov_y1 >= g_cov_y0) {
+        D3D11_BOX box;
+        box.left = (UINT)g_cov_x0; box.right = (UINT)g_cov_x1 + 1u;
+        box.top = (UINT)g_cov_y0; box.bottom = (UINT)g_cov_y1 + 1u;
+        box.front = 0; box.back = 1;
+        ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)g_color_shadow,
+                                                  0, box.left, box.top, 0,
+                                                  (ID3D11Resource *)g_color_tex, 0, &box);
+    }
+    g_cov_x0 = g_cov_y0 = 0x7FFFFFFF;
+    g_cov_x1 = g_cov_y1 = -1;
+    ID3D11DeviceContext_Draw(g_ctx, n, g_vb_pos);
+    g_vb_pos += n;
+    g_batches++;
+    /* Neuer Batch: Abdeckung zuruecksetzen (Id weiterzaehlen). */
+    if (++g_cov_id == 0u) {
+        if (g_cov) memset(g_cov, 0, sizeof(uint16_t) * (size_t)g_cov_w * (size_t)g_cov_h);
+        g_cov_id = 1;
+    }
+}
+
+/* Markiert die Pixel eines Dreiecks im aktuellen Batch. Rueckgabe 1, wenn
+ * ein Pixel schon von einem frueheren Dreieck dieses Batches belegt ist.
+ * Bildschirmkoordinaten wie die D3D-Viewport-Transformation (X/Y wie
+ * p_hw_tri_clip), Pixelmitten bei +0.5. */
+static int cov_mark(const HwVertex *t)
+{
+    const HwDrawState *st = &g_state;
+    long long x[3], y[3], area, minx, maxx, miny, maxy;
+    long long ex[3], ey[3];
+    int tl[3];
+    int i, px, py, x0, x1, y0, y1, hit = 0;
+
+    if (g_cov == NULL || g_cov_w != g_target_w || g_cov_h != g_target_h) {
+        free(g_cov);
+        g_cov_w = g_target_w;
+        g_cov_h = g_target_h;
+        g_cov = (uint16_t *)calloc((size_t)g_cov_w * (size_t)g_cov_h, sizeof(uint16_t));
+        g_cov_id = 1;
+        if (g_cov == NULL) {
+            /* Ohne Abdeckungsfeld: jedes Dreieck einzeln, volle Kopie. */
+            g_cov_w = g_cov_h = 0;
+            g_cov_x0 = 0; g_cov_y0 = 0;
+            g_cov_x1 = g_target_w - 1; g_cov_y1 = g_target_h - 1;
+            return 1;
+        }
+    }
+    /* D3D11-Rasterregeln: Perspektivdivision und Viewport in float32,
+       Einrasten auf 1/256 Pixel (16.8-Festkomma, round-to-nearest-even),
+       Abtastung in der Pixelmitte, Top-Left-Regel (Y nach unten). */
+    for (i = 0; i < 3; i++) {
+        float iw = 1.0f / t[i].pos[3];
+        float fx = (t[i].pos[0] * iw + 1.0f) * st->viewport_half_w +
+                   (float)st->viewport_corner_x;
+        float fy = (t[i].pos[1] * iw + 1.0f) * st->viewport_half_h +
+                   (float)st->viewport_corner_y;
+        x[i] = llrint((double)fx * 256.0);
+        y[i] = llrint((double)fy * 256.0);
+    }
+    area = (x[1] - x[0]) * (y[2] - y[0]) - (x[2] - x[0]) * (y[1] - y[0]);
+    if (area == 0) return 0;                    /* D3D zeichnet nichts */
+    if (area < 0) {                             /* Innenseite: E > 0 */
+        long long tx = x[1], ty = y[1];
+        x[1] = x[2]; y[1] = y[2];
+        x[2] = tx; y[2] = ty;
+    }
+    for (i = 0; i < 3; i++) {
+        int j = (i + 1) % 3;
+        ex[i] = x[j] - x[i];
+        ey[i] = y[j] - y[i];
+        tl[i] = (ey[i] < 0) || (ey[i] == 0 && ex[i] > 0);
+    }
+    minx = maxx = x[0];
+    miny = maxy = y[0];
+    for (i = 1; i < 3; i++) {
+        if (x[i] < minx) minx = x[i];
+        if (x[i] > maxx) maxx = x[i];
+        if (y[i] < miny) miny = y[i];
+        if (y[i] > maxy) maxy = y[i];
+    }
+    x0 = (int)ceil((double)(minx - 128) / 256.0);
+    x1 = (int)floor((double)(maxx - 128) / 256.0);
+    y0 = (int)ceil((double)(miny - 128) / 256.0);
+    y1 = (int)floor((double)(maxy - 128) / 256.0);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > g_cov_w - 1) x1 = g_cov_w - 1;
+    if (y1 > g_cov_h - 1) y1 = g_cov_h - 1;
+    if (x0 <= x1 && y0 <= y1) {
+        if (x0 < g_cov_x0) g_cov_x0 = x0;
+        if (y0 < g_cov_y0) g_cov_y0 = y0;
+        if (x1 > g_cov_x1) g_cov_x1 = x1;
+        if (y1 > g_cov_y1) g_cov_y1 = y1;
+    }
+    for (py = y0; py <= y1; py++) {
+        long long sy = (long long)py * 256 + 128;
+        uint16_t *row = g_cov + (size_t)py * (size_t)g_cov_w;
+        for (px = x0; px <= x1; px++) {
+            long long sx = (long long)px * 256 + 128;
+            int k, in = 1;
+            for (k = 0; k < 3; k++) {
+                long long e = ex[k] * (sy - y[k]) - ey[k] * (sx - x[k]);
+                if (e < 0 || (e == 0 && !tl[k])) { in = 0; break; }
+            }
+            if (!in) continue;
+            if (row[px] == g_cov_id) hit = 1;
+            row[px] = g_cov_id;
+        }
+    }
+    return hit;
+}
+
+unsigned hw_draw_serial(void) { return g_begin_serial; }
+
+int hw_continue_draw(unsigned serial) {
+    return g_ready && g_have_state && g_batch_ok && !g_guest_dirty &&
+           serial == g_begin_serial &&
+           g_state.tex_generation == gpu_pica_tex_generation();
+}
+
+static int hw_begin_draw_impl(const HwDrawState *st);
 int hw_begin_draw(const HwDrawState *st) {
+    unsigned long long t0;
+    int r;
+    /* Fast-Path: derselbe Zustand wie der laufende Batch. */
+    if (g_ready && g_have_state && g_batch_ok && !g_guest_dirty &&
+        g_state.tex_generation == gpu_pica_tex_generation() &&
+        memcmp(st, &g_state_in, sizeof(*st)) == 0)
+        return 1;
+    t0 = tex_diag_on() ? hw_now_us() : 0ull;
+    pend_flush();
+    g_batch_ok = 0;
+    r = hw_begin_draw_impl(st);
+    if (r) {
+        g_state_in = *st;
+        g_begin_serial++;
+        g_batch_ok = 1;
+        g_cov_track = pica_shader_blend(st) || pica_logic_active(st);
+    }
+    if (t0) g_dg_begin_us += hw_now_us() - t0;
+    return r;
+}
+
+static int hw_begin_draw_impl(const HwDrawState *st) {
     D3D11_VIEWPORT vp;
     D3D11_RECT rc;
     D3D11_DEPTH_STENCIL_DESC ds;
@@ -1434,8 +1995,7 @@ int hw_begin_draw(const HwDrawState *st) {
     {
         int shadow = pica_shader_blend(st) || pica_logic_active(st);
         if (shadow) {
-            ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)g_color_shadow,
-                                             (ID3D11Resource *)g_color_tex);
+            /* Die Kopie selbst entsteht in pend_flush direkt vor dem Draw. */
             ID3D11DeviceContext_PSSetShaderResources(g_ctx, 3, 1, &g_color_shadow_srv);
         } else {
             ID3D11DeviceContext_PSSetShaderResources(g_ctx, 3, 1, &g_tex_dummy);
@@ -1592,14 +2152,19 @@ int hw_begin_draw(const HwDrawState *st) {
     ID3D11DeviceContext_VSSetShader(g_ctx, g_vs, NULL, 0);
     ID3D11DeviceContext_PSSetShader(g_ctx, g_ps, NULL, 0);
     set_constants(st, NULL);
+    set_light_constants(st);
     return 1;
 }
 
+static int hw_triangles_impl(const HwVertex *v, int n);
 int hw_triangles(const HwVertex *v, int n) {
-    D3D11_BUFFER_DESC bd;
-    D3D11_SUBRESOURCE_DATA sd;
-    ID3D11Buffer *vb = NULL;
-    UINT stride = sizeof(HwVertex), offset = 0;
+    unsigned long long t0 = tex_diag_on() ? hw_now_us() : 0ull;
+    int r = hw_triangles_impl(v, n);
+    if (t0) g_dg_tri_us += hw_now_us() - t0;
+    return r;
+}
+
+static int hw_triangles_impl(const HwVertex *v, int n) {
     int i;
 
     if (!g_ready || !g_have_state || v == NULL || n < 3) return 0;
@@ -1607,17 +2172,32 @@ int hw_triangles(const HwVertex *v, int n) {
     for (i = 0; i < n; i++) {
         if (v[i].pos[3] == 0.0f) return 0;
     }
-    memset(&bd, 0, sizeof(bd));
-    bd.ByteWidth = (UINT)(sizeof(HwVertex) * (size_t)n);
-    bd.Usage = D3D11_USAGE_IMMUTABLE;
-    bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-    memset(&sd, 0, sizeof(sd));
-    sd.pSysMem = v;
-    if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, &sd, &vb))) return 0;
-    ID3D11DeviceContext_IASetVertexBuffers(g_ctx, 0, 1, &vb, &stride, &offset);
-    ID3D11DeviceContext_IASetPrimitiveTopology(g_ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ID3D11DeviceContext_Draw(g_ctx, (UINT)n, 0);
-    ID3D11Buffer_Release(vb);
+    if (g_cov_track) {
+        /* Dreieck fuer Dreieck: bei Ueberschneidung mit dem laufenden
+           Batch erst zeichnen (neue Momentaufnahme), dann anhaengen. */
+        for (i = 0; i + 3 <= n; i += 3) {
+            if (g_pend_n + 3 > HW_PEND_CAP) pend_flush();
+            g_dg_trk++;
+            if (cov_mark(v + i)) {
+                g_dg_ovl++;
+                pend_flush();
+                cov_mark(v + i);
+            }
+            memcpy(g_pend + g_pend_n, v + i, sizeof(HwVertex) * 3u);
+            g_pend_n += 3;
+        }
+    } else {
+        while (n > 0) {
+            int k = n;
+            if (k > HW_PEND_CAP) k = HW_PEND_CAP - HW_PEND_CAP % 3;
+            if (g_pend_n + k > HW_PEND_CAP) pend_flush();
+            memcpy(g_pend + g_pend_n, v, sizeof(HwVertex) * (size_t)k);
+            g_pend_n += k;
+            v += k;
+            n -= k;
+        }
+    }
+    if (!g_batch_ok) pend_flush();
     g_draws++;
     g_rendered = 1;
     if (g_state.depth_write ||
@@ -1629,6 +2209,7 @@ int hw_triangles(const HwVertex *v, int n) {
 }
 
 int hw_flush_to_guest(void) {
+    unsigned long long t0 = 0;
     D3D11_MAPPED_SUBRESOURCE cm, dm;
     unsigned char *cbase, *dbase;
     uint32_t cbpp, h, w;
@@ -1638,15 +2219,18 @@ int hw_flush_to_guest(void) {
     if (!g_rendered) return 0;
     if (!g_color_tex || !g_color_stage || g_target_w <= 0 || g_target_h <= 0)
         return 0;
+    pend_flush();
     w = (uint32_t)g_target_w;
     h = (uint32_t)g_target_h;
     cbpp = fmt_bpp(g_state.color_format);
+    if (tex_diag_on()) t0 = hw_now_us();
 
     ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)g_color_stage,
                                      (ID3D11Resource *)g_color_tex);
     if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_color_stage, 0,
                                        D3D11_MAP_READ, 0, &cm)))
         return 0;
+    if (t0) g_dg_wait_us += hw_now_us() - t0;
     cbase = (unsigned char *)cm.pData;
 
     /* Farbpuffer: PICA kachelt 8x8-Morton und legt die Zeilen von unten
@@ -1691,6 +2275,7 @@ int hw_flush_to_guest(void) {
     gpu_pica_bump_tex_generation();
     /* Der Gast entspricht jetzt dem D3D-Ziel; Schatten fuer hw_list_begin. */
     shadow_capture();
+    if (t0) g_dg_flush_us += hw_now_us() - t0;
     return 1;
 }
 
@@ -1698,9 +2283,12 @@ void hw_list_begin(void) {
     /* Neue Kommandoliste: jede gebundene Textur wird hoechstens einmal per
        Byte-Hash gegen den Gastspeicher geprueft (CPU-Schreibzugriffe). */
     g_list_serial++;
+    g_batch_ok = 0;
+    g_dg_lists++;
     /* Diagnose (HLE_HW_STATE/HLE_GTIME): Upload- und Dekodierrate. */
     if (tex_diag_on()) {
         static unsigned long long t0, up0, dec0, start;
+        static unsigned long long d0, f0, l0, fl0, wt0, bg0, tr0, hs0, b0, ov0, tk0;
         unsigned long long now = hw_now_us();
         if (start == 0ull) start = now;
         if (t0 == 0ull) { t0 = now; up0 = 0ull; dec0 = 0ull; }
@@ -1713,6 +2301,16 @@ void hw_list_begin(void) {
                    (g_tex_upload_us - dec0) / 1000ull,
                    100.0 * (double)(g_tex_upload_us - dec0) / 1000000.0 / sec);
             fflush(stdout);
+            printf("[hwtime] listen=%llu draws=%llu batches=%llu flushes=%llu flush_ms=%llu "
+                   "(warten %llu) begin_ms=%llu tri_ms=%llu hash_ms=%llu ovl=%llu/%llu\n",
+                   g_dg_lists - l0, g_draws - d0, g_batches - b0, g_flushes - f0,
+                   (g_dg_flush_us - fl0) / 1000ull, (g_dg_wait_us - wt0) / 1000ull,
+                   (g_dg_begin_us - bg0) / 1000ull, (g_dg_tri_us - tr0) / 1000ull,
+                   (g_dg_hash_us - hs0) / 1000ull, g_dg_ovl - ov0, g_dg_trk - tk0);
+            fflush(stdout);
+            l0 = g_dg_lists; d0 = g_draws; f0 = g_flushes; fl0 = g_dg_flush_us;
+            wt0 = g_dg_wait_us; bg0 = g_dg_begin_us; tr0 = g_dg_tri_us;
+            hs0 = g_dg_hash_us; b0 = g_batches; ov0 = g_dg_ovl; tk0 = g_dg_trk;
             t0 = now; up0 = g_tex_uploads; dec0 = g_tex_upload_us;
         }
     }

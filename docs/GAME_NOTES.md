@@ -304,6 +304,20 @@ Struktur je Draw statt Registerlesen je Pixel.
   Azahars next_thread_id), hs_wait traegt sich neu ein, falls der Eintrag
   nicht mehr ihm gehoert, Waechter unter HLE_STALLDUMP.
 
+## Bildrate 3D-Dialog Froenborg (HW-Renderer, 2026-11-26)
+
+* Vorher: jeder Draw mit Fragment-Lighting fiel auf den Software-Rasterizer
+  zurueck (Render-Thread 92 % aktiv, p_shade_rows 44 %), 18-19 Gast-Frames
+  je 300 Host-Frames, 19 sichtbare Bildwechsel (Aufnahme alle 2 Frames).
+* Lighting im Pixelshader allein brachte nichts (17-18): gpu.c reicht jedes
+  Dreieck einzeln weiter, D3D wartete beim Rueckschreiben ~2 s je 5 s auf
+  ~45 000 Einzel-Draws/s. Die Figuren blenden mit RGB Add SrcA/1-SrcA und
+  Alpha **Max** SrcA/DstA (Shader-Blending mit Zielkopie je Draw).
+* Nachher (Batching + Ueberlappungspruefung, Zustand nur nach
+  Registeraenderung, schnellerer Texturhash): 50-53 Gast-Frames je 300,
+  49 sichtbare Wechsel; Render-Thread p_shader_run (Vertex-Shader auf der
+  CPU) 43 %, `[hwtime]`: ~4 500 Batches/s fuer ~130 000 Dreiecke/s.
+
 ## Darstellungsfehler 3D-Figuren (Nutzerbeobachtung 2026-11-25, behoben 2026-11-26)
 
 * Ursache: D16-Tiefenpuffer, nur das Low-Byte wurde geschrieben (p_depth_set);
@@ -313,8 +327,7 @@ Struktur je Draw statt Registerlesen je Pixel.
 * 3D-Modell von Layton (Dialog-/Inworld-Szene, --renderer hw, Host-Frame
   ~43440) wirkt grob: kantig, sehr dunkle/flache Schattierung, keine
   Umrisslinie/Cel-Schattierung. Bild: scratch/befunde/layton_modell_hw.png.
-  Zu pruefen: Fragment-Lighting (im HW-Pfad Software-Rueckfall je Draw),
-  Texturfilter/Mip-Stufen, Umriss-Pass (Stencil/Depth/Polygon-Offset), und
+  Zu pruefen: Texturfilter/Mip-Stufen, Umriss-Pass (Stencil/Depth/Polygon-Offset), und
   ob der Software-Renderer dasselbe Bild liefert.
 * 3D-Figuren im Dialog (Froenborg, Host-Frame ~23040, Bild
   scratch/befunde/figuren_dialog_hw.png): Gesichter/Haare von Layton, Emmy

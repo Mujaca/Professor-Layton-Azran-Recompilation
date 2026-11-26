@@ -9,7 +9,8 @@ Software-Pfad (runtime/gpu/gpu.c) und einmal mit dem Hardware-Pfad
 (Toleranz max. 1 LSB pro Kanal; Kantenpixel per Top-Left-Regel werden
 gezaehlt und je Szene begrenzt). Szenen: konstante und vertexgefaerbte
 Dreiecke, Viewport, Scissor, Tiefentest inkl. Tiefen-Rueckschreiben,
-RGBA8 und RGB565.
+RGBA8 und RGB565, Texturen/TEV, Output-Merger, Stencil, Fog und
+Fragment-Lighting (L0..L5, Toleranz dort 2 LSB).
 """
 import os
 import subprocess
