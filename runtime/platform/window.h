@@ -7,6 +7,11 @@
 int win_open(int width, int height, const char *title);
 void win_set_no_activate(int on);                 /* vor win_open: ohne Fokus zeigen */
 void win_set_split(int on);   /* vor win_open: je Screen ein Fenster (ueberstimmt port.ini) */
+/* Diagnose-Anzeige (Statuszeilen im Fenster, fps/Gast-Frames im Titel):
+ * Standard aus; port.ini [debug] overlay = 1 oder --debug. win_set_debug
+ * (Startoption) ueberstimmt port.ini; win_debug gilt nach win_open. */
+void win_set_debug(int on);
+int win_debug(void);
 int win_pump(void);                              /* 1 = Fenster offen */
 void win_blit(const uint8_t *rgb, int w, int h);  /* RGB24 -> Fenster */
 void win_status(const char *text, int line);

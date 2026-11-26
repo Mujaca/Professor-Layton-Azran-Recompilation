@@ -24,6 +24,8 @@ static int g_has_touch_rect = 0;
 static int g_xinput_enabled = 1;
 static int g_layout_ini = 0;          /* [display] layout = split -> 1 */
 static int g_scale_ini = 0;           /* [display] scale = N (0 = nicht gesetzt) */
+static int g_debug_ini = 0;           /* [debug] overlay = 1 */
+static int g_debug_cli = -1;          /* --debug/--no-debug, -1 = port.ini */
 static WinPresentFn g_present_fn = NULL;
 static WinDetachFn g_detach_fn = NULL;
 
@@ -91,7 +93,12 @@ static void write_default_config(const char *path) {
           "# Fenster (auch per Startoption --split-screens).\n"
           "layout = single\n"
           "# Interne Aufloesung des Hardware-Renderers (1..4, auch --scale N).\n"
-          "scale = 1\n",
+          "scale = 1\n"
+          "\n"
+          "[debug]\n"
+          "# 1 = Diagnosezeilen im Fenster und fps/Gast-Frames in der Titelzeile\n"
+          "# (auch per Startoption --debug / --no-debug).\n"
+          "overlay = 0\n",
           f);
     fclose(f);
 }
@@ -209,6 +216,8 @@ static void load_config(void) {
             } else if (ieq(section, "display") && ieq(key, "layout")) {
                 if (ieq(val, "split")) g_layout_ini = 1;
                 else if (ieq(val, "single")) g_layout_ini = 0;
+            } else if (ieq(section, "debug") && ieq(key, "overlay")) {
+                g_debug_ini = (atoi(val) != 0);
             } else if (ieq(section, "display") && ieq(key, "scale")) {
                 int v = atoi(val);
                 if (v >= 1 && v <= 4) g_scale_ini = v;
@@ -444,7 +453,7 @@ static void draw_into(WinPane *p, HDC dc, const RECT *rc) {
                       g_dib + (size_t)p->src_y * g_w * 4, &p->bi,
                       DIB_RGB_COLORS, SRCCOPY);
     }
-    if (p == &g_pane[0]) {               /* Statustext nur im ersten Fenster */
+    if (p == &g_pane[0] && win_debug()) {   /* Statustext nur im ersten Fenster */
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, RGB(255, 255, 255));
         for (int i = 0; i < g_status_lines; i++) {
@@ -473,7 +482,7 @@ static void draw(WinPane *p, HDC dc) {
         info.src_w = p->src_w;
         info.src_h = p->src_h;
         info.status = lines;
-        info.nstatus = (p == &g_pane[0]) ? g_status_lines : 0;
+        info.nstatus = (p == &g_pane[0] && win_debug()) ? g_status_lines : 0;
         if (g_present_fn(&info)) return;
     }
     bdc = back_buffer(p, dc, rc.right - rc.left, rc.bottom - rc.top);
@@ -709,6 +718,14 @@ void win_set_present(WinPresentFn present, WinDetachFn detach) {
 
 int win_config_scale(void) {
     return g_scale_ini;
+}
+
+void win_set_debug(int on) {
+    g_debug_cli = on != 0;
+}
+
+int win_debug(void) {
+    return (g_debug_cli >= 0) ? g_debug_cli : g_debug_ini;
 }
 
 void win_close(void) {

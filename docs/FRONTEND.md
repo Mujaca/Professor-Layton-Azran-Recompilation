@@ -51,9 +51,17 @@ und die Fenstergeometrie (Sollwerte mit `Fraction` nachgerechnet).
   wird zusaetzlich in N-facher Aufloesung fuer die Anzeige; alles, was der
   Gast sieht (Rueckschreiben ins VRAM, Transfers), bleibt nativ und
   unveraendert, ebenso Screenshots (`--shot`).
-* Titelzeile: `fps=` ist die tatsaechliche Host-Bildrate (gemessen ueber
-  QPC), `Gast-Frames=` zaehlt die VBlanks, in denen das Spiel eine neue
-  FrameBufferInfo veroeffentlicht hat (Diagnose, kein Gastzustand).
+* **Diagnose-Anzeige ist standardmaessig aus:** Titelzeile nur
+  "Professor Layton and the Azran Legacy" (unteres Fenster im Split-Layout
+  mit " - Touchscreen"), keine Statuszeilen im Fenster. Einschalten mit
+  `--debug` oder `[debug] overlay = 1` (Startoption gewinnt, `--no-debug`
+  schaltet aus). Dann zeigt die Titelzeile zusaetzlich `fps=` (tatsaechliche
+  Host-Bildrate, gemessen ueber QPC) und `Gast-Frames=` (VBlanks, in denen
+  das Spiel eine neue FrameBufferInfo veroeffentlicht hat), und das erste
+  Fenster die Statuszeilen (frames/fps/gast/block/fb0/fb1, Tastenhinweise).
+  Die Konsolenausgabe (`[port] frames= ... gast=`, von `tools/scene.py`
+  und Messungen gelesen) ist davon unabhaengig und bleibt. Reine Anzeige,
+  kein Gastzustand.
 
 ## Tastenbelegung: `port.ini` neben `port.exe`
 
@@ -87,6 +95,9 @@ enabled = 1
 [display]
 layout = single
 scale = 1
+
+[debug]
+overlay = 0
 ```
 
 Tastennamen: ein Buchstabe oder eine Ziffer (`X`, `7`), oder `Enter`,

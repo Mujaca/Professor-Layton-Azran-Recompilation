@@ -221,6 +221,8 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--savedata") == 0 && i + 1 < argc) savedata = argv[++i];
         else if (strcmp(argv[i], "--deterministic") == 0) det = 1;
         else if (strcmp(argv[i], "--split-screens") == 0) win_set_split(1);
+        else if (strcmp(argv[i], "--debug") == 0) win_set_debug(1);
+        else if (strcmp(argv[i], "--no-debug") == 0) win_set_debug(0);
         else if (strcmp(argv[i], "--scale") == 0 && i + 1 < argc) {
             scale = atoi(argv[++i]);
             if (scale < 1 || scale > 4) {
@@ -279,6 +281,9 @@ int main(int argc, char **argv) {
     }
     /* Unterer Screen als Touchflaeche; Tastenbelegung siehe window.h. */
     win_set_touch_rect(BOT_X, BOT_Y, 320, 240);
+    /* Titelzeile ohne Diagnose; mit --debug / [debug] overlay = 1 kommen
+       fps und Gast-Frames dazu, und das Fenster zeigt die Statuszeilen. */
+    win_set_title("Professor Layton and the Azran Legacy");
     win_status("Tasten: port.ini neben port.exe (Standard siehe docs/FRONTEND.md)", 2);
     win_status("F11=Vollbild  Touch=Maus ueber dem unteren Screen", 3);
     if (!CreateThread(NULL, 0, game_thread, NULL, 0, NULL)) {
@@ -369,7 +374,7 @@ int main(int argc, char **argv) {
                      "Professor Layton and the Azran Legacy  |  fps=%.1f  |  "
                      "Gast-Frames=%u  |  F11=Vollbild",
                      host_fps, guest_frames);
-            win_set_title(title);
+            if (win_debug()) win_set_title(title);
             snprintf(line, sizeof(line),
                      "frames=%d  fps=%.1f gast=%u  block=0x%08X  halted=%d  "
                      "fb0=%d:0x%08X/%u/%X fb1=%d:0x%08X/%u/%X",
