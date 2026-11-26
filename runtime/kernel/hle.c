@@ -405,7 +405,7 @@ enum ServiceId {
 #define MAX_FILES 64
 typedef struct {
     int used;
-    char path[256];
+    char path[FS_ARCHIVE_PATH_MAX];  /* Host-Pfad, auch unter --savedata */
     FILE *fp;
     uint32_t size;
     int fixed_size;  /* ExtSaveData: Groesse bleibt fest (Azahar FixSizeDiskFile) */
@@ -460,6 +460,8 @@ typedef struct {
 
 static ArmCpu *g_cpu = NULL;
 static char g_romfs[512];
+/* Spielstand-Wurzel (Host); main.c setzt sie per --savedata. */
+static char g_savedir[400] = "out/savedata";
 static int g_log = 0;
 static uint64_t g_tick = 0x1000;
 static uint64_t g_boot_ns = 0;   /* Nullpunkt fuer svcGetSystemTick */
@@ -1693,16 +1695,21 @@ static int find_path(const uint32_t *buf, char *out, int out_size) {
 
 static void ensure_savedata(void) {
 #ifdef _WIN32
-    _mkdir("out/savedata");
+    _mkdir(g_savedir);
 #else
-    mkdir("out/savedata", 0755);
+    mkdir(g_savedir, 0755);
 #endif
 }
 
-/* Sucht eine Datei zuerst in out/savedata, dann in out/romfs. */
+void hle_set_savedata_dir(const char *dir) {
+    if (dir != NULL && dir[0] != 0) snprintf(g_savedir, sizeof(g_savedir), "%s", dir);
+}
+
+/* Sucht eine Datei zuerst in der Spielstand-Wurzel (Standard out/savedata),
+   dann in out/romfs. */
 static int open_guest_file(const char *guest_path, FileSlot **slot_out) {
     char q[256];
-    char sd[320];
+    char sd[720];
     const char *src = guest_path;
     if (strncmp(src, "romfs:", 6) == 0) src += 6;
     /* Das Spiel adressiert RomFS-Dateien mit dem Praefix "rom:"
@@ -1711,7 +1718,7 @@ static int open_guest_file(const char *guest_path, FileSlot **slot_out) {
     while (*src == '/') src++;
     snprintf(q, sizeof(q), "%s", src);
     for (char *c = q; *c; c++) if (*c == '/') *c = '\\';
-    snprintf(sd, sizeof(sd), "out/savedata/%s", q);
+    snprintf(sd, sizeof(sd), "%s/%s", g_savedir, q);
 
     FILE *fp = fopen(sd, "r+b");
     const char *used_path = sd;
@@ -4733,7 +4740,7 @@ static SchedThread *sched_register(int idx, uint32_t tid, int prio, int state) {
 
 void hle_init(ArmCpu *c, const char *romfs_dir) {
     ensure_savedata();
-    fs_archive_init("out/savedata");
+    fs_archive_init(g_savedir);
     /* SharedExtSaveData ist auf echter Hardware ein vorhandenes Systemarchiv.
      * Der Host stellt es beim Start bereit (nicht beim OpenArchive, siehe
      * Azahar ArchiveFactory_ExtSaveData::Open -> NotFormatted).  Die ID stammt

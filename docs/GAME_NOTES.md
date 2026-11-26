@@ -284,6 +284,22 @@ Struktur je Draw statt Registerlesen je Pixel.
   Spielszene (Hangar, Luke und Emmy auf der Treppe, Untertitel). Bewaehrte
   Folge: `--press touch@3600:20:160:118,touch@4500:12:55:111,touch@4560:12:170:135,touch@4620:12:112:135,touch@4800:15:160:225`
   (Host-Frames, --renderer hw).
+* Mit vorhandenem Spielstand zeigt das Titelmenue drei Eintraege: New Game
+  (160,64), Continue (160,118), Bonuses; (160,118) waere dann Continue.
+  `tools/scene.py erste-szene` faehrt die Folge in Gast-Frames ab
+  (New Game g1800, Tastatur ab ~g2000, Name "abc", "OK!" g2400); der Prolog
+  laeuft ohne Eingabe bis zum Titelbild von Raetsel 001 (~g5500).
+* Raetsel 001 "Airship's Destination": 4x4-Raster (S C C F / C F C C /
+  C C C C / C F C C, S = Luftschiff, F = Tankstelle, 4 Tankeinheiten);
+  einzige Route: runter bis unten, (3,1), (2,1), (2,2), (1,2), (1,1),
+  (0,1)..(0,3), runter bis (3,3), Ziel (3,2) "Froenborg". Beim ersten Mal
+  verschluckt ein Tutorial-Hinweis den ersten Tipp. Danach Erklaerung,
+  Prologende, Mysteries-Bildschirm ("OK!"), dann erstes Speicherangebot
+  ("Save your progress?" OK! bei 100,147 -> Slot-Auswahl).
+* Gast-Zaehler auf Standbildern: zeigt das Spiel ein unveraendertes Bild
+  (z. B. Raetsel-Titel "001", wartet auf Beruehrung), veroeffentlicht es kaum
+  neue FrameBufferInfos - der Zaehler steigt dann nur ~1 je 20 Host-Frames.
+  Eingaben dort mit kleinem Gast-Abstand planen.
 * Nach "OK!" hing das Spiel frueher: der Formatierer (Thumb, 0x10024E
   `blx r2`) ruft einen Lese-Callback 0x100999, dessen Adresse in 0x1009A2 per
   `ldr r1,[pc,#0x14]` + `add r1, pc` gebildet wird; der Scanner kannte das
