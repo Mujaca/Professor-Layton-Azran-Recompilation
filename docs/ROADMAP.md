@@ -58,7 +58,7 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | M9 | teilweise | `--renderer hw` läuft (Titel, Szenen, ~50 % mehr Gast-Frames); 3D-Figuren korrekt seit D16-Tiefenfix; Abnahme-Bildvergleich offen (braucht M18) |
 | M10 | teilweise | Aussetzer (DSP-Zustellung), Hänger (DSP-Frame beim Stabhalter) und Echtzeit gelöst, Hörtest Nutzer „sauber“; Azahar-Aufnahme fehlt (kein Azahar-Build vorhanden) |
 | M11 | erreicht | Namenseingabe → Eröffnungsszene (`--press`-Folge in `docs/GAME_NOTES.md`) |
-| M12 | offen | Titel ~20 sichtbare fps (HW), 3D-Szenen/Rätsel ~3 fps |
+| M12 | offen | Titel ~20 sichtbare fps (HW), 3D-Dialog Froenborg 20 Gast-fps (HW, seit Vertex-Shading je Draw) |
 | M13 | erreicht | Sichttest Nutzer (Doppelpufferung) |
 | M14 | erreicht | Nutzer: erstes Rätsel gespielt, gespeichert, „Continue“ lädt in Froenborg |
 | M15 | erreicht (Logo) | Logo gegen FFmpeg mittlere Abweichung 0,91; weitere Filme ungeprüft |

@@ -50,7 +50,7 @@ def main():
     # HW-Test laeuft auf WARP, damit er ohne Grafikkarte reproduzierbar ist.
     for t in ["dsp_hle_test", "audio_test", "y2r_test", "framebuffer_test",
               "fs_archive_test", "frame_clock_test", "sched_selftest", "hid_ring_test",
-              "lighting_test"]:
+              "lighting_test", "vs_test"]:
         step("Runtime-Selbsttest " + t, [py, "tests/%s.py" % t], timeout=300)
     step("HW-Renderer-Selbsttest (WARP)", [py, "tests/hw_test.py", "--warp"], timeout=600)
     need = roadmap_services() if a.min_services is None else a.min_services
