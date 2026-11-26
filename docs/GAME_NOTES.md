@@ -396,6 +396,39 @@ Struktur je Draw statt Registerlesen je Pixel.
   sichtbar. Verworfen: Schichten statt Batch-Wechsel bei Ueberlappung
   (45 600 -> 16 400 D3D-Draws je 5 s, aber nicht schneller).
 
+## Kosten Shader-Blending im 3D-Dialog (M17, 2026-11-26)
+
+Echtzeit, `--renderer hw`, Froenborg-Dialog g4400..5600 (Gast-fps je 300
+Host-Frames, Obergrenze 30), `HLE_HW_STATE=1` je 5 s:
+
+| Variante | Gast-fps | Segmente | tri_ms | warten |
+|---|---|---|---|---|
+| master (Shader-Blending ausser Zero/One) | 28,4-29,1 | 72 000 | 790 | 365 |
+| Blending wie vor M9 (nur Mischfaelle im Shader) | 29,8 | 66 400 | 585 | 310 |
+| Experiment: ohne Momentaufnahme (falsches Bild) | 29,4 | 73 700 | 790 | 131 |
+| Experiment: ohne Ueberschneidungspruefung (falsches Bild) | ~29,6 | 8 300 | 95 | 370 |
+| Abdeckung je 8x8-Kachel (Bitmaske) statt je Pixel | 28,7 | 71 800 | 760 | 370 |
+| Segmente mit einem Map je Batch | 19,9 | 50 000 | 415 | 435 |
+| dito, spaetestens alle 32 Segmente zeichnen | 24,1 | 55 500 | 570 | 335 |
+| Uebergabe alle 8 statt 32 Draws | 24,7 | 63 000 | 865 | 145 |
+| Uebergabe alle 256 Draws | 19,9 | 50 000 | 480 | 830 |
+| Software-Renderer (Vergleich) | 4,3 | - | - | - |
+
+* Der Aufpreis (~1 Gast-fps, Gast steht sonst an der 30er-Grenze) kommt
+  von ~720 000 zusaetzlich geprueften Dreiecken je 5 s und ~6 000
+  zusaetzlichen Segmenten. Je Segment kostet `pend_flush` ~10 us
+  CPU (Map, Kopie, Draw), auf der GPU serialisiert jede Momentaufnahme
+  (Kopie liest, was der vorige Draw schreibt): ohne Kopien sinkt das
+  Warten am Listenende von 365 auf 131 ms je 5 s.
+* Die Pixelmarkierung selbst ist billig (Kachel-Bitmasken: kein Gewinn).
+  Alles, was die Uebergabe an die GPU buendelt oder verzoegert, kostet
+  deutlich mehr Bildrate, als es CPU spart (GPU beginnt spaeter, Warten
+  am Listenende waechst).
+* Ein beweisbar gleicher billigerer Weg fehlt: D3D-Festfunktions-Blending
+  rundet, die PICA schneidet ab; Rasterizer-Ordered-Views scheitern am
+  Tiefenwert aus dem Shader (SV_Depth) vor dem Tiefentest. Stand bleibt
+  daher master; Titel/Menue unberuehrt (60 Gast-fps).
+
 ## Darstellungsfehler 3D-Figuren (Nutzerbeobachtung 2026-11-25, behoben 2026-11-26)
 
 * Ursache: D16-Tiefenpuffer, nur das Low-Byte wurde geschrieben (p_depth_set);
