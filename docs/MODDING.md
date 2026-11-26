@@ -2,6 +2,8 @@
 
 Stand 2026-11-26, vom Nutzer als Entwurf festgehalten. Noch kein
 Meilenstein; Abnahmekriterien legt der Mensch in `docs/ROADMAP.md` fest.
+Anleitung fuer Mod-Nutzer und -Autoren (englisch):
+[`MODDING_GUIDE.md`](MODDING_GUIDE.md).
 
 ## Grundsätze
 

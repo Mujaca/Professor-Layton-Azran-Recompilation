@@ -81,6 +81,13 @@ start): A = `X`, B = `Z`, X = `S`, Y = `A`, L = `Q`, R = `W`, Start = `Enter`,
 Select = `Backspace`, D-Pad = arrow keys, Circle Pad = `I`/`J`/`K`/`L`.
 An XInput gamepad works as well. Save games are stored in `out/savedata`.
 
+## Mods
+
+The port can load mods: replacement files (text, graphics, music, videos)
+and sandboxed Lua scripts (memory access, input, mouse). Mods are off by
+default; start with `--mods`. See the
+[Modding Guide](docs/MODDING_GUIDE.md).
+
 ## Repository layout
 
 ```
