@@ -89,6 +89,12 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
    baut port.exe ohne weitere Installation oder Downloads. Enthaelt keine
    Spielinhalte; Lizenztexte der gebuendelten Teile liegen bei. Bau des
    Pakets reproduzierbar (Skript, spaeter GitHub-Release per CI).
+7. **Ruhiger Standardstart** (nach M17): Debug-Overlay/fps im Titel nur mit
+   `--debug` bzw. `[debug] overlay = 1` (Teil des M17-Branches); port.exe
+   ohne Konsole (`--console` bzw. `[debug] console = 1` zeigt sie);
+   Konsolenausgabe immer zusaetzlich in `out/logs/port-<Zeit>.log`, die
+   letzten 10 bleiben. Tools (check, frontier, scene.py) muessen weiter die
+   Ausgabe lesen koennen.
 
 ## Frontier-Verlauf
 
