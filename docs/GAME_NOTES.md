@@ -40,6 +40,30 @@ Start/A bleibt der Titel stehen (Lauf `runB.log`, siehe unten).
   Reaktion sichtbar). Layout/Takt gemaess `docs/REFERENCE.md` (HID) und
   Azahar `hid/hid.cpp`.
 
+## Offen: Continue-Tipp im Titelmenue greift unzuverlaessig (2026-11-26)
+
+Nach den HW-Beschleunigungen (master 2ecf438) erreichen die Szenen
+`froenborg`/`raetsel1` aus `tools/scene.py` das Slot-Menue nicht mehr
+zuverlaessig. Messung mit einem einzelnen Continue-Tipp (160,118),
+Fixture `froenborg`, `--renderer hw`, Bild alle 50 Gast-Frames bis g3200
+(Skript `scratch/scene_test/ab_menu.py`):
+
+| Tipp ab | Dauer | Slot-Menue bis g3200 |
+|---|---|---|
+| g1800 | 20 | einmal ja (~g2300), einmal nein |
+| g1900 | 20 | nein (4 Laeufe, auch Stand vor 9b6cc24) |
+| g1800/1900/2100 | 120 | nein |
+| g2100/g2400 | 20 | nein |
+| g2700 | 20 | ja (≤ g3200) |
+| g2000, danach Tipps alle 100 auf Slot 1 bis g3800 | 20/8 | Slot-Menue erst ~g4200 |
+
+Das Menue ist ab ~g1900 sichtbar. Weitere Tipps verzoegern den Wechsel
+offenbar. Keine Regression durch 9b6cc24 (Stand davor verhaelt sich gleich).
+Ungeklaert, ob der Wechsel an Wandzeit/Ton (z. B. Ende eines Effekts) haengt
+oder Touch-Abtastung im Menue verloren geht; naechster Schritt
+`HLE_HID_LOG=1` + Ton-Ereignisse um den Tipp. Bis dahin: Szenen-Zeiten in
+`tools/scene.py` gelten fuer den Stand 92c2cc2 und muessen nachgemessen werden.
+
 ## Offen (Bildauffaelligkeit, keine Diagnose)
 
 Die Seitenflaeche des Menues erscheint als sehr regelmaessiges Zellenraster
