@@ -1,4 +1,4 @@
-/* Testtreiber fuer runtime/mods/lua_host.c (tests/lua_host_test.py).
+/* Testtreiber fuer runtime/modding/lua_host.c (tests/lua_host_test.py).
  *
  *   lua_host_selftest.exe <mods-ordner> <vblanks> [budget]
  *
