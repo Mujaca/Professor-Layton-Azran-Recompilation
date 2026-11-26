@@ -433,6 +433,34 @@ static uint32_t scene_tex_cmd(ArmCpu *c) {
     return (uint32_t)((unsigned char *)q - (c->mem + LIST));
 }
 
+/* Wie scene_tex_cmd, aber eine 8x32-Textur (vier Kachelzeilen) auf einem
+   bildfuellenden Rechteck, Ziel 8x32: ein Texel je Pixel, Abtastung in
+   der Texelmitte (Teil-Upload-Test). */
+static uint32_t scene_tex_tall(ArmCpu *c) {
+    static const Vtx3 v[6] = {
+        {{-1.0f, -1.0f, 0.0f}, {0.5f, 0.5f, 0.5f, 1.0f}, {0.0f, 0.0f}},
+        {{ 1.0f, -1.0f, 0.0f}, {0.5f, 0.5f, 0.5f, 1.0f}, {1.0f, 0.0f}},
+        {{ 1.0f,  1.0f, 0.0f}, {0.5f, 0.5f, 0.5f, 1.0f}, {1.0f, 1.0f}},
+        {{-1.0f, -1.0f, 0.0f}, {0.5f, 0.5f, 0.5f, 1.0f}, {0.0f, 0.0f}},
+        {{ 1.0f,  1.0f, 0.0f}, {0.5f, 0.5f, 0.5f, 1.0f}, {1.0f, 1.0f}},
+        {{-1.0f,  1.0f, 0.0f}, {0.5f, 0.5f, 0.5f, 1.0f}, {0.0f, 1.0f}},
+    };
+    uint32_t *q;
+    put_vertices3(c, v, 6);
+    q = (uint32_t *)(c->mem + LIST);
+    q = emit_attrs3(q, 6);
+    q = emit_vs_tex(q, 0);
+    q = emit_viewport(q, 8, 32);
+    q = emit(q, 0x80, 1u);                 /* nur Einheit 0 */
+    q = emit_tex(q, 0, TEX0, 8, 32, 0u, 2u, 2u, 0u, 0u);
+    q = emit_tev_stage(q, 0, 0x00000003u, 0u, 0u, 0u, 0u);
+    q = emit_tev_stage(q, 1, 0x0F0F0F0Fu, 0u, 0x00010001u, 0u, 0u);
+    q = emit_tev_passthrough(q, 2);
+    q = emit_target(q, FB, 8, 32, 0u, 0u, 0, 0u);
+    q = emit(q, 0x22E, 0);
+    return (uint32_t)((unsigned char *)q - (c->mem + LIST));
+}
+
 static uint32_t scene_f(ArmCpu *c) {
     fill_tex_rgba8(c, TEX0, 1);
     return scene_tex_cmd(c);
@@ -698,6 +726,55 @@ static uint32_t scene_o(ArmCpu *c) {
     q = emit_tri_color(q, 0x60C08040u, 0.0f);
     q = emit_blend(q, 1u, 3u, 3u, 10u, 12u, 10u, 12u, 0x20304050u);
     q = emit_target(q, FB, 16, 16, 0u, 0u, 0, 0u);
+    q = emit(q, 0x22E, 0u);
+    return (uint32_t)((unsigned char *)q - (c->mem + LIST));
+}
+
+/* Szene S: Batching mit Shader-Blending bei tiefer Ueberlappung. 42
+   bildfuellende Dreiecke (jedes ueberdeckt alle Pixel und muss das Ergebnis
+   aller vorherigen lesen), dazwischen kleine Dreiecke in den vier
+   Quadranten (ohne gemeinsame Pixel untereinander). Blend wie die Figuren im Dialog: RGB Add SrcA/1-SrcA,
+   Alpha Max SrcA/DstA; das Ergebnis haengt je Pixel von Anzahl und
+   Reihenfolge der Dreiecke ab. Je Dreieck eine Farbe (keine Interpolation),
+   Kanten nur an den kleinen Dreiecken. */
+#define SCENE_S_TRIS 56
+static uint32_t scene_s(ArmCpu *c) {
+    static Vtx v[SCENE_S_TRIS * 3];
+    static const float quad[4][2] = {{-0.8f, -0.8f}, {0.2f, -0.8f},
+                                     {-0.8f, 0.2f}, {0.2f, 0.2f}};
+    uint32_t *q;
+    int t, k, n = 0, sm = 0;
+    for (t = 0; t < SCENE_S_TRIS; t++) {
+        float r = (float)((t * 37) % 256) / 255.0f;
+        float g = (float)((t * 91 + 40) % 256) / 255.0f;
+        float b = (float)((t * 53 + 100) % 256) / 255.0f;
+        float a = (float)((t * 29 + 60) % 200 + 30) / 255.0f;
+        float px[3], py[3];
+        if (t % 4 == 3) {                    /* kleines Dreieck im Quadranten */
+            const float *o = quad[sm++ & 3];
+            px[0] = o[0]; py[0] = o[1];
+            px[1] = o[0] + 0.55f; py[1] = o[1] + 0.05f;
+            px[2] = o[0] + 0.2f; py[2] = o[1] + 0.5f;
+        } else {                             /* bildfuellend */
+            px[0] = -3.0f; py[0] = -3.0f;
+            px[1] = 3.0f;  py[1] = -3.0f;
+            px[2] = 0.0f;  py[2] = 3.0f;
+        }
+        for (k = 0; k < 3; k++, n++) {
+            v[n].pos[0] = px[k]; v[n].pos[1] = py[k]; v[n].pos[2] = 0.0f;
+            v[n].col[0] = r; v[n].col[1] = g; v[n].col[2] = b; v[n].col[3] = a;
+        }
+    }
+    fill_fb_rgba8(c, FB, 32, 32);
+    put_vertices(c, v, n);
+    q = (uint32_t *)(c->mem + LIST);
+    q = emit_attrs(q, n);
+    q = emit_vs_real(q);
+    q = emit_viewport(q, 32, 32);
+    q = emit_tev0(q, 0u, 0u);                /* PrimaryColor */
+    q = emit_target(q, FB, 32, 32, 0u, 0u, 0, 0u);
+    /* nach emit_target: das setzt 0x100 (Blending) zurueck */
+    q = emit_blend(q, 1u, 0u, 4u, 6u, 7u, 6u, 8u, 0u);
     q = emit(q, 0x22E, 0u);
     return (uint32_t)((unsigned char *)q - (c->mem + LIST));
 }
@@ -1377,6 +1454,101 @@ static void scene_case(ArmCpu *c, const char *name, SceneFn fn, uint32_t fmt,
     }
 }
 
+/* Referenz der Ueberlappungspruefung: Pixeltest je Pixel des Ziels nach
+   den D3D11-Rasterregeln (16.8-Festkomma, Pixelmitte, Top-Left), wie
+   cov_mark vor der Zeilenspannen-Rechnung. */
+static int cov_ref_mask(const HwVertex *t, float hw_, float hh, int cx, int cy,
+                        int w, int h, unsigned char *mask)
+{
+    long long x[3], y[3], ex[3], ey[3], area;
+    int tl[3], i, px, py, n = 0;
+    memset(mask, 0, (size_t)w * h);
+    for (i = 0; i < 3; i++) {
+        float iw = 1.0f / t[i].pos[3];
+        float fx = (t[i].pos[0] * iw + 1.0f) * hw_ + (float)cx;
+        float fy = (t[i].pos[1] * iw + 1.0f) * hh + (float)cy;
+        x[i] = llrint((double)fx * 256.0);
+        y[i] = llrint((double)fy * 256.0);
+    }
+    area = (x[1] - x[0]) * (y[2] - y[0]) - (x[2] - x[0]) * (y[1] - y[0]);
+    if (area == 0) return 0;
+    if (area < 0) {
+        long long tx = x[1], ty = y[1];
+        x[1] = x[2]; y[1] = y[2]; x[2] = tx; y[2] = ty;
+    }
+    for (i = 0; i < 3; i++) {
+        int j = (i + 1) % 3;
+        ex[i] = x[j] - x[i]; ey[i] = y[j] - y[i];
+        tl[i] = (ey[i] < 0) || (ey[i] == 0 && ex[i] > 0);
+    }
+    for (py = 0; py < h; py++) {
+        long long sy = (long long)py * 256 + 128;
+        for (px = 0; px < w; px++) {
+            long long sx = (long long)px * 256 + 128;
+            int k, in = 1;
+            for (k = 0; k < 3; k++) {
+                long long e = ex[k] * (sy - y[k]) - ey[k] * (sx - x[k]);
+                if (e < 0 || (e == 0 && !tl[k])) { in = 0; break; }
+            }
+            if (in) { mask[(size_t)py * w + px] = 1; n++; }
+        }
+    }
+    return n;
+}
+
+/* Zeilenspannen der Ueberlappungspruefung (hw_cov_tri_mask) gegen den
+   Pixeltest: zufaellige Dreiecke (auch teils ausserhalb, Ecken auf
+   Pixelmitten/-kanten, waagrechte/senkrechte Kanten, beide Umlaufsinne,
+   w != 1). Ergebnis muss bitgleich sein. */
+static void test_cov_spans(void)
+{
+    enum { W = 48, H = 40 };
+    static unsigned char a[W * H], b[W * H];
+    unsigned seed = 12345u;
+    int it, bad = 0, total = 0, grid = 0;
+    for (it = 0; it < 20000; it++) {
+        HwVertex t[3];
+        int k;
+        memset(t, 0, sizeof(t));
+        for (k = 0; k < 3; k++) {
+            float wv;
+            seed = seed * 1103515245u + 12345u;
+            wv = (it & 1) ? 1.0f : 0.5f + (float)((seed >> 8) & 255u) / 128.0f;
+            seed = seed * 1103515245u + 12345u;
+            if (it % 3 == 0) {
+                /* Ecke genau auf Pixelmitte bzw. -kante (Gleichheitsfaelle) */
+                int gx = (int)((seed >> 4) % (W + 8)) - 4;
+                int gy = (int)((seed >> 14) % (H + 8)) - 4;
+                float hx = (float)gx + (((seed >> 24) & 1u) ? 0.5f : 0.0f);
+                float hy = (float)gy + (((seed >> 25) & 1u) ? 0.5f : 0.0f);
+                t[k].pos[0] = (hx / (W / 2.0f) - 1.0f) * wv;
+                t[k].pos[1] = (hy / (H / 2.0f) - 1.0f) * wv;
+                grid++;
+            } else {
+                t[k].pos[0] = ((float)((seed >> 4) & 4095u) / 2048.0f - 1.0f) * 1.3f * wv;
+                seed = seed * 1103515245u + 12345u;
+                t[k].pos[1] = ((float)((seed >> 4) & 4095u) / 2048.0f - 1.0f) * 1.3f * wv;
+            }
+            t[k].pos[3] = wv;
+        }
+        if (it % 7 == 0) t[1].pos[1] = t[0].pos[1] * t[1].pos[3] / t[0].pos[3];  /* waagrecht */
+        if (it % 11 == 0) t[2].pos[0] = t[0].pos[0] * t[2].pos[3] / t[0].pos[3]; /* senkrecht */
+        {
+            int na = hw_cov_tri_mask(t, W / 2.0f, H / 2.0f, 0, 0, W, H, a);
+            int nb = cov_ref_mask(t, W / 2.0f, H / 2.0f, 0, 0, W, H, b);
+            total += nb;
+            if (na != nb || memcmp(a, b, sizeof(a)) != 0) bad++;
+        }
+    }
+    {
+        char msg[220];
+        snprintf(msg, sizeof(msg), "Ueberlappungspruefung: Zeilenspannen == Pixeltest "
+                 "(20000 Dreiecke, %d Pixel, %d Rasterecken, %d abweichend)",
+                 total, grid, bad);
+        check(bad == 0 && total > 100000, msg);
+    }
+}
+
 int main(int argc, char **argv) {
     static unsigned char mem[0x100000];
     ArmCpu c;
@@ -1392,6 +1564,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     printf("D3D11-Treiber: %s\n", hw_driver_name());
+    test_cov_spans();
 
     /* Referenzlauf Software, dann Hardware; Szenen decken Viewport,
        konstante/vertexgefaerbte Dreiecke, Tiefentest, RGB565 und Scissor ab. */
@@ -1434,6 +1607,22 @@ int main(int argc, char **argv) {
     scene_case(&c, "Szene L5: Lighting + Blend Max/DstAlpha, Ueberlappung",
                scene_lit5, 0u, 0, 32, 32, 8);
     g_tol = 1;
+    /* Tiefe Ueberlappung: jedes Vollbild-Dreieck liest das Ergebnis aller
+       vorherigen (ein Batch je Ueberschneidung, Momentaufnahme je Batch). */
+    {
+        /* Viele D3D-Draws in einer Liste: die Befehle gehen alle 32 Draws
+           vorzeitig an die GPU (ID3D11DeviceContext::Flush); das Bild muss
+           trotzdem dem Software-Pfad entsprechen. */
+        unsigned long long b0, s0, b1, s1;
+        char msg[160];
+        hw_submit_stats(&b0, &s0);
+        scene_case(&c, "Szene S: Shader-Blending, 42 Vollbild-Dreiecke + Quadranten",
+                   scene_s, 0u, 0, 32, 32, 16);
+        hw_submit_stats(&b1, &s1);
+        snprintf(msg, sizeof(msg), "Szene S: %llu D3D-Draws, %llu vorzeitige Uebergaben an die GPU",
+                 b1 - b0, s1 - s0);
+        check(b1 - b0 >= 32u && s1 - s0 >= 1u, msg);
+    }
     /* D16-Tiefe der Figurenszene: beide Bytes wie p_depth_set. */
     {
         static unsigned char col[32 * 32 * 4], sd[32 * 32 * 2], hd[32 * 32 * 2];
@@ -1622,6 +1811,76 @@ int main(int argc, char **argv) {
             printf("     Texturwechsel: %d Pixel >1 LSB (erster %d), %d Kantenpixel\n",
                    bad, first, edge);
         check(bad <= 32, "Texturinhalt zwischen zwei Listen wird neu gesampelt");
+    }
+
+    /* (E6) Teil-Upload: 8x32-Textur (4 Kachelzeilen), zwischen zwei Listen
+       aendert sich nur Kachelzeile 2. Der Upload darf nur diese Zeile
+       ersetzen; das Bild muss der Software-Referenz mit den neuen Gastbytes
+       entsprechen (alte und neue Zeilen). */
+    {
+        static unsigned char hwb[8 * 32 * 4], swb[8 * 32 * 4];
+        unsigned long long p0 = hw_texture_partial_uploads();
+        uint32_t sz;
+        int bad, one, edge, first, r;
+
+        gpu_pica_reset();
+        gpu_pica_set_render_hw(1);
+        for (r = 0; r < 4; r++) fill_tex_rgba8(&c, TEX0 + (uint32_t)r * 256u, 4 + r);
+        memset(c.mem + FB, 0, 8 * 32 * 4);
+        sz = scene_tex_tall(&c);
+        gpu_run_pica_list(&c, LIST, sz);
+        fill_tex_rgba8(&c, TEX0 + 2u * 256u, 1);
+        memset(c.mem + FB, 0, 8 * 32 * 4);
+        sz = scene_tex_tall(&c);
+        gpu_run_pica_list(&c, LIST, sz);
+        memcpy(hwb, c.mem + FB, sizeof(hwb));
+
+        gpu_pica_reset();
+        gpu_pica_set_render_hw(0);
+        memset(c.mem + FB, 0, 8 * 32 * 4);
+        sz = scene_tex_tall(&c);
+        gpu_run_pica_list(&c, LIST, sz);
+        memcpy(swb, c.mem + FB, sizeof(swb));
+
+        bad = compare_pixels(swb, hwb, (int)sizeof(swb), 4, &one, &edge, &first);
+        if (bad > 0)
+            printf("     Teil-Upload: %d Pixel >1 LSB (erster %d), %d Kantenpixel\n",
+                   bad, first, edge);
+        check(any_nonzero(swb, (int)sizeof(swb)) && bad == 0,
+              "Teil-Upload: geaenderte Kachelzeile neu, uebrige wie zuvor");
+        check(hw_texture_partial_uploads() == p0 + 1u,
+              "Teil-Upload: genau ein Box-Upload fuer die eine geaenderte Kachelzeile");
+    }
+
+    /* (E7) RGBA8-Direktdekoder und Zeilenbereiche gegen gpu_pica_decode_texel
+       fuer alle 14 Formate mit Zufallsbytes. */
+    {
+        static unsigned char srcb[32 * 32 * 4], ref[32 * 32 * 4], got[32 * 32 * 4];
+        unsigned seed = 777u;
+        int fmt, i, bad = 0;
+        for (i = 0; i < (int)sizeof(srcb); i++) {
+            seed = seed * 1103515245u + 12345u;
+            srcb[i] = (unsigned char)(seed >> 16);
+        }
+        for (fmt = 0; fmt < 14; fmt++) {
+            uint32_t ts = gpu_pica_tex_tile_size((uint32_t)fmt), tx, ty, k;
+            for (ty = 0; ty < 4u; ty++)
+                for (tx = 0; tx < 4u; tx++)
+                    for (k = 0; k < 64u; k++) {
+                        unsigned char px[4];
+                        gpu_pica_decode_texel(srcb + (ty * 4u + tx) * ts, (uint32_t)fmt,
+                                              k & 7u, k >> 3, px);
+                        memcpy(ref + (((ty * 8u + (k >> 3)) * 32u) + tx * 8u + (k & 7u)) * 4u,
+                               px, 4);
+                    }
+            hw_tex_decode_rows(srcb, (uint32_t)fmt, 32u, 0u, 4u, got);
+            if (memcmp(ref, got, sizeof(ref)) != 0) bad++;
+            /* nur Kachelzeilen 1..2: muss die Zeilen 8..23 der Referenz ergeben */
+            memset(got, 0, sizeof(got));
+            hw_tex_decode_rows(srcb, (uint32_t)fmt, 32u, 1u, 3u, got);
+            if (memcmp(ref + 8u * 32u * 4u, got, 16u * 32u * 4u) != 0) bad++;
+        }
+        check(bad == 0, "Textur-Dekoder (RGBA8 direkt, Zeilenbereiche) == gpu_pica_decode_texel");
     }
 
     /* (E3) D24 ueber D32_FLOAT: Laden und Rueckschreiben ohne Draw muss

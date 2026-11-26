@@ -326,6 +326,35 @@ Struktur je Draw statt Registerlesen je Pixel.
   Rate rastet auf 50/75/100 je 300 ein, ein 512er-Cache allein gab 75).
   Danach Render-Thread 62 % aktiv; p_shader_run 11 %, cov_mark 8 %, texslot_upload 8 %,
   hw_flush_to_guest 6 %, p_clip_edge 6 %, hw_begin_draw 5 % der Samples.
+* Render-Thread-Kosten (2026-11-26, `HLE_GTIME`, Werte je 5 s in der Szene):
+  `hw_flush_to_guest` wartete ~0,9-1,2 s auf `Map`, weil der Treiber alle
+  Draws einer Liste sammelte und die GPU erst beim Rueckschreiben begann
+  (~100 Rueckschreibungen/s). Die Textur 0x1F112280 (512x1024 RGBA8, 2 MiB,
+  enthaelt das 240x400-Ziel) wurde je Gast-Frame voll neu dekodiert
+  (30 Uploads/s zu ~3 ms). Massnahmen: Flush alle 32 D3D-Draws,
+  Teil-Upload nur geaenderter Kachelzeilen + RGBA8-Direktdekoder,
+  Zeilenspannen in `cov_mark`, RGBA8-Rueckschreiben ohne Pruefung je Pixel.
+  A/B im Wechsel, Gast-Frames 5700-8400 / sichtbare Wechsel oben 6600-6900:
+
+  | Variante | Lauf 1 | Lauf 2 | Lauf 3 |
+  |---|---|---|---|
+  | vorher (e902a54) | 939 / 100 | 921 / 100 | 933 / 99 |
+  | nur CPU-Posten (ohne Flush) | 973 / 100 | 974 / 100 | 972 / 100 |
+  | dito, Vergleichslauf | 974 / 100 | 973 / 100 | 973 / 100 |
+  | mit Flush alle 32 Draws | 1327 / 149 | 1344 / 150 | 1346 / 150 |
+  | Endstand (Commit) | 1345 / 150 | 1348 / 150 | 1347 / 150 |
+
+  Also 20 -> 30 Gast-fps (3 -> 2 VBlanks je Gast-Frame). `[hwtime]` je 5 s:
+  vorher begin 927 ms, tri 514 ms, flush 1222 ms (davon warten 867);
+  nachher bei 1,5-facher Arbeit begin 888, tri 574, flush 583 (warten 279).
+  Die CPU-Posten allein senkten die Rechenzeit (begin+tri+flush ohne
+  Warten 1,8 s -> 1,15 s), verschoben sie aber nur ins Warten; erst die
+  fruehe Uebergabe macht daraus Bildrate. Profil danach (Render-Thread
+  73 % aktiv): p_shader_run 17 %, p_clip_edge 8 %, hw_begin_draw 7 %,
+  hw_flush_to_guest 5 %, p_emit_tri 5 %, p_ext_transfer 3 %,
+  depth_from_guest 3 %, cov_row_span+cov_mark 6 %; texslot_upload nicht mehr
+  sichtbar. Verworfen: Schichten statt Batch-Wechsel bei Ueberlappung
+  (45 600 -> 16 400 D3D-Draws je 5 s, aber nicht schneller).
 
 ## Darstellungsfehler 3D-Figuren (Nutzerbeobachtung 2026-11-25, behoben 2026-11-26)
 

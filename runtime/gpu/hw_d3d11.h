@@ -229,5 +229,21 @@ void hw_texture_stats(unsigned long long *uploads, unsigned long long *decode_us
 unsigned long long hw_depth_writes(void);
 /* Volle Gast->D3D-Ladungen des Ziels (Diagnose fuer HW/SW-Wechsel). */
 unsigned long long hw_target_loads(void);
+/* Selbsttest: Pixelabdeckung eines Dreiecks nach den D3D11-Rasterregeln, wie
+ * die Ueberlappungspruefung beim Batching sie rechnet (mask: w*h Bytes,
+ * 1 = abgedeckt). Rueckgabe: Zahl der abgedeckten Pixel. */
+int hw_cov_tri_mask(const HwVertex t[3], float half_w, float half_h,
+                    int corner_x, int corner_y, int w, int h,
+                    unsigned char *mask);
+/* Textur-Upload: Kachelzeilen [trow0, trow1) eines PICA-Texturbilds der
+ * Breite w nach RGBA8 (out = Pixelzeile trow0*8, Zeilenabstand w*4 Bytes). */
+void hw_tex_decode_rows(const unsigned char *src, uint32_t fmt, uint32_t w,
+                        uint32_t trow0, uint32_t trow1, unsigned char *out);
+/* Uploads, die nur die geaenderten Kachelzeilen ersetzt haben. */
+unsigned long long hw_texture_partial_uploads(void);
+/* D3D-Draws und vorzeitige Uebergaben an die GPU (ID3D11DeviceContext::
+ * Flush alle HW_SUBMIT_BATCHES Draws, damit die GPU nicht erst beim
+ * Rueckschreiben anfaengt). */
+void hw_submit_stats(unsigned long long *batches, unsigned long long *submits);
 
 #endif
