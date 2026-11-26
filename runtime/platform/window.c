@@ -8,13 +8,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-static HWND g_hwnd = NULL;
-static BITMAPINFO g_bi;
 static uint8_t *g_dib = NULL;
 static int g_w = 400, g_h = 240;
 static char g_status[10][192];
 static int g_status_lines = 0;
-static WinViewport g_vp = {0, 0, 400, 480, 1};
 static int g_keys[256];
 /* Tastatur-/Mauszustand fuer HID. Der WndProc-Hostthread schreibt, der
  * Port-Hauptthread liest; SRWLOCK schuetzt die Momentaufnahme. */
@@ -25,6 +22,7 @@ static int g_mouse_down = 0;
 static int g_touch_x = 0, g_touch_y = 240, g_touch_w = 320, g_touch_h = 240;
 static int g_has_touch_rect = 0;
 static int g_xinput_enabled = 1;
+static int g_layout_ini = 0;          /* [display] layout = split -> 1 */
 
 /* ---- Tastenbelegung (port.ini neben port.exe, siehe docs/FRONTEND.md) ---- */
 typedef struct {
@@ -83,7 +81,12 @@ static void write_default_config(const char *path) {
           "\n"
           "[gamepad]\n"
           "# XInput-Gamepad zusaetzlich zur Tastatur (0 = aus).\n"
-          "enabled = 1\n",
+          "enabled = 1\n"
+          "\n"
+          "[display]\n"
+          "# single = ein Fenster mit beiden Screens, split = je Screen ein\n"
+          "# Fenster (auch per Startoption --split-screens).\n"
+          "layout = single\n",
           f);
     fclose(f);
 }
@@ -198,6 +201,9 @@ static void load_config(void) {
                 if (slot != NULL && vk >= 0) *slot = vk;
             } else if (ieq(section, "gamepad") && ieq(key, "enabled")) {
                 g_xinput_enabled = (atoi(val) != 0);
+            } else if (ieq(section, "display") && ieq(key, "layout")) {
+                if (ieq(val, "split")) g_layout_ini = 1;
+                else if (ieq(val, "single")) g_layout_ini = 0;
             }
         }
     }
@@ -282,47 +288,94 @@ static int xinput_poll(WinInput *out) {
     return 0;
 }
 
-/* ---- Fenster ---- */
-static int g_fullscreen = 0;
-static LONG g_windowed_style = 0;
-static RECT g_windowed_rect;
+/* ---- Fenster ----
+ * Ein "Pane" ist ein Fenster, das einen Ausschnitt des Kanvas zeigt.
+ * Standard: ein Fenster mit dem ganzen Kanvas (beide Screens untereinander).
+ * Layout "split" (--split-screens oder [display] layout = split): zwei
+ * Fenster, oben der obere Screen, unten der Touchscreen (Ausschnitt =
+ * Touch-Rechteck). Jedes Fenster skaliert und schaltet Vollbild (F11) fuer
+ * sich; Tastatur/Gamepad wirken, solange eines der Fenster vorne ist. Die
+ * Fensterschicht aendert nur die Anzeige, nie den Gastzustand. */
+typedef struct {
+    HWND hwnd;
+    int src_x, src_y, src_w, src_h;   /* Ausschnitt des Kanvas */
+    WinViewport vp;
+    BITMAPINFO bi;                    /* Hoehe = src_h (top-down) */
+    HDC back_dc;                      /* Doppelpufferung, siehe draw() */
+    HBITMAP back_bmp, back_old;
+    int back_w, back_h;
+    int fullscreen;
+    LONG windowed_style;
+    RECT windowed_rect;
+} WinPane;
 
-static void update_viewport(HWND hwnd) {
-    RECT rc;
-    GetClientRect(hwnd, &rc);
-    g_vp = win_fit_viewport((int)rc.right, (int)rc.bottom, g_w, g_h);
+static WinPane g_pane[2];
+static int g_npanes = 0;
+static int g_layout_cli = -1;         /* -1 = port.ini entscheidet */
+
+void win_set_split(int on) {
+    g_layout_cli = on != 0;
 }
 
-static void toggle_fullscreen(HWND hwnd) {
-    if (!g_fullscreen) {
+static WinPane *pane_of(HWND hwnd) {
+    int i;
+    for (i = 0; i < g_npanes; i++)
+        if (g_pane[i].hwnd == hwnd) return &g_pane[i];
+    return NULL;
+}
+
+static void pane_set_src(WinPane *p, int x, int y, int w, int h) {
+    p->src_x = x;
+    p->src_y = y;
+    p->src_w = w;
+    p->src_h = h;
+    memset(&p->bi, 0, sizeof(p->bi));
+    p->bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    p->bi.bmiHeader.biWidth = g_w;    /* Zeilenlaenge des ganzen Kanvas */
+    p->bi.bmiHeader.biHeight = -h;    /* top-down, ab Zeile src_y */
+    p->bi.bmiHeader.biPlanes = 1;
+    p->bi.bmiHeader.biBitCount = 32;
+    p->bi.bmiHeader.biCompression = BI_RGB;
+}
+
+static void update_viewport(WinPane *p) {
+    RECT rc;
+    if (p == NULL || p->hwnd == NULL) return;
+    GetClientRect(p->hwnd, &rc);
+    p->vp = win_fit_viewport((int)rc.right, (int)rc.bottom, p->src_w, p->src_h);
+}
+
+static void toggle_fullscreen(WinPane *p) {
+    HWND hwnd = p->hwnd;
+    if (!p->fullscreen) {
         MONITORINFO mi;
         HMONITOR mon;
-        g_windowed_style = GetWindowLongA(hwnd, GWL_STYLE);
-        GetWindowRect(hwnd, &g_windowed_rect);
+        p->windowed_style = GetWindowLongA(hwnd, GWL_STYLE);
+        GetWindowRect(hwnd, &p->windowed_rect);
         mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
         memset(&mi, 0, sizeof(mi));
         mi.cbSize = sizeof(mi);
         if (mon == NULL || !GetMonitorInfoA(mon, &mi)) return;
         SetWindowLongA(hwnd, GWL_STYLE,
-                       (g_windowed_style & ~(WS_CAPTION | WS_THICKFRAME |
-                                             WS_MINIMIZEBOX | WS_MAXIMIZEBOX |
-                                             WS_SYSMENU)) |
+                       (p->windowed_style & ~(WS_CAPTION | WS_THICKFRAME |
+                                              WS_MINIMIZEBOX | WS_MAXIMIZEBOX |
+                                              WS_SYSMENU)) |
                            WS_POPUP | WS_VISIBLE);
         SetWindowPos(hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
                      mi.rcMonitor.right - mi.rcMonitor.left,
                      mi.rcMonitor.bottom - mi.rcMonitor.top,
                      SWP_FRAMECHANGED | SWP_SHOWWINDOW);
-        g_fullscreen = 1;
+        p->fullscreen = 1;
     } else {
-        SetWindowLongA(hwnd, GWL_STYLE, g_windowed_style);
-        SetWindowPos(hwnd, HWND_TOP, g_windowed_rect.left,
-                     g_windowed_rect.top,
-                     g_windowed_rect.right - g_windowed_rect.left,
-                     g_windowed_rect.bottom - g_windowed_rect.top,
+        SetWindowLongA(hwnd, GWL_STYLE, p->windowed_style);
+        SetWindowPos(hwnd, HWND_TOP, p->windowed_rect.left,
+                     p->windowed_rect.top,
+                     p->windowed_rect.right - p->windowed_rect.left,
+                     p->windowed_rect.bottom - p->windowed_rect.top,
                      SWP_FRAMECHANGED | SWP_SHOWWINDOW);
-        g_fullscreen = 0;
+        p->fullscreen = 0;
     }
-    update_viewport(hwnd);
+    update_viewport(p);
 }
 
 /* Hintergrundpuffer (Doppelpufferung). Frueher wurde direkt ins Fenster
@@ -332,79 +385,101 @@ static void toggle_fullscreen(HWND hwnd) {
  * Fenster (M13); Screenshots zeigten es nicht, weil sie den Bildpuffer vor
  * der Fensterausgabe lesen. Jetzt wird alles in einen Speicher-DC gezeichnet
  * und mit einem einzigen BitBlt uebertragen. */
-static HDC g_back_dc;
-static HBITMAP g_back_bmp, g_back_old;
-static int g_back_w, g_back_h;
-
-static HDC back_buffer(HDC dc, int w, int h) {
+static HDC back_buffer(WinPane *p, HDC dc, int w, int h) {
     if (w <= 0 || h <= 0) return NULL;
-    if (g_back_dc && g_back_w == w && g_back_h == h) return g_back_dc;
-    if (g_back_dc) {
-        SelectObject(g_back_dc, g_back_old);
-        DeleteObject(g_back_bmp);
-        DeleteDC(g_back_dc);
-        g_back_dc = NULL;
+    if (p->back_dc && p->back_w == w && p->back_h == h) return p->back_dc;
+    if (p->back_dc) {
+        SelectObject(p->back_dc, p->back_old);
+        DeleteObject(p->back_bmp);
+        DeleteDC(p->back_dc);
+        p->back_dc = NULL;
     }
-    g_back_dc = CreateCompatibleDC(dc);
-    if (!g_back_dc) return NULL;
-    g_back_bmp = CreateCompatibleBitmap(dc, w, h);
-    if (!g_back_bmp) {
-        DeleteDC(g_back_dc);
-        g_back_dc = NULL;
+    p->back_dc = CreateCompatibleDC(dc);
+    if (!p->back_dc) return NULL;
+    p->back_bmp = CreateCompatibleBitmap(dc, w, h);
+    if (!p->back_bmp) {
+        DeleteDC(p->back_dc);
+        p->back_dc = NULL;
         return NULL;
     }
-    g_back_old = (HBITMAP)SelectObject(g_back_dc, g_back_bmp);
-    g_back_w = w;
-    g_back_h = h;
-    return g_back_dc;
+    p->back_old = (HBITMAP)SelectObject(p->back_dc, p->back_bmp);
+    p->back_w = w;
+    p->back_h = h;
+    return p->back_dc;
 }
 
-static void draw_into(HDC dc, const RECT *rc) {
+static void back_buffer_free(WinPane *p) {
+    if (p->back_dc) {
+        SelectObject(p->back_dc, p->back_old);
+        DeleteObject(p->back_bmp);
+        DeleteDC(p->back_dc);
+        p->back_dc = NULL;
+    }
+}
+
+static void draw_into(WinPane *p, HDC dc, const RECT *rc) {
     FillRect(dc, rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
     if (g_dib) {
         /* Verkleinern: HALFTONE mittelt (sonst fehlen ganze Zeilen, Text
            zerfaellt); Vergroessern: naechster Nachbar (scharf, billig). */
-        if (g_vp.scale < 1.0) {
+        if (p->vp.scale < 1.0) {
             SetStretchBltMode(dc, HALFTONE);
             SetBrushOrgEx(dc, 0, 0, NULL);
         } else {
             SetStretchBltMode(dc, COLORONCOLOR);
         }
-        StretchDIBits(dc, g_vp.x, g_vp.y, g_vp.width, g_vp.height,
-                      0, 0, g_w, g_h, g_dib, &g_bi, DIB_RGB_COLORS, SRCCOPY);
+        /* Quelle ab Zeile src_y als eigenes top-down-Bitmap (Hoehe src_h):
+           vermeidet die Y-Ursprungs-Mehrdeutigkeit von StretchDIBits bei
+           top-down-DIBs. */
+        StretchDIBits(dc, p->vp.x, p->vp.y, p->vp.width, p->vp.height,
+                      p->src_x, 0, p->src_w, p->src_h,
+                      g_dib + (size_t)p->src_y * g_w * 4, &p->bi,
+                      DIB_RGB_COLORS, SRCCOPY);
     }
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, RGB(255, 255, 255));
-    for (int i = 0; i < g_status_lines; i++) {
-        TextOutA(dc, 8, 8 + i * 16, g_status[i], (int)strlen(g_status[i]));
+    if (p == &g_pane[0]) {               /* Statustext nur im ersten Fenster */
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, RGB(255, 255, 255));
+        for (int i = 0; i < g_status_lines; i++) {
+            TextOutA(dc, 8, 8 + i * 16, g_status[i], (int)strlen(g_status[i]));
+        }
     }
 }
 
-static void draw(HDC dc) {
+static void draw(WinPane *p, HDC dc) {
     RECT rc;
     HDC bdc;
-    GetClientRect(g_hwnd, &rc);
-    bdc = back_buffer(dc, rc.right - rc.left, rc.bottom - rc.top);
+    GetClientRect(p->hwnd, &rc);
+    bdc = back_buffer(p, dc, rc.right - rc.left, rc.bottom - rc.top);
     if (!bdc) {           /* Fallback: direkt (z. B. minimiert) */
-        draw_into(dc, &rc);
+        draw_into(p, dc, &rc);
         return;
     }
-    draw_into(bdc, &rc);
+    draw_into(p, bdc, &rc);
     BitBlt(dc, 0, 0, rc.right - rc.left, rc.bottom - rc.top, bdc, 0, 0, SRCCOPY);
 }
 
+/* Fensterpixel -> Kanvaspixel (fuer Touch), ueber den Ausschnitt des Panes. */
+static void mouse_to_canvas(WinPane *p, LPARAM lp) {
+    int mx = (int)(short)LOWORD(lp);
+    int my = (int)(short)HIWORD(lp);
+    if (p == NULL || p->vp.scale <= 0) return;
+    g_mouse_x = p->src_x + (int)floor((mx - p->vp.x) / p->vp.scale);
+    g_mouse_y = p->src_y + (int)floor((my - p->vp.y) / p->vp.scale);
+}
+
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    WinPane *p = pane_of(hwnd);
     switch (msg) {
         case WM_DESTROY:
             PostQuitMessage(0);
             return 0;
         case WM_SIZE:
-            update_viewport(hwnd);
+            update_viewport(p);
             return 0;
         case WM_KEYDOWN:
         case WM_SYSKEYDOWN:
             if (wp == VK_F11) {
-                toggle_fullscreen(hwnd);
+                if (p != NULL) toggle_fullscreen(p);
                 return 0;
             }
             if (wp < 256) {
@@ -423,21 +498,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         case WM_KILLFOCUS:
-            AcquireSRWLockExclusive(&g_in_srw);
-            memset(g_key_down, 0, sizeof(g_key_down));
-            g_mouse_down = 0;
-            ReleaseSRWLockExclusive(&g_in_srw);
+            /* Fokuswechsel zwischen den eigenen Fenstern behaelt die Tasten. */
+            if (pane_of((HWND)wp) == NULL) {
+                AcquireSRWLockExclusive(&g_in_srw);
+                memset(g_key_down, 0, sizeof(g_key_down));
+                g_mouse_down = 0;
+                ReleaseSRWLockExclusive(&g_in_srw);
+            }
             return 0;
         case WM_MOUSEMOVE:
             AcquireSRWLockExclusive(&g_in_srw);
-            g_mouse_x = (int)(short)LOWORD(lp);
-            g_mouse_y = (int)(short)HIWORD(lp);
+            mouse_to_canvas(p, lp);
             ReleaseSRWLockExclusive(&g_in_srw);
             return 0;
         case WM_LBUTTONDOWN:
             AcquireSRWLockExclusive(&g_in_srw);
-            g_mouse_x = (int)(short)LOWORD(lp);
-            g_mouse_y = (int)(short)HIWORD(lp);
+            mouse_to_canvas(p, lp);
             g_mouse_down = 1;
             ReleaseSRWLockExclusive(&g_in_srw);
             SetCapture(hwnd);
@@ -453,7 +529,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_PAINT: {
             PAINTSTRUCT ps;
             HDC dc = BeginPaint(hwnd, &ps);
-            draw(dc);
+            if (p != NULL) draw(p, dc);
             EndPaint(hwnd, &ps);
             return 0;
         }
@@ -469,13 +545,31 @@ void win_set_no_activate(int on) {
     g_no_activate = on != 0;
 }
 
+/* Fenster mit Clientgroesse cw x ch; x/y = CW_USEDEFAULT oder Bildschirmpos. */
+static HWND create_pane_window(const char *title, int x, int y, int cw, int ch) {
+    RECT rc;
+    HWND h;
+    rc.left = 0;
+    rc.top = 0;
+    rc.right = cw;
+    rc.bottom = ch;
+    AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
+    h = CreateWindowA("LaytonPortWindow", title,
+                      WS_OVERLAPPEDWINDOW | (g_no_activate ? 0 : WS_VISIBLE),
+                      x, y, rc.right - rc.left, rc.bottom - rc.top,
+                      NULL, NULL, GetModuleHandleA(NULL), NULL);
+    if (h != NULL && g_no_activate) ShowWindow(h, SW_SHOWNOACTIVATE);
+    return h;
+}
+
 int win_open(int width, int height, const char *title) {
     WNDCLASSA wc;
-    RECT rc;
+    int split;
     g_w = width;
     g_h = height;
     load_config();
     xinput_init();
+    split = (g_layout_cli >= 0) ? g_layout_cli : g_layout_ini;
 
     memset(&wc, 0, sizeof(wc));
     wc.lpfnWndProc = WndProc;
@@ -487,38 +581,47 @@ int win_open(int width, int height, const char *title) {
         return 0;
     }
 
-    /* Beide Screens untereinander: 400x480, Standardmassstab 2x. */
-    rc.left = 0;
-    rc.top = 0;
-    rc.right = g_w * 2;
-    rc.bottom = g_h * 2;
-    AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
-    g_hwnd = CreateWindowA("LaytonPortWindow", title,
-                           WS_OVERLAPPEDWINDOW | (g_no_activate ? 0 : WS_VISIBLE), CW_USEDEFAULT,
-                           CW_USEDEFAULT, rc.right - rc.left,
-                           rc.bottom - rc.top, NULL, NULL, wc.hInstance, NULL);
-    if (!g_hwnd) {
-        return 0;
-    }
-    if (g_no_activate) ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
-    update_viewport(g_hwnd);
-
-    memset(&g_bi, 0, sizeof(g_bi));
-    g_bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    g_bi.bmiHeader.biWidth = g_w;
-    g_bi.bmiHeader.biHeight = -g_h;   /* top-down */
-    g_bi.bmiHeader.biPlanes = 1;
-    g_bi.bmiHeader.biBitCount = 32;
-    g_bi.bmiHeader.biCompression = BI_RGB;
     g_dib = (uint8_t *)calloc((size_t)g_w * g_h * 4, 1);
     if (!g_dib) {
         return 0;
     }
+
+    memset(g_pane, 0, sizeof(g_pane));
+    if (!split) {
+        /* Beide Screens untereinander: 400x480, Standardmassstab 2x. */
+        g_npanes = 1;
+        pane_set_src(&g_pane[0], 0, 0, g_w, g_h);
+        g_pane[0].hwnd = create_pane_window(title, CW_USEDEFAULT, CW_USEDEFAULT,
+                                            g_w * 2, g_h * 2);
+        if (!g_pane[0].hwnd) return 0;
+    } else {
+        /* Oberer Screen (obere Kanvashaelfte) und darunter das Touch-
+           Rechteck (Standard bis win_set_touch_rect: untere Haelfte). */
+        RECT wr;
+        int bx, by;
+        g_npanes = 2;
+        pane_set_src(&g_pane[0], 0, 0, g_w, g_h / 2);
+        pane_set_src(&g_pane[1], 0, g_h / 2, g_w, g_h - g_h / 2);
+        g_pane[0].hwnd = create_pane_window(title, CW_USEDEFAULT, CW_USEDEFAULT,
+                                            g_pane[0].src_w * 2,
+                                            g_pane[0].src_h * 2);
+        if (!g_pane[0].hwnd) return 0;
+        GetWindowRect(g_pane[0].hwnd, &wr);
+        bx = wr.left;
+        by = wr.bottom;
+        g_pane[1].hwnd = create_pane_window(title, bx, by,
+                                            g_pane[1].src_w * 2,
+                                            g_pane[1].src_h * 2);
+        if (!g_pane[1].hwnd) return 0;
+    }
+    update_viewport(&g_pane[0]);
+    update_viewport(&g_pane[1]);
     return 1;
 }
 
 int win_pump(void) {
     MSG msg;
+    int i;
     while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
         if (msg.message == WM_QUIT) {
             return 0;
@@ -526,9 +629,11 @@ int win_pump(void) {
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
     }
-    InvalidateRect(g_hwnd, NULL, FALSE);
-    UpdateWindow(g_hwnd);
-    return g_hwnd != NULL;
+    for (i = 0; i < g_npanes; i++) {
+        InvalidateRect(g_pane[i].hwnd, NULL, FALSE);
+        UpdateWindow(g_pane[i].hwnd);
+    }
+    return g_npanes > 0 && g_pane[0].hwnd != NULL;
 }
 
 void win_blit(const uint8_t *rgb, int w, int h) {
@@ -560,15 +665,25 @@ void win_status(const char *text, int line) {
 }
 
 void win_set_title(const char *text) {
-    if (g_hwnd) {
-        SetWindowTextA(g_hwnd, text ? text : "");
+    if (g_npanes > 0 && g_pane[0].hwnd) {
+        SetWindowTextA(g_pane[0].hwnd, text ? text : "");
+    }
+    if (g_npanes > 1 && g_pane[1].hwnd) {
+        char t[256];
+        snprintf(t, sizeof(t), "%s - Touchscreen", text ? text : "");
+        SetWindowTextA(g_pane[1].hwnd, t);
     }
 }
 
 void win_close(void) {
-    if (g_hwnd) {
-        DestroyWindow(g_hwnd);
-        g_hwnd = NULL;
+    int i, n = g_npanes;
+    g_npanes = 0;                 /* WndProc sieht ab hier keine Panes mehr */
+    for (i = 0; i < n; i++) {
+        back_buffer_free(&g_pane[i]);
+        if (g_pane[i].hwnd) {
+            DestroyWindow(g_pane[i].hwnd);
+            g_pane[i].hwnd = NULL;
+        }
     }
     free(g_dib);
     g_dib = NULL;
@@ -580,17 +695,35 @@ void win_set_touch_rect(int x, int y, int w, int h) {
     g_touch_w = w;
     g_touch_h = h;
     g_has_touch_rect = (w > 0 && h > 0);
+    /* Split-Layout: das zweite Fenster zeigt genau den Touchscreen. */
+    if (g_npanes > 1 && g_has_touch_rect) {
+        WinPane *b = &g_pane[1];
+        pane_set_src(b, x, y, w, h);
+        if (!b->fullscreen && g_pane[0].hwnd && b->hwnd) {
+            /* Clientgroesse 2x, zentriert unter dem oberen Fenster. */
+            RECT top, rc = {0, 0, w * 2, h * 2};
+            AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
+            GetWindowRect(g_pane[0].hwnd, &top);
+            SetWindowPos(b->hwnd, NULL,
+                         top.left + ((top.right - top.left) -
+                                     (rc.right - rc.left)) / 2,
+                         top.bottom, rc.right - rc.left, rc.bottom - rc.top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        update_viewport(b);
+    }
 }
 
 void win_input_poll(WinInput *out) {
     int mx, my, md;
     int down[256];
+    HWND fg;
     if (out == NULL) return;
     memset(out, 0, sizeof(*out));
 
     AcquireSRWLockShared(&g_in_srw);
     memcpy(down, g_key_down, sizeof(down));
-    mx = g_mouse_x;
+    mx = g_mouse_x;          /* bereits Kanvaspixel (mouse_to_canvas) */
     my = g_mouse_y;
     md = g_mouse_down;
     ReleaseSRWLockShared(&g_in_srw);
@@ -628,13 +761,12 @@ void win_input_poll(WinInput *out) {
      * (unabhaengig vom Fokus); wie die Tastatur (Fenstermeldungen) wirkt das
      * Gamepad nur, solange dieses Fenster im Vordergrund ist. Sonst steuerte
      * ein Controller alle laufenden Instanzen gleichzeitig. */
-    if (g_hwnd != NULL && GetForegroundWindow() == g_hwnd)
+    fg = GetForegroundWindow();
+    if (fg != NULL && pane_of(fg) != NULL)
         (void)xinput_poll(out);
 
-    if (g_has_touch_rect && g_vp.scale > 0) {
-        int px, py, tx, ty;
-        px = (int)floor((mx - g_vp.x) / g_vp.scale);
-        py = (int)floor((my - g_vp.y) / g_vp.scale);
+    if (g_has_touch_rect) {
+        int px = mx, py = my, tx, ty;
         tx = px - g_touch_x;
         ty = py - g_touch_y;
         if (tx < 0) tx = 0;

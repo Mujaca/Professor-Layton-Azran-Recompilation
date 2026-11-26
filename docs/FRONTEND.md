@@ -28,10 +28,18 @@ und die Fenstergeometrie (Sollwerte mit `Fraction` nachgerechnet).
 
 * Beide Screens untereinander: oben 400x240, darunter zentriert 320x240
   (Kanvas 400x480).
-* Skalierung **ganzzahlig** und seitenverhaeltnistreu; freie Flaeche bleibt
-  schwarz (Letterbox). Beim Groessenziehen wird der groesste passende Faktor
-  neu berechnet, mindestens 1.
-* **F11** schaltet randloses Vollbild auf dem aktuellen Monitor und zurueck.
+* Skalierung **stufenlos** und seitenverhaeltnistreu; freie Flaeche bleibt
+  schwarz (Letterbox). Verkleinern unter 1x mittelt (HALFTONE), Vergroessern
+  ist naechster Nachbar.
+* **Zwei Fenster:** `--split-screens` oder in `port.ini` `[display] layout =
+  split` zeigt den oberen Screen und den Touchscreen in je einem eigenen
+  Fenster (frei verschieb- und skalierbar, z. B. auf zwei Monitore).
+  `--single-window` erzwingt das gemeinsame Fenster. Tastatur und Gamepad
+  wirken, solange eines der beiden Fenster vorne ist; Schliessen eines
+  Fensters beendet den Port. Intern bleibt der 400x480-Kanvas (Screenshots,
+  `scene.py` unveraendert), nur die Anzeige wird aufgeteilt.
+* **F11** schaltet randloses Vollbild des aktiven Fensters auf dem aktuellen
+  Monitor und zurueck.
 * Die Maus ueber dem unteren Screen wirkt als Touchscreen; die Umrechnung
   beruecksichtigt Skalierung und Letterbox.
 * Titelzeile: `fps=` ist die tatsaechliche Host-Bildrate (gemessen ueber
@@ -66,6 +74,9 @@ CIRCLE_RIGHT = L
 
 [gamepad]
 enabled = 1
+
+[display]
+layout = single
 ```
 
 Tastennamen: ein Buchstabe oder eine Ziffer (`X`, `7`), oder `Enter`,

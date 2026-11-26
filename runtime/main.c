@@ -171,6 +171,8 @@ int main(int argc, char **argv) {
             g_press_n = press_spec_parse(argv[++i], g_press, g_press_n, PRESS_MAX);
         else if (strcmp(argv[i], "--savedata") == 0 && i + 1 < argc) savedata = argv[++i];
         else if (strcmp(argv[i], "--deterministic") == 0) det = 1;
+        else if (strcmp(argv[i], "--split-screens") == 0) win_set_split(1);
+        else if (strcmp(argv[i], "--single-window") == 0) win_set_split(0);
         else if (strcmp(argv[i], "--renderer") == 0 && i + 1 < argc) {
             const char *r = argv[++i];
             if (strcmp(r, "hw") == 0) renderer_hw = 1;
