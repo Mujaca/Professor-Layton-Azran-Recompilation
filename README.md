@@ -1,56 +1,96 @@
-# Layton 6 (Azran Legacy) – statische Recompilation für den PC
+# Professor Layton and the Azran Legacy – Static Recompilation
 
-Ziel: *Professor Layton and the Azran Legacy* (3DS, EUR) als **native
-PC-Anwendung** – ohne Emulator. Der ARM11-Code wird statisch nach C übersetzt
-(`tools/recomp`), eine eigene Runtime (`runtime/`) stellt Kernel, Dienste,
-GPU und Fenster bereit. Azahar dient nur als Referenz zum Lesen und Vergleichen.
+A native Windows port of *Professor Layton and the Azran Legacy* (Nintendo 3DS,
+EUR release) built by **static recompilation** – no emulator at runtime.
+The game's ARM11 code is translated ahead of time into C (`tools/recomp`), and
+a custom runtime (`runtime/`) provides the 3DS kernel, system services, the
+PICA200 GPU (software rasterizer and a Direct3D 11 renderer), DSP audio and
+input. The [Azahar](https://github.com/azahar-emu/azahar) emulator served only
+as a reference for reading and comparing behaviour; none of its code is linked.
 
-**Für Agenten: zuerst [`AGENTS.md`](AGENTS.md) lesen.**
+**This repository contains no game code or assets.** You need your own legally
+dumped copy of the game; the build turns *your* dump into the executable on
+your machine.
 
-| Dokument | Inhalt |
-|---|---|
-| [`docs/ROADMAP.md`](docs/ROADMAP.md) | Ziel, Meilensteine, Frontier-Verlauf |
-| [`docs/WORKAROUNDS.md`](docs/WORKAROUNDS.md) | technische Schuld (soll schrumpfen) |
-| [`docs/REFERENCE.md`](docs/REFERENCE.md) | verifizierte 3DS-Fakten |
-| [`docs/TOOLS.md`](docs/TOOLS.md) | Werkzeuge |
-| [`reports/FEASIBILITY.md`](reports/FEASIBILITY.md), [`reports/RECOMPILER_MVP.md`](reports/RECOMPILER_MVP.md), [`reports/TRACE.md`](reports/TRACE.md) | Hintergrundberichte |
+## Status
 
-## Stand
+The game boots, plays its intro films, shows the title screen and menus, lets
+you start a new game or continue a save, and the first puzzle is playable with
+sound and saving. The 3D scenes run at about 30 guest frames per second with
+the hardware renderer. This is a work-in-progress research project: expect
+bugs, slow scenes and occasional hangs. Progress and milestones are tracked in
+[`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-Natürlicher Boot ab `0x00100000` erreicht 7 von 10 Referenzdiensten
-(APT, ndm, fs, hid, ptm, cfg, gsp); erste Divergenz: `y2r:u`. Noch kein vom
-Spiel gerenderter Frame. Details und Verlauf: `docs/ROADMAP.md`.
+## Requirements
 
-## Quickstart
+* Windows 10/11 (x64), a GPU with Direct3D 11
+* Python 3.10+
+* A **decrypted** dump of the EUR cartridge (`.3ds`, e.g. made with
+  GodMode9 on your own console)
 
-```powershell
-pip install pyctr capstone keystone-engine ziglang
-git submodule update --init tools/azahar     # optional, nur als Referenz
+## Building
 
-python tools/extract.py          # ExeFS + RomFS-Listing (ROM im Repo-Wurzelverzeichnis)
-python tools/extract_romfs.py    # RomFS-Dateien -> out/romfs
-python tools/romfs_image.py      # SelfNCCH-Image -> out/romfs_image.bin
-python tools/build.py            # -> out/port.exe (erster Lauf: einige Minuten)
-python tools/frontier.py         # Fortschritt messen
-.\out\port.exe                   # Fenster: oben 400x240, unten 320x240
+1. Place your dump in the repository root under exactly this name:
+   `Professor Layton and the Azran Legacy (Europe).3ds`
+2. Install the Python dependencies (the C compiler comes with `ziglang`):
+
+   ```powershell
+   pip install pyctr capstone keystone-engine ziglang pillow
+   ```
+
+3. Extract the game data and build:
+
+   ```powershell
+   python tools/extract.py          # ExeFS + RomFS inventory
+   python tools/extract_romfs.py    # RomFS files -> out/romfs
+   python tools/romfs_image.py      # RomFS image -> out/romfs_image.bin
+   python tools/build.py            # recompile + compile -> out/port.exe (first run takes a few minutes)
+   ```
+
+4. Run:
+
+   ```powershell
+   .\out\port.exe --renderer hw
+   ```
+
+   Without `--renderer hw` the software rasterizer is used (slower, but the
+   reference implementation).
+
+## Controls
+
+The top screen and the touch screen are shown in one window; click the lower
+screen to touch. Default keys (configurable in `out/port.ini`, created on first
+start): A = `X`, B = `Z`, X = `S`, Y = `A`, L = `Q`, R = `W`, Start = `Enter`,
+Select = `Backspace`, D-Pad = arrow keys, Circle Pad = `I`/`J`/`K`/`L`.
+An XInput gamepad works as well. Save games are stored in `out/savedata`.
+
+## Repository layout
+
+```
+tools/recomp/      ARM11 -> C recompiler (game-agnostic)
+tools/workarounds/ game-specific deviations (debt list, currently empty)
+tools/g3ds/        analysis tools (trace diff, guest refs, ...)
+runtime/cpu/       CPU state, instruction semantics
+runtime/kernel/    SVCs, threads, IPC, 3DS services
+runtime/gpu/       PICA200 (software rasterizer, D3D11 renderer), texture decoders
+runtime/audio/     DSP emulation (HLE), audio output
+runtime/platform/  Win32 window, input
+tests/             recompiler, GPU, audio and runtime self-tests
+docs/              roadmap, reference notes, tool docs (mostly German)
 ```
 
-## Struktur
+`python tools/check.py` runs all self-tests, the build and the frontier
+check (boot progress compared against a reference trace).
 
-```
-tools/recomp/      ARM11 -> C Recompiler (spielunabhängig)
-tools/workarounds/ alle spielspezifischen Abweichungen (Schuldenliste)
-tools/g3ds/        Analysewerkzeuge (trace-diff, guest-refs, ...)
-runtime/cpu/       CPU-Zustand, Instruktionssemantik, Block-Hook/Trace
-runtime/kernel/    SVCs, Threads, IPC, 3DS-Dienste
-runtime/gpu/       PICA200-Ausführung, Texturdekoder
-runtime/platform/  Win32-Fenster
-runtime/main.c     Host: lädt Code, startet 0x00100000, zeigt Framebuffer
-tests/             Recompiler-/Trace-/GPU-Selbsttests
-reports/           Referenzspuren und -bilder (Azahar), Berichte
-```
+Most project documentation in `docs/` is written in German.
+[`AGENTS.md`](AGENTS.md) describes the rules for the (AI-assisted) development
+process.
 
-## Rechtliches
+## Legal
 
-Die ROM wird nicht mitgeliefert. Der Port bezieht seine Daten aus der eigenen
-Cartridge-Kopie des Nutzers.
+This project is not affiliated with or endorsed by Nintendo or Level-5.
+*Professor Layton* is a trademark of Level-5 Inc. No ROM, game code, assets or
+keys are distributed here; you must own the game and dump it yourself.
+
+The source code is licensed under the
+[GNU General Public License v3.0](LICENSE).
