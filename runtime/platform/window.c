@@ -362,7 +362,14 @@ static HDC back_buffer(HDC dc, int w, int h) {
 static void draw_into(HDC dc, const RECT *rc) {
     FillRect(dc, rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
     if (g_dib) {
-        SetStretchBltMode(dc, COLORONCOLOR);
+        /* Verkleinern: HALFTONE mittelt (sonst fehlen ganze Zeilen, Text
+           zerfaellt); Vergroessern: naechster Nachbar (scharf, billig). */
+        if (g_vp.scale < 1.0) {
+            SetStretchBltMode(dc, HALFTONE);
+            SetBrushOrgEx(dc, 0, 0, NULL);
+        } else {
+            SetStretchBltMode(dc, COLORONCOLOR);
+        }
         StretchDIBits(dc, g_vp.x, g_vp.y, g_vp.width, g_vp.height,
                       0, 0, g_w, g_h, g_dib, &g_bi, DIB_RGB_COLORS, SRCCOPY);
     }
@@ -626,8 +633,8 @@ void win_input_poll(WinInput *out) {
 
     if (g_has_touch_rect && g_vp.scale > 0) {
         int px, py, tx, ty;
-        px = (mx - g_vp.x) / g_vp.scale;
-        py = (my - g_vp.y) / g_vp.scale;
+        px = (int)floor((mx - g_vp.x) / g_vp.scale);
+        py = (int)floor((my - g_vp.y) / g_vp.scale);
         tx = px - g_touch_x;
         ty = py - g_touch_y;
         if (tx < 0) tx = 0;

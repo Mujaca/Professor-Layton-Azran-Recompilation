@@ -12,27 +12,32 @@ void win_status(const char *text, int line);
 void win_set_title(const char *text);            /* Titelzeile (fps/Frames) */
 void win_close(void);
 
-/* Bildbereich im Fenster: ganzzahliger Massstab, Seitenverhaeltnis
- * canvas_w:canvas_h, zentriert (schwarze Balken statt Verzerrung). Reine
- * Funktion, damit tests/frame_clock_selftest.c sie pruefen kann. */
+/* Bildbereich im Fenster: stufenloser Massstab (fuellt das Fenster so weit
+ * wie moeglich), Seitenverhaeltnis canvas_w:canvas_h, zentriert (schwarze
+ * Balken statt Verzerrung). Frueher ganzzahlig: ein Fenster knapp unter 2x
+ * fiel auf 1x zurueck. Reine Funktion, damit tests/frame_clock_selftest.c
+ * sie pruefen kann. */
 typedef struct {
     int x, y, width, height;   /* Zielrechteck im Clientbereich */
-    int scale;                 /* ganzzahliger Faktor >= 1 */
+    double scale;              /* Faktor > 0 (Fensterpixel je Kanvaspixel) */
 } WinViewport;
 
 static inline WinViewport win_fit_viewport(int client_w, int client_h,
                                            int canvas_w, int canvas_h) {
     WinViewport v;
-    int sx, sy, s;
+    double sx, sy, s;
     if (canvas_w <= 0) canvas_w = 1;
     if (canvas_h <= 0) canvas_h = 1;
-    sx = client_w / canvas_w;
-    sy = client_h / canvas_h;
+    if (client_w < 1) client_w = 1;
+    if (client_h < 1) client_h = 1;
+    sx = (double)client_w / canvas_w;
+    sy = (double)client_h / canvas_h;
     s = (sx < sy) ? sx : sy;
-    if (s < 1) s = 1;
     v.scale = s;
-    v.width = canvas_w * s;
-    v.height = canvas_h * s;
+    v.width = (int)(canvas_w * s + 0.5);
+    v.height = (int)(canvas_h * s + 0.5);
+    if (v.width < 1) v.width = 1;
+    if (v.height < 1) v.height = 1;
     v.x = (client_w - v.width) / 2;
     v.y = (client_h - v.height) / 2;
     return v;

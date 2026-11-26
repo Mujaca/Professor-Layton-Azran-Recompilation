@@ -67,29 +67,40 @@ int main(void) {
         check_int("monoton", mono, 1);
     }
 
-    /* Fenstergeometrie: 400x480-Kanvas, ganzzahlig und zentriert. */
+    /* Fenstergeometrie: 400x480-Kanvas, stufenlos und zentriert. */
     v = win_fit_viewport(800, 960, 400, 480);
-    check_int("vp800x960.scale", v.scale, 2);
+    check_int("vp800x960.scale*1000", (int)(v.scale * 1000 + 0.5), 2000);
     check_int("vp800x960.x", v.x, 0);
     check_int("vp800x960.y", v.y, 0);
     check_int("vp800x960.w", v.width, 800);
     check_int("vp800x960.h", v.height, 960);
 
     v = win_fit_viewport(800, 1080, 400, 480);
-    check_int("vp800x1080.scale", v.scale, 2);
+    check_int("vp800x1080.w", v.width, 800);
     check_int("vp800x1080.y", v.y, 60);
 
+    /* 1080 hoch: Faktor 2,25 statt frueher 2 */
     v = win_fit_viewport(1920, 1080, 400, 480);
-    check_int("vp1920x1080.scale", v.scale, 2);
-    check_int("vp1920x1080.x", v.x, 560);
+    check_int("vp1920x1080.scale*1000", (int)(v.scale * 1000 + 0.5), 2250);
+    check_int("vp1920x1080.w", v.width, 900);
+    check_int("vp1920x1080.h", v.height, 1080);
+    check_int("vp1920x1080.x", v.x, 510);
+
+    /* knapp unter 2x faellt nicht mehr auf 1x zurueck */
+    v = win_fit_viewport(790, 950, 400, 480);
+    check_int("vp790x950.w", v.width, 790);
+    check_int("vp790x950.h", v.height, 948);
+    check_int("vp790x950.y", v.y, 1);
 
     v = win_fit_viewport(400, 480, 400, 480);
-    check_int("vp400x480.scale", v.scale, 1);
+    check_int("vp400x480.scale*1000", (int)(v.scale * 1000 + 0.5), 1000);
 
+    /* kleiner als 1x: verkleinert statt abgeschnitten */
     v = win_fit_viewport(320, 240, 400, 480);
-    check_int("vp320x240.scale", v.scale, 1);
-    check_int("vp320x240.x", v.x, -40);
-    check_int("vp320x240.y", v.y, -120);
+    check_int("vp320x240.w", v.width, 200);
+    check_int("vp320x240.h", v.height, 240);
+    check_int("vp320x240.x", v.x, 60);
+    check_int("vp320x240.y", v.y, 0);
 
     {
         /* --press: alte Syntax (Host-Frames) und Gast-Praefix g. */
