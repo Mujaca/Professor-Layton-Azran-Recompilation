@@ -323,6 +323,8 @@ def run_scene(name, a):
         # Interne Aufloesung (M17, nur HW): native Bilder bleiben unveraendert,
         # zusaetzlich hd_*.png in interner Aufloesung.
         cmd += ["--scale", str(a.scale), "--shot-scaled"]
+    # Szenen laufen ohne Mods, ausser --mods DIR (docs/MODDING.md).
+    cmd += ["--mods", "--mods-dir", a.mods] if a.mods else ["--no-mods"]
     if presses:
         cmd += ["--press", ",".join(presses)]
     if a.every:
@@ -432,6 +434,8 @@ def main():
                          "vergleichen; Exit 1 bei Abweichung")
     ap.add_argument("--scale", type=int, default=0,
                     help="interne Aufloesung 1..4 des HW-Renderers; schreibt zusaetzlich hd_*.png")
+    ap.add_argument("--mods", default="",
+                    help="Mods aus diesem Ordner laden (Standard: --no-mods)")
     ap.add_argument("--realtime", action="store_true",
                     help="ohne --deterministic (Wanduhr wie im Spiel; Laeufe nicht reproduzierbar, "
                          "Szenen-Zeiten gelten dann nicht)")

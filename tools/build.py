@@ -29,6 +29,8 @@ SOURCES = [
     "cpu/arm_trace.c",
     "kernel/hle.c",
     "kernel/fs_archive.c",
+    "kernel/romfs_overlay.c",
+    "modding/lua_host.c",
     "gpu/gpu.c",
     "gpu/hw_d3d11.c",
     "gpu/hw_present.c",
@@ -39,7 +41,29 @@ SOURCES = [
     "platform/window.c",
     "workarounds.c",
 ]
-INCLUDES = ["", "cpu", "kernel", "gpu", "audio", "platform"]
+INCLUDES = ["", "cpu", "kernel", "gpu", "audio", "platform", "modding"]
+
+# Lua 5.4.7 (third_party/README.md): nur Kern + Sandbox-Bibliotheken, Quellen
+# unveraendert. Kein lua.c/luac.c/linit.c/liolib.c/loslib.c/ldblib.c/loadlib.c.
+LUA_DIR = os.path.join(ROOT, "third_party", "lua")
+LUA_SOURCES = [
+    "lapi.c", "lcode.c", "lctype.c", "ldebug.c", "ldo.c", "ldump.c", "lfunc.c",
+    "lgc.c", "llex.c", "lmem.c", "lobject.c", "lopcodes.c", "lparser.c",
+    "lstate.c", "lstring.c", "ltable.c", "ltm.c", "lundump.c", "lvm.c", "lzio.c",
+    "lauxlib.c", "lbaselib.c", "lcorolib.c", "lmathlib.c", "lstrlib.c",
+    "ltablib.c", "lutf8lib.c",
+]
+# Feste String-Hash-Saat (lstate.c nimmt sonst Uhrzeit und Adressen): Mods
+# laufen in jedem Start gleich (Reihenfolge von pairs ueber String-Schluessel).
+LUA_DEFINES = ["-Dluai_makeseed(L)=0x4C756121u"]
+
+
+def lua_flags():
+    return ["-I", LUA_DIR] + LUA_DEFINES
+
+
+def lua_sources():
+    return [os.path.join(LUA_DIR, s) for s in LUA_SOURCES]
 
 
 def zig():
@@ -135,8 +159,8 @@ def main():
             else:
                 print("gen_boot.o aktuell")
 
-    srcs = [os.path.join(RUNTIME, s) for s in SOURCES]
-    run([zig(), "cc"] + cflags() + srcs + [gen_o, "-o", os.path.join(ROOT, "out", "port.exe"),
+    srcs = [os.path.join(RUNTIME, s) for s in SOURCES] + lua_sources()
+    run([zig(), "cc"] + cflags() + lua_flags() + srcs + [gen_o, "-o", os.path.join(ROOT, "out", "port.exe"),
                                            "-luser32", "-lgdi32", "-lwinmm"])
     print("gebaut: out/port.exe")
 

@@ -2,7 +2,12 @@
 #ifndef WINDOW_H
 #define WINDOW_H
 
+#include <stddef.h>
 #include <stdint.h>
+
+/* Wert aus port.ini (neben port.exe) lesen, ohne die Datei anzulegen.
+ * Liefert 1, wenn [section] key = ... vorhanden ist. */
+int win_config_get(const char *section, const char *key, char *out, size_t n);
 
 int win_open(int width, int height, const char *title);
 void win_set_no_activate(int on);                 /* vor win_open: ohne Fokus zeigen */
@@ -90,6 +95,18 @@ void win_set_touch_rect(int x, int y, int w, int h);
 void win_input_poll(WinInput *out);
 
 int win_key_take(int vk);
+
+/* Fuer Lua-Mods (host.*, docs/MODDING.md). Lesen nur Host-Zustand.
+ * win_mouse_touch: 1 = Zeiger ueber einem Spielfenster; tx/ty in Pixeln
+ *   des Touchscreens (auch ohne Klick), inside = im Touch-Rechteck,
+ *   down = linke Taste (im Fenster gedrueckt).
+ * win_key_state: Taste nach port.ini-Namen ("F5", "A", "SPACE", "0x41");
+ *   -1 unbekannt, sonst 0/1 (nur solange ein Spielfenster den Fokus hat).
+ * win_set_cursor_mode: 0 Pfeil, 1 versteckt, 2 Fadenkreuz (nur ueber den
+ *   Spielfenstern, einfaches und geteiltes Layout). */
+int win_mouse_touch(int *tx, int *ty, int *inside, int *down);
+int win_key_state(const char *name);
+void win_set_cursor_mode(int mode);
 void win_key_push(int vk);
 
 #endif

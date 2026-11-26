@@ -132,6 +132,34 @@ Belegung:
 Tasten werden mit der Tastatur ODER-verknuepft; der Stick ersetzt das
 Tastatur-Circle-Pad nur, wenn er die Deadzone verlaesst.
 
+## Mods (`[mods]`, `--mods`)
+
+Mods sind standardmaessig **aus** (docs/MODDING.md). `port.ini`:
+
+```
+[mods]
+# 1 = Mods aus mods/<name>/ laden
+enabled = 0
+# Wurzel relativ zum Arbeitsverzeichnis (Repo-Wurzel)
+# dir = mods
+```
+
+Kommentare stehen auf eigenen Zeilen (keine Kommentare hinter Werten).
+
+`--mods` / `--no-mods` ueberstimmen `enabled`, `--mods-dir ordner` den
+Ordner. Die Mods-Wurzel liegt wie `out/romfs_image.bin` relativ zum
+Arbeitsverzeichnis (Standard `mods/` in der Repo-Wurzel, nicht neben
+`out/port.exe`), weil port.exe dort startet. `frontier.py` und `scene.py`
+uebergeben immer `--no-mods` (scene.py: `--mods ordner` fuer Mod-Laeufe).
+Beim Start meldet das Log `[mods] ...` (geladene Mods, Prioritaeten,
+ersetzte Dateien und Archiv-Eintraege, Konflikte).
+Lua-Mods (`mods/<name>/scripts/main.lua`, docs/MODDING.md Stufe B) laufen
+mit denselben Schaltern; ihre Ausgaben stehen als `[mod:<name>] ...` im
+Log. Sie duerfen Maus (auch ohne Klick), Host-Tasten lesen und den Zeiger
+ueber den Spielfenstern aendern (Pfeil/versteckt/Fadenkreuz); mit
+`--deterministic` sehen sie keine Maus und keine Taste. Beispiele:
+`mods-examples/` (in den Mods-Ordner kopieren).
+
 ## Diagnose-CLI fuer Testlaeufe
 
 ```
@@ -139,6 +167,7 @@ out/port.exe [romfs] [--frames N] [--frames-guest N] [--shot datei.bmp] [--shot-
              [--shot-from M] [--shot-guest] [--press taste@[g]frame[+h][:dauer[:x:y]],...]
              [--savedata ordner] [--renderer hw|soft] [--deterministic]
              [--scale N] [--shot-scaled] [--split-screens|--single-window]
+             [--mods | --no-mods] [--mods-dir ordner]
 ```
 
 * `--renderer`: Standard `hw` (D3D11, M17); `soft` = Software-Rasterizer

@@ -7,6 +7,8 @@
  */
 #include "hle.h"
 #include "fs_archive.h"
+#include "romfs_overlay.h"
+#include "lua_host.h"
 #include "gpu.h"
 #include "gsp_fb.h"
 #include "frame_clock.h"
@@ -432,6 +434,7 @@ typedef struct {
     FILE *fp;
     uint32_t size;
     int fixed_size;  /* ExtSaveData: Groesse bleibt fest (Azahar FixSizeDiskFile) */
+    int virt;        /* 1 = virtuelles RomFS-Abbild mit Mods (romfs_overlay.c) */
 } FileSlot;
 
 static FileSlot g_files[MAX_FILES];
@@ -483,6 +486,8 @@ typedef struct {
 
 static ArmCpu *g_cpu = NULL;
 static char g_romfs[512];
+static int g_mods_enabled = 0;
+static char g_mods_dir[512] = "mods";
 /* Spielstand-Wurzel (Host); main.c setzt sie per --savedata. */
 static char g_savedir[400] = "out/savedata";
 static int g_log = 0;
@@ -1457,6 +1462,10 @@ static SRWLOCK g_hid_srw = SRWLOCK_INIT;
  * schreiben hier, hid_poll liest ihn als Stabhalter. */
 static SRWLOCK g_hid_in_srw = SRWLOCK_INIT;
 static HleHidInput g_hid_input;
+/* Lua-Mods (input.set, docs/MODDING.md): Ueberschreibung einzelner Felder bis
+ * zum naechsten VBlank, gesetzt am sicheren Punkt (mods_frame), geschuetzt
+ * wie g_hid_input. Ohne Mods immer leer. */
+static MluaInputOverride g_hid_mod_ov;
 static int g_hid_log = -1;
 
 static uint32_t hid_rd32(const HidState *s, uint32_t off) {
@@ -1482,6 +1491,7 @@ static void hid_update_pad_locked(uint64_t tick) {
     HidRingInput in;
     AcquireSRWLockShared(&g_hid_in_srw);
     in = g_hid_input;
+    mlua_apply_override(&in, &g_hid_mod_ov);
     ReleaseSRWLockShared(&g_hid_in_srw);
     g_hid.pad_updates++;
     hid_signal_events(hid_ring_write_pad(&g_hid.ring, g_hid.shadow,
@@ -1579,6 +1589,44 @@ void hle_hid_set_input(const HleHidInput *in) {
     if (in == NULL) return;
     AcquireSRWLockExclusive(&g_hid_in_srw);
     g_hid_input = *in;
+    ReleaseSRWLockExclusive(&g_hid_in_srw);
+}
+
+/* Lua-Mods: Gastspeicher ueber die geprueften Zugriffe (arm_mem_read/
+ * arm_mem_write, Busalias wie dort). Ausserhalb des Gastspeichers: 0, der
+ * Mod bekommt einen Lua-Fehler. Nur am sicheren Punkt aufgerufen. */
+static int mods_mem_read(void *ctx, uint32_t addr, int size, uint32_t *out) {
+    uint32_t a = addr >= 0x20000000u ? (addr & 0x1FFFFFFFu) : addr;
+    (void)ctx;
+    if (g_main_cpu == NULL || (uint64_t)a + (uint64_t)size > g_main_cpu->mem_size) return 0;
+    *out = arm_mem_read(g_main_cpu, addr, size);
+    return 1;
+}
+
+static int mods_mem_write(void *ctx, uint32_t addr, int size, uint32_t val) {
+    uint32_t a = addr >= 0x20000000u ? (addr & 0x1FFFFFFFu) : addr;
+    (void)ctx;
+    if (g_main_cpu == NULL || (uint64_t)a + (uint64_t)size > g_main_cpu->mem_size) return 0;
+    arm_mem_write(g_main_cpu, addr, size, val);
+    return 1;
+}
+
+static const MluaMemOps g_mods_mem = {NULL, mods_mem_read, mods_mem_write};
+
+/* Lua on_frame am sicheren Punkt (VBlank-Zweig von sched_service, alle
+ * anderen Gast-Threads geparkt, deterministisch nach det_host_sync): die
+ * Eingabe, die das Spiel ohne Mods saehe, geht an die Skripte; ihre
+ * Ueberschreibung gilt bis zum naechsten VBlank fuer jedes Pad-Update. Lua
+ * fuehrt keine Gast-Bloecke aus, die virtuelle Zeit bleibt unberuehrt. */
+static void mods_frame(void) {
+    HidRingInput base;
+    MluaInputOverride ov;
+    AcquireSRWLockShared(&g_hid_in_srw);
+    base = g_hid_input;
+    ReleaseSRWLockShared(&g_hid_in_srw);
+    mlua_frame(g_gsp_guest_frames, guest_ns() - g_boot_ns, &base, &ov);
+    AcquireSRWLockExclusive(&g_hid_in_srw);
+    g_hid_mod_ov = ov;
     ReleaseSRWLockExclusive(&g_hid_in_srw);
 }
 
@@ -1756,6 +1804,11 @@ static void ensure_savedata(void) {
 #endif
 }
 
+void hle_set_mods(int enabled, const char *dir) {
+    g_mods_enabled = enabled != 0;
+    if (dir != NULL && dir[0] != 0) snprintf(g_mods_dir, sizeof(g_mods_dir), "%s", dir);
+}
+
 void hle_set_savedata_dir(const char *dir) {
     if (dir != NULL && dir[0] != 0) snprintf(g_savedir, sizeof(g_savedir), "%s", dir);
 }
@@ -1817,6 +1870,7 @@ static int open_guest_file(const char *guest_path, FileSlot **slot_out) {
             snprintf(g_files[i].path, sizeof(g_files[i].path), "%s", used_path);
             g_files[i].fp = fp;
             g_files[i].size = (uint32_t)sz;
+            g_files[i].virt = 0;
             *slot_out = &g_files[i];
             return 1;
         }
@@ -1866,6 +1920,7 @@ static int fs_open_host_file(const char *host, const char *label, FileSlot **slo
             snprintf(g_files[i].path, sizeof(g_files[i].path), "%s", label);
             g_files[i].fp = fp;
             g_files[i].size = (uint32_t)sz;
+            g_files[i].virt = 0;
             *slot_out = &g_files[i];
             return 1;
         }
@@ -1952,7 +2007,22 @@ static void fs_command(Ipc *r, uint32_t *p) {
                 uint32_t kind = 0;
                 if (flen >= 4) memcpy(&kind, fraw, 4);
                 if (kind == 0 || kind == 5) {
-                    if (fs_open_host_file("out/romfs_image.bin", "out/romfs_image.bin", &slot))
+                    if (rfo_active()) {
+                        /* Mods aktiv: virtuelles Abbild (gleiches 0x1000-Praefix). */
+                        for (int i = 0; i < MAX_FILES; i++) {
+                            if (!g_files[i].used) {
+                                memset(&g_files[i], 0, sizeof(g_files[i]));
+                                g_files[i].used = 1;
+                                g_files[i].virt = 1;
+                                g_files[i].size = (uint32_t)(0x1000 + rfo_size());
+                                snprintf(g_files[i].path, sizeof(g_files[i].path), "%s",
+                                         "out/romfs_image.bin (mods)");
+                                slot = &g_files[i];
+                                res = FS_RESULT_SUCCESS;
+                                break;
+                            }
+                        }
+                    } else if (fs_open_host_file("out/romfs_image.bin", "out/romfs_image.bin", &slot))
                         res = FS_RESULT_SUCCESS;
                 } else if (kind == 2) {
                     char nm[9];
@@ -2359,7 +2429,10 @@ static void file_command(Ipc *r, uint32_t *p) {
             if (r->translate >= 2) addr = p[r->normal + 1];
             uint32_t done = 0;
             if (addr && length) {
-                if (f->fp) {
+                if (f->virt) {
+                    /* Virtuelles RomFS (Mods): Stream-Offset = Level-3-Offset. */
+                    done = (uint32_t)rfo_read(offset, g_cur_mem + (addr & 0x1FFFFFFFu), length);
+                } else if (f->fp) {
                     /* Das SelfNCCH-Image enthaelt ein 0x1000-Byte-IVFC-Praefix.
                        Die Engine parst die RomFS-Metadaten aber ab Offset 0
                        (Header @0, Hash-Tabellen @0x28/0x160, Metadaten @0x4C/
@@ -2464,8 +2537,9 @@ static void file_command(Ipc *r, uint32_t *p) {
                 memset(ns, 0, sizeof(*ns));
                 ns->used = 1;
                 ns->size = f->size;
+                ns->virt = f->virt;
                 snprintf(ns->path, sizeof(ns->path), "%s", f->path);
-                if (f->fp != NULL && f->path[0] != 0) {
+                if (!f->virt && f->fp != NULL && f->path[0] != 0) {
                     ns->fp = fopen(f->path, "r+b");
                     if (ns->fp == NULL) ns->fp = fopen(f->path, "rb");
                 }
@@ -4591,6 +4665,7 @@ static void sched_service(uint64_t now) {
             gsp_signal_interrupt(GSP_IRQ_PDC0);
             gsp_signal_interrupt(GSP_IRQ_PDC1);
             if (g_det) det_host_sync();
+            if (mlua_active()) mods_frame();
             if (g_ystat && (++g_vblank_tick % 62u) == 0u) {
                 printf("[ystat] vbl=%u t=%llus switches=%llu idle_ms=%llu\n",
                        g_vblank_tick,
@@ -4823,6 +4898,14 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
                (unsigned long long)VCLOCK_NS_PER_BLOCK);
     }
     snprintf(g_romfs, sizeof(g_romfs), "%s", romfs_dir ? romfs_dir : "out/romfs");
+    /* Mods (docs/MODDING.md): nur mit --mods bzw. port.ini [mods] enabled = 1.
+     * Ohne wirksame Mod-Datei bleibt alles beim Original-Abbild. */
+    if (g_mods_enabled) {
+        rfo_init("out/romfs_image.bin", 0x1000, g_mods_dir);
+        /* Stufe B: scripts/main.lua je Mod (Hauptchunk + on_load laufen hier,
+         * vor dem ersten Gast-Befehl). */
+        mlua_init(g_mods_dir, &g_mods_mem);
+    }
     g_log = getenv("HLE_LOG") != NULL;
     g_ystat = getenv("HLE_YSTAT") != NULL;
     g_wstat = getenv("HLE_WSTAT") != NULL;

@@ -14,6 +14,7 @@ Alle Python-Tools liegen in `tools/`. Wegwerfskripte gehören nach `scratch/`
 | `python tools/frontier.py` | **Fortschrittsmetrik**: natürlicher Boot gegen Azahar-Referenz |
 | `python tools/check.py` | Gate vor jedem Commit (Tests + Build + Frontier) |
 | `python tools/scene.py <szene>` | Standard-Szene aus Fixture-Spielstand anfahren, Bild/Log/WAV/Profil nach `scratch/scene/<szene>/` (siehe unten) |
+| `python tools/modkit.py <befehl>` | RomFS-Dateien und `.fa`-Eintraege aus dem eigenen Dump auflisten/entpacken, Test-Mod erzeugen (siehe unten) |
 | `python tools/rendercmp.py <A> <B>` | Bildvergleich Software- gegen Hardware-Renderer auf denselben Gast-Frames (M9, siehe Szenen) |
 
 ## Szenen (`tools/scene.py`)
@@ -96,6 +97,36 @@ python tools/scene.py froenborg --renderer soft --tag soft --every 50      # -> 
   g6857 gesehen (damals wirkten Fenstereingaben noch), in fuenf
   Wiederholungen mit denselben Eingaben nicht (bis g7200 bildgleich); tritt
   er wieder auf, mit `--repro` pruefen.
+
+## Modkit (`tools/modkit.py`, docs/MODDING.md)
+
+Liest das eigene RomFS-Abbild `out/romfs_image.bin` (`--image` fuer ein
+anderes); Ausgaben nach `scratch/modkit/` bzw. in den angegebenen Ordner,
+nie ins Repo.
+
+```powershell
+python tools/modkit.py romfs-list [--find arc]                    # Level-3-Dateien
+python tools/modkit.py romfs-extract lt6/arc/lt6_a.fa -o scratch/x.fa
+python tools/modkit.py fa-list lt6/arc/lt6_uk.fa --find txt/uk/01   # ARC0-Eintraege
+python tools/modkit.py fa-extract lt6/arc/lt6_uk.fa txt/uk/01/01_010020.xs --xscr
+python tools/modkit.py make-testmod                 # -> mods/testmod-dialog/
+python tools/modkit.py make-testmod --control --mods scratch/mods/ctl  # Kontrolle
+```
+
+* Level-5-Kompression (Methoden 0..4) ueber `fa_index.decompress`; Kodierer
+  (`compress`) fuer alle Methoden, Huffman nur fuer kleine Alphabete
+  (Selbsttests). `build_romfs`/`build_arc0` bauen synthetische Abbilder fuer
+  die Selbsttests (`tools/selftest_tools.py` "modkit",
+  `tests/romfs_overlay_test.py`).
+* `--xscr` entpackt zusaetzlich die drei Abschnitte eines XSCR-Blocks
+  (`.xs`); Abschnitt 2 enthaelt die Texte.
+* `make-testmod`: Rezept fuer den Test-Mod (erste Dialogzeile nach dem
+  Laden des Test-Spielstands, Szene `froenborg`). Ziel ist nur ueber
+  Archiv/Eintrag/Position benannt (`TESTMOD_*` in modkit.py); der Text kommt
+  aus dem eigenen Dump. Ergebnis liegt in `mods/` (ignoriert).
+* Nachweis mit Szenen: `python tools/scene.py froenborg --tag tm --every 50
+  --every-from 3000 --extra 300 --mods scratch/mods/tm` (bzw. `ctl`) und die
+  Bildfolgen vergleichen (docs/MODDING.md, "Stand").
 
 ## Recompiler (`tools/recomp`)
 
@@ -310,6 +341,7 @@ Selbsttest: `python tools/selftest_tools.py`.
 | `python tests/fs_archive_test.py` | fs-Archive (SaveData/Ext/Shared/System): Host-Layout, Result-Codes, Datei-/Verzeichnisoperationen, Directory-Eintraege |
 | `python tests/audio_test.py` | DSP-HLE-Dekodierung/Resampling (ADPCM inkl. s16-Verlauf, PCM8/16, lineare Interpolation mit Azahar-Rundung) |
 | `python tests/vs_test.py [n]` | Vertex-Shading je Draw (dedupliziert, auf den Raster-Pool verteilt, `p_vs_shade_draw`) bitgleich gegen den seriellen Pfad (`p_load_attrs` + `p_vs_process` je Position): zufaellige VS-Programme inkl. Flusskontrolle, Swizzles, Uniforms, Sonderwerte (0, inf, NaN, Denormale), u8/u16-Indizes, Rundungsmodus des Aufrufers |
+| `python tests/lua_host_test.py` | Lua-Mods (`runtime/modding/lua_host.c`, docs/MODDING.md Stufe B) mit synthetischen Skripten und falschem Gastspeicher: Sandbox (kein io/os/debug/package, require nur `scripts/` des Mods, keine Binaer-Chunks, feste Zufallssaat), `mem.*`/`input.*`/`host.*`/`guest.*`, Prioritaet bei `input.set`, Fehler-Isolation mit Traceback, Instruktionsbudget (auch gegen `pcall`/`xpcall`/Koroutinen) |
 | `python tests/dsp_hle_test.py` | DSP-HLE-Frame-Verarbeitung: Regionenwahl ueber Frame-Counter (inkl. Wraparound), Dirty-Bits, Status-Rueckschreiben, `u32_dsp`, Sleep-Reply nach zwei Frames, DSP-RAM-Nullung bei Initialize |
 
 Nicht im Gate: `python tests/lighting_test.py [n]` vergleicht das
@@ -322,7 +354,7 @@ D16-Tiefe (Azahar `SetDepth`/`EncodeD16`).
 Diese Tests brauchen nur `zig cc` und laufen in Sekunden. Seit 2026-11-25
 laufen `dsp_hle_test`, `audio_test`, `y2r_test`, `framebuffer_test`,
 `fs_archive_test`, `frame_clock_test`, `sched_selftest`, `hid_ring_test`, seit
-2026-11-26 `lighting_test` und `vs_test` sowie
+2026-11-26 `lighting_test`, `vs_test`, `romfs_overlay_test` und `lua_host_test` sowie
 `tests/hw_test.py --warp` (D3D11-Renderer gegen Software-Pfad, WARP ohne
 Grafikkarte) im Gate; vorher war ein HW-Commit mit roten Selbsttests
 durchgerutscht.

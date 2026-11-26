@@ -33,6 +33,7 @@
 #include "hle.h"
 #include "hw_d3d11.h"
 #include "hw_present.h"
+#include "lua_host.h"
 #include "press_spec.h"
 #include "window.h"
 
@@ -195,6 +196,18 @@ static void press_apply(HleHidInput *hi, int frame, unsigned guest) {
     }
 }
 
+/* Lua-Mods (host.*): Maus/Tasten aus dem Fenster. Im deterministischen
+ * Modus neutral (keine Maus, keine Taste gedrueckt), wie fuer die
+ * Spieleingabe: ein Lauf darf nicht von Fenster oder Tastatur abhaengen. */
+static void mods_mouse(MluaMouse *m) {
+    m->over_window = win_mouse_touch(&m->x, &m->y, &m->inside_touch, &m->down);
+}
+
+static int mods_key_det(const char *name) {
+    int v = win_key_state(name);
+    return v < 0 ? -1 : 0;
+}
+
 int main(int argc, char **argv) {
     const char *romfs = "out/romfs";
     const char *shot = NULL;
@@ -208,6 +221,8 @@ int main(int argc, char **argv) {
     int renderer_hw = 1;      /* M17: Hardware-Renderer ist Standard */
     int scale = 0;
     int det = 0;
+    int mods_cli = -1;            /* -1 = port.ini [mods] enabled entscheidet */
+    const char *mods_dir = NULL;
     setvbuf(stdout, NULL, _IONBF, 0);
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) shot = argv[++i];
@@ -220,6 +235,9 @@ int main(int argc, char **argv) {
             g_press_n = press_spec_parse(argv[++i], g_press, g_press_n, PRESS_MAX);
         else if (strcmp(argv[i], "--savedata") == 0 && i + 1 < argc) savedata = argv[++i];
         else if (strcmp(argv[i], "--deterministic") == 0) det = 1;
+        else if (strcmp(argv[i], "--mods") == 0) mods_cli = 1;
+        else if (strcmp(argv[i], "--no-mods") == 0) mods_cli = 0;
+        else if (strcmp(argv[i], "--mods-dir") == 0 && i + 1 < argc) mods_dir = argv[++i];
         else if (strcmp(argv[i], "--split-screens") == 0) win_set_split(1);
         else if (strcmp(argv[i], "--debug") == 0) win_set_debug(1);
         else if (strcmp(argv[i], "--no-debug") == 0) win_set_debug(0);
@@ -265,6 +283,19 @@ int main(int argc, char **argv) {
         printf("[port] Spielstaende: %s\n", savedata);
     }
     hle_set_deterministic(det);
+    {
+        /* Mods (docs/MODDING.md): standardmaessig aus; port.ini [mods]
+         * enabled/dir, --mods/--no-mods/--mods-dir ueberstimmen. */
+        static char ini_dir[512];
+        char v[32];
+        int on = 0;
+        if (win_config_get("mods", "enabled", v, sizeof(v))) on = atoi(v) != 0;
+        if (mods_cli >= 0) on = mods_cli;
+        if (mods_dir == NULL && win_config_get("mods", "dir", ini_dir, sizeof(ini_dir)) && ini_dir[0])
+            mods_dir = ini_dir;
+        hle_set_mods(on, mods_dir != NULL ? mods_dir : "mods");
+        if (on) printf("[port] Mods an: %s\n", mods_dir != NULL ? mods_dir : "mods");
+    }
     hle_init(&g_cpu, romfs);
     arm_set_svc_handler(hle_svc);
     if (renderer_hw) gpu_pica_set_render_hw(1);
@@ -289,6 +320,13 @@ int main(int argc, char **argv) {
     win_set_title("Professor Layton and the Azran Legacy");
     win_status("Tasten: port.ini neben port.exe (Standard siehe docs/FRONTEND.md)", 2);
     win_status("F11=Vollbild  Touch=Maus ueber dem unteren Screen", 3);
+    {
+        MluaHostOps ops;
+        ops.mouse = det ? NULL : mods_mouse;
+        ops.key = det ? mods_key_det : win_key_state;
+        ops.set_cursor = win_set_cursor_mode;
+        mlua_set_host_ops(&ops);
+    }
     if (!CreateThread(NULL, 0, game_thread, NULL, 0, NULL)) {
         printf("Thread fehlgeschlagen\n");
         return 3;

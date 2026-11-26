@@ -80,25 +80,59 @@ def huf_decode(buf, raw_len, num_bits):
             ch = pos & 0x40
             pos = buf[tree + nxt + 1] if tree + nxt + 1 < len(buf) else 0
         if ch:
-            cur = ((cur << num_bits) | pos) & 0xFF
-            nbits = (nbits + num_bits) & 7
-            if nbits == 0:
-                out.append(cur)
+            # Level-5 Huff4: niedriges Nibble zuerst (Verzeichnistabellen der
+            # ARC0-Archive); Huff8: ein Symbol = ein Byte.
+            cur |= (pos & ((1 << num_bits) - 1)) << nbits
+            nbits += num_bits
+            if nbits == 8:
+                out.append(cur & 0xFF)
                 cur = 0
+                nbits = 0
             pos = buf[tree + 1]
             nxt = 0
     return bytes(out[:raw_len])
 
 
+def rle_decode(buf, raw_len):
+    """Level-5 RLE (Methode 4): Flag-Byte, Bit 7 = Wiederholung."""
+    out = bytearray()
+    i = 4
+    while len(out) < raw_len and i < len(buf):
+        flag = buf[i]
+        i += 1
+        if flag & 0x80:
+            n = (flag & 0x7F) + 3
+            if i >= len(buf):
+                break
+            out += bytes([buf[i]]) * n
+            i += 1
+        else:
+            n = (flag & 0x7F) + 1
+            out += buf[i:i + n]
+            i += n
+    return bytes(out[:raw_len])
+
+
 def decompress(buf):
-    if len(buf) < 5:
+    """Level-5-Kompression: u32-Kopf = (Rohgroesse << 3) | Methode.
+
+    Methode 0 = unkomprimiert, 1 = LZ10, 2 = Huffman 4 Bit, 3 = Huffman
+    8 Bit, 4 = RLE (Kuriimu2 Level5Compressor; Methode 0 nutzt das Spiel
+    selbst fuer die Verzeichnis-Hash-Tabelle der ARC0-Archive).
+    """
+    if len(buf) < 4:
         return b""
-    size = struct.unpack_from("<I", buf, 0)[0] // 8
-    if len(buf) - 4 == size:
-        return buf[4:]
-    if buf[4] in (0x0F, 0xFF):
-        return huf_decode(buf, size, 4 if buf[4] == 0x0F else 8)
-    return lzss_decode(buf, size)
+    head = struct.unpack_from("<I", buf, 0)[0]
+    size, method = head >> 3, head & 7
+    if method == 0:
+        return bytes(buf[4:4 + size])
+    if method == 1:
+        return lzss_decode(buf, size)
+    if method in (2, 3):
+        return huf_decode(buf, size, 4 if method == 2 else 8)
+    if method == 4:
+        return rle_decode(buf, size)
+    raise ValueError("unbekannte Level-5-Kompression %d" % method)
 
 
 def parse(path):
