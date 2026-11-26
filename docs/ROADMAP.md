@@ -79,6 +79,9 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
    Overlay-Zeichnen); C. Funktions-Hooks ueber Recompiler-Einstiegspruefung.
    Mods standardmaessig aus; Gate, Frontier und Vergleiche laufen ohne Mods;
    Schnittstelle generisch, keine Spieladressen in der Runtime.
+   QoL-Ideen (als Beispiel-Mods, nicht in der Runtime):
+   - Lupenmodus: Lupe folgt dem Mauszeiger, Klick untersucht; eigener
+     Cursor nur in diesem Modus (braucht Spielzustand -> Lua, Stufe B).
 
 ## Frontier-Verlauf
 
