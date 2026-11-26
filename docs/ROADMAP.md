@@ -48,31 +48,31 @@ Azahar-Referenz (`reports/azahar_trace.txt`) und meldet:
 
 Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 
-## Stand und nächste Arbeitspakete (Stand 2026-11-26, master e52cb3c)
+## Stand und nächste Arbeitspakete (Stand 2026-11-26, master 4a442a1)
 
 | # | Stand | Beleg |
 |---|---|---|
 | M1–M5, M8 | erreicht | Frontier 10/10, 0 Patches, Titel |
 | M6 | erreicht | Menü, Touch, Namenseingabe, Rätsel-Eingabe (Nutzer) |
 | M7 | erreicht | Ton, Filme, Speichern/Laden, Soundeffekte |
-| M9 | teilweise | `--renderer hw` läuft (Titel, Szenen, ~50 % mehr Gast-Frames); 3D-Figuren korrekt seit D16-Tiefenfix; Abnahme-Bildvergleich offen (braucht M18) |
-| M10 | teilweise | Aussetzer (DSP-Zustellung), Hänger (DSP-Frame beim Stabhalter) und Echtzeit gelöst, Hörtest Nutzer „sauber“; Azahar-Aufnahme fehlt (kein Azahar-Build vorhanden) |
+| M9 | teilweise | `--renderer hw` läuft (Titel, Szenen, 3D-Dialog 30 Gast-fps); 3D-Figuren korrekt seit D16-Tiefenfix; Abnahme-Bildvergleich offen (jetzt mit `--deterministic` möglich) |
+| M10 | erreicht | Aussetzer, Hänger und Echtzeit gelöst; Nutzer-Entscheid 2026-11-26: Hörtest („sauber“) genügt als Abnahme, Azahar-Aufnahme entfällt |
 | M11 | erreicht | Namenseingabe → Eröffnungsszene (`--press`-Folge in `docs/GAME_NOTES.md`) |
 | M12 | offen | Titel ~20 sichtbare fps (HW), 3D-Dialog Froenborg 30 Gast-fps (HW, seit fruehem GPU-Flush + Teil-Upload) |
 | M13 | erreicht | Sichttest Nutzer (Doppelpufferung) |
 | M14 | erreicht | Nutzer: erstes Rätsel gespielt, gespeichert, „Continue“ lädt in Froenborg |
-| M15 | erreicht (Logo) | Logo gegen FFmpeg mittlere Abweichung 0,91; weitere Filme ungeprüft |
+| M15 | erreicht | Logo gegen FFmpeg mittlere Abweichung 0,91; übrige Filme: Nutzer-Sichttest 2026-11-26 ohne Farbfehler, als Abnahme bestätigt |
 | M16 | erreicht | Speichern/Laden („Continue“) und Soundeffekte vom Nutzer bestätigt |
 | M17 | offen | – |
 | M18 | erreicht | `port.exe --deterministic` (virtuelle Zeit, VBlank im Gleichschritt); `tools/scene.py froenborg raetsel1 --repro`: je 89/89 Bilder gleich (alle 50 Gast-Frames bis g4450), hw und soft gleiche VBlank→Gast-Frame-Folge |
 
-1. **Effizientes Testen**: Szenen ohne Durchklicken erreichen (Spielstände
-   als Testfixtures, Eingaben an Gastzeit gekoppelt, Szenen-Skript).
-2. ~~3D-Figuren~~ (erledigt: D16-Tiefe schrieb nur 1 Byte; tests/lighting_test.py).
-3. **Bildrate in 3D-Szenen** (M12/M17): Profil in der Szene, dann
-   HW-Renderer-Ausbau (Bilder auf der GPU, D3D-Ausgabe, Vertex-Shader auf
-   der GPU, höhere interne Auflösung).
-4. **Reproduzierbarkeit** (M18), Speicherpfad mit echter Titel-ID.
+1. **Bildrate Titel/Hauptmenü nachmessen** (M12), HW-Renderer.
+2. **Bildvergleich SW gegen HW** auf denselben Gast-Frames (M9, mit
+   `tools/scene.py` im deterministischen Modus).
+3. **HW-Renderer als Standard** (M17): Bilder auf der GPU, D3D-Ausgabe,
+   höhere interne Auflösung.
+4. Offen, niedrige Priorität: seltener Hänger in Rätsel 001 (Nutzer meldet
+   beim Spielen), Speicherpfad mit echter Titel-ID.
 
 ## Frontier-Verlauf
 
