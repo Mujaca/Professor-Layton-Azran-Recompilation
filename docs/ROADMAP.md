@@ -79,6 +79,10 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
    Overlay-Zeichnen); C. Funktions-Hooks ueber Recompiler-Einstiegspruefung.
    Mods standardmaessig aus; Gate, Frontier und Vergleiche laufen ohne Mods;
    Schnittstelle generisch, keine Spieladressen in der Runtime.
+   Stand 2026-11-26 (Branch mods-overlay): Stufe A umgesetzt (RomFS-Overlay,
+   Archiv-Overlay mit unkomprimierter Dateitabelle, `tools/modkit.py`,
+   Test-Mod aendert die erste Dialogzeile sichtbar; Nachweis in
+   docs/MODDING.md, "Stand Stufe A").
    QoL-Ideen (als Beispiel-Mods, nicht in der Runtime):
    - Lupenmodus: Lupe folgt dem Mauszeiger, Klick untersucht; eigener
      Cursor nur in diesem Modus (braucht Spielzustand -> Lua, Stufe B).
