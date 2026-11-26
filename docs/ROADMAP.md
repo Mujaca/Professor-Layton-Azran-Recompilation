@@ -73,6 +73,12 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
    höhere interne Auflösung.
 4. Offen, niedrige Priorität: seltener Hänger in Rätsel 001 (Nutzer meldet
    beim Spielen), Speicherpfad mit echter Titel-ID.
+5. **Modding** (vom Nutzer aufgenommen 2026-11-26, noch kein Meilenstein):
+   A. RomFS-Overlay `mods/<name>/romfs/` (Texte, Grafiken, Ton, Filme);
+   B. Lua-Skripte (Frame-/Eingabe-Callbacks, Gastspeicher lesen/schreiben,
+   Overlay-Zeichnen); C. Funktions-Hooks ueber Recompiler-Einstiegspruefung.
+   Mods standardmaessig aus; Gate, Frontier und Vergleiche laufen ohne Mods;
+   Schnittstelle generisch, keine Spieladressen in der Runtime.
 
 ## Frontier-Verlauf
 
