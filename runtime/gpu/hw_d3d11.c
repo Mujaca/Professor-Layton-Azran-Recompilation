@@ -153,6 +153,9 @@ static int g_pend_n;
 static HwDrawState g_state_in;           /* Eingangszustand des Batches */
 static int g_batch_ok;                   /* g_state_in gilt fuer den Fast-Path */
 static unsigned long long g_batches;     /* tatsaechliche D3D-Draws */
+#define HW_SUBMIT_BATCHES 32             /* D3D-Draws je vorzeitiger Uebergabe */
+static unsigned g_submit_cnt;
+static unsigned long long g_submits;     /* vorzeitige Uebergaben (Flush) */
 static int g_cov_track;                  /* Batch braucht Momentaufnahme */
 static unsigned g_begin_serial;          /* volle hw_begin_draw-Aufrufe */
 static uint16_t *g_cov;                  /* Batch-Id je Pixel */
@@ -222,6 +225,8 @@ typedef struct {
     uint32_t last_use;          /* LRU */
     int stale;                  /* Schreibzugriff im Bereich -> neu pruefen */
     int valid;                  /* hash passt zum hochgeladenen Bild */
+    unsigned char *src;         /* Quellbytes des hochgeladenen Bildes */
+    uint32_t src_len;           /* (Kachelbereich, fuer Teil-Uploads) */
     ID3D11Texture2D *tex;
     ID3D11ShaderResourceView *srv;
 } HwTexSlot;
@@ -236,6 +241,7 @@ static uint32_t g_tex_clock;                /* LRU-Zeitstempel */
 static ID3D11ShaderResourceView *g_tex_dummy;
 static uint32_t g_list_serial;      /* hw_list_begin() */
 static unsigned long long g_tex_upload_us;
+static unsigned long long g_tex_partial;      /* Teil-Uploads (Diagnose) */
 static unsigned long long g_tex_upload_key, g_tex_upload_hash;  /* Diagnose */
 static int g_tex_diag = -1;         /* HLE_GTIME/HLE_HW_STATE (nur Diagnose) */
 /* Diagnose (HLE_GTIME): Wandzeit je Abschnitt des HW-Pfads. */
@@ -276,6 +282,11 @@ void hw_texture_stats(unsigned long long *uploads, unsigned long long *decode_us
     if (decode_us) *decode_us = g_tex_upload_us;
 }
 unsigned long long hw_depth_writes(void) { return g_depth_writes; }
+unsigned long long hw_texture_partial_uploads(void) { return g_tex_partial; }
+void hw_submit_stats(unsigned long long *batches, unsigned long long *submits) {
+    if (batches) *batches = g_batches;
+    if (submits) *submits = g_submits;
+}
 unsigned long long hw_target_loads(void) { return g_target_loads; }
 int hw_available(void) { return g_ready; }
 void hw_invalidate_guest(void) {
@@ -1594,6 +1605,7 @@ static uint64_t fnv1a(const unsigned char *p, uint32_t n)
 /* Gibt die D3D-Ressourcen eines Cache-Eintrags frei. */
 static void texslot_release(HwTexSlot *s)
 {
+    free(s->src);
     if (s->srv) { ID3D11ShaderResourceView_Release(s->srv); s->srv = NULL; }
     if (s->tex) {
         ID3D11Texture2D_Release(s->tex);
@@ -1603,15 +1615,70 @@ static void texslot_release(HwTexSlot *s)
     memset(s, 0, sizeof(*s));
 }
 
-/* Dekodiert das ganze Texturbild einmal nach RGBA8 und laedt es hoch.
+/* Dekodiert die Kachelzeilen [trow0, trow1) eines PICA-Texturbilds nach
+ * RGBA8; out zeigt auf Pixelzeile trow0*8 eines Bildes der Breite w.
  * Kachelreihenfolge wie p_lookup_texel: ti = (y/8)*(w/8) + x/8, innerhalb
- * der Kachel dekodiert gpu_pica_decode_texel (alle Formate inkl. ETC1). */
+ * der Kachel dekodiert gpu_pica_decode_texel (alle Formate inkl. ETC1).
+ * RGBA8 (Format 0, Gastbytes A,B,G,R) direkt: je Morton-Index ein
+ * Byte-Tausch, bitgleich zu gpu_pica_decode_texel (Selbsttest). */
+void hw_tex_decode_rows(const unsigned char *src, uint32_t fmt, uint32_t w,
+                        uint32_t trow0, uint32_t trow1, unsigned char *out)
+{
+    uint32_t ts = gpu_pica_tex_tile_size(fmt);
+    uint32_t tw = w / 8u, tx, ty, k;
+    if (fmt == 0u) {
+        /* Morton-Index -> (x, y) innerhalb der 8x8-Kachel */
+        static const uint8_t mx[64] = {
+            0,1,0,1,2,3,2,3, 0,1,0,1,2,3,2,3, 4,5,4,5,6,7,6,7, 4,5,4,5,6,7,6,7,
+            0,1,0,1,2,3,2,3, 0,1,0,1,2,3,2,3, 4,5,4,5,6,7,6,7, 4,5,4,5,6,7,6,7 };
+        static const uint8_t my[64] = {
+            0,0,1,1,0,0,1,1, 2,2,3,3,2,2,3,3, 0,0,1,1,0,0,1,1, 2,2,3,3,2,2,3,3,
+            4,4,5,5,4,4,5,5, 6,6,7,7,6,6,7,7, 4,4,5,5,4,4,5,5, 6,6,7,7,6,6,7,7 };
+        for (ty = trow0; ty < trow1; ty++) {
+            unsigned char *orow = out + (size_t)(ty - trow0) * 8u * w * 4u;
+            for (tx = 0; tx < tw; tx++) {
+                const unsigned char *tile = src + ((size_t)ty * tw + tx) * 256u;
+                unsigned char *o = orow + (size_t)tx * 32u;
+                for (k = 0; k < 64u; k++) {
+                    uint32_t v;
+                    memcpy(&v, tile + k * 4u, 4);
+                    v = (v >> 24) | ((v >> 8) & 0xFF00u) |
+                        ((v << 8) & 0xFF0000u) | (v << 24);
+                    memcpy(o + ((size_t)my[k] * w + mx[k]) * 4u, &v, 4);
+                }
+            }
+        }
+        return;
+    }
+    for (ty = trow0; ty < trow1; ty++) {
+        for (tx = 0; tx < tw; tx++) {
+            const unsigned char *tile = src + ((size_t)ty * tw + tx) * ts;
+            for (k = 0; k < 64u; k++) {
+                uint32_t px_x = k & 7u, px_y = k >> 3;
+                unsigned char px[4];
+                gpu_pica_decode_texel(tile, fmt, px_x, px_y, px);
+                memcpy(out + ((((size_t)(ty - trow0) * 8u + px_y) * w +
+                               tx * 8u + px_x) * 4u), px, 4);
+            }
+        }
+    }
+}
+
+/* Dekodiert das Texturbild nach RGBA8 und laedt es hoch. Ist derselbe
+ * Eintrag (Adresse/Format/Groesse) schon hochgeladen, werden nur die
+ * Kachelzeilen von der ersten bis zur letzten geaenderten neu dekodiert und
+ * per Box hochgeladen (Vergleich mit den gemerkten Quellbytes): der Titel
+ * sampelt im 3D-Dialog eine 512x1024-RGBA8-Textur, die das gerade gerenderte
+ * 240x400-Ziel enthaelt; je Gast-Frame aendert sich nur dieser Teil.
+ * Unveraenderte Quellbytes ergeben unveraenderte Texel: bitgleich zum
+ * vollen Upload. */
 static int texslot_upload(HwTexSlot *s, const HwDrawState *st, const HwTexture *t)
 {
     D3D11_TEXTURE2D_DESC td;
     D3D11_SHADER_RESOURCE_VIEW_DESC sv;
     unsigned char *stage;
-    uint32_t ts, tiles, tx, ty, k;
+    const unsigned char *src;
+    uint32_t ts, tiles, strip, th, r0, r1;
     unsigned long long t0 = 0;
 
     ts = gpu_pica_tex_tile_size(t->format);
@@ -1619,6 +1686,9 @@ static int texslot_upload(HwTexSlot *s, const HwDrawState *st, const HwTexture *
     if (ts == 0u || tiles == 0u) return 0;
     if (t->width == 0u || t->height == 0u || (uint64_t)tiles * ts > t->bytes)
         return 0;
+    src = st->guest_mem + t->offset;
+    th = t->height / 8u;
+    strip = (t->width / 8u) * ts;             /* Bytes je Kachelzeile */
 
     if (!s->tex || s->w != t->width || s->h != t->height) {
         if (s->tex) {
@@ -1647,25 +1717,47 @@ static int texslot_upload(HwTexSlot *s, const HwDrawState *st, const HwTexture *
         g_tex_cache_bytes += (unsigned long long)t->width * t->height * 4u;
     }
 
-    stage = (unsigned char *)malloc((size_t)t->width * t->height * 4u);
-    if (!stage) return 0;
     if (tex_diag_on()) t0 = hw_now_us();
-    for (ty = 0; ty < t->height / 8u; ty++) {
-        for (tx = 0; tx < t->width / 8u; tx++) {
-            uint32_t ti = ty * (t->width / 8u) + tx;
-            const unsigned char *tile = st->guest_mem + t->offset + ti * ts;
-            for (k = 0; k < 64u; k++) {
-                uint32_t px_x = k & 7u, px_y = k >> 3;
-                unsigned char px[4];
-                gpu_pica_decode_texel(tile, t->format, px_x, px_y, px);
-                memcpy(stage + (((ty * 8u + px_y) * t->width +
-                                 tx * 8u + px_x) * 4u), px, 4);
-            }
+    r0 = 0u;
+    r1 = th;
+    if (s->src != NULL && s->src_len == tiles * ts && s->fmt == t->format &&
+        s->offset == t->offset) {
+        /* Teil-Upload: erste und letzte geaenderte Kachelzeile. */
+        while (r0 < th && memcmp(s->src + (size_t)r0 * strip,
+                                 src + (size_t)r0 * strip, strip) == 0)
+            r0++;
+        if (r0 == th) {                       /* Bild unveraendert */
+            s->bytes = t->bytes;
+            if (t0 != 0ull) g_tex_upload_us += hw_now_us() - t0;
+            return 1;
         }
+        while (r1 > r0 + 1u && memcmp(s->src + (size_t)(r1 - 1u) * strip,
+                                      src + (size_t)(r1 - 1u) * strip, strip) == 0)
+            r1--;
+    } else {
+        free(s->src);
+        s->src = (unsigned char *)malloc((size_t)tiles * ts);
+        s->src_len = s->src ? tiles * ts : 0u;
     }
-    ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)s->tex, 0,
-                                          NULL, stage, t->width * 4u, 0);
+    stage = (unsigned char *)malloc((size_t)t->width * (r1 - r0) * 8u * 4u);
+    if (!stage) return 0;
+    hw_tex_decode_rows(src, t->format, t->width, r0, r1, stage);
+    if (r0 == 0u && r1 == th) {
+        ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)s->tex, 0,
+                                              NULL, stage, t->width * 4u, 0);
+    } else {
+        D3D11_BOX box;
+        box.left = 0; box.right = t->width;
+        box.top = r0 * 8u; box.bottom = r1 * 8u;
+        box.front = 0; box.back = 1;
+        ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)s->tex, 0,
+                                              &box, stage, t->width * 4u, 0);
+        g_tex_partial++;
+    }
     free(stage);
+    if (s->src != NULL)
+        memcpy(s->src + (size_t)r0 * strip, src + (size_t)r0 * strip,
+               (size_t)(r1 - r0) * strip);
     s->offset = t->offset;
     s->fmt = t->format;
     s->bytes = t->bytes;
@@ -1828,6 +1920,15 @@ static void pend_flush(void)
     ID3D11DeviceContext_Draw(g_ctx, n, g_vb_pos);
     g_vb_pos += n;
     g_batches++;
+    /* Befehle frueh an die GPU uebergeben: sonst sammelt der Treiber die
+       Draws der ganzen Kommandoliste und die GPU beginnt erst beim Map des
+       Rueckschreibens (hw_flush_to_guest wartete dann die volle GPU-Zeit
+       der Liste ab). Reine Uebergabe, keine Aenderung der Ergebnisse. */
+    if (++g_submit_cnt >= HW_SUBMIT_BATCHES) {
+        g_submit_cnt = 0;
+        ID3D11DeviceContext_Flush(g_ctx);
+        g_submits++;
+    }
     /* Neuer Batch: Abdeckung zuruecksetzen (Id weiterzaehlen). */
     if (++g_cov_id == 0u) {
         if (g_cov) memset(g_cov, 0, sizeof(uint16_t) * (size_t)g_cov_w * (size_t)g_cov_h);
@@ -1835,17 +1936,107 @@ static void pend_flush(void)
     }
 }
 
+/* Dreieck nach D3D11-Rasterregeln: Perspektivdivision und Viewport in
+   float32, Einrasten auf 1/256 Pixel (16.8-Festkomma, round-to-nearest-
+   even), Abtastung in der Pixelmitte, Top-Left-Regel (Y nach unten).
+   Ein Pixel (px,py) ist abgedeckt, wenn fuer alle drei Kanten
+   e = ex*(sy-y) - ey*(sx-x) > 0 gilt (= 0 nur auf Top-Left-Kanten), mit
+   sx = 256*px+128, sy = 256*py+128. */
+typedef struct {
+    long long x[3], y[3], ex[3], ey[3];
+    int tl[3];
+    int x0, x1, y0, y1;     /* Pixel-Rechteck, auf das Ziel beschnitten */
+} CovTri;
+
+static long long cov_fdiv(long long a, long long b)   /* floor(a/b), b > 0 */
+{
+    long long q = a / b;
+    if ((a % b) != 0 && a < 0) q--;
+    return q;
+}
+
+static int cov_setup(CovTri *c, const HwVertex *t, float half_w, float half_h,
+                     int corner_x, int corner_y, int w, int h)
+{
+    long long area, minx, maxx, miny, maxy;
+    int i;
+    for (i = 0; i < 3; i++) {
+        float iw = 1.0f / t[i].pos[3];
+        float fx = (t[i].pos[0] * iw + 1.0f) * half_w + (float)corner_x;
+        float fy = (t[i].pos[1] * iw + 1.0f) * half_h + (float)corner_y;
+        c->x[i] = llrint((double)fx * 256.0);
+        c->y[i] = llrint((double)fy * 256.0);
+    }
+    area = (c->x[1] - c->x[0]) * (c->y[2] - c->y[0]) -
+           (c->x[2] - c->x[0]) * (c->y[1] - c->y[0]);
+    if (area == 0) return 0;                    /* D3D zeichnet nichts */
+    if (area < 0) {                             /* Innenseite: E > 0 */
+        long long tx = c->x[1], ty = c->y[1];
+        c->x[1] = c->x[2]; c->y[1] = c->y[2];
+        c->x[2] = tx; c->y[2] = ty;
+    }
+    for (i = 0; i < 3; i++) {
+        int j = (i + 1) % 3;
+        c->ex[i] = c->x[j] - c->x[i];
+        c->ey[i] = c->y[j] - c->y[i];
+        c->tl[i] = (c->ey[i] < 0) || (c->ey[i] == 0 && c->ex[i] > 0);
+    }
+    minx = maxx = c->x[0];
+    miny = maxy = c->y[0];
+    for (i = 1; i < 3; i++) {
+        if (c->x[i] < minx) minx = c->x[i];
+        if (c->x[i] > maxx) maxx = c->x[i];
+        if (c->y[i] < miny) miny = c->y[i];
+        if (c->y[i] > maxy) maxy = c->y[i];
+    }
+    c->x0 = (int)ceil((double)(minx - 128) / 256.0);
+    c->x1 = (int)floor((double)(maxx - 128) / 256.0);
+    c->y0 = (int)ceil((double)(miny - 128) / 256.0);
+    c->y1 = (int)floor((double)(maxy - 128) / 256.0);
+    if (c->x0 < 0) c->x0 = 0;
+    if (c->y0 < 0) c->y0 = 0;
+    if (c->x1 > w - 1) c->x1 = w - 1;
+    if (c->y1 > h - 1) c->y1 = h - 1;
+    return c->x0 <= c->x1 && c->y0 <= c->y1;
+}
+
+/* Abgedeckte Pixel der Zeile py als ein Intervall [lo, hi] (das Dreieck ist
+   konvex und e je Kante linear in px: e(px) = C - D*px mit D = 256*ey).
+   Bedingung e >= thr (thr = 0 auf Top-Left-Kanten, sonst 1) ergibt je
+   Kante eine Halbgerade, exakt per Ganzzahl-Division statt Pixeltest. */
+static int cov_row_span(const CovTri *c, int py, int *lo_out, int *hi_out)
+{
+    long long sy = (long long)py * 256 + 128;
+    long long lo = c->x0, hi = c->x1;
+    int k;
+    for (k = 0; k < 3; k++) {
+        long long C = c->ex[k] * (sy - c->y[k]) - c->ey[k] * (128 - c->x[k]);
+        long long D = 256 * c->ey[k];
+        long long thr = c->tl[k] ? 0 : 1;
+        if (D == 0) {
+            if (C < thr) return 0;
+        } else if (D > 0) {             /* px <= floor((C-thr)/D) */
+            long long b = cov_fdiv(C - thr, D);
+            if (b < hi) hi = b;
+        } else {                        /* px >= ceil((thr-C)/-D) */
+            long long b = -cov_fdiv(C - thr, -D);
+            if (b > lo) lo = b;
+        }
+        if (lo > hi) return 0;
+    }
+    *lo_out = (int)lo;
+    *hi_out = (int)hi;
+    return 1;
+}
+
 /* Markiert die Pixel eines Dreiecks im aktuellen Batch. Rueckgabe 1, wenn
  * ein Pixel schon von einem frueheren Dreieck dieses Batches belegt ist.
- * Bildschirmkoordinaten wie die D3D-Viewport-Transformation (X/Y wie
- * p_hw_tri_clip), Pixelmitten bei +0.5. */
+ * Je Zeile wird nur die abgedeckte Spanne besucht (cov_row_span). */
 static int cov_mark(const HwVertex *t)
 {
     const HwDrawState *st = &g_state;
-    long long x[3], y[3], area, minx, maxx, miny, maxy;
-    long long ex[3], ey[3];
-    int tl[3];
-    int i, px, py, x0, x1, y0, y1, hit = 0;
+    CovTri c;
+    int px, py, hit = 0;
 
     if (g_cov == NULL || g_cov_w != g_target_w || g_cov_h != g_target_h) {
         free(g_cov);
@@ -1861,69 +2052,41 @@ static int cov_mark(const HwVertex *t)
             return 1;
         }
     }
-    /* D3D11-Rasterregeln: Perspektivdivision und Viewport in float32,
-       Einrasten auf 1/256 Pixel (16.8-Festkomma, round-to-nearest-even),
-       Abtastung in der Pixelmitte, Top-Left-Regel (Y nach unten). */
-    for (i = 0; i < 3; i++) {
-        float iw = 1.0f / t[i].pos[3];
-        float fx = (t[i].pos[0] * iw + 1.0f) * st->viewport_half_w +
-                   (float)st->viewport_corner_x;
-        float fy = (t[i].pos[1] * iw + 1.0f) * st->viewport_half_h +
-                   (float)st->viewport_corner_y;
-        x[i] = llrint((double)fx * 256.0);
-        y[i] = llrint((double)fy * 256.0);
-    }
-    area = (x[1] - x[0]) * (y[2] - y[0]) - (x[2] - x[0]) * (y[1] - y[0]);
-    if (area == 0) return 0;                    /* D3D zeichnet nichts */
-    if (area < 0) {                             /* Innenseite: E > 0 */
-        long long tx = x[1], ty = y[1];
-        x[1] = x[2]; y[1] = y[2];
-        x[2] = tx; y[2] = ty;
-    }
-    for (i = 0; i < 3; i++) {
-        int j = (i + 1) % 3;
-        ex[i] = x[j] - x[i];
-        ey[i] = y[j] - y[i];
-        tl[i] = (ey[i] < 0) || (ey[i] == 0 && ex[i] > 0);
-    }
-    minx = maxx = x[0];
-    miny = maxy = y[0];
-    for (i = 1; i < 3; i++) {
-        if (x[i] < minx) minx = x[i];
-        if (x[i] > maxx) maxx = x[i];
-        if (y[i] < miny) miny = y[i];
-        if (y[i] > maxy) maxy = y[i];
-    }
-    x0 = (int)ceil((double)(minx - 128) / 256.0);
-    x1 = (int)floor((double)(maxx - 128) / 256.0);
-    y0 = (int)ceil((double)(miny - 128) / 256.0);
-    y1 = (int)floor((double)(maxy - 128) / 256.0);
-    if (x0 < 0) x0 = 0;
-    if (y0 < 0) y0 = 0;
-    if (x1 > g_cov_w - 1) x1 = g_cov_w - 1;
-    if (y1 > g_cov_h - 1) y1 = g_cov_h - 1;
-    if (x0 <= x1 && y0 <= y1) {
-        if (x0 < g_cov_x0) g_cov_x0 = x0;
-        if (y0 < g_cov_y0) g_cov_y0 = y0;
-        if (x1 > g_cov_x1) g_cov_x1 = x1;
-        if (y1 > g_cov_y1) g_cov_y1 = y1;
-    }
-    for (py = y0; py <= y1; py++) {
-        long long sy = (long long)py * 256 + 128;
+    if (!cov_setup(&c, t, st->viewport_half_w, st->viewport_half_h,
+                   st->viewport_corner_x, st->viewport_corner_y,
+                   g_cov_w, g_cov_h))
+        return 0;
+    if (c.x0 < g_cov_x0) g_cov_x0 = c.x0;
+    if (c.y0 < g_cov_y0) g_cov_y0 = c.y0;
+    if (c.x1 > g_cov_x1) g_cov_x1 = c.x1;
+    if (c.y1 > g_cov_y1) g_cov_y1 = c.y1;
+    for (py = c.y0; py <= c.y1; py++) {
         uint16_t *row = g_cov + (size_t)py * (size_t)g_cov_w;
-        for (px = x0; px <= x1; px++) {
-            long long sx = (long long)px * 256 + 128;
-            int k, in = 1;
-            for (k = 0; k < 3; k++) {
-                long long e = ex[k] * (sy - y[k]) - ey[k] * (sx - x[k]);
-                if (e < 0 || (e == 0 && !tl[k])) { in = 0; break; }
-            }
-            if (!in) continue;
-            if (row[px] == g_cov_id) hit = 1;
+        int lo, hi;
+        if (!cov_row_span(&c, py, &lo, &hi)) continue;
+        for (px = lo; px <= hi; px++) {
+            hit |= (row[px] == g_cov_id);
             row[px] = g_cov_id;
         }
     }
     return hit;
+}
+
+/* Testzugang (tests/hw_selftest.c): Abdeckung eines Dreiecks als Maske. */
+int hw_cov_tri_mask(const HwVertex t[3], float half_w, float half_h,
+                    int corner_x, int corner_y, int w, int h,
+                    unsigned char *mask)
+{
+    CovTri c;
+    int py, px, n = 0;
+    memset(mask, 0, (size_t)w * (size_t)h);
+    if (!cov_setup(&c, t, half_w, half_h, corner_x, corner_y, w, h)) return 0;
+    for (py = c.y0; py <= c.y1; py++) {
+        int lo, hi;
+        if (!cov_row_span(&c, py, &lo, &hi)) continue;
+        for (px = lo; px <= hi; px++) { mask[(size_t)py * w + px] = 1; n++; }
+    }
+    return n;
 }
 
 unsigned hw_draw_serial(void) { return g_begin_serial; }
@@ -2235,7 +2398,33 @@ int hw_flush_to_guest(void) {
 
     /* Farbpuffer: PICA kachelt 8x8-Morton und legt die Zeilen von unten
        nach oben (y' = height-1-y), wie p_fb_write im Software-Pfad. */
-    if (g_state.color_mem != NULL) {
+    if (g_state.color_mem != NULL && g_state.color_format == 0u &&
+        (w & 7u) == 0u && (h & 7u) == 0u &&
+        (uint64_t)w * h * 4u <= g_state.color_size) {
+        /* RGBA8 (Gast: A,B,G,R je Pixel) ohne Bereichspruefung je Pixel:
+           das ganze Ziel liegt im Gastpuffer. Je 8er-Kachelzeile sind die
+           Morton-Offsets xlut[x&7] fest; Ergebnis bitgleich zur
+           allgemeinen Schleife unten (color_encode Format 0). */
+        static const uint32_t xlut[8] = {0x00, 0x01, 0x04, 0x05, 0x10, 0x11, 0x14, 0x15};
+        static const uint32_t ylut[8] = {0x00, 0x02, 0x08, 0x0A, 0x20, 0x22, 0x28, 0x2A};
+        for (y = 0; y < (int)h; y++) {
+            uint32_t yp = h - 1u - (uint32_t)y;
+            const uint32_t *row = (const uint32_t *)(cbase + (size_t)y * cm.RowPitch);
+            unsigned char *dst = g_state.color_mem +
+                                 ((size_t)(yp & ~7u) * w + ylut[yp & 7u]) * 4u;
+            uint32_t tx;
+            for (tx = 0; tx < w; tx += 8u) {
+                unsigned char *tile = dst + (size_t)tx * 8u * 4u;
+                int k;
+                for (k = 0; k < 8; k++) {
+                    uint32_t v = row[tx + (uint32_t)k];   /* R,G,B,A (LE) */
+                    v = (v >> 24) | ((v >> 8) & 0xFF00u) |
+                        ((v << 8) & 0xFF0000u) | (v << 24);
+                    memcpy(tile + xlut[k] * 4u, &v, 4);
+                }
+            }
+        }
+    } else if (g_state.color_mem != NULL) {
         for (y = 0; y < (int)h; y++) {
             uint32_t yp = h - 1u - (uint32_t)y;
             const unsigned char *row = cbase + (size_t)y * cm.RowPitch;
@@ -2294,10 +2483,10 @@ void hw_list_begin(void) {
         if (t0 == 0ull) { t0 = now; up0 = 0ull; dec0 = 0ull; }
         if (now - t0 >= 5000000ull && now > t0) {
             double sec = (double)(now - t0) / 1000000.0;
-            printf("[texcache] t=%.1fs uploads=%llu (%.1f/s) key=%llu hash=%llu "
+            printf("[texcache] t=%.1fs uploads=%llu (%.1f/s) key=%llu hash=%llu teil=%llu "
                    "dekodier_ms=%llu (%.1f%%)\n", (double)(now - start) / 1000000.0,
                    g_tex_uploads - up0, (double)(g_tex_uploads - up0) / sec,
-                   g_tex_upload_key, g_tex_upload_hash,
+                   g_tex_upload_key, g_tex_upload_hash, g_tex_partial,
                    (g_tex_upload_us - dec0) / 1000ull,
                    100.0 * (double)(g_tex_upload_us - dec0) / 1000000.0 / sec);
             fflush(stdout);

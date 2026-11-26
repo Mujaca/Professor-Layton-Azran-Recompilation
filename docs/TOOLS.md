@@ -331,7 +331,8 @@ Block und LR), `HLE_SLEEP_LOG=1` (die ersten 200 `svcSleepThread`-Aufrufe),
 Anteil an der Laufzeit, Fragmente/Textursamples/Lighting/Farbziel-Zugriffe
 sowie parallele und serielle Dreieckszeilen des Software-Rasterizers; im
 Hardware-Pfad zusaetzlich `texup`/`texdec_ms` und alle 5 s eine Zeile
-`[texcache]` mit Uploads/s und Dekodierzeit; alle 20 000 Draws eine Zeile
+`[texcache]` mit Uploads/s, Teil-Uploads (`teil=`, nur geaenderte
+Kachelzeilen) und Dekodierzeit; alle 20 000 Draws eine Zeile
 `[vshade]`: Draw-Positionen, davon gerechnete eindeutige Vertices und wie
 viele davon parallel liefen),
 `HLE_RASTER_THREADS=<n>` (Worker-Threads fuer das parallele Rasterisieren
