@@ -2,8 +2,8 @@
  *
  * Nur Rasterisierung + Fragment-Pipeline liegen auf der Host-GPU; Vertex- und
  * Geometry-Shader bleiben der CPU-Interpreter in runtime/gpu/gpu.c. Das Modul
- * ist eine schmale Schnittstelle (hw_d3d11.h) und wird ausschliesslich ueber
- * `--renderer hw` aktiviert. Ohne diesen Schalter wird kein Device erzeugt.
+ * ist eine schmale Schnittstelle (hw_d3d11.h); runtime/main.c aktiviert es
+ * standardmaessig (M17), `--renderer soft` erzeugt kein Device.
  *
  * Umfang:
  *   - Clip-Space-Dreiecke mit POSITION + PrimaryColor + TEXCOORD0..2
@@ -54,7 +54,7 @@
 
 #include "gpu.h"
 
-/* d3d11.dll/d3dcompiler_47.dll werden erst bei --renderer hw geladen, damit
+/* d3d11.dll/d3dcompiler_47.dll werden erst mit dem HW-Renderer geladen, damit
    der Software-Pfad ohne diese DLLs startet. */
 typedef HRESULT (WINAPI *HwD3D11CreateDeviceFn)(
     IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE, UINT,
@@ -277,7 +277,18 @@ static int g_tex_diag = -1;         /* HLE_GTIME/HLE_HW_STATE (nur Diagnose) */
  * nehmen g_hw_cs (hw_lock). */
 static CRITICAL_SECTION g_hw_cs;
 static volatile LONG g_hw_cs_init;
-static void hw_lock_enter(void) { if (g_hw_cs_init) EnterCriticalSection(&g_hw_cs); }
+/* Diagnose (HLE_HW_STATE): Wartezeit auf die Sperre, nur wenn sie belegt war. */
+static volatile LONG64 g_lock_wait_us;
+static unsigned long long hw_now_us(void);
+static void hw_lock_enter(void)
+{
+    if (!g_hw_cs_init) return;
+    if (!TryEnterCriticalSection(&g_hw_cs)) {
+        unsigned long long t0 = hw_now_us();
+        EnterCriticalSection(&g_hw_cs);
+        InterlockedExchangeAdd64(&g_lock_wait_us, (LONG64)(hw_now_us() - t0));
+    }
+}
 static void hw_lock_leave(void) { if (g_hw_cs_init) LeaveCriticalSection(&g_hw_cs); }
 
 static int g_scale = 1;
@@ -295,6 +306,13 @@ typedef struct {
     uint64_t chash, dhash;
     uint32_t clen, dlen;
     int cvalid, dvalid;
+    /* Nur Ziele, die schon einmal Quelle eines DisplayTransfers waren,
+     * werden in interner Aufloesung mitgerendert (shown). Zwischenziele
+     * (Render-to-Texture, z. B. die 3D-Figuren im Dialog) sampelt der
+     * Renderer ohnehin nativ; der zweite Durchgang waere dort nur Last.
+     * hr_skipped: seit dem Laden ohne zweiten Durchgang gezeichnet ->
+     * interne Kopie veraltet. */
+    int shown, hr_skipped;
     unsigned long long last_use;
 } HwSurf;
 #define HW_SURF_N 8
@@ -2428,6 +2446,15 @@ static void surf_after_flush(int depth_written)
     if (g_scale == 1)
         ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)sf->ctex,
                                          (ID3D11Resource *)g_color_tex);
+    if (g_scale > 1 && sf->hr_skipped) {
+        /* interne Kopie nicht mitgerendert: beim naechsten Laden neu
+           vergroessern, bis dahin kein GPU-Transfer aus ihr */
+        sf->hr_skipped = 0;
+        sf->cvalid = 0;
+        sf->dvalid = 0;
+        sf->last_use = ++g_surf_clock;
+        return;
+    }
     clen = surf_color_len(&g_state, g_target_w, g_target_h);
     sf->chash = clen ? fnv1a(g_state.color_mem, clen) : 0;
     sf->clen = clen;
@@ -2469,6 +2496,10 @@ static void hr_bind(int hires)
 
 static int hr_active(void)
 {
+    if (g_scale > 1 && g_cur_surf != NULL && !g_cur_surf->shown) {
+        g_cur_surf->hr_skipped = 1;
+        return 0;
+    }
     return g_scale > 1 && g_cur_surf != NULL && g_cur_surf->crtv != NULL &&
            g_cur_surf->dsv != NULL && g_hr_shadow != NULL;
 }
@@ -2527,12 +2558,18 @@ void hw_display_transfer(const unsigned char *src, const unsigned char *dst,
     if (ow == 0u || oh == 0u || out_w > in_w || out_h > in_h) goto cpu;
     for (i = 0; i < HW_SURF_N; i++) {
         HwSurf *t = &g_surf[i];
-        if (!t->valid || !t->cvalid || t->color_mem != src) continue;
+        if (!t->valid || t->color_mem != src) continue;
         if (t->w != (int)in_w || t->h != (int)in_h || cb_to_fb_fmt(t->color_fmt) != in_fmt)
             continue;
         if (sf == NULL || t->last_use > sf->last_use) sf = t;
     }
-    if (sf == NULL || fnv1a(src, sf->clen) != sf->chash) goto cpu;
+    if (sf == NULL) goto cpu;
+    if (g_scale > 1 && !sf->shown) {
+        /* erstes Mal Bildschirmquelle: ab jetzt intern mitrendern */
+        sf->shown = 1;
+        goto cpu;
+    }
+    if (!sf->cvalid || fnv1a(src, sf->clen) != sf->chash) goto cpu;
     len = ow * oh * fb_fmt_bpp(out_fmt);
     for (i = 0; i < HW_DISP_N; i++)
         if (g_disp[i].tex && g_disp[i].dst == dst) { d = &g_disp[i]; break; }
@@ -3242,7 +3279,7 @@ static void hw_list_begin_l(void) {
     /* Diagnose (HLE_HW_STATE/HLE_GTIME): Upload- und Dekodierrate. */
     if (tex_diag_on()) {
         static unsigned long long t0, up0, dec0, start;
-        static unsigned long long d0, f0, l0, fl0, wt0, bg0, tr0, hs0, b0, ov0, tk0;
+        static unsigned long long d0, f0, l0, fl0, wt0, bg0, tr0, hs0, b0, ov0, tk0, lw0;
         unsigned long long now = hw_now_us();
         if (start == 0ull) start = now;
         if (t0 == 0ull) { t0 = now; up0 = 0ull; dec0 = 0ull; }
@@ -3256,11 +3293,14 @@ static void hw_list_begin_l(void) {
                    100.0 * (double)(g_tex_upload_us - dec0) / 1000000.0 / sec);
             fflush(stdout);
             printf("[hwtime] listen=%llu draws=%llu batches=%llu flushes=%llu flush_ms=%llu "
-                   "(warten %llu) begin_ms=%llu tri_ms=%llu hash_ms=%llu ovl=%llu/%llu\n",
+                   "(warten %llu) begin_ms=%llu tri_ms=%llu hash_ms=%llu ovl=%llu/%llu "
+                   "sperre_ms=%llu\n",
                    g_dg_lists - l0, g_draws - d0, g_batches - b0, g_flushes - f0,
                    (g_dg_flush_us - fl0) / 1000ull, (g_dg_wait_us - wt0) / 1000ull,
                    (g_dg_begin_us - bg0) / 1000ull, (g_dg_tri_us - tr0) / 1000ull,
-                   (g_dg_hash_us - hs0) / 1000ull, g_dg_ovl - ov0, g_dg_trk - tk0);
+                   (g_dg_hash_us - hs0) / 1000ull, g_dg_ovl - ov0, g_dg_trk - tk0,
+                   ((unsigned long long)g_lock_wait_us - lw0) / 1000ull);
+            lw0 = (unsigned long long)g_lock_wait_us;
             fflush(stdout);
             l0 = g_dg_lists; d0 = g_draws; f0 = g_flushes; fl0 = g_dg_flush_us;
             wt0 = g_dg_wait_us; bg0 = g_dg_begin_us; tr0 = g_dg_tri_us;
