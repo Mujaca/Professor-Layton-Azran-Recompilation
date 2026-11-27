@@ -61,6 +61,10 @@ int64_t fs_archive_open(uint32_t archive_id, const uint8_t *raw, uint32_t raw_le
                         uint64_t program_id, uint32_t *result);
 uint32_t fs_archive_close(uint64_t handle);
 
+/* Archiv-ID eines offenen Archivs (z. B. 3 = SelfNCCH), 0 bei ungueltigem
+ * Handle. */
+uint32_t fs_archive_id(uint64_t handle);
+
 /* Kopiert den Host-Wurzelpfad eines offenen Archivs. 0 bei Erfolg. */
 int fs_archive_root(uint64_t handle, char *out, size_t out_size);
 

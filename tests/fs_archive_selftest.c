@@ -263,6 +263,27 @@ int main(int argc, char **argv) {
         CHECK_RES(fs_archive_close((uint64_t)h), FS_RESULT_SUCCESS);
     }
 
+    /* --- SelfNCCH (0x3): Azahar ArchiveFactory_SelfNCCH ---------------- */
+    {
+        uint64_t free_bytes = 1;
+        h = fs_archive_open(3, NULL, 0, 0, &res);
+        CHECK(h > 0);
+        CHECK_RES(res, FS_RESULT_SUCCESS);
+        CHECK(fs_archive_id((uint64_t)h) == 3u);
+        /* Dateien nur ueber binaere SelfNCCH-Pfade (hle.c); alle
+           Verzeichnis-/Schreiboperationen: UnsupportedOpenFlags. */
+        CHECK_RES(fs_archive_create_file((uint64_t)h, "/x", 4, 0), FS_RESULT_UNSUPPORTED_OPEN_FLAGS);
+        CHECK_RES(fs_archive_delete_file((uint64_t)h, "/x"), FS_RESULT_UNSUPPORTED_OPEN_FLAGS);
+        CHECK_RES(fs_archive_create_directory((uint64_t)h, "/d", 0),
+                  FS_RESULT_UNSUPPORTED_OPEN_FLAGS);
+        CHECK_RES(fs_archive_open_directory((uint64_t)h, "/", host, sizeof(host)),
+                  FS_RESULT_UNSUPPORTED_OPEN_FLAGS);
+        CHECK_RES(fs_archive_get_free_bytes((uint64_t)h, &free_bytes), FS_RESULT_SUCCESS);
+        CHECK(free_bytes == 0);
+        CHECK_RES(fs_archive_close((uint64_t)h), FS_RESULT_SUCCESS);
+        CHECK(fs_archive_id((uint64_t)h) == 0u);
+    }
+
     if (g_fail == 0) printf("fs_archive_selftest: OK\n");
     return g_fail ? 1 : 0;
 }

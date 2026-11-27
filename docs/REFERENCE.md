@@ -43,6 +43,14 @@ Kommandopuffer (`cmd_buf[0x40 + 2*id]` Deskriptor, `+1` Adresse; Azahar
 dorthin und setzt die Adresse in ihren Deskriptor. Beispiel: `dsp::DSP
 ReadPipeIfPossible` (Request `normal=3, translate=0`).
 
+CopyHandle in einer Antwort (Deskriptor 0x0) legt im Empfänger einen
+**neuen** Handle auf dasselbe Objekt an (Azahar `kernel/hle_ipc.cpp`,
+`HandleTable::Create`); der Dienst behält seinen eigenen. Schließt der Client
+seine Kopie, lebt das Objekt weiter, ein späteres `Get…Handle` liefert einen
+weiteren neuen Handle. Für Antworten von HLE-Diensten behandelt Azahar
+MoveHandle (0x10) genauso (`hle_ipc.cpp` WriteToOutgoingCommandBuffer); in
+Anfragen schließt MoveHandle den Handle des Absenders.
+
 ### Dienst-Kommandos, die das Spiel benutzt
 
 * **srv:** `1` RegisterClient, `2` EnableNotification, `5` GetServiceHandle.
@@ -117,6 +125,83 @@ Kettenende in den Hash-Tabellen = `0xFFFFFFFF`. Hash pro UTF-16-Zeichen:
 Assets: 3 × Level-5-`ARC0` (`lt6_*.fa`), 566 × BCSTM, 34 × MOFLEX. Texturen
 `IMGC`, ETC1 (`fmt 0x011B`, 4 bpp, lineare 8×8-Kachelordnung); Dekoder in
 `runtime/imgc.c`, Test `tools/test_imgc_c.py`.
+
+SelfNCCH-Archiv (Azahar `core/file_sys/archive_selfncch.cpp`): öffnet sich
+per `OpenArchive(3, Empty)` wie per `OpenFileDirectly(3, …)`. Dateipfad ist
+**binär, genau 12 Byte** `{u32 typ, char exefs_name[8]}`: Typ 0 RomFS, 5
+Update-RomFS (fehlt → RomFSNotFound `0xC8804464`), 1 Code → CommandNotAllowed
+`0xD9004676`, 2 ExeFS-Abschnitt `icon`/`logo`/`banner` (fehlt →
+ExeFSSectionNotFound `0xC8804637`, anderer Name → InvalidPath). Andere
+Pfadtypen → InvalidPath. ExeFS-Dateien lassen sich nur ganz lesen (Offset ≠ 0
+→ UnsupportedOpenFlags, Länge ≠ Dateigröße → IncorrectExeFSReadSize
+`0xE0C046F9`). Alle Schreib-/Verzeichnisbefehle → UnsupportedOpenFlags,
+GetFreeBytes 0. Das `icon` ist das SMDH (0x36C0 Byte).
+
+## boss:U (SpotPass) ohne Netz
+
+Quelle Azahar `core/hle/service/boss/boss.cpp`, `online_service.{h,cpp}`.
+Zustand je Session: erst `InitializeSession` (0x0001) legt ihn an; Befehle,
+die ihn brauchen (RegisterTask, UnregisterTask, GetTaskIdList,
+GetNsDataIdList*, Send/ReceiveProperty, GetNsDataHeaderInfo, ReadNsData,
+GetNsDataLastUpdate), liefern vorher ResultUnknown `0xFFFFFFFF` (1,0).
+
+* Properties (`SendProperty` 0x0014 schreibt, `ReceiveProperty` 0x0016 liest,
+  Antwort (2,2): Result, angefragte Größe, Puffer-Echo): fester Satz mit IDs
+  0x00–0x2F (ohne 0x17), 0x35 TotalTasks (u16), 0x36 TaskIdList (0x400 Byte,
+  8 Byte je Task-ID), 0x3B, 0x3E (0x200), 0x3F; unbekannte ID →
+  UnknownPropertyID `0xC960F84D` (77, Modul BOSS = 62).
+* `RegisterTask` (0x000B) übernimmt die aktuellen Properties unter der
+  Task-ID und setzt sie zurück; `UnregisterTask` (0x000C) für unbekannte ID →
+  TaskNotFound `0xC8A0F833`. `GetTaskIdList` (0x000E) antwortet nur mit
+  Result und legt Anzahl/Liste in die Properties 0x35/0x36, die das Spiel
+  danach per ReceiveProperty abholt.
+* Daten (NsData) liegen im BOSS-ExtData der Anwendung; ohne Download ist die
+  Liste leer: `GetNsDataIdList*` (3,2) Anzahl 0, `GetNsDataHeaderInfo`/
+  `ReadNsData` → NsDataNotFound `0xC8A0F840`.
+* Task-Abfragen liefern Ruhewerte: GetTaskState/GetTaskResult/
+  GetTaskCommErrorCode (4,2) je 0, GetTaskStatus/GetTaskError (2,2) 0,
+  GetTaskServiceStatus 1, StartTask*/CancelTask quittieren nur.
+  GetTaskFinishHandle liefert ein OneShot-Event.
+
+## err:f (ThrowFatalError)
+
+`err:f` ist ein benannter Port (`svcConnectToPort("err:f")`), kein
+srv-Dienst. Kommando 0x0001 mit 32 Wörtern `ErrInfo` (Azahar
+`core/hle/service/err/err_f.cpp`): Wort 0 = specifier (u8: 0 Generic, 1
+Corrupted, 2 CardRemoved, 3 Exception, 4 ResultFailure, 5 Logged), rev_high
+(u8), rev_low (u16); Wort 1 result_code, 2 pc_address, 3 pid, 4/5 title_id,
+6/7 app_title_id; ab Wort 8 typabhängig (Exception: ExceptionInfo 6 Wörter,
+r0–r15, CPSR; ResultFailure: 0x60 Byte Text). Antwort Result 0; die Konsole
+zeigt danach den Fehlerbildschirm (Azahar stoppt die Emulation).
+
+## ac:u (Verbindung)
+
+Azahar `core/hle/service/ac/ac.cpp`: `ConnectAsync` (0x0004) erhält
+PID-Deskriptor, ein Event (CopyHandle) und die ACConfig (StaticBuffer,
+0x200 Byte); fertig wird der Versuch durch Signalisieren des Events, das
+Ergebnis liefert `GetConnectResult` (0x0005). `CreateDefaultConfig` (0x0001)
+und `SetRequestEulaVersion` (0x002D) antworten mit der Config als
+StaticBuffer 0, `GetInfraPriority` (0x0027) u32, `IsConnected` (0x003E)
+bool, `GetStatus` (0x000C: 0 getrennt … 3 Internet), `CloseAsync` (0x0008)
+signalisiert Close- und ggf. Disconnect-Event. `CancelConnectAsync` liefert
+`0xE0A09D2D` (301, verbunden) bzw. `0xE0A09D2E` (302, nicht verbunden),
+Modul AC = 39.
+
+## APT: Library-Applets
+
+Azahar `apt/applet_manager.cpp`, `applets/applet.cpp`: Start eines
+Library-Applets (z. B. Fehler-/EULA-Applet 0x206/0x406):
+`PrepareToStartLibraryApplet(id)` (0x0018; ParameterPresent `0xC8A0CC02`
+bei ausstehendem Parameter, AlreadyExists `0xC8A0CFFC` bei belegtem Slot) →
+`SendParameter(app, id, Request, CaptureBufferInfo 0x20)` (0x000C) → Applet
+antwortet mit `Response` + SharedMemory-Handle → `StartLibraryApplet(id,
+Handle, Parameter)` (0x001E, Signal Wakeup) → das Applet schließt mit
+`WakeupByExit` (0xA) und seinem Parameterpuffer an den Starter.
+Receive/GlanceParameter (0x000D/0x000E) antworten (4,4): sender, signal,
+min(Größe, angefragt), MoveHandle, StaticBuffer 0 in angefragter Größe;
+ohne Parameter NoData `0xC8A0CFEF`, anderes Ziel NotFound `0xC880CFFA`
+(Modul Applet = 51). ErrEulaParam ist 0xF80 Byte (Typ u8 @0, error_code
+s32 @4, result u32 @0xF70).
 
 ## GSP
 
@@ -669,6 +754,14 @@ Kommandopuffer (`cmd_buf[0x40 + 2*id]` Deskriptor, `+1` Adresse; Azahar
 dorthin und setzt die Adresse in ihren Deskriptor. Beispiel: `dsp::DSP
 ReadPipeIfPossible` (Request `normal=3, translate=0`).
 
+CopyHandle in einer Antwort (Deskriptor 0x0) legt im Empfänger einen
+**neuen** Handle auf dasselbe Objekt an (Azahar `kernel/hle_ipc.cpp`,
+`HandleTable::Create`); der Dienst behält seinen eigenen. Schließt der Client
+seine Kopie, lebt das Objekt weiter, ein späteres `Get…Handle` liefert einen
+weiteren neuen Handle. Für Antworten von HLE-Diensten behandelt Azahar
+MoveHandle (0x10) genauso (`hle_ipc.cpp` WriteToOutgoingCommandBuffer); in
+Anfragen schließt MoveHandle den Handle des Absenders.
+
 ### Dienst-Kommandos, die das Spiel benutzt
 
 * **srv:** `1` RegisterClient, `2` EnableNotification, `5` GetServiceHandle.
@@ -753,6 +846,83 @@ Kettenende in den Hash-Tabellen = `0xFFFFFFFF`. Hash pro UTF-16-Zeichen:
 Assets: 3 × Level-5-`ARC0` (`lt6_*.fa`), 566 × BCSTM, 34 × MOFLEX. Texturen
 `IMGC`, ETC1 (`fmt 0x011B`, 4 bpp, lineare 8×8-Kachelordnung); Dekoder in
 `runtime/imgc.c`, Test `tools/test_imgc_c.py`.
+
+SelfNCCH-Archiv (Azahar `core/file_sys/archive_selfncch.cpp`): öffnet sich
+per `OpenArchive(3, Empty)` wie per `OpenFileDirectly(3, …)`. Dateipfad ist
+**binär, genau 12 Byte** `{u32 typ, char exefs_name[8]}`: Typ 0 RomFS, 5
+Update-RomFS (fehlt → RomFSNotFound `0xC8804464`), 1 Code → CommandNotAllowed
+`0xD9004676`, 2 ExeFS-Abschnitt `icon`/`logo`/`banner` (fehlt →
+ExeFSSectionNotFound `0xC8804637`, anderer Name → InvalidPath). Andere
+Pfadtypen → InvalidPath. ExeFS-Dateien lassen sich nur ganz lesen (Offset ≠ 0
+→ UnsupportedOpenFlags, Länge ≠ Dateigröße → IncorrectExeFSReadSize
+`0xE0C046F9`). Alle Schreib-/Verzeichnisbefehle → UnsupportedOpenFlags,
+GetFreeBytes 0. Das `icon` ist das SMDH (0x36C0 Byte).
+
+## boss:U (SpotPass) ohne Netz
+
+Quelle Azahar `core/hle/service/boss/boss.cpp`, `online_service.{h,cpp}`.
+Zustand je Session: erst `InitializeSession` (0x0001) legt ihn an; Befehle,
+die ihn brauchen (RegisterTask, UnregisterTask, GetTaskIdList,
+GetNsDataIdList*, Send/ReceiveProperty, GetNsDataHeaderInfo, ReadNsData,
+GetNsDataLastUpdate), liefern vorher ResultUnknown `0xFFFFFFFF` (1,0).
+
+* Properties (`SendProperty` 0x0014 schreibt, `ReceiveProperty` 0x0016 liest,
+  Antwort (2,2): Result, angefragte Größe, Puffer-Echo): fester Satz mit IDs
+  0x00–0x2F (ohne 0x17), 0x35 TotalTasks (u16), 0x36 TaskIdList (0x400 Byte,
+  8 Byte je Task-ID), 0x3B, 0x3E (0x200), 0x3F; unbekannte ID →
+  UnknownPropertyID `0xC960F84D` (77, Modul BOSS = 62).
+* `RegisterTask` (0x000B) übernimmt die aktuellen Properties unter der
+  Task-ID und setzt sie zurück; `UnregisterTask` (0x000C) für unbekannte ID →
+  TaskNotFound `0xC8A0F833`. `GetTaskIdList` (0x000E) antwortet nur mit
+  Result und legt Anzahl/Liste in die Properties 0x35/0x36, die das Spiel
+  danach per ReceiveProperty abholt.
+* Daten (NsData) liegen im BOSS-ExtData der Anwendung; ohne Download ist die
+  Liste leer: `GetNsDataIdList*` (3,2) Anzahl 0, `GetNsDataHeaderInfo`/
+  `ReadNsData` → NsDataNotFound `0xC8A0F840`.
+* Task-Abfragen liefern Ruhewerte: GetTaskState/GetTaskResult/
+  GetTaskCommErrorCode (4,2) je 0, GetTaskStatus/GetTaskError (2,2) 0,
+  GetTaskServiceStatus 1, StartTask*/CancelTask quittieren nur.
+  GetTaskFinishHandle liefert ein OneShot-Event.
+
+## err:f (ThrowFatalError)
+
+`err:f` ist ein benannter Port (`svcConnectToPort("err:f")`), kein
+srv-Dienst. Kommando 0x0001 mit 32 Wörtern `ErrInfo` (Azahar
+`core/hle/service/err/err_f.cpp`): Wort 0 = specifier (u8: 0 Generic, 1
+Corrupted, 2 CardRemoved, 3 Exception, 4 ResultFailure, 5 Logged), rev_high
+(u8), rev_low (u16); Wort 1 result_code, 2 pc_address, 3 pid, 4/5 title_id,
+6/7 app_title_id; ab Wort 8 typabhängig (Exception: ExceptionInfo 6 Wörter,
+r0–r15, CPSR; ResultFailure: 0x60 Byte Text). Antwort Result 0; die Konsole
+zeigt danach den Fehlerbildschirm (Azahar stoppt die Emulation).
+
+## ac:u (Verbindung)
+
+Azahar `core/hle/service/ac/ac.cpp`: `ConnectAsync` (0x0004) erhält
+PID-Deskriptor, ein Event (CopyHandle) und die ACConfig (StaticBuffer,
+0x200 Byte); fertig wird der Versuch durch Signalisieren des Events, das
+Ergebnis liefert `GetConnectResult` (0x0005). `CreateDefaultConfig` (0x0001)
+und `SetRequestEulaVersion` (0x002D) antworten mit der Config als
+StaticBuffer 0, `GetInfraPriority` (0x0027) u32, `IsConnected` (0x003E)
+bool, `GetStatus` (0x000C: 0 getrennt … 3 Internet), `CloseAsync` (0x0008)
+signalisiert Close- und ggf. Disconnect-Event. `CancelConnectAsync` liefert
+`0xE0A09D2D` (301, verbunden) bzw. `0xE0A09D2E` (302, nicht verbunden),
+Modul AC = 39.
+
+## APT: Library-Applets
+
+Azahar `apt/applet_manager.cpp`, `applets/applet.cpp`: Start eines
+Library-Applets (z. B. Fehler-/EULA-Applet 0x206/0x406):
+`PrepareToStartLibraryApplet(id)` (0x0018; ParameterPresent `0xC8A0CC02`
+bei ausstehendem Parameter, AlreadyExists `0xC8A0CFFC` bei belegtem Slot) →
+`SendParameter(app, id, Request, CaptureBufferInfo 0x20)` (0x000C) → Applet
+antwortet mit `Response` + SharedMemory-Handle → `StartLibraryApplet(id,
+Handle, Parameter)` (0x001E, Signal Wakeup) → das Applet schließt mit
+`WakeupByExit` (0xA) und seinem Parameterpuffer an den Starter.
+Receive/GlanceParameter (0x000D/0x000E) antworten (4,4): sender, signal,
+min(Größe, angefragt), MoveHandle, StaticBuffer 0 in angefragter Größe;
+ohne Parameter NoData `0xC8A0CFEF`, anderes Ziel NotFound `0xC880CFFA`
+(Modul Applet = 51). ErrEulaParam ist 0xF80 Byte (Typ u8 @0, error_code
+s32 @4, result u32 @0xF70).
 
 ## GSP
 

@@ -222,3 +222,4 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
 | 2026-11-26 | m9-compare | 10/10 | None | 0 |
 | 2026-11-26 | m17-hw-default | 10/10 | None | 0 |
 | 2026-11-27 | texture-filter | 10/10 | None | 0 |
+| 2026-11-27 | boss-service | 10/10 | None | 0 |

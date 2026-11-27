@@ -113,6 +113,27 @@ def puzzle1_presses():
     return p
 
 
+BONUSES = (160, 172)          # Titelmenue "Bonuses" (danach Slot waehlen)
+DAILY_PUZZLE = (88, 60)       # Bonuses-Menue: "Daily Puzzle"
+DAILY_DOWNLOAD = (145, 218)   # Puzzle Delivery: "Download"
+DAILY_OK = (104, 172)         # "Download puzzles?" -> OK!
+DAILY_ERR_OK = (160, 171)     # "An error has occurred." -> OK!
+
+
+def daily_puzzle_presses():
+    """Bonuses -> Slot 1 -> Daily Puzzle -> Begruessung (Granny R.)
+    weitertippen -> Download -> OK!. Danach versucht das Spiel den
+    SpotPass-Download (boss:U, ac:u); ohne Netz zeigt es nach dem
+    Fehler-Applet selbst "An error has occurred.", OK! fuehrt zurueck ins
+    Menue (docs/GAME_NOTES.md "Daily Puzzle")."""
+    p = [touch(MENU, BONUSES, 20), touch(MENU + 300, SLOT[1], 12),
+         touch(3300, DAILY_PUZZLE, 12)]
+    p += [touch(g, (160, 120), 8) for g in range(4400, 5601, 150)]
+    p += [touch(5800, DAILY_DOWNLOAD, 12), touch(6000, DAILY_OK, 12),
+          touch(6300, DAILY_ERR_OK, 12)]
+    return p
+
+
 def continue_presses(slot):
     """Continue -> Slot -> "The Story So Far..." weitertippen -> Froenborg."""
     p = [touch(MENU, CONTINUE, 20), touch(MENU + 300, SLOT[slot], 10)]
@@ -142,6 +163,11 @@ SCENES["fixture-raetsel1"] = dict(
      touch(11700 + MENU_SHIFT, SLOT[2], 10)],         # Slot 2
     desc="Neues Spiel, Raetsel 001 loesen, in Slot 2 speichern; "
          "spielstand/ ist dann die Fixture raetsel1 (~13 min)")
+SCENES["daily-puzzle"] = dict(
+    fixture="froenborg", target=6800, presses=daily_puzzle_presses(),
+    desc="Bonuses -> Daily Puzzle -> Download -> OK! -> 'An error has occurred.' "
+         "-> OK!: SpotPass-Download ohne Netz (Regression SelfNCCH/boss:U/ac:u/"
+         "Library-Applet, frueher err:f E0A046DA)")
 SCENES["froenborg"] = dict(
     fixture="froenborg", target=4450, presses=continue_presses(1),
     desc="Continue Slot 1 (Prologue End): 3D-Dialogszene in Froenborg")

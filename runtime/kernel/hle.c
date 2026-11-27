@@ -425,6 +425,8 @@ enum ServiceId {
     SVC_HTTP,
     SVC_OTHER,
     SVC_FILE,
+    SVC_ERRF,        /* Port "err:f" (svcConnectToPort, kein srv-Dienst) */
+    SVC_COUNT
 };
 
 #define MAX_FILES 64
@@ -435,6 +437,7 @@ typedef struct {
     uint32_t size;
     int fixed_size;  /* ExtSaveData: Groesse bleibt fest (Azahar FixSizeDiskFile) */
     int virt;        /* 1 = virtuelles RomFS-Abbild mit Mods (romfs_overlay.c) */
+    int exefs;       /* 1 = SelfNCCH-ExeFS-Abschnitt: nur ganz lesbar (Azahar ExeFSSectionFile) */
 } FileSlot;
 
 static FileSlot g_files[MAX_FILES];
@@ -536,7 +539,7 @@ static const char *SERVICE_NAMES[] = {
     "APT:U", "cfg:u", "ptm:u", "dsp::DSP", "y2r:u", "ndsp:", "soc:U",
     "ir:USER", "mic:u", "cam:u", "ac:u", "boss:U", "cecd:u", "news:u",
     "ndm:u", "nwm::UDS", "frd:u", "am:u", "ldr:ro", "mvd:std", "nfc:u",
-    "pxi:dev", "dlp:FKCL", "ssl:C", "http:C", "?", "file",
+    "pxi:dev", "dlp:FKCL", "ssl:C", "http:C", "?", "file", "err:f",
 };
 
 static int service_from_name(const char *name) {
@@ -640,6 +643,7 @@ static int canonical_slot(uint32_t h) {
 /* Gibt einen Handle-Slot frei. Das Objekt (Datei, Event-Zustand, Mutex ...)
    wird erst zerstoert, wenn kein anderer Slot mehr darauf verweist
    (Azahar HandleTable::Close). */
+static void boss_session_rekey(uint32_t from, uint32_t to);
 static void close_handle_slot(uint32_t h) {
     Handle *s;
     if (h == 0 || h >= (uint32_t)MAX_HANDLES) return;
@@ -664,6 +668,7 @@ static void close_handle_slot(uint32_t h) {
         }
         if (p > 0) {
             int refs = s->refs - 1;
+            if (s->service == SVC_BOSS) boss_session_rekey(h, (uint32_t)p);
             g_handles[p] = *s;
             g_handles[p].alias = 0;
             g_handles[p].refs = refs;
@@ -677,6 +682,8 @@ static void close_handle_slot(uint32_t h) {
             return;
         }
     }
+    /* Session-Zustand eines Dienstes endet mit dem letzten Handle. */
+    if (s->service == SVC_BOSS) boss_session_rekey(h, 0);
     if (s->file >= 0 && s->file < MAX_FILES) {
         if (g_files[s->file].fp != NULL) fclose(g_files[s->file].fp);
         g_files[s->file].used = 0;
@@ -1109,9 +1116,34 @@ static void ipc_put_handle(Ipc *r, uint32_t handle) {
     ipc_put(r, handle);
 }
 
+/* CopyHandle: der Empfaenger bekommt einen EIGENEN Handle auf dasselbe
+ * Kernel-Objekt (Azahar kernel/hle_ipc.cpp, CopyHandle -> HandleTable::
+ * Create; das Objekt lebt, solange Dienst oder Client es halten). Frueher
+ * gab der Port die Nummer des Dienst-Handles selbst heraus: schloss der Gast
+ * seine Kopie (z. B. DSP-Semaphore-Event beim Entladen der Komponente vor
+ * einem Library-Applet), war das Objekt des Dienstes zerstoert und ein
+ * spaeteres Get...Handle lieferte eine verwaiste, inzwischen neu vergebene
+ * Nummer (err:f 0xD8E007F7 InvalidHandle). */
 static void ipc_put_handle_copy(Ipc *r, uint32_t handle) {
+    uint32_t out = handle;
+    int canon = canonical_slot(handle);
+    if (handle != 0 && canon > 0) {
+        Handle *src = &g_handles[canon];
+        int nh = alloc_handle(src->service, src->name);
+        if (nh > 0) {
+            Handle *n = &g_handles[nh];
+            memset(n, 0, sizeof(*n));
+            n->used = 1;
+            n->file = -1;
+            n->dir = -1;
+            n->alias = canon;
+            n->refs = 0;
+            g_handles[canon].refs++;
+            out = (uint32_t)nh;
+        }
+    }
     ipc_put(r, 0x00u);      /* CopyHandle-Deskriptor */
-    ipc_put(r, handle);
+    ipc_put(r, out);
 }
 
 /* Beginnt eine Antwort. Layout wie Azahar IPC::RequestBuilder:
@@ -1254,15 +1286,149 @@ static void y2r_command(Ipc *r, uint32_t *p);
 /* APT-Parameterwarteschlange (Azahar AppletManager::CancelAndSendParameter):
  * APT::Initialize legt fuer den ersten registrierten Applet einen
  * Wakeup-Parameter (Sender 0, Signal 1) an und signalisiert das
- * Parameter-Event. ReceiveParameter konsumiert ihn, GlanceParameter nicht. */
+ * Parameter-Event. ReceiveParameter konsumiert ihn, GlanceParameter nicht
+ * (ausser DspSleep/DspWakeup). Ein Parameter traegt ein Objekt-Handle und
+ * einen Puffer (StaticBuffer, z. B. CaptureBufferInfo oder Applet-Parameter). */
+static uint32_t ipc_resp_static_buffer_addr(uint32_t *buf, int id);
+#define APT_PARAM_MAX 0x1000
 typedef struct {
     int used;
     uint32_t sender;
     uint32_t dest;
     uint32_t signal;
     uint32_t size;
+    uint32_t object;              /* Handle (MoveHandle in der Antwort), 0 = keins */
+    uint8_t data[APT_PARAM_MAX];
 } AptParam;
 static AptParam g_apt_next_param;
+static uint32_t g_apt_app_id = 0x300u;   /* bei APT::Initialize registrierte App */
+
+/* APT-Result-Codes (Azahar apt/errors.h, result.h; Modul Applet = 51). */
+#define APT_RESULT_NO_DATA           0xC8A0CFEFu  /* 1007, InvalidState, Status */
+#define APT_RESULT_NOT_FOUND         0xC880CFFAu  /* 1018, NotFound, Status */
+#define APT_RESULT_PARAMETER_PRESENT 0xC8A0CC02u  /* 2, InvalidState, Status */
+#define APT_RESULT_ALREADY_EXISTS    0xC8A0CFFCu  /* 1020, InvalidState, Status */
+#define APT_RESULT_INVALID_SLOT      0xC8A0CC04u  /* 4, InvalidState, Status */
+#define APT_RESULT_APPLET_NOT_SUPP   0xD8C0CFFAu  /* 1018, NotSupported, Permanent */
+#define APT_SIGNAL_WAKEUP            0x1u
+#define APT_SIGNAL_REQUEST           0x2u
+#define APT_SIGNAL_RESPONSE          0x3u
+#define APT_SIGNAL_DSP_SLEEP         0x8u
+#define APT_SIGNAL_DSP_WAKEUP        0x9u
+#define APT_SIGNAL_WAKEUP_BY_EXIT    0xAu
+#define APT_SIGNAL_WAKEUP_BY_CANCEL  0xCu
+
+/* Library-Applet-Slot (Azahar AppletSlot::LibraryApplet). Der Port bildet
+ * Library-Applets als HLE nach wie Azahar ohne LLE-Applets: nur das
+ * Fehler-/EULA-Applet (ErrEula, IDs 0x206/0x406), das Azahar sofort wieder
+ * schliesst (applets/erreula.cpp). Andere IDs -> Fehler wie Azahar
+ * CreateHLEApplet. */
+#define APT_ERREULA_PARAM_SIZE 0xF80u    /* Azahar ErrEulaParam */
+static struct {
+    int registered;
+    uint32_t applet_id;
+    uint32_t parent;               /* last_library_launcher_slot */
+    uint32_t fb_memory;            /* Framebuffer-SharedMemory des Applets */
+    uint8_t param[APT_ERREULA_PARAM_SIZE];
+} g_apt_lib;
+
+static void apt_signal_param_event(uint32_t dest) {
+    /* Azahar: Parameter-Event des Ziel-Slots; der Port kennt nur den der App. */
+    if (dest == g_apt_app_id && g_apt_param_ev != 0) {
+        Handle *ph = get_handle(g_apt_param_ev);
+        if (ph != NULL) ph->signaled = 1;
+    }
+}
+
+static void apt_cancel_and_send(const AptParam *par);
+
+/* ErrEula schliesst sich (Applet::CloseApplet -> PrepareToCloseLibraryApplet
+ * (not_pause) -> CloseLibraryApplet): WakeupByExit mit dem Parameterpuffer
+ * an den Starter, Slot frei. */
+static void apt_erreula_close(void) {
+    static AptParam out;
+    memset(&out, 0, sizeof(out));
+    out.sender = g_apt_lib.applet_id;
+    out.dest = g_apt_lib.parent;
+    out.signal = APT_SIGNAL_WAKEUP_BY_EXIT;
+    out.size = APT_ERREULA_PARAM_SIZE;
+    memcpy(out.data, g_apt_lib.param, APT_ERREULA_PARAM_SIZE);
+    g_apt_lib.registered = 0;
+    apt_cancel_and_send(&out);
+}
+
+/* HLE-Applet empfaengt einen Parameter (Azahar Applet::ReceiveParameter). */
+static void apt_hle_applet_receive(const AptParam *par) {
+    if (par->signal == APT_SIGNAL_WAKEUP) {
+        /* ErrEula::Start: Parameter uebernehmen, Agree-Dialog bestaetigen,
+           sofort schliessen (keine Anzeige). */
+        uint32_t n = par->size < APT_ERREULA_PARAM_SIZE ? par->size : APT_ERREULA_PARAM_SIZE;
+        int32_t code = 0;
+        memset(g_apt_lib.param, 0, sizeof(g_apt_lib.param));
+        memcpy(g_apt_lib.param, par->data, n);
+        memcpy(&code, g_apt_lib.param + 4, 4);
+        if (g_apt_lib.param[0] == 5u) {   /* DisplayType::Agree -> result = 1 */
+            uint32_t one = 1;
+            memcpy(g_apt_lib.param + 0xF70, &one, 4);
+        }
+        printf("[apt] Fehler-Applet 0x%03X: Anzeige typ=%u error_code=%d (0x%08X) - "
+               "HLE schliesst sofort (wie Azahar)\n",
+               g_apt_lib.applet_id, g_apt_lib.param[0], code, (uint32_t)code);
+        fflush(stdout);
+        apt_erreula_close();
+        return;
+    }
+    if (par->signal == APT_SIGNAL_WAKEUP_BY_CANCEL) {
+        apt_erreula_close();
+        return;
+    }
+    if (par->signal != APT_SIGNAL_REQUEST) {
+        printf("[apt] HLE-Applet 0x%03X: Signal %u nicht unterstuetzt\n",
+               g_apt_lib.applet_id, par->signal);
+        return;
+    }
+    /* ReceiveParameterImpl: Request (CaptureBufferInfo) -> Response mit
+       einem SharedMemory-Objekt fuer den Framebuffer des Applets. */
+    {
+        static AptParam out;
+        /* Azahar legt je Request einen neuen SharedMemory-Block an; der
+           Starter bekommt ihn per MoveHandle und schliesst ihn selbst. */
+        g_apt_lib.fb_memory = (uint32_t)alloc_handle(SVC_OTHER, "memoryblock");
+        memset(&out, 0, sizeof(out));
+        out.sender = g_apt_lib.applet_id;
+        out.dest = g_apt_lib.parent;
+        out.signal = APT_SIGNAL_RESPONSE;
+        out.object = g_apt_lib.fb_memory;
+        apt_cancel_and_send(&out);
+    }
+}
+
+static void apt_cancel_and_send(const AptParam *par) {
+    if (g_log) printf("[apt] Parameter 0x%03X -> 0x%03X signal=%u size=%u obj=%u\n",
+                      par->sender, par->dest, par->signal, par->size, par->object);
+    if (g_apt_lib.registered && par->dest == g_apt_lib.applet_id) {
+        apt_hle_applet_receive(par);
+        return;
+    }
+    g_apt_next_param = *par;
+    g_apt_next_param.used = 1;
+    apt_signal_param_event(par->dest);
+}
+
+static uint32_t apt_send_parameter(const AptParam *par) {
+    if (g_apt_next_param.used) return APT_RESULT_PARAMETER_PRESENT;
+    apt_cancel_and_send(par);
+    return 0;
+}
+
+/* Request-StaticBuffer {Deskriptor, Adresse} in einen Parameter kopieren. */
+static void apt_param_from_static(AptParam *par, uint32_t dsc, uint32_t addr) {
+    uint32_t n = dsc >> 14;
+    if (n > APT_PARAM_MAX) n = APT_PARAM_MAX;
+    if (addr == 0 || g_cpu == NULL || (addr & 0x1FFFFFFFu) + n > g_cpu->mem_size) n = 0;
+    if (n) memcpy(par->data, g_cur_mem + (addr & 0x1FFFFFFFu), n);
+    par->size = n;
+}
 
 static void apt_command(Ipc *r, uint32_t *p) {
     switch (r->cmd) {
@@ -1282,12 +1448,14 @@ static void apt_command(Ipc *r, uint32_t *p) {
         case 2: { /* Initialize: Result, CopyHandle(Notification), CopyHandle(Parameter) */
             uint32_t app_id = (r->normal >= 1) ? p[0] : 0x300u;
             if (!g_apt_initialized) {
+                g_apt_app_id = app_id;
                 g_apt_notif_handle = new_event_handle("apt-notif", 0);
                 g_apt_param_ev = new_event_handle("apt-param", 0);
                 /* Azahar AppletManager::Initialize -> SendParameter(Wakeup):
                    der erste registrierte Applet bekommt sofort einen
                    Wakeup-Parameter (Sender 0, Signal 1, Groesse 0), das
                    Parameter-Event wird signalisiert. */
+                memset(&g_apt_next_param, 0, sizeof(g_apt_next_param));
                 g_apt_next_param.used = 1;
                 g_apt_next_param.sender = 0;
                 g_apt_next_param.dest = app_id;
@@ -1322,9 +1490,94 @@ static void apt_command(Ipc *r, uint32_t *p) {
             break;
         }
         case 9: { /* IsRegistered: Result + bool */
+            /* Library-Applets (0x2xx/0x4xx): nur der belegte HLE-Slot ist
+               registriert (Azahar AppletManager::IsRegistered). Andere IDs wie
+               bisher als registriert. */
+            uint32_t id = (r->normal >= 1) ? p[0] : 0u;
+            uint32_t reg = 1;
+            if ((id & 0xF00u) == 0x200u || (id & 0xF00u) == 0x400u)
+                reg = (g_apt_lib.registered && g_apt_lib.applet_id == id) ? 1u : 0u;
             ipc_begin(r, 9, 2, 0);
             put_result(r);
-            ipc_put(r, 1);
+            ipc_put(r, reg);
+            break;
+        }
+        case 0x0C: { /* SendParameter(src, dst, signal, size, Handle, StaticBuffer) */
+            static AptParam par;
+            uint32_t res;
+            memset(&par, 0, sizeof(par));
+            par.sender = p[0];
+            par.dest = p[1];
+            par.signal = p[2];
+            if (r->translate >= 4) {
+                par.object = p[r->normal + 1];
+                apt_param_from_static(&par, p[r->normal + 2], p[r->normal + 3]);
+            }
+            res = apt_send_parameter(&par);
+            ipc_begin(r, 0x0C, 1, 0);
+            ipc_put(r, res);
+            break;
+        }
+        case 0x18: { /* PrepareToStartLibraryApplet(applet_id) */
+            uint32_t id = p[0];
+            uint32_t res = 0;
+            if (g_apt_next_param.used) {
+                res = APT_RESULT_PARAMETER_PRESENT;
+            } else if (g_apt_lib.registered) {
+                res = APT_RESULT_ALREADY_EXISTS;
+            } else if (id == 0x206u || id == 0x406u) {
+                memset(&g_apt_lib.param, 0, sizeof(g_apt_lib.param));
+                g_apt_lib.registered = 1;
+                g_apt_lib.applet_id = id;
+                g_apt_lib.parent = g_apt_app_id;
+            } else {
+                res = APT_RESULT_APPLET_NOT_SUPP;
+                printf("[apt] Library-Applet 0x%03X ist nicht nachgebildet -> %08X\n", id, res);
+            }
+            if (g_log) printf("[apt] PrepareToStartLibraryApplet 0x%03X -> %08X\n", id, res);
+            ipc_begin(r, 0x18, 1, 0);
+            ipc_put(r, res);
+            break;
+        }
+        case 0x1E: { /* StartLibraryApplet(applet_id, size, Handle, StaticBuffer) */
+            static AptParam par;
+            uint32_t res;
+            memset(&par, 0, sizeof(par));
+            par.sender = g_apt_lib.registered ? g_apt_lib.parent : g_apt_app_id;
+            par.dest = p[0];
+            par.signal = APT_SIGNAL_WAKEUP;
+            if (r->translate >= 4) {
+                par.object = p[r->normal + 1];
+                apt_param_from_static(&par, p[r->normal + 2], p[r->normal + 3]);
+            }
+            res = apt_send_parameter(&par);
+            if (g_log) printf("[apt] StartLibraryApplet 0x%03X size=%u -> %08X\n", p[0], par.size, res);
+            ipc_begin(r, 0x1E, 1, 0);
+            ipc_put(r, res);
+            break;
+        }
+        case 0x3B: { /* CancelLibraryApplet(app_exiting) */
+            uint32_t res;
+            if (g_apt_next_param.used) {
+                res = APT_RESULT_PARAMETER_PRESENT;
+            } else if (!g_apt_lib.registered) {
+                res = APT_RESULT_INVALID_SLOT;
+            } else {
+                static AptParam par;
+                memset(&par, 0, sizeof(par));
+                par.sender = g_apt_lib.parent;
+                par.dest = g_apt_lib.applet_id;
+                par.signal = APT_SIGNAL_WAKEUP_BY_CANCEL;
+                res = apt_send_parameter(&par);
+            }
+            ipc_begin(r, 0x3B, 1, 0);
+            ipc_put(r, res);
+            break;
+        }
+        case 0x3E:     /* ReplySleepQuery(app_id, reply): Azahar quittiert */
+        case 0x40: {   /* SendCaptureBufferInfo(size, StaticBuffer) */
+            ipc_begin(r, r->cmd, 1, 0);
+            put_result(r);
             break;
         }
         case 0x0B: { /* InquireNotification: Result + SignalType */
@@ -1336,46 +1589,53 @@ static void apt_command(Ipc *r, uint32_t *p) {
         case 0x0D: case 0x0E: { /* ReceiveParameter / GlanceParameter */
             /* Azahar (apt.cpp): MakeBuilder(4,4)
                Push(ResultSuccess, sender_id, signal, size),
-               PushMoveObjects(object), PushStaticBuffer(buffer, 0). */
-            uint32_t dsc_flags = 0, dsc_addr = 0;
-            if (r->translate >= 2) {
-                dsc_flags = p[r->normal];
-                dsc_addr = p[r->normal + 1];
+               PushMoveObjects(object), PushStaticBuffer(buffer, 0); der
+               Puffer wird immer in der angefragten Groesse geschickt.
+               Ohne Parameter NoData, falsches Ziel NotFound (MakeBuilder(1,0)).
+               GlanceParameter (0x000E) konsumiert nur DspSleep/DspWakeup,
+               ReceiveParameter (0x000D) immer. */
+            uint32_t app_id = (r->normal >= 1) ? p[0] : 0u;
+            uint32_t buffer_size = (r->normal >= 2) ? p[1] : 0u;
+            uint32_t res_addr = ipc_resp_static_buffer_addr(r->buf, 0);
+            uint32_t res_cap = r->buf[0x40] >> 14;
+            if (!g_apt_next_param.used || g_apt_next_param.dest != app_id) {
+                ipc_begin(r, r->cmd, 1, 0);
+                ipc_put(r, g_apt_next_param.used ? APT_RESULT_NOT_FOUND : APT_RESULT_NO_DATA);
+                break;
             }
-            /* GlanceParameter (0x000E) konsumiert den Parameter NICHT,
-               ReceiveParameter (0x000D) schon. */
             {
-                uint32_t app_id = (r->normal >= 1) ? p[0] : 0u;
-                uint32_t buffer_size = (r->normal >= 2) ? p[1] : 0u;
-                (void)dsc_flags;
-                if (!g_apt_next_param.used || g_apt_next_param.dest != app_id) {
-                    /* Kein passender Parameter: NoData */
-                    ipc_begin(r, r->cmd, 1, 0);
-                    ipc_put(r, 0xC8A303EFu);
-                    break;
-                }
-                {
-                    AptParam par = g_apt_next_param;
-                    uint32_t size = (par.size < buffer_size) ? par.size : buffer_size;
-                    if (r->cmd == 0x000D) {
-                        g_apt_next_param.used = 0;
-                        if (g_apt_param_ev != 0) {
-                            Handle *ph = get_handle(g_apt_param_ev);
-                            if (ph != NULL && ph->reset_type != 1) ph->signaled = 0;
-                        }
+                static AptParam par;
+                uint32_t size, out_n = buffer_size;
+                par = g_apt_next_param;
+                size = (par.size < buffer_size) ? par.size : buffer_size;
+                if (r->cmd == 0x000D || par.signal == APT_SIGNAL_DSP_SLEEP ||
+                    par.signal == APT_SIGNAL_DSP_WAKEUP) {
+                    g_apt_next_param.used = 0;
+                    if (g_apt_param_ev != 0) {
+                        Handle *ph = get_handle(g_apt_param_ev);
+                        if (ph != NULL && ph->reset_type != 1) ph->signaled = 0;
                     }
-                    ipc_begin(r, r->cmd, 4, 4);
-                    put_result(r);
-                    ipc_put(r, par.sender);
-                    ipc_put(r, par.signal);
-                    ipc_put(r, size);
-                    ipc_put_handle(r, 0);  /* MoveHandle: kein Objekt (Azahar: nullptr) */
-                    ipc_put(r, (2u | ((buffer_size & 0x3FFFFu) << 14)));
-                    ipc_put(r, dsc_addr);
-                    if (g_log) printf("[apt] %s -> sender=%u signal=%u\n",
-                                      r->cmd == 0x0D ? "ReceiveParameter" : "GlanceParameter",
-                                      par.sender, par.signal);
                 }
+                if (out_n > res_cap) out_n = res_cap;
+                if (res_addr != 0 && g_cpu != NULL &&
+                    (res_addr & 0x1FFFFFFFu) + out_n <= g_cpu->mem_size) {
+                    uint8_t *dst = g_cur_mem + (res_addr & 0x1FFFFFFFu);
+                    memset(dst, 0, out_n);
+                    memcpy(dst, par.data, size < out_n ? size : out_n);
+                } else {
+                    out_n = 0;
+                }
+                ipc_begin(r, r->cmd, 4, 4);
+                put_result(r);
+                ipc_put(r, par.sender);
+                ipc_put(r, par.signal);
+                ipc_put(r, size);
+                ipc_put_handle(r, par.object);   /* MoveHandle (0 = kein Objekt) */
+                ipc_put(r, (2u | ((out_n & 0x3FFFFu) << 14)));
+                ipc_put(r, res_addr);
+                if (g_log) printf("[apt] %s -> sender=0x%03X signal=%u size=%u obj=%u\n",
+                                  r->cmd == 0x0D ? "ReceiveParameter" : "GlanceParameter",
+                                  par.sender, par.signal, size, par.object);
             }
             break;
         }
@@ -1871,6 +2131,8 @@ static int open_guest_file(const char *guest_path, FileSlot **slot_out) {
             g_files[i].fp = fp;
             g_files[i].size = (uint32_t)sz;
             g_files[i].virt = 0;
+            g_files[i].exefs = 0;
+            g_files[i].fixed_size = 0;
             *slot_out = &g_files[i];
             return 1;
         }
@@ -1921,12 +2183,73 @@ static int fs_open_host_file(const char *host, const char *label, FileSlot **slo
             g_files[i].fp = fp;
             g_files[i].size = (uint32_t)sz;
             g_files[i].virt = 0;
+            g_files[i].exefs = 0;
+            g_files[i].fixed_size = 0;
             *slot_out = &g_files[i];
             return 1;
         }
     }
     fclose(fp);
     return 0;
+}
+
+/* SelfNCCH-Archiv (ID 3): Datei ueber den binaeren 12-Byte-Pfad
+ * {u32 typ, char exefs_name[8]} oeffnen (Azahar archive_selfncch.cpp
+ * SelfNCCHArchive::OpenFile). Typ 0/5 = RomFS (Abbild mit 0x1000-Byte-
+ * IVFC-Praefix, mit Mods virtuell), 1 = Code (nicht erlaubt), 2 = ExeFS-
+ * Abschnitt icon/logo/banner (aus out/exefs/<name>.bin). Genutzt von
+ * OpenFileDirectly und von OpenFile auf einem per OpenArchive(3) geoeffneten
+ * Archiv. */
+#define FS_RESULT_EXEFS_SECTION_NOT_FOUND 0xC8804637u  /* 567, NotFound, Status */
+#define FS_RESULT_COMMAND_NOT_ALLOWED     0xD9004676u  /* 630, WrongArgument, Permanent */
+#define FS_RESULT_ROMFS_NOT_FOUND         0xC8804464u  /* 100, NotFound, Status */
+static uint32_t selfncch_open_file(uint32_t path_type, const uint8_t *raw, int len,
+                                   FileSlot **slot_out) {
+    uint32_t kind = 0;
+    *slot_out = NULL;
+    /* Azahar: Pfad muss Binary (2) und genau 12 Byte lang sein. OpenFileDirectly
+       des Ports nahm bisher auch kuerzere RomFS-Pfade an; deshalb nur die
+       Typpruefung hart, die Laenge wie bisher tolerant fuer Typ 0. */
+    if (path_type != 2u || len < 4) return FS_RESULT_INVALID_PATH;
+    memcpy(&kind, raw, 4);
+    if (kind == 0 || kind == 5) {
+        if (rfo_active()) {
+            /* Mods aktiv: virtuelles Abbild (gleiches 0x1000-Praefix). */
+            for (int i = 0; i < MAX_FILES; i++) {
+                if (!g_files[i].used) {
+                    memset(&g_files[i], 0, sizeof(g_files[i]));
+                    g_files[i].used = 1;
+                    g_files[i].virt = 1;
+                    g_files[i].size = (uint32_t)(0x1000 + rfo_size());
+                    snprintf(g_files[i].path, sizeof(g_files[i].path), "%s",
+                             "out/romfs_image.bin (mods)");
+                    *slot_out = &g_files[i];
+                    return FS_RESULT_SUCCESS;
+                }
+            }
+            return FS_RESULT_ROMFS_NOT_FOUND;
+        }
+        if (fs_open_host_file("out/romfs_image.bin", "out/romfs_image.bin", slot_out))
+            return FS_RESULT_SUCCESS;
+        return FS_RESULT_ROMFS_NOT_FOUND;
+    }
+    if (kind == 1) return FS_RESULT_COMMAND_NOT_ALLOWED;
+    if (kind == 2) {
+        char nm[9];
+        char host[64];
+        if (len < 12) return FS_RESULT_INVALID_PATH;
+        memcpy(nm, raw + 4, 8);
+        nm[8] = 0;
+        if (strcmp(nm, "icon") != 0 && strcmp(nm, "logo") != 0 && strcmp(nm, "banner") != 0)
+            return FS_RESULT_INVALID_PATH;
+        snprintf(host, sizeof(host), "out/exefs/%s.bin", nm);
+        if (fs_open_host_file(host, host, slot_out)) {
+            (*slot_out)->exefs = 1;
+            return FS_RESULT_SUCCESS;
+        }
+        return FS_RESULT_EXEFS_SECTION_NOT_FOUND;
+    }
+    return FS_RESULT_INVALID_PATH;
 }
 
 static void fs_reply_result(Ipc *r, uint32_t cmd, uint32_t res) {
@@ -1960,7 +2283,20 @@ static void fs_command(Ipc *r, uint32_t *p) {
 
             path[0] = 0;
             if (len > 0 && (type == 3 || type == 4)) snprintf(path, sizeof(path), "%s", raw);
-            if (archive != 0 && path[0]) {
+            if (archive != 0 && fs_archive_id(archive) == 3u) {
+                /* SelfNCCH: binaerer Pfad (z. B. ExeFS "icon" fuer das SMDH). */
+                res = selfncch_open_file(type, raw, len, &slot);
+                if (res == FS_RESULT_SUCCESS && slot != NULL) {
+                    h = (uint32_t)alloc_handle(SVC_FILE, "file");
+                    if (h && h < MAX_HANDLES) g_handles[h].file = (int)(slot - g_files);
+                }
+                if (len >= 12 && type == 2) {
+                    char nm[9];
+                    memcpy(nm, raw + 4, 8);
+                    nm[8] = 0;
+                    snprintf(path, sizeof(path), "selfncch:%u:%s", (unsigned)raw[0], nm);
+                }
+            } else if (archive != 0 && path[0]) {
                 res = fs_archive_open_file(archive, path, mode, attrs, host, sizeof(host), &fixed);
                 if (res == FS_RESULT_SUCCESS) {
                     if (fs_open_host_file(host, host, &slot)) {
@@ -2004,33 +2340,7 @@ static void fs_command(Ipc *r, uint32_t *p) {
 
             fpath[0] = 0;
             if (aid == 3) {
-                uint32_t kind = 0;
-                if (flen >= 4) memcpy(&kind, fraw, 4);
-                if (kind == 0 || kind == 5) {
-                    if (rfo_active()) {
-                        /* Mods aktiv: virtuelles Abbild (gleiches 0x1000-Praefix). */
-                        for (int i = 0; i < MAX_FILES; i++) {
-                            if (!g_files[i].used) {
-                                memset(&g_files[i], 0, sizeof(g_files[i]));
-                                g_files[i].used = 1;
-                                g_files[i].virt = 1;
-                                g_files[i].size = (uint32_t)(0x1000 + rfo_size());
-                                snprintf(g_files[i].path, sizeof(g_files[i].path), "%s",
-                                         "out/romfs_image.bin (mods)");
-                                slot = &g_files[i];
-                                res = FS_RESULT_SUCCESS;
-                                break;
-                            }
-                        }
-                    } else if (fs_open_host_file("out/romfs_image.bin", "out/romfs_image.bin", &slot))
-                        res = FS_RESULT_SUCCESS;
-                } else if (kind == 2) {
-                    char nm[9];
-                    memcpy(nm, fraw + 4, 8);
-                    nm[8] = 0;
-                    snprintf(host, sizeof(host), "out/exefs/%s.bin", nm);
-                    if (fs_open_host_file(host, host, &slot)) res = FS_RESULT_SUCCESS;
-                }
+                res = selfncch_open_file(ftype, fraw, flen, &slot);
             } else {
                 int64_t ah = fs_archive_open(aid, araw, (uint32_t)(alen > 0 ? alen : 0),
                                              fs_archive_program_id(), &res);
@@ -2428,7 +2738,12 @@ static void file_command(Ipc *r, uint32_t *p) {
             /* Translate-Deskriptor: {size|flags, adresse} -> Adresse ist das ZWEITE Wort. */
             if (r->translate >= 2) addr = p[r->normal + 1];
             uint32_t done = 0;
-            if (addr && length) {
+            uint32_t rres = 0;
+            /* Azahar ExeFSSectionFile::Read: nur Offset 0 und genau die
+               Dateigroesse. */
+            if (f->exefs && offset != 0) rres = FS_RESULT_UNSUPPORTED_OPEN_FLAGS;
+            else if (f->exefs && length != f->size) rres = 0xE0C046F9u; /* IncorrectExeFSReadSize */
+            if (rres == 0 && addr && length) {
                 if (f->virt) {
                     /* Virtuelles RomFS (Mods): Stream-Offset = Level-3-Offset. */
                     done = (uint32_t)rfo_read(offset, g_cur_mem + (addr & 0x1FFFFFFFu), length);
@@ -2454,7 +2769,7 @@ static void file_command(Ipc *r, uint32_t *p) {
                               f->path, (unsigned long long)offset, length, p[0], addr, done);
             /* Azahar: MakeBuilder(2,2) + PushMappedBuffer -> Descriptor-Echo */
             ipc_begin(r, 0x0802, 2, 2);
-            ipc_put(r, 0);
+            ipc_put(r, rres);
             ipc_put(r, done);
             ipc_put(r, p[r->normal]);
             ipc_put(r, p[r->normal + 1]);
@@ -2469,6 +2784,15 @@ static void file_command(Ipc *r, uint32_t *p) {
             /* Translate-Deskriptor: {size|flags, adresse} -> Adresse ist das ZWEITE Wort. */
             if (r->translate >= 2) addr = p[r->normal + 1];
             uint32_t done = 0;
+            if (f->exefs) {
+                /* Azahar ExeFSSectionFile::Write: schreibgeschuetzt. */
+                ipc_begin(r, 0x0803, 2, 2);
+                ipc_put(r, FS_RESULT_UNSUPPORTED_OPEN_FLAGS);
+                ipc_put(r, 0);
+                ipc_put(r, p[r->normal]);
+                ipc_put(r, p[r->normal + 1]);
+                break;
+            }
             if (addr && length && f->fixed_size) {
                 /* Azahar FixSizeDiskFile::Write: offset > size -> WriteBeyondEnd,
                  * offset == size -> 0 Bytes, sonst auf die Groesse kappen. */
@@ -2790,32 +3114,624 @@ static void ndm_command(Ipc *r, uint32_t *p) {
     }
 }
 
+/* boss:U (SpotPass). Nachbildung von Azahar boss/boss.cpp und
+ * boss/online_service.cpp, so wie sich eine Konsole ohne Netz bzw. ohne die
+ * abgeschalteten Nintendo-Server verhaelt: es gibt keine heruntergeladenen
+ * Daten (NsData), registrierte Tasks laufen nie erfolgreich an, Abfragen
+ * liefern Azahars Ruhewerte (Status/Ergebnis 0).
+ *
+ * Zustand je Session (Azahar Module::SessionData / OnlineService):
+ *   - erst InitializeSession (0x0001) legt den OnlineService an; Befehle, die
+ *     ihn brauchen, liefern vorher ResultUnknown (0xFFFFFFFF), Layout (1,0).
+ *   - current_props: Property-Satz fuer den naechsten RegisterTask
+ *     (SendProperty schreibt, ReceiveProperty liest; unbekannte ID ->
+ *     UnknownPropertyID). Groessen wie BossTaskProperties in
+ *     online_service.h.
+ *   - task_id_list: per RegisterTask registrierte Task-IDs (max. 8 Zeichen);
+ *     GetTaskIdList schreibt Anzahl (0x35, u16) und Liste (0x36, 0x400 Byte)
+ *     in current_props. Azahar liest beim Start BOSS_SV.db aus dem
+ *     System-Spielstand 0x00010034; ohne diese Datei (wie hier) ist die
+ *     Liste leer.
+ *   - NsData kommt bei Azahar aus dem BOSS-ExtData-Archiv der Anwendung; der
+ *     Port hat keins, also leere Listen und NsDataNotFound. */
+#define BOSS_RESULT_UNKNOWN          0xFFFFFFFFu  /* Azahar ResultUnknown */
+#define BOSS_RESULT_TASK_NOT_FOUND   0xC8A0F833u  /* 51, BOSS, InvalidState, Status */
+#define BOSS_RESULT_NSDATA_NOT_FOUND 0xC8A0F840u  /* 64, BOSS, InvalidState, Status */
+#define BOSS_RESULT_UNKNOWN_PROPERTY 0xC960F84Du  /* 77, BOSS, Internal, Status */
+#define BOSS_TASK_ID_SIZE    8
+#define BOSS_TASKIDLIST_SIZE 0x400
+#define BOSS_MAX_TASKS       (BOSS_TASKIDLIST_SIZE / BOSS_TASK_ID_SIZE)
+#define BOSS_MAX_SESSIONS    8
+
+/* Azahar BossTaskProperties::properties: ID und Groesse in Byte. */
+static const struct { uint16_t id, size; } BOSS_PROPS[] = {
+    {0x00, 1}, {0x01, 1}, {0x02, 4}, {0x03, 4}, {0x04, 4}, {0x05, 1}, {0x06, 1},
+    {0x07, 0x200}, {0x08, 4}, {0x09, 1}, {0x0A, 0x100}, {0x0B, 0x200}, {0x0C, 4},
+    {0x0D, 0x360}, {0x0E, 4}, {0x0F, 12}, {0x10, 1}, {0x11, 1}, {0x12, 1}, {0x13, 4},
+    {0x14, 4}, {0x15, 0x40}, {0x16, 4}, {0x18, 1}, {0x19, 1}, {0x1A, 1}, {0x1B, 4},
+    {0x1C, 4}, {0x1D, 1}, {0x1E, 1}, {0x1F, 1}, {0x20, 1}, {0x21, 1}, {0x22, 1},
+    {0x23, 4}, {0x24, 1}, {0x25, 4}, {0x26, 4}, {0x27, 4}, {0x28, 8}, {0x29, 8},
+    {0x2A, 4}, {0x2B, 4}, {0x2C, 1}, {0x2D, 2}, {0x2E, 2}, {0x2F, 0x40},
+    {0x35, 2}, {0x36, BOSS_TASKIDLIST_SIZE}, {0x3B, 4}, {0x3E, 0x200}, {0x3F, 1},
+};
+#define BOSS_NPROPS ((int)(sizeof(BOSS_PROPS) / sizeof(BOSS_PROPS[0])))
+#define BOSS_PROP_BYTES 0x1000   /* Summe der Groessen oben: 0xF5E */
+
+typedef struct {
+    int used;
+    uint32_t handle;                   /* kanonischer Session-Slot */
+    uint8_t props[BOSS_PROP_BYTES];    /* current_props, Werte hintereinander */
+    int ntasks;
+    char tasks[BOSS_MAX_TASKS][BOSS_TASK_ID_SIZE + 1];
+} BossSession;
+
+static BossSession g_boss_sessions[BOSS_MAX_SESSIONS];
+static uint8_t g_boss_optout_flag = 0;          /* Module::output_flag */
+static uint8_t g_boss_ns_data_new_flag = 0;     /* Module::ns_data_new_flag */
+static uint32_t g_boss_task_finish_event = 0;   /* Module::task_finish_event (OneShot) */
+
+/* Session-Slot wechselt (Alias wird kanonisch) oder endet (to == 0). */
+static void boss_session_rekey(uint32_t from, uint32_t to) {
+    for (int i = 0; i < BOSS_MAX_SESSIONS; i++) {
+        if (g_boss_sessions[i].used && g_boss_sessions[i].handle == from) {
+            if (to == 0) g_boss_sessions[i].used = 0;
+            else g_boss_sessions[i].handle = to;
+        }
+    }
+}
+
+static int boss_prop_offset(uint16_t id, uint32_t *size) {
+    int off = 0;
+    for (int i = 0; i < BOSS_NPROPS; i++) {
+        if (BOSS_PROPS[i].id == id) {
+            if (size) *size = BOSS_PROPS[i].size;
+            return off;
+        }
+        off += BOSS_PROPS[i].size;
+    }
+    return -1;
+}
+
+static BossSession *boss_session(int create) {
+    int canon = canonical_slot(g_cur_handle);
+    BossSession *free_slot = NULL;
+    for (int i = 0; i < BOSS_MAX_SESSIONS; i++) {
+        if (g_boss_sessions[i].used && g_boss_sessions[i].handle == (uint32_t)canon)
+            return &g_boss_sessions[i];
+        if (!g_boss_sessions[i].used && free_slot == NULL) free_slot = &g_boss_sessions[i];
+    }
+    if (!create || free_slot == NULL || canon < 0) return NULL;
+    memset(free_slot, 0, sizeof(*free_slot));
+    free_slot->used = 1;
+    free_slot->handle = (uint32_t)canon;
+    return free_slot;
+}
+
+/* Mapped-Buffer-Deskriptor (Groesse in Bit 4..31) + Adresse -> Host-Zeiger. */
+static uint8_t *boss_mapped(uint32_t desc, uint32_t addr, uint32_t *len) {
+    uint32_t n = desc >> 4;
+    uint32_t a = addr & 0x1FFFFFFFu;
+    if (len) *len = 0;
+    if (g_cur_mem == NULL || g_cpu == NULL || (desc & 0x8u) == 0) return NULL;
+    if (a >= g_cpu->mem_size || n > g_cpu->mem_size - a) return NULL;
+    if (len) *len = n;
+    return g_cur_mem + a;
+}
+
+static void boss_task_id(const uint8_t *buf, uint32_t buflen, uint32_t size, char *out) {
+    uint32_t n = size < BOSS_TASK_ID_SIZE ? size : BOSS_TASK_ID_SIZE;
+    if (buf == NULL) n = 0;
+    if (n > buflen) n = buflen;
+    memcpy(out, buf, n);
+    out[n] = 0;
+}
+
 static void boss_command(Ipc *r, uint32_t *p) {
-    (void)p;
+    uint32_t q[32];   /* Anfrage sichern: die Antwort ueberschreibt den Puffer */
+    int nq = r->normal + r->translate;
+    int normal = r->normal;
+    BossSession *s;
+    if (nq > 32) nq = 32;
+    memset(q, 0, sizeof(q));
+    memcpy(q, p, (size_t)nq * 4u);
+#define BOSS_TR(i) ((normal + (i) < 32) ? q[normal + (i)] : 0u)
+#define BOSS_ECHO(nbuf) do { for (int i_ = 0; i_ < 2 * (nbuf); i_++) ipc_put(r, BOSS_TR(i_)); } while (0)
+#define BOSS_NEED_SESSION() do { \
+        s = boss_session(0); \
+        if (s == NULL) { \
+            if (g_log) printf("[boss] cmd 0x%04X ohne InitializeSession -> ResultUnknown\n", r->cmd); \
+            ipc_begin(r, r->cmd, 1, 0); \
+            ipc_put(r, BOSS_RESULT_UNKNOWN); \
+            return; \
+        } \
+    } while (0)
+
     switch (r->cmd) {
-        case 0x0001: { /* InitializeSession: Result */
+        case 0x0001: { /* InitializeSession(program_id u64, PID): Result */
+            s = boss_session(1);
+            if (s != NULL) {
+                /* Azahar OnlineService::InitializeSession: current_props neu,
+                   Task-Liste aus BOSS_SV.db (hier nicht vorhanden). */
+                memset(s->props, 0, sizeof(s->props));
+            }
+            if (g_log) printf("[boss] InitializeSession program_id=%08X%08X\n", q[1], q[0]);
             ipc_begin(r, 0x0001, 1, 0);
+            ipc_put(r, s != NULL ? 0u : BOSS_RESULT_UNKNOWN);
+            break;
+        }
+        case 0x0002:   /* SetStorageInfo */
+        case 0x0003:   /* UnregisterStorage */
+        case 0x0008:   /* RegisterNewArrivalEvent */
+        case 0x0015:   /* SendPropertyHandle */
+        case 0x0026:   /* DeleteNsData */
+        case 0x0029:   /* SetNsDataAdditionalInfo */
+        case 0x002F:   /* RegisterStorageEntry */
+        case 0x0031: { /* SetStorageOption */
+            ipc_begin(r, r->cmd, 1, 0);
             put_result(r);
             break;
         }
-        case 0x0006: { /* RegisterPrivateClientCert: Result + 2 MappedBuffer-Echos */
-            /* Azahar (boss.cpp): MakeBuilder(1,4),
-               PushMappedBuffer(buffer1), PushMappedBuffer(buffer2). */
-            ipc_begin(r, 0x0006, 1, 4);
+        case 0x0004:   /* GetStorageInfo: u32 0 */
+        case 0x002A:   /* GetNsDataAdditionalInfo: u32 0 */
+        case 0x002E: { /* GetErrorCode: u32 0 */
+            ipc_begin(r, r->cmd, 2, 0);
             put_result(r);
-            for (int i = 0; i < 4; i++) ipc_put(r, (r->translate > i) ? p[r->normal + i] : 0u);
+            ipc_put(r, 0);
             break;
         }
-        case 0x000A: { /* GetOptoutFlag: Result + Flag */
+        case 0x0005:   /* RegisterPrivateRootCa */
+        case 0x000D:   /* ReconfigureTask */
+        case 0x000F:   /* GetStepIdList */
+        case 0x0017:   /* UpdateTaskInterval */
+        case 0x0018:   /* UpdateTaskCount */
+        case 0x001C:   /* StartTask */
+        case 0x001D:   /* StartTaskImmediate */
+        case 0x001E:   /* CancelTask */
+        case 0x0025:   /* GetTaskInfo */
+        case 0x0033:   /* StartBgImmediate */
+        case 0x0035: { /* RegisterImmediateTask */
+            /* Azahar: MakeBuilder(1,2), Result + Echo des Mapped Buffers.
+               StartTask* stoesst ohne Netz nichts an. */
+            if (g_log) printf("[boss] cmd 0x%04X size=%u (ohne Netz: keine Wirkung)\n",
+                              r->cmd, q[0]);
+            ipc_begin(r, r->cmd, 1, 2);
+            put_result(r);
+            BOSS_ECHO(1);
+            break;
+        }
+        case 0x0006:   /* RegisterPrivateClientCert: 2 Buffer */
+        case 0x0036:   /* SetTaskQuery */
+        case 0x0037: { /* GetTaskQuery */
+            ipc_begin(r, r->cmd, 1, 4);
+            put_result(r);
+            BOSS_ECHO(2);
+            break;
+        }
+        case 0x0007: { /* GetNewArrivalFlag: u8 */
+            ipc_begin(r, 0x0007, 2, 0);
+            put_result(r);
+            ipc_put(r, 0);   /* Azahar new_arrival_flag (nie gesetzt) */
+            break;
+        }
+        case 0x0009: { /* SetOptoutFlag(u8) */
+            g_boss_optout_flag = (uint8_t)(q[0] & 0xFFu);
+            ipc_begin(r, 0x0009, 1, 0);
+            put_result(r);
+            break;
+        }
+        case 0x000A: { /* GetOptoutFlag: u8 */
             ipc_begin(r, 0x000A, 2, 0);
             put_result(r);
-            ipc_put(r, 0);      /* output_flag = 0 */
+            ipc_put(r, g_boss_optout_flag);
+            break;
+        }
+        case 0x000B: { /* RegisterTask(size, u8, u8, MappedBuffer task_id) */
+            uint32_t blen = 0;
+            uint8_t *b = boss_mapped(BOSS_TR(0), BOSS_TR(1), &blen);
+            char id[BOSS_TASK_ID_SIZE + 1];
+            BOSS_NEED_SESSION();
+            boss_task_id(b, blen, q[0], id);
+            {
+                int i, found = -1;
+                for (i = 0; i < s->ntasks; i++)
+                    if (strcmp(s->tasks[i], id) == 0) found = i;
+                if (found < 0 && s->ntasks < BOSS_MAX_TASKS) found = s->ntasks++;
+                if (found >= 0) memcpy(s->tasks[found], id, sizeof(s->tasks[found]));
+            }
+            /* current_props gehen an den Task ueber und werden zurueckgesetzt. */
+            memset(s->props, 0, sizeof(s->props));
+            if (g_log) printf("[boss] RegisterTask \"%s\" -> %d Tasks\n", id, s->ntasks);
+            ipc_begin(r, 0x000B, 1, 2);
+            put_result(r);
+            BOSS_ECHO(1);
+            break;
+        }
+        case 0x000C: { /* UnregisterTask(size, u8, MappedBuffer task_id) */
+            uint32_t blen = 0, res = 0;
+            uint8_t *b = boss_mapped(BOSS_TR(0), BOSS_TR(1), &blen);
+            char id[BOSS_TASK_ID_SIZE + 1];
+            BOSS_NEED_SESSION();
+            if (q[0] > BOSS_TASK_ID_SIZE) {
+                res = BOSS_RESULT_UNKNOWN;
+            } else {
+                int i, found = -1;
+                boss_task_id(b, blen, q[0], id);
+                for (i = 0; i < s->ntasks; i++)
+                    if (strcmp(s->tasks[i], id) == 0) found = i;
+                if (found < 0) {
+                    res = BOSS_RESULT_TASK_NOT_FOUND;
+                } else {
+                    for (i = found; i + 1 < s->ntasks; i++)
+                        memcpy(s->tasks[i], s->tasks[i + 1], sizeof(s->tasks[i]));
+                    s->ntasks--;
+                }
+                if (g_log) printf("[boss] UnregisterTask \"%s\" -> %08X\n", id, res);
+            }
+            ipc_begin(r, 0x000C, 1, 2);
+            ipc_put(r, res);
+            BOSS_ECHO(1);
+            break;
+        }
+        case 0x000E: { /* GetTaskIdList: fuellt current_props 0x35/0x36 */
+            uint32_t sz = 0;
+            int off_n, off_l;
+            BOSS_NEED_SESSION();
+            off_n = boss_prop_offset(0x35, NULL);
+            off_l = boss_prop_offset(0x36, &sz);
+            {
+                uint16_t n = (uint16_t)s->ntasks;
+                memcpy(s->props + off_n, &n, 2);
+                memset(s->props + off_l, 0, sz);
+                for (int i = 0; i < s->ntasks; i++)
+                    memcpy(s->props + off_l + i * BOSS_TASK_ID_SIZE, s->tasks[i],
+                           BOSS_TASK_ID_SIZE);
+            }
+            if (g_log) printf("[boss] GetTaskIdList -> %d Tasks\n", s->ntasks);
+            ipc_begin(r, 0x000E, 1, 0);
+            put_result(r);
+            break;
+        }
+        case 0x0010: case 0x0011: case 0x0012:
+        case 0x0013: { /* GetNsDataIdList*(filter, max, start_idx, start_id, Buffer) */
+            BOSS_NEED_SESSION();
+            if (g_log) printf("[boss] GetNsDataIdList%s filter=%08X max=%u -> 0 Eintraege\n",
+                              r->cmd == 0x0010 ? "" : "N", q[0], q[1]);
+            ipc_begin(r, r->cmd, 3, 2);
+            put_result(r);
+            ipc_put(r, 0);   /* Anzahl ausgegebener Eintraege (u16) */
+            ipc_put(r, 0);   /* letzter Wortindex (u16) */
+            BOSS_ECHO(1);
+            break;
+        }
+        case 0x0014: { /* SendProperty(u16 id, size, MappedBuffer) */
+            uint32_t psize = 0, blen = 0, res = 0;
+            uint8_t *b = boss_mapped(BOSS_TR(0), BOSS_TR(1), &blen);
+            int off;
+            BOSS_NEED_SESSION();
+            off = boss_prop_offset((uint16_t)(q[0] & 0xFFFFu), &psize);
+            if (off < 0) {
+                res = BOSS_RESULT_UNKNOWN_PROPERTY;
+            } else if (b != NULL) {
+                uint32_t n = q[1] < psize ? q[1] : psize;
+                if (n > blen) n = blen;
+                memset(s->props + off, 0, psize);
+                memcpy(s->props + off, b, n);
+            }
+            if (g_log) printf("[boss] SendProperty id=0x%02X size=%u -> %08X\n",
+                              q[0] & 0xFFFFu, q[1], res);
+            ipc_begin(r, 0x0014, 1, 2);
+            ipc_put(r, res);
+            BOSS_ECHO(1);
+            break;
+        }
+        case 0x0016: { /* ReceiveProperty(u16 id, size, MappedBuffer): Result, size */
+            uint32_t psize = 0, blen = 0, res = 0;
+            uint8_t *b = boss_mapped(BOSS_TR(0), BOSS_TR(1), &blen);
+            int off;
+            BOSS_NEED_SESSION();
+            off = boss_prop_offset((uint16_t)(q[0] & 0xFFFFu), &psize);
+            if (off < 0) {
+                /* Azahar: auch im Fehlerfall MakeBuilder(2,2). */
+                res = BOSS_RESULT_UNKNOWN_PROPERTY;
+            } else if (b != NULL) {
+                uint32_t n = q[1] < psize ? q[1] : psize;
+                if (n > blen) n = blen;
+                memcpy(b, s->props + off, n);
+            }
+            if (g_log) printf("[boss] ReceiveProperty id=0x%02X size=%u -> %08X\n",
+                              q[0] & 0xFFFFu, q[1], res);
+            ipc_begin(r, 0x0016, 2, 2);
+            ipc_put(r, res);
+            ipc_put(r, q[1]);
+            BOSS_ECHO(1);
+            break;
+        }
+        case 0x0019:   /* GetTaskInterval: u32 0 */
+        case 0x001A:   /* GetTaskCount: u32 0 */
+        case 0x0023:   /* GetTaskStatus: u8 0 */
+        case 0x0024:   /* GetTaskError: u8 0 */
+        case 0x0034: { /* GetTaskProperty0: u8 0 */
+            ipc_begin(r, r->cmd, 2, 2);
+            put_result(r);
+            ipc_put(r, 0);
+            BOSS_ECHO(1);
+            break;
+        }
+        case 0x001B: { /* GetTaskServiceStatus: u8 1 (Azahar-Konstante) */
+            ipc_begin(r, 0x001B, 2, 2);
+            put_result(r);
+            ipc_put(r, 1);
+            BOSS_ECHO(1);
+            break;
+        }
+        case 0x001F: { /* GetTaskFinishHandle: CopyHandle(Event) */
+            if (g_boss_task_finish_event == 0)
+                g_boss_task_finish_event = new_event_handle("boss-taskfin", 0);
+            ipc_begin(r, 0x001F, 1, 2);
+            put_result(r);
+            ipc_put_handle_copy(r, g_boss_task_finish_event);
+            break;
+        }
+        case 0x0020:   /* GetTaskState: u8 status, u32 Wert, u8 */
+        case 0x0021:   /* GetTaskResult: u8, u32, u8 */
+        case 0x0022: { /* GetTaskCommErrorCode: u32, u32, u8 */
+            if (g_log) printf("[boss] cmd 0x%04X -> Status 0\n", r->cmd);
+            ipc_begin(r, r->cmd, 4, 2);
+            put_result(r);
+            ipc_put(r, 0);
+            ipc_put(r, 0);
+            ipc_put(r, 0);
+            BOSS_ECHO(1);
+            break;
+        }
+        case 0x0027: { /* GetNsDataHeaderInfo: keine NsData */
+            BOSS_NEED_SESSION();
+            if (g_log) printf("[boss] GetNsDataHeaderInfo id=%08X -> NsDataNotFound\n", q[0]);
+            ipc_begin(r, 0x0027, 1, 2);
+            ipc_put(r, BOSS_RESULT_NSDATA_NOT_FOUND);
+            BOSS_ECHO(1);
+            break;
+        }
+        case 0x0028: { /* ReadNsData: keine NsData -> (1,0) */
+            BOSS_NEED_SESSION();
+            if (g_log) printf("[boss] ReadNsData id=%08X -> NsDataNotFound\n", q[0]);
+            ipc_begin(r, 0x0028, 1, 0);
+            ipc_put(r, BOSS_RESULT_NSDATA_NOT_FOUND);
+            break;
+        }
+        case 0x002B: { /* SetNsDataNewFlag(id, u8) */
+            g_boss_ns_data_new_flag = (uint8_t)(q[1] & 0xFFu);
+            ipc_begin(r, 0x002B, 1, 0);
+            put_result(r);
+            break;
+        }
+        case 0x002C: { /* GetNsDataNewFlag(id): u8 */
+            ipc_begin(r, 0x002C, 2, 0);
+            put_result(r);
+            ipc_put(r, g_boss_ns_data_new_flag);
+            break;
+        }
+        case 0x002D: { /* GetNsDataLastUpdate(id): Eintrag fehlt -> ResultUnknown */
+            BOSS_NEED_SESSION();
+            ipc_begin(r, 0x002D, 1, 0);
+            ipc_put(r, BOSS_RESULT_UNKNOWN);
+            break;
+        }
+        case 0x0030: { /* GetStorageEntryInfo: u32 0, u16 0 */
+            ipc_begin(r, 0x0030, 3, 0);
+            put_result(r);
+            ipc_put(r, 0);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x0032: { /* GetStorageOption: u32, u8, u16, u16 (alle 0) */
+            ipc_begin(r, 0x0032, 5, 0);
+            put_result(r);
+            for (int i = 0; i < 4; i++) ipc_put(r, 0);
             break;
         }
         default:
             generic_command(r, SVC_BOSS);
             break;
     }
+#undef BOSS_TR
+#undef BOSS_ECHO
+#undef BOSS_NEED_SESSION
+}
+
+/* ac:u (Verbindungsverwaltung). Befehlssatz und Antwort-Layouts nach Azahar
+ * ac/ac.cpp. Abweichung: Azahar meldet bei ConnectAsync eine bestehende
+ * Internetverbindung (ac_connected = true, GetStatus STATUS_INTERNET). Der
+ * Port hat kein Netz und bildet eine Konsole ohne erreichbaren Zugangspunkt
+ * ab: ConnectAsync ist sofort fertig (Event signalisiert), die Verbindung
+ * kommt nicht zustande. GetConnectResult liefert dann 0xE0A09D2E (AC 302,
+ * InvalidState, Usage) - den Code, den Azahar fuer "nicht verbunden"
+ * benutzt (CancelConnectAsync); den echten Fehlercode einer Konsole ohne
+ * Zugangspunkt belegt Azahar nicht (docs/WORKAROUNDS.md). */
+#define AC_RESULT_NOT_CONNECTED 0xE0A09D2Eu   /* 302, AC(39), InvalidState, Usage */
+#define AC_RESULT_ALREADY_CONNECTED 0xE0A09D2Du /* 301 */
+#define AC_CONFIG_SIZE 0x200                 /* Azahar ACConfig */
+static int g_ac_connected = 0;
+static uint32_t g_ac_disconnect_event = 0;
+
+/* Antwort-StaticBuffer 0 mit n Byte aus src (NULL = Nullen) belegen. */
+static void ac_put_static_config(Ipc *r, const uint8_t *src, uint32_t n) {
+    uint32_t dsc = r->buf[0x40];
+    uint32_t addr = ipc_resp_static_buffer_addr(r->buf, 0);
+    uint32_t cap = dsc >> 14;
+    if (n > cap) n = cap;
+    if (addr != 0 && g_cpu != NULL && (addr & 0x1FFFFFFFu) + n <= g_cpu->mem_size) {
+        uint8_t *dst = g_cur_mem + (addr & 0x1FFFFFFFu);
+        if (src != NULL) memmove(dst, src, n);
+        else memset(dst, 0, n);
+    } else {
+        n = 0;
+    }
+    ipc_put(r, 0x2u | (n << 14));
+    ipc_put(r, addr);
+}
+
+static void ac_signal(uint32_t handle) {
+    Handle *hh = get_handle(handle);
+    if (hh != NULL) hs_signal(hh);
+}
+
+static void ac_command(Ipc *r, uint32_t *p) {
+    uint32_t q[16];
+    int nq = r->normal + r->translate;
+    if (nq > 16) nq = 16;
+    memset(q, 0, sizeof(q));
+    memcpy(q, p, (size_t)nq * 4u);
+    switch (r->cmd) {
+        case 0x0001: { /* CreateDefaultConfig: Result + StaticBuffer(ACConfig) */
+            ipc_begin(r, 0x0001, 1, 2);
+            put_result(r);
+            ac_put_static_config(r, NULL, AC_CONFIG_SIZE);   /* default_config{} */
+            break;
+        }
+        case 0x0004: { /* ConnectAsync(PID, CopyHandle event, StaticBuffer config) */
+            /* Translate: [0..1] PID-Deskriptor, [2..3] Handle, [4..5] Puffer. */
+            uint32_t ev_h = (r->translate >= 4) ? q[r->normal + 3] : 0u;
+            ac_signal(ev_h);              /* Verbindungsversuch beendet ... */
+            g_ac_connected = 0;           /* ... ohne Verbindung */
+            if (g_log) printf("[ac] ConnectAsync event=%u -> kein Netz\n", ev_h);
+            ipc_begin(r, 0x0004, 1, 0);
+            put_result(r);
+            break;
+        }
+        case 0x0005: { /* GetConnectResult */
+            uint32_t res = g_ac_connected ? 0u : AC_RESULT_NOT_CONNECTED;
+            if (g_log) printf("[ac] GetConnectResult -> %08X\n", res);
+            ipc_begin(r, 0x0005, 1, 0);
+            ipc_put(r, res);
+            break;
+        }
+        case 0x0007: { /* CancelConnectAsync */
+            ipc_begin(r, 0x0007, 1, 0);
+            ipc_put(r, g_ac_connected ? AC_RESULT_ALREADY_CONNECTED : AC_RESULT_NOT_CONNECTED);
+            break;
+        }
+        case 0x0008: { /* CloseAsync(PID, CopyHandle event) */
+            uint32_t ev_h = (r->translate >= 4) ? q[r->normal + 3] : 0u;
+            if (g_ac_connected && g_ac_disconnect_event != 0) ac_signal(g_ac_disconnect_event);
+            ac_signal(ev_h);
+            g_ac_connected = 0;
+            ipc_begin(r, 0x0008, 1, 0);
+            put_result(r);
+            break;
+        }
+        case 0x0009:   /* GetCloseResult */
+        case 0x002F:   /* GetNZoneBeaconNotFoundEvent (Event: s. u.) */
+        case 0x0040: { /* SetClientVersion */
+            if (r->cmd == 0x002F && r->translate >= 4) ac_signal(q[r->normal + 3]);
+            ipc_begin(r, r->cmd, 1, 0);
+            put_result(r);
+            break;
+        }
+        case 0x0030: { /* RegisterDisconnectEvent(PID, CopyHandle event) */
+            g_ac_disconnect_event = (r->translate >= 4) ? q[r->normal + 3] : 0u;
+            ipc_begin(r, 0x0030, 1, 0);
+            put_result(r);
+            break;
+        }
+        case 0x000C: { /* GetStatus: ohne Verbindung STATUS_DISCONNECTED (0) */
+            ipc_begin(r, 0x000C, 2, 0);
+            put_result(r);
+            ipc_put(r, g_ac_connected ? 3u : 0u);
+            break;
+        }
+        case 0x000D: { /* GetWifiStatus: 0 = nicht verbunden */
+            ipc_begin(r, 0x000D, 2, 0);
+            put_result(r);
+            ipc_put(r, g_ac_connected ? 1u : 0u);
+            break;
+        }
+        case 0x0027: { /* GetInfraPriority(StaticBuffer config): u32 0 */
+            ipc_begin(r, 0x0027, 2, 0);
+            put_result(r);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x002D: { /* SetRequestEulaVersion(u8, u8, StaticBuffer config) */
+            /* Azahar: Eingabe-Config unveraendert als StaticBuffer 0 zurueck. */
+            uint32_t in_dsc = (r->translate >= 2) ? q[r->normal] : 0u;
+            uint32_t in_addr = (r->translate >= 2) ? q[r->normal + 1] : 0u;
+            uint32_t n = in_dsc >> 14;
+            const uint8_t *src = NULL;
+            if (in_addr != 0 && g_cpu != NULL && (in_addr & 0x1FFFFFFFu) + n <= g_cpu->mem_size)
+                src = g_cur_mem + (in_addr & 0x1FFFFFFFu);
+            else
+                n = 0;
+            ipc_begin(r, 0x002D, 1, 2);
+            put_result(r);
+            ac_put_static_config(r, src, n);
+            break;
+        }
+        case 0x0036: { /* GetConnectingProxyEnable: false */
+            ipc_begin(r, 0x0036, 2, 0);
+            put_result(r);
+            ipc_put(r, 0);
+            break;
+        }
+        case 0x003E: { /* IsConnected(u32, Deskriptor, u32): bool */
+            ipc_begin(r, 0x003E, 2, 0);
+            put_result(r);
+            ipc_put(r, (uint32_t)g_ac_connected);
+            break;
+        }
+        default:
+            generic_command(r, SVC_AC);
+            break;
+    }
+}
+
+/* err:f (Port, svcConnectToPort). Azahar err_f.cpp ThrowFatalError (0x0001):
+ * 32 Woerter ErrInfo = ErrInfoCommon (specifier u8, rev_high u8, rev_low u16,
+ * result_code, pc_address, pid, title_id lo/hi, app_title_id lo/hi) + 0x60
+ * Byte typabhaengig (Exception: ExceptionInfo + 16 Register + CPSR;
+ * ResultFailure: Meldungstext). Auf der Konsole zeigt das System den
+ * Fehlerbildschirm und die Anwendung steht; Azahar stoppt die Emulation.
+ * Der Port meldet den Fehler deutlich im Log ([errf]) und antwortet wie
+ * Azahar mit Result 0. Danach legt sich der aufrufende Gast-Thread
+ * typischerweise selbst schlafen (Gast-Frames bleiben stehen). */
+static int g_errf_count = 0;
+static void errf_command(Ipc *r, uint32_t *p) {
+    if (r->cmd == 0x0001 && r->normal >= 8) {
+        static const char *types[] = {"Generic", "Corrupted", "CardRemoved", "Exception",
+                                      "ResultFailure", "Logged"};
+        uint32_t spec = p[0] & 0xFFu;
+        uint32_t res = p[1];
+        uint32_t pc = p[2];
+        g_errf_count++;
+        printf("[errf] ThrowFatalError #%d typ=%u (%s) result=%08X pc=%08X pid=%u "
+               "title=%08X%08X rev=%02X/%04X\n",
+               g_errf_count, spec, spec < 6 ? types[spec] : "?", res, pc, p[3], p[5], p[4],
+               (p[0] >> 8) & 0xFFu, p[0] >> 16);
+        printf("[errf]   result: level=%u summary=%u module=%u desc=%u\n",
+               res >> 27, (res >> 21) & 0x3Fu, (res >> 10) & 0xFFu, res & 0x3FFu);
+        if (spec == 3 && r->normal >= 31) {
+            /* ExceptionData ab Wort 8: Typ, sr, ar, fpexc, fpinst, fpinst2,
+               dann r0..r15 (Wort 14..29) und CPSR (Wort 30). */
+            printf("[errf]   exception typ=%u sr=%08X ar=%08X sp=%08X lr=%08X pc=%08X cpsr=%08X\n",
+                   p[8] & 0xFFu, p[9], p[10], p[27], p[28], p[29], p[30]);
+        } else if (spec == 4 && r->normal >= 32) {
+            char msg[0x61];
+            memcpy(msg, &p[8], 0x60);
+            msg[0x60] = 0;
+            for (int i = 0; msg[i]; i++)
+                if ((unsigned char)msg[i] < 0x20 || (unsigned char)msg[i] > 0x7E) msg[i] = '.';
+            printf("[errf]   message: \"%s\"\n", msg);
+        }
+        printf("[errf]   Gast-Thread th=%03X blk=%08X lr=%08X: Spiel meldet einen fatalen "
+               "Fehler (auf der Konsole: Fehlerbildschirm, Anwendung steht)\n",
+               (uint32_t)((g_cpu ? g_cpu->tpidruro : 0) >> 12) & 0xFFFu, arm_last_block,
+               g_cpu ? g_cpu->r[14] : 0u);
+        fflush(stdout);
+        ipc_begin(r, 0x0001, 1, 0);
+        put_result(r);
+        return;
+    }
+    generic_command(r, SVC_ERRF);
 }
 
 /* cecd:u (StreetPass). Azahar cecd.cpp: Stop, GetCecdState (NdmStatusIdle),
@@ -4306,7 +5222,7 @@ static void dispatch_ipc(uint32_t handle) {
     r.written = 0;
 
     int service = h ? h->service : SVC_OTHER;
-    if (service < 0 || service > 33) service = SVC_OTHER;
+    if (service < 0 || service >= SVC_COUNT) service = SVC_OTHER;
     /* Fallback: einige SDK-Wrapper senden ueber die srv-Session, obwohl das
        Kommando zu APT/cfg gehoert (im Trace beobachtet). */
     if (service == SVC_SRV) {
@@ -4411,6 +5327,12 @@ static void dispatch_ipc(uint32_t handle) {
             break;
         case SVC_CECD:
             cecd_command(&r, params);
+            break;
+        case SVC_ERRF:
+            errf_command(&r, params);
+            break;
+        case SVC_AC:
+            ac_command(&r, params);
             break;
         case SVC_GSP_GPU:
             gsp_command(&r, params);
@@ -5681,7 +6603,9 @@ static uint32_t hle_svc_dispatch(ArmCpu *c, uint32_t imm) {
         }
         case 0x2D: { /* ConnectToPort(out_ptr=r0, name=r1) -> r1 = handle */
             const char *name = (const char *)(c->mem + (c->r[1] & 0x1FFFFFFF));
-            int svc = service_from_name(name);
+            /* err:f ist ein benannter Port (Azahar err_f.cpp InstallAsNamedPort),
+               ueber srv:GetServiceHandle nicht erreichbar. */
+            int svc = (strcmp(name, "err:f") == 0) ? SVC_ERRF : service_from_name(name);
             uint32_t h = (uint32_t)alloc_handle(svc, name);
             if (g_log) printf("[svc] ConnectToPort(\"%s\") -> %u (lr=%08X sp=%08X)\n",
                               name, h, c->r[14], c->r[13]);
