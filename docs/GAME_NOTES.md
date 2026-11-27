@@ -493,3 +493,45 @@ Luftschiff in Raetsel 001 nur in geraden Gast-Frames (halbe Pixelposition,
 285-353 px > 32), oben ein symmetrisches +-1..4-Rauschen auf ~50 % der
 Pixel (MAD 0,6-0,85). Die SW-Rechnung haengt zudem an FMA-Kontraktion des
 Compilers (zig cc nativ: 147 vfmadd in gpu.c).
+
+## Texturfilter der internen Aufloesung (2026-11-27, Branch texture-filter)
+
+* **Textbox ohne Zwischenziel:** Diagnosezaehlung im 3D-Dialog Froenborg
+  (Skala 3, je Draw Ziel + gebundene Texturen, Textur == Farbziel einer
+  Oberflaeche?): einziges Render-to-Texture-Zwischenziel ist das
+  512x800-Ziel der 3D-Figuren (ETC1-Texturen), gesampelt als
+  512x1024-RGBA8-Textur. Alle uebrigen Draws auf dem Bildschirmziel
+  (Textbox, Schrift, 2D-Grafik, unterer Screen) sampeln direkt
+  Gast-Texturen (RGBA8/RGB8/ETC1/ETC1A4), keine davon ist ein Renderziel.
+  Die Schrift wird also direkt aus der Glyphen-Textur gezeichnet, der
+  Texturfilter greift dort.
+* Viele dieser 2D-Texturen setzen Vergroesserung "linear" (0x83 Bit 1),
+  erscheinen nativ aber 1:1; deshalb gilt der Spiel-Linearfilter im
+  Texturfilter nur fuer nativ vergroesserte Texturen.
+* **Kosten** (RTX 5070 Ti, Skala 3). Echtzeit-Gast-fps
+  (`[port] gast=` je 300 Host-Frames, Wandzeit aus der Host-Rate):
+
+  | Szene | none | linear | xbrz |
+  |---|---|---|---|
+  | Titel g2100-2700 | 59,3 | 59,9 | 59,5 |
+  | Slot-Menue | 29,9 | 29,9 | 29,9 |
+  | 3D-Dialog g4400-5600 | 20,3 | 19,9 | 19,9-20,0 |
+
+  Deterministisch (GPU-gebunden) wartet `hw_flush_to_guest` am Titel
+  0,55 ms je Rueckschreiben ohne Filter, 0,65 ms mit linear/xbrz
+  ([hwtime] `warten`, je 5 s). Davon kommt praktisch alles von der
+  groesseren Pixelshader-Variante (Register), nicht vom Filter selbst
+  und nicht vom Geometry-Shader (Experiment: GS mit nativem PS 0,47 ms).
+  Raetsel 001 (deterministisch, letztes 5-s-Fenster bis g7400, viel 2D):
+  1,31 / 1,75 / 2,41 ms je Rueckschreiben (none/linear/xbrz); 3D-Dialog
+  0,75 / 0,94 / 1,25. Raetsel 001 in Echtzeit nicht gemessen: die
+  `fixture-raetsel1`-Eingaben mit Host-Versatz (`g...+h`) treffen in
+  Echtzeit nicht, der Lauf blieb vor dem Raetsel stehen (g6857).
+  Startverzoegerung: Uebersetzen der Filter-Variante ~13 s; der erste
+  Entwurf wartete darauf (Echtzeit: 12,6 s Standbild beim Start), jetzt
+  ungefiltert bis fertig (ausser `--deterministic`).
+  Verworfen: `?:` zur Filterwahl (HLSL wertet beide Seiten aus, linear so
+  teuer wie xbrz), xBRZ-Kern als float4-Array (100 Register; Array als
+  Funktionsparameter kopiert: Titel 75 -> 27 Host-fps deterministisch),
+  ungefiltertes Sampling vorab mit konstanten Einheiten (kein Gewinn,
+  Uebersetzen 14 s).

@@ -293,6 +293,17 @@ static void hw_lock_leave(void) { if (g_hw_cs_init) LeaveCriticalSection(&g_hw_c
 
 static int g_scale = 1;
 
+/* Texturfilter der internen Aufloesung: zweite Variante des Pixelshaders
+ * (Makro HW_TEXFILTER) plus Geometry-Shader fuer das Texelrechteck je
+ * Dreieck; wird beim ersten internen Durchgang uebersetzt und nur dort
+ * gebunden. g_filt_state: 0 noch nicht versucht, 1 bereit, -1 fehlgeschlagen. */
+static int g_texfilter = HW_TEXFILTER_NONE;
+static int g_filt_state;
+static int g_filt_cb_mode = -1;
+static ID3D11PixelShader *g_ps_filt;
+static ID3D11GeometryShader *g_gs_filt;
+static ID3D11Buffer *g_filt_cb;
+
 typedef struct {
     int valid;
     unsigned char *color_mem, *depth_mem;
@@ -361,6 +372,7 @@ static void hr_bind(int hires);
 static int hr_active(void);
 static int util_init(void);
 static void util_release(void);
+static void filt_release(void);
 static void pend_flush(void);
 /* Diagnose (HLE_GTIME): Wandzeit je Abschnitt des HW-Pfads. */
 static unsigned long long g_dg_flush_us, g_dg_wait_us, g_dg_begin_us, g_dg_tri_us;
@@ -588,6 +600,259 @@ static const char *k_hlsl =
     "  }\n"
     "  return fetch_tex(unit, s, h - 1 - t);\n"
     "}\n"
+    /* Texturfilter fuer den Durchgang in interner Aufloesung (nur Anzeige,
+       docs/FRONTEND.md "Texturfilter"). Alles zwischen #ifdef HW_TEXFILTER
+       und #endif existiert nur in der zweiten Shader-Variante; ohne das
+       Makro ergibt der Praeprozessor exakt den bisherigen Quelltext, der
+       native Durchgang bleibt also bitgleich (gleicher Bytecode). */
+    "#ifdef HW_TEXFILTER\n"
+    "cbuffer FiltCB : register(b2) { uint4 f_cfg; };\n"
+    "struct PSIn { float4 pos : SV_Position; float4 col : COLOR0;\n"
+    "              float2 uv0 : TEXCOORD0; float2 uv1 : TEXCOORD1; float2 uv2 : TEXCOORD2;\n"
+    "              float4 quat : TEXCOORD3; float4 vt : TEXCOORD4;\n"
+    "              nointerpolation int4 rc0 : TEXCOORD5; nointerpolation int4 rc1 : TEXCOORD6;\n"
+    "              nointerpolation int4 rc2 : TEXCOORD7; nointerpolation uint rfl : TEXCOORD8; };\n"
+    "float2 uv_of(VSOut v, uint u) { return (u == 0u) ? v.uv0 : ((u == 1u) ? v.uv1 : v.uv2); }\n"
+    /* Je Dreieck und Einheit das gesampelte Texelrechteck (Atlas: Nachbar-
+       Glyphen/-Sprites liegen ausserhalb). Ist das Dreieck im Texturraum
+       ein rechtwinkliges mit achsparallelen Katheten (Haelfte eines
+       Sprite-Quads: Flaeche = halbe Bounding-Box), klemmt der Filter seine
+       Nachbartexel auf dieses Rechteck (rfl Bit 2u: s, Bit 2u+1: t);
+       sonst (3D-Netze, Kacheln ueber die ganze Textur) gilt der Wrap-Modus. */
+    "[maxvertexcount(3)]\n"
+    "void GSMain(triangle VSOut v[3], inout TriangleStream<PSIn> os) {\n"
+    "  int4 rc[3];\n"
+    "  uint fl = 0u;\n"
+    "  [unroll] for (uint u = 0u; u < 3u; u++) {\n"
+    "    float2 sz = float2((float)k_tex0[u].x, (float)k_tex0[u].y);\n"
+    "    float2 a = uv_of(v[0], u) * sz, b = uv_of(v[1], u) * sz, c = uv_of(v[2], u) * sz;\n"
+    "    float2 mn = min(a, min(b, c)), mx = max(a, max(b, c));\n"
+    "    float2 ex = mx - mn;\n"
+    "    float ar = abs((b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y));\n"
+    "    bool rect = ex.x > 0.0 && ex.y > 0.0 && abs(ar - ex.x * ex.y) <= 0.01 * ex.x * ex.y;\n"
+    "    int2 lo = (int2)floor(mn + 1.0 / 256.0);\n"
+    "    int2 hi = max((int2)ceil(mx - 1.0 / 256.0) - 1, lo);\n"
+    "    rc[u] = int4(lo, hi);\n"
+    "    if (rect && ex.x < sz.x) fl |= 1u << (2u * u);\n"
+    "    if (rect && ex.y < sz.y) fl |= 2u << (2u * u);\n"
+    "  }\n"
+    "  [unroll] for (uint j = 0u; j < 3u; j++) {\n"
+    "    PSIn o;\n"
+    "    o.pos = v[j].pos; o.col = v[j].col;\n"
+    "    o.uv0 = v[j].uv0; o.uv1 = v[j].uv1; o.uv2 = v[j].uv2;\n"
+    "    o.quat = v[j].quat; o.vt = v[j].vt;\n"
+    "    o.rc0 = rc[0]; o.rc1 = rc[1]; o.rc2 = rc[2]; o.rfl = fl;\n"
+    "    os.Append(o);\n"
+    "  }\n"
+    "}\n"
+    /* Texel (s, t) im PICA-Texturraum, vormultipliziert (rgb * a): so
+       mischen transparente Texel mit beliebigem RGB keinen Farbsaum ein.
+       Gepackt als RGBA8 in einem uint: der xBRZ-Kern haelt 25 Texel, als
+       float4 waeren das 100 Register fuer den ganzen Shader (gemessen:
+       weniger Wellen je Recheneinheit, auch wo der Filter nicht greift). */
+    "uint ft_texp(uint unit, int s, int t, int w, int h, int4 rc, uint fl) {\n"
+    "  if ((fl & 1u) != 0u) s = clamp(s, rc.x, rc.z);\n"
+    "  if ((fl & 2u) != 0u) t = clamp(t, rc.y, rc.w);\n"
+    "  s = clamp(wrap_coord(k_tex0[unit].z, s, w), 0, w - 1);\n"
+    "  t = clamp(wrap_coord(k_tex0[unit].w, t, h), 0, h - 1);\n"
+    "  uint4 c = fetch_tex(unit, s, h - 1 - t);\n"
+    "  c.rgb = (c.rgb * c.a + 127u) / 255u;\n"
+    "  return c.r | (c.g << 8) | (c.b << 16) | (c.a << 24);\n"
+    "}\n"
+    "float4 ft_un(uint v) {\n"
+    "  return float4(v & 255u, (v >> 8) & 255u, (v >> 16) & 255u, v >> 24) / 255.0;\n"
+    "}\n"
+    "float4 ft_linear(uint unit, float2 p, int w, int h, int4 rc, uint fl) {\n"
+    "  float2 f = p - 0.5;\n"
+    "  float2 f0 = floor(f);\n"
+    "  int2 i0 = (int2)f0;\n"
+    "  float2 a = f - f0;\n"
+    "  float4 c00 = ft_un(ft_texp(unit, i0.x, i0.y, w, h, rc, fl));\n"
+    "  float4 c10 = ft_un(ft_texp(unit, i0.x + 1, i0.y, w, h, rc, fl));\n"
+    "  float4 c01 = ft_un(ft_texp(unit, i0.x, i0.y + 1, w, h, rc, fl));\n"
+    "  float4 c11 = ft_un(ft_texp(unit, i0.x + 1, i0.y + 1, w, h, rc, fl));\n"
+    "  return lerp(lerp(c00, c10, a.x), lerp(c01, c11, a.x), a.y);\n"
+    "}\n"
+    /* xBRZ-artiger Kantenfilter mit freier Skalierung (eigene Umsetzung nach
+       der veroeffentlichten Beschreibung von xBRZ): Farbabstand in YCbCr
+       (+ Alpha), Eckentyp je 2x2-Block aus den Gradienten der beiden
+       Diagonalen (keiner/normal/dominant, Schwelle 3,6), dann je Ecke des
+       Texels eine Mischregion: Diagonale (x+y > 1,5), flache/steile Linie
+       (Steigung 1:2 durch die Kantenmitte, Schwelle 2,2) oder runde Ecke.
+       Die Region wird analytisch gegen die Position im Texel geprueft und
+       ueber eine Ausgabepixelbreite (rho Texel) geglaettet. */
+    "float ft_dist(uint pa, uint pb) {\n"
+    "  float4 a = ft_un(pa), b = ft_un(pb);\n"
+    "  float3 d = a.rgb - b.rgb;\n"
+    "  float y = dot(d, float3(0.2627, 0.6780, 0.0593));\n"
+    "  float cb = 0.5 / (1.0 - 0.0593) * (d.b - y);\n"
+    "  float cr = 0.5 / (1.0 - 0.2627) * (d.r - y);\n"
+    "  return sqrt(y * y + cb * cb + cr * cr) + abs(a.a - b.a);\n"
+    "}\n"
+    "bool ft_eq(uint a, uint b) { return ft_dist(a, b) < 30.0 / 255.0; }\n"
+    "bool ft_same(uint a, uint b) { return a == b; }\n"
+    /* 2x2-Block f g / j k im 4x4-Kern a..p; Ergebnis (f, g, j, k):
+       0 keine, 1 normale, 2 dominante Mischung an der gemeinsamen Ecke. */
+    "uint4 ft_pre(uint b, uint c, uint e, uint f, uint g, uint h,\n"
+    "             uint i, uint j, uint k, uint l, uint n, uint o) {\n"
+    "  uint4 r = uint4(0u, 0u, 0u, 0u);\n"
+    "  if ((ft_same(f, g) && ft_same(j, k)) || (ft_same(f, j) && ft_same(g, k))) return r;\n"
+    "  float jg = ft_dist(i, f) + ft_dist(f, c) + ft_dist(n, k) + ft_dist(k, h) + 4.0 * ft_dist(j, g);\n"
+    "  float fk = ft_dist(e, j) + ft_dist(j, o) + ft_dist(b, g) + ft_dist(g, l) + 4.0 * ft_dist(f, k);\n"
+    "  if (jg < fk) {\n"
+    "    uint t = (3.6 * jg < fk) ? 2u : 1u;\n"
+    "    if (!ft_same(f, g) && !ft_same(f, j)) r.x = t;\n"
+    "    if (!ft_same(k, j) && !ft_same(k, g)) r.w = t;\n"
+    "  } else if (fk < jg) {\n"
+    "    uint t = (3.6 * fk < jg) ? 2u : 1u;\n"
+    "    if (!ft_same(j, f) && !ft_same(j, k)) r.z = t;\n"
+    "    if (!ft_same(g, f) && !ft_same(g, k)) r.y = t;\n"
+    "  }\n"
+    "  return r;\n"
+    "}\n"
+    "#define FK(X, Y) K[((Y) + 2) * 5 + (X) + 2]\n"
+    "#define FT_BLOCK(X, Y) ft_pre(FK(X + 1, Y), FK(X + 2, Y), FK(X, Y + 1), FK(X + 1, Y + 1),\\\n"
+    "  FK(X + 2, Y + 1), FK(X + 3, Y + 1), FK(X, Y + 2), FK(X + 1, Y + 2), FK(X + 2, Y + 2),\\\n"
+    "  FK(X + 3, Y + 2), FK(X + 1, Y + 3), FK(X + 2, Y + 3))\n"
+    /* Drehung r (0..3, je 90 Grad) eines Versatzes aus dem gedrehten Rahmen
+       in den Originalrahmen; Ecke (1,1) des gedrehten Rahmens ist die
+       bearbeitete Ecke. */
+    "int2 ft_rot(uint r, int2 p) {\n"
+    "  if (r == 1u) return int2(-p.y, p.x);\n"
+    "  if (r == 2u) return int2(-p.x, -p.y);\n"
+    "  if (r == 3u) return int2(p.y, -p.x);\n"
+    "  return p;\n"
+    "}\n"
+    "float2 ft_unrot(uint r, float2 q) {\n"
+    "  if (r == 1u) return float2(q.y, -q.x);\n"
+    "  if (r == 2u) return float2(-q.x, -q.y);\n"
+    "  if (r == 3u) return float2(-q.y, q.x);\n"
+    "  return q;\n"
+    "}\n"
+    /* ct = Eckentypen des Mitteltexels (x: +s+t, y: -s+t, z: +s-t, w: -s-t) */
+    "uint ft_ct(int2 c, uint4 ct) {\n"
+    "  if (c.x > 0) return (c.y > 0) ? ct.x : ct.z;\n"
+    "  return (c.y > 0) ? ct.y : ct.w;\n"
+    "}\n"
+    /* Kernindex des gedrehten Versatzes (x, y); als Makro, damit kein
+       Array kopiert wird (ein Funktionsparameter float4 K[25] kostete je
+       Aufruf eine Kopie im lokalen Speicher, gemessen: Titel 75 -> 27
+       Host-fps im deterministischen Lauf). */
+    "#define FKR(R, X, Y) K[ft_ki(R, X, Y)]\n"
+    "int ft_ki(uint r, int x, int y) {\n"
+    "  int2 o = ft_rot(r, int2(x, y));\n"
+    "  return (o.y + 2) * 5 + o.x + 2;\n"
+    "}\n"
+    "float4 ft_xbrz(uint unit, float2 p, float rho, int w, int h, int4 rc, uint fl) {\n"
+    "  float2 p0 = floor(p);\n"
+    "  int2 c0 = (int2)p0;\n"
+    "  float2 fr = p - p0;\n"
+    "  uint K[25];\n"
+    /* Erst die 3x3-Nachbarschaft: ist sie einfarbig, gibt es an keiner
+       Ecke des Mitteltexels eine Mischung (jeder 2x2-Block besteht aus
+       gleichen Texeln) -> Texel unveraendert, ohne die aeusseren Texel. */
+    "  bool flat = true;\n"
+    "  [unroll] for (int y3 = -1; y3 <= 1; y3++)\n"
+    "    [unroll] for (int x3 = -1; x3 <= 1; x3++)\n"
+    "      FK(x3, y3) = ft_texp(unit, c0.x + x3, c0.y + y3, w, h, rc, fl);\n"
+    "  [unroll] for (int k3 = 0; k3 < 9; k3++)\n"
+    "    flat = flat && ft_same(K[(k3 / 3 + 1) * 5 + k3 % 3 + 1], FK(0, 0));\n"
+    "  [branch] if (flat) return ft_un(FK(0, 0));\n"
+    "  [unroll] for (int k = 0; k < 25; k++) {\n"
+    "    int x = k % 5 - 2, y = k / 5 - 2;\n"
+    "    if (abs(x) == 2 || abs(y) == 2)\n"
+    "      K[k] = (abs(x) == 2 && abs(y) == 2) ? 0u\n"
+    "             : ft_texp(unit, c0.x + x, c0.y + y, w, h, rc, fl);\n"
+    "  }\n"
+    "  uint4 ct = uint4(FT_BLOCK(-1, -1).x, FT_BLOCK(-2, -1).y,\n"
+    "                   FT_BLOCK(-1, -2).z, FT_BLOCK(-2, -2).w);\n"
+    "  uint e = FK(0, 0);\n"
+    "  float4 res = ft_un(e);\n"
+    "  [branch] if (all(ct == 0u)) return res;\n"
+    "  float aa = 1.0 / max(rho, 1.0 / 64.0);\n"
+    "  [unroll] for (uint r = 0u; r < 4u; r++) {\n"
+    "    uint br = ft_ct(ft_rot(r, int2(1, 1)), ct);\n"
+    "    if (br == 0u) continue;\n"
+    "    uint tr = ft_ct(ft_rot(r, int2(1, -1)), ct);\n"
+    "    uint bl = ft_ct(ft_rot(r, int2(-1, 1)), ct);\n"
+    "    uint b = FKR(r, 0, -1), c = FKR(r, 1, -1), d = FKR(r, -1, 0);\n"
+    "    uint f = FKR(r, 1, 0), g = FKR(r, -1, 1), hh = FKR(r, 0, 1);\n"
+    "    uint i = FKR(r, 1, 1);\n"
+    "    bool lb = true;\n"
+    "    if (br >= 2u) lb = true;\n"
+    "    else if (tr != 0u && !ft_eq(e, g)) lb = false;\n"
+    "    else if (bl != 0u && !ft_eq(e, c)) lb = false;\n"
+    "    else if (!ft_eq(e, i) && ft_eq(g, hh) && ft_eq(hh, i) && ft_eq(i, f) && ft_eq(f, c)) lb = false;\n"
+    "    uint px = (ft_dist(e, f) <= ft_dist(e, hh)) ? f : hh;\n"
+    "    float2 q = ft_unrot(r, fr - 0.5) + 0.5;\n"
+    "    float sd;\n"
+    "    if (lb) {\n"
+    "      float fg = ft_dist(f, g), hc = ft_dist(hh, c);\n"
+    "      bool shallow = 2.2 * fg <= hc && !ft_same(e, g) && !ft_same(d, g);\n"
+    "      bool steep = 2.2 * hc <= fg && !ft_same(e, c) && !ft_same(b, c);\n"
+    "      float s1 = (0.5 * q.x + q.y - 1.0) * 0.8944272;\n"
+    "      float s2 = (q.x + 0.5 * q.y - 1.0) * 0.8944272;\n"
+    "      if (shallow && steep) sd = max(s1, s2);\n"
+    "      else if (shallow) sd = s1;\n"
+    "      else if (steep) sd = s2;\n"
+    "      else sd = (q.x + q.y - 1.5) * 0.7071068;\n"
+    "    } else {\n"
+    "      sd = min(length(q - 0.5) - 0.5, min(q.x, q.y) - 0.5);\n"
+    "    }\n"
+    "    res = lerp(res, ft_un(px), saturate(0.5 + sd * aa));\n"
+    "  }\n"
+    "  return res;\n"
+    "}\n"
+    /* Gefiltertes Sampling: nur 2D-Texturen, nur wenn ein Texel groesser
+       als ein Ausgabepixel ist (Vergroesserung, rho < 1). Filter nach
+       f_cfg.x (1 linear, 2 xbrz). Ausnahme: vergroessert das Spiel die
+       Textur schon in nativer Aufloesung (rho * Skala < 1) und verlangt
+       dafuer lineare Filterung (0x83 Bit 1), wird bilinear gefiltert wie
+       auf der Konsole; was nativ 1:1 erscheint (Schrift, 2D-Grafik), bekommt
+       den gewaehlten Filter. Randfarbe (ClampToBorder ausserhalb) bleibt
+       wie nativ. f_cfg.y = Skala. */
+    "uint4 sample_filt(uint unit, float2 uv, float2 dx, float2 dy, int4 rc, uint rfl) {\n"
+    "  uint4 c0 = k_tex0[unit];\n"
+    "  uint4 c1 = k_tex1[unit];\n"
+    "  uint4 c2 = k_tex2[unit];\n"
+    "  int w = (int)c0.x, h = (int)c0.y;\n"
+    "  float2 sz = float2((float)max(w, 1), (float)max(h, 1));\n"
+    "  float rho = max(length(dx * sz), length(dy * sz));\n"
+    "  float2 p = uv * sz;\n"
+    "  bool bs = (c0.z == 1u) ? (p.x < 0.0 || p.x >= sz.x) : (c0.z == 5u && p.x >= sz.x);\n"
+    "  bool bt = (c0.w == 1u) ? (p.y < 0.0 || p.y >= sz.y) : (c0.w == 5u && p.y >= sz.y);\n"
+    "  bool use = f_cfg.x != 0u && c1.y != 0u && c1.w == 0u && c2.x != 0u &&\n"
+    "             w > 0 && h > 0 && rho < 1.0 && !bs && !bt;\n"
+    /* [branch] statt ?: bzw. abgeflachter Verzweigung: HLSL wertet beim ?:
+       beide Seiten aus (linear kostete sonst so viel wie xbrz). */
+    "  [branch] if (!use) return sample_unit(unit, uv);\n"
+    "  uint fl = (rfl >> (2u * unit)) & 3u;\n"
+    "  float4 r;\n"
+    "  [branch] if ((c2.y != 0u && rho * (float)f_cfg.y < 0.99) || f_cfg.x == 1u)\n"
+    "    r = ft_linear(unit, p, w, h, rc, fl);\n"
+    "  else r = ft_xbrz(unit, p, rho, w, h, rc, fl);\n"
+    "  float3 rgb = (r.a > 0.0) ? r.rgb / r.a : float3(0.0, 0.0, 0.0);\n"
+    "  return (uint4)round(saturate(float4(rgb, r.a)) * 255.0);\n"
+    "}\n"
+    /* Alle drei Einheiten in einer Schleife (der Filter steht so nur einmal
+       im Bytecode; dreifach eingebettet dauerte das Uebersetzen doppelt so
+       lang). Ableitungen vorher, ausserhalb jeder Verzweigung. */
+    "void ft_all(PSIn i, out uint4 r[3]) {\n"
+    "  float2 uv[3] = { i.uv0, i.uv1, i.uv2 };\n"
+    "  float2 dx[3] = { ddx(i.uv0), ddx(i.uv1), ddx(i.uv2) };\n"
+    "  float2 dy[3] = { ddy(i.uv0), ddy(i.uv1), ddy(i.uv2) };\n"
+    "  int4 rc[3] = { i.rc0, i.rc1, i.rc2 };\n"
+    "  [loop] for (uint u = 0u; u < 3u; u++)\n"
+    "    r[u] = sample_filt(u, uv[u], dx[u], dy[u], rc[u], i.rfl);\n"
+    "}\n"
+    "#define PS_IN PSIn\n"
+    "#define FT_PREPARE uint4 ftr[3]; ft_all(i, ftr);\n"
+    "#define SAMPLE_UNIT(U, UV, RC) ftr[U]\n"
+    "#else\n"
+    "#define PS_IN VSOut\n"
+    "#define FT_PREPARE\n"
+    "#define SAMPLE_UNIT(U, UV, RC) sample_unit(U, UV)\n"
+    "#endif\n"
     "uint3 cmod(uint m, uint4 s) {\n"
     "  if (m == 0) return s.rgb;\n"
     "  if (m == 1) return 255u - s.rgb;\n"
@@ -834,14 +1099,15 @@ static const char *k_hlsl =
     "  pfc = (uint4)(saturate(dsum) * 255.0);\n"
     "  sfc = (uint4)(saturate(ssum) * 255.0);\n"
     "}\n"
-    "PSOut PSMain(VSOut i) {\n"
+    "PSOut PSMain(PS_IN i) {\n"
     "  PSOut o;\n"
     "  uint4 prim = (uint4)round(saturate(i.col) * 255.0);\n"
     "  uint4 zero = uint4(0, 0, 0, 0);\n"
     "  uint4 pfc = zero, sfc = zero;\n"
-    "  uint4 t0 = sample_unit(0, i.uv0);\n"
-    "  uint4 t1 = sample_unit(1, i.uv1);\n"
-    "  uint4 t2 = sample_unit(2, i.uv2);\n"
+    "  FT_PREPARE\n"
+    "  uint4 t0 = SAMPLE_UNIT(0, i.uv0, rc0);\n"
+    "  uint4 t1 = SAMPLE_UNIT(1, i.uv1, rc1);\n"
+    "  uint4 t2 = SAMPLE_UNIT(2, i.uv2, rc2);\n"
     "  if (l_cfg.w != 0u) light_frag(i.quat, i.vt.xyz, t0, t1, t2, pfc, sfc);\n"
     "  uint4 res = zero;\n"
     "  uint bcol = k_buf.y;\n"
@@ -1546,6 +1812,7 @@ void hw_shutdown(void) {
     release_targets();
     surf_release_all();
     util_release();
+    filt_release();
     if (g_bs) { ID3D11BlendState_Release(g_bs); g_bs = NULL; }
     if (g_dss) { ID3D11DepthStencilState_Release(g_dss); g_dss = NULL; }
     if (g_rs) { ID3D11RasterizerState_Release(g_rs); g_rs = NULL; }
@@ -1735,6 +2002,8 @@ static void set_constants(const HwDrawState *st, const ID3D11ShaderResourceView 
         cb.u[148 + i * 4 + 2] = st->tex[i].filter;
         cb.u[148 + i * 4 + 3] = st->tex[i].type;
         cb.u[160 + i * 4 + 0] = (g_texbind[i] >= 0) ? 1u : 0u;
+        /* k_tex2[i].y: nur die Texturfilter-Variante liest es */
+        cb.u[160 + i * 4 + 1] = st->tex[i].mag_linear ? 1u : 0u;
     }
     cb.u[176] = (uint32_t)pica_shader_blend(st);
     cb.u[177] = pica_logic_active(st) ? (st->logic_op & 0xFu) : 0u;
@@ -2468,6 +2737,114 @@ static void surf_after_flush(int depth_written)
     sf->last_use = ++g_surf_clock;
 }
 
+/* ---- Texturfilter der internen Aufloesung ------------------------------ */
+/* Uebersetzen dauert einige Sekunden (der Pixelshader ist gross): es laeuft
+ * ab hw_set_texture_filter in einem eigenen Thread, waehrend der Port das
+ * Spiel startet; bis zum Ende zeigt der interne Durchgang ungefiltert. Mit
+ * hw_texture_filter_sync(1) (--deterministic, Selbsttest) wartet der erste
+ * gefilterte Durchgang stattdessen: Bildfolge unabhaengig vom Compiler. */
+static HANDLE g_filt_thread;
+static int g_filt_sync;              /* hw_texture_filter_sync: warten statt ungefiltert */
+static ID3DBlob *g_filt_blob[2], *g_filt_err;
+static HRESULT g_filt_hr;
+
+static DWORD WINAPI filt_compile_thread(LPVOID arg)
+{
+    static const D3D_SHADER_MACRO defs[2] = { { "HW_TEXFILTER", "1" }, { NULL, NULL } };
+    (void)arg;
+    g_filt_hr = g_pfn_d3d_compile(k_hlsl, strlen(k_hlsl), "pica_hw_filt", defs, NULL,
+                                  "PSMain", "ps_5_0", 0, 0, &g_filt_blob[0], &g_filt_err);
+    if (SUCCEEDED(g_filt_hr))
+        g_filt_hr = g_pfn_d3d_compile(k_hlsl, strlen(k_hlsl), "pica_hw_filt", defs, NULL,
+                                      "GSMain", "gs_5_0", 0, 0, &g_filt_blob[1], &g_filt_err);
+    return 0;
+}
+
+static void filt_start_compile(void)
+{
+    if (g_filt_thread || g_filt_state != 0 || !g_pfn_d3d_compile) return;
+    g_filt_thread = CreateThread(NULL, 0, filt_compile_thread, NULL, 0, NULL);
+}
+
+static void filt_join(void)
+{
+    if (!g_filt_thread) return;
+    WaitForSingleObject(g_filt_thread, INFINITE);
+    CloseHandle(g_filt_thread);
+    g_filt_thread = NULL;
+}
+
+static void filt_release(void)
+{
+    int i;
+    filt_join();
+    for (i = 0; i < 2; i++)
+        if (g_filt_blob[i]) { ID3D10Blob_Release(g_filt_blob[i]); g_filt_blob[i] = NULL; }
+    if (g_filt_err) { ID3D10Blob_Release(g_filt_err); g_filt_err = NULL; }
+    if (g_ps_filt) { ID3D11PixelShader_Release(g_ps_filt); g_ps_filt = NULL; }
+    if (g_gs_filt) { ID3D11GeometryShader_Release(g_gs_filt); g_gs_filt = NULL; }
+    if (g_filt_cb) { ID3D11Buffer_Release(g_filt_cb); g_filt_cb = NULL; }
+    g_filt_state = 0;
+    g_filt_cb_mode = -1;
+}
+
+/* Legt die Filter-Variante beim ersten Bedarf an. Rueckgabe 1, wenn der
+ * interne Durchgang gefiltert werden soll. */
+static int filt_active(void)
+{
+    D3D11_BUFFER_DESC bd;
+    unsigned long long tw;
+    if (g_texfilter == HW_TEXFILTER_NONE || g_filt_state < 0) return 0;
+    if (g_filt_state == 0) {
+        g_filt_state = -1;
+        tw = hw_now_us();
+        if (!g_filt_thread && !g_filt_blob[0]) {
+            if (!g_pfn_d3d_compile) goto fail;
+            filt_compile_thread(NULL);
+        }
+        /* Uebersetzung laeuft noch: bis dahin ungefiltert anzeigen statt
+           das Spiel anzuhalten (gemessen ~13 s nach dem Start). */
+        if (g_filt_thread && !g_filt_sync &&
+            WaitForSingleObject(g_filt_thread, 0) == WAIT_TIMEOUT) {
+            g_filt_state = 0;
+            return 0;
+        }
+        filt_join();
+        if (FAILED(g_filt_hr) || !g_filt_blob[0] || !g_filt_blob[1]) {
+            fprintf(stderr, "[hw] Texturfilter-Shader: %s\n",
+                    g_filt_err ? (char *)ID3D10Blob_GetBufferPointer(g_filt_err) : "?");
+            goto fail;
+        }
+        if (FAILED(ID3D11Device_CreatePixelShader(
+                g_dev, ID3D10Blob_GetBufferPointer(g_filt_blob[0]),
+                ID3D10Blob_GetBufferSize(g_filt_blob[0]), NULL, &g_ps_filt)) ||
+            FAILED(ID3D11Device_CreateGeometryShader(
+                g_dev, ID3D10Blob_GetBufferPointer(g_filt_blob[1]),
+                ID3D10Blob_GetBufferSize(g_filt_blob[1]), NULL, &g_gs_filt)))
+            goto fail;
+        memset(&bd, 0, sizeof(bd));
+        bd.ByteWidth = 16;
+        bd.Usage = D3D11_USAGE_DEFAULT;
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_filt_cb))) goto fail;
+        g_filt_state = 1;
+        printf("[hw] Texturfilter %s fuer die interne Aufloesung bereit (gewartet %llu ms)\n",
+               hw_texture_filter_name(g_texfilter), (hw_now_us() - tw) / 1000ull);
+    }
+    if (g_filt_cb_mode != g_texfilter * 16 + g_scale) {
+        uint32_t u[4] = { (uint32_t)g_texfilter, (uint32_t)g_scale, 0u, 0u };
+        ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)g_filt_cb, 0, NULL,
+                                              u, 0, 0);
+        g_filt_cb_mode = g_texfilter * 16 + g_scale;
+    }
+    return 1;
+fail:
+    filt_release();
+    g_filt_state = -1;
+    printf("[hw] Texturfilter nicht verfuegbar, Anzeige ungefiltert\n");
+    return 0;
+}
+
 /* Bindungen fuer den nativen (0) bzw. internen (1) Durchgang in pend_flush. */
 static void hr_bind(int hires)
 {
@@ -2491,6 +2868,21 @@ static void hr_bind(int hires)
         ID3D11DeviceContext_RSSetScissorRects(g_ctx, 1, &rc);
         ID3D11DeviceContext_PSSetShaderResources(g_ctx, 3, 1,
             g_shadow_on ? &g_hr_shadow_srv : &g_tex_dummy);
+    }
+}
+
+/* Texturfilter: Shader des internen Durchgangs an (1) bzw. zurueck auf den
+ * unveraenderten nativen Pixelshader ohne Geometry-Shader (0). */
+static void filt_bind(int on)
+{
+    if (on) {
+        ID3D11DeviceContext_GSSetShader(g_ctx, g_gs_filt, NULL, 0);
+        ID3D11DeviceContext_GSSetConstantBuffers(g_ctx, 0, 1, &g_cb);
+        ID3D11DeviceContext_PSSetShader(g_ctx, g_ps_filt, NULL, 0);
+        ID3D11DeviceContext_PSSetConstantBuffers(g_ctx, 2, 1, &g_filt_cb);
+    } else {
+        ID3D11DeviceContext_GSSetShader(g_ctx, NULL, NULL, 0);
+        ID3D11DeviceContext_PSSetShader(g_ctx, g_ps, NULL, 0);
     }
 }
 
@@ -2661,6 +3053,84 @@ void hw_set_scale(int s)
     hw_lock_leave();
 }
 
+void hw_set_texture_filter(int mode)
+{
+    if (mode < HW_TEXFILTER_NONE || mode > HW_TEXFILTER_XBRZ) mode = HW_TEXFILTER_NONE;
+    hw_lock_enter();
+    if (mode != g_texfilter) {
+        /* laufenden Batch noch mit dem alten Filter zeichnen */
+        if (g_ready) pend_flush();
+        g_texfilter = mode;
+    }
+    /* nur bei interner Aufloesung gebraucht: dann sofort im Hintergrund
+       uebersetzen */
+    if (mode != HW_TEXFILTER_NONE && g_scale > 1 && g_ready) filt_start_compile();
+    hw_lock_leave();
+}
+
+int hw_texture_filter(void) { return g_texfilter; }
+
+void hw_texture_filter_sync(int on) { g_filt_sync = on != 0; }
+
+int hw_texture_filter_parse(const char *name)
+{
+    if (name == NULL) return -1;
+    if (_stricmp(name, "none") == 0) return HW_TEXFILTER_NONE;
+    if (_stricmp(name, "linear") == 0) return HW_TEXFILTER_LINEAR;
+    if (_stricmp(name, "xbrz") == 0) return HW_TEXFILTER_XBRZ;
+    return -1;
+}
+
+const char *hw_texture_filter_name(int mode)
+{
+    switch (mode) {
+    case HW_TEXFILTER_LINEAR: return "linear";
+    case HW_TEXFILTER_XBRZ: return "xbrz";
+    default: return "none";
+    }
+}
+
+int hw_surface_read(const unsigned char *color_mem, unsigned char *out, int cap,
+                    int *w, int *h)
+{
+    D3D11_TEXTURE2D_DESC td;
+    D3D11_MAPPED_SUBRESOURCE map;
+    ID3D11Texture2D *st = NULL;
+    HwSurf *sf = NULL;
+    int i, y, ok = 0;
+    hw_lock_enter();
+    if (!g_ready) goto out;
+    pend_flush();
+    for (i = 0; i < HW_SURF_N; i++)
+        if (g_surf[i].valid && g_surf[i].color_mem == color_mem && g_surf[i].ctex &&
+            (sf == NULL || g_surf[i].last_use > sf->last_use))
+            sf = &g_surf[i];
+    if (sf == NULL) goto out;
+    ID3D11Texture2D_GetDesc(sf->ctex, &td);
+    if ((long long)td.Width * td.Height * 4 > cap) goto out;
+    td.Usage = D3D11_USAGE_STAGING;
+    td.BindFlags = 0;
+    td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    td.MiscFlags = 0;
+    if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &st))) goto out;
+    ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)st, (ID3D11Resource *)sf->ctex);
+    if (SUCCEEDED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)st, 0, D3D11_MAP_READ,
+                                          0, &map))) {
+        for (y = 0; y < (int)td.Height; y++)
+            memcpy(out + (size_t)y * td.Width * 4u,
+                   (const unsigned char *)map.pData + (size_t)y * map.RowPitch,
+                   (size_t)td.Width * 4u);
+        ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)st, 0);
+        if (w) *w = (int)td.Width;
+        if (h) *h = (int)td.Height;
+        ok = 1;
+    }
+    ID3D11Texture2D_Release(st);
+out:
+    hw_lock_leave();
+    return ok;
+}
+
 /* Gesammelte Dreiecke mit einem Draw zeichnen (Ringpuffer: anhaengen mit
  * NO_OVERWRITE, bei vollem Puffer DISCARD und von vorn). */
 static void pend_flush(void)
@@ -2707,6 +3177,7 @@ static void pend_flush(void)
        skalierten Rechtecks folgt denselben Batch-Grenzen. */
     if (hires) {
         UINT s = (UINT)g_scale;
+        int filt = filt_active();
         hr_bind(1);
         if (have_box) {
             box.left *= s; box.right *= s; box.top *= s; box.bottom *= s;
@@ -2714,7 +3185,9 @@ static void pend_flush(void)
                                                       0, box.left, box.top, 0,
                                                       (ID3D11Resource *)g_cur_surf->ctex, 0, &box);
         }
+        if (filt) filt_bind(1);
         ID3D11DeviceContext_Draw(g_ctx, n, g_vb_pos);
+        if (filt) filt_bind(0);
     }
     g_vb_pos += n;
     g_batches++;

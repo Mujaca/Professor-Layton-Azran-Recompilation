@@ -53,6 +53,11 @@ python tools/scene.py froenborg --renderer soft --tag soft --every 50      # -> 
   (`seq_*.png`, `ziel.png`) bleiben unveraendert (pixelgleich zu N = 1),
   zusaetzlich `hd_<gast>.png`/`hd_ziel.png` mit der Anzeige in
   interner Aufloesung (`port.exe --shot-scaled`).
+* `--texture-filter none|linear|xbrz` (Standard `none`): Texturfilter der
+  internen Aufloesung (docs/FRONTEND.md "Texturfilter"), wirkt nur auf die
+  `hd_*`-Bilder. scene.py gibt den Wert immer explizit an `port.exe`
+  weiter, damit `port.ini [display] texture_filter` Testlaeufe nicht
+  veraendert.
 * SW/HW-Bildvergleich (M9): beide Renderer mit `--tag soft`/`--tag hw` und
   derselben `--every`-Folge fahren, dann
   `python tools/rendercmp.py scratch/scene/<szene>-soft scratch/scene/<szene>-hw`.
