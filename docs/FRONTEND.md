@@ -161,6 +161,20 @@ Belegung:
 Tasten werden mit der Tastatur ODER-verknuepft; der Stick ersetzt das
 Tastatur-Circle-Pad nur, wenn er die Deadzone verlaesst.
 
+## Datenpfade und Arbeitsverzeichnis
+
+port.exe liest alle Spieldaten relativ zum **Arbeitsverzeichnis**
+(`out/exefs/code_decomp.bin`, `out/exefs/*.bin`, `out/romfs/`,
+`out/romfs_image.bin`, Spielstaende `out/savedata`, Mods `mods/`), also aus
+der Repo-Wurzel. `port.ini` und `logs/` liegen dagegen neben der exe.
+Fehlt `out/exefs/code_decomp.bin` im Arbeitsverzeichnis, liegt es aber unter
+dem Elternordner des exe-Ordners, wechselt port.exe dorthin
+(`data_root_fallback`, Log `[port] Arbeitsverzeichnis: ...`). Damit startet
+ein Doppelklick auf `<wurzel>/out/port.exe` - im Repo wie im Ausgabeordner
+des Builder-Pakets (`game/out/port.exe`, docs/TOOLS.md) - ohne
+Verknuepfung. Starts aus der Repo-Wurzel (Tools, `scene.py`, Gate) sind
+unveraendert.
+
 ## Mods (`[mods]`, `--mods`)
 
 Mods sind standardmaessig **aus** (docs/MODDING.md). `port.ini`:

@@ -97,6 +97,13 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
    baut port.exe ohne weitere Installation oder Downloads. Enthaelt keine
    Spielinhalte; Lizenztexte der gebuendelten Teile liegen bei. Bau des
    Pakets reproduzierbar (Skript, spaeter GitHub-Release per CI).
+   **Stand 2026-11-27** (Branch builder): `tools/make_builder.py`,
+   `tools/builder.py`, Starter `tools/starter/` (docs/TOOLS.md
+   "Builder-Paket"). End-to-End nur mit Stand-in (lokales Python 3.10.6 +
+   installierte Pakete statt Downloads): ZIP 110 MiB, Bau aus dem Dump
+   ~8,5 min (kalter zig-Cache), port.exe startet aus `game/out/`. Offen:
+   Downloads der Artefakte (Liste `--print-artefacts`) und ihre SHA-256
+   freigeben/eintragen, danach Lauf mit echten Artefakten; CI.
 7. **Ruhiger Standardstart** (nach M17): Debug-Overlay/fps im Titel nur mit
    `--debug` bzw. `[debug] overlay = 1` (Teil des M17-Branches); port.exe
    ohne Konsole (`--console` bzw. `[debug] console = 1` zeigt sie);

@@ -23,10 +23,12 @@ def main():
     ap.add_argument("--none", action="store_true", help="keine Patches anwenden")
     ap.add_argument("--skip", default="", help="Adressen (Komma-getrennt) auslassen")
     ap.add_argument("--out", default=os.path.join(ROOT, "out", "exefs", "code_decomp.bin"))
+    ap.add_argument("--code", default=os.path.join(ROOT, "out", "exefs", "code.bin"),
+                    help="komprimiertes code.bin (Builder: anderer out-Ordner)")
     a = ap.parse_args()
 
     from pyctr.type.exefs import decompress_code
-    raw = open(os.path.join(ROOT, "out", "exefs", "code.bin"), "rb").read()
+    raw = open(a.code, "rb").read()
     code = bytearray(decompress_code(raw))
 
     skip = {int(x, 16) for x in a.skip.split(",") if x.strip()}

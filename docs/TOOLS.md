@@ -16,6 +16,8 @@ Alle Python-Tools liegen in `tools/`. Wegwerfskripte gehören nach `scratch/`
 | `python tools/scene.py <szene>` | Standard-Szene aus Fixture-Spielstand anfahren, Bild/Log/WAV/Profil nach `scratch/scene/<szene>/` (siehe unten) |
 | `python tools/modkit.py <befehl>` | RomFS-Dateien und `.fa`-Eintraege aus dem eigenen Dump auflisten/entpacken, Test-Mod erzeugen (siehe unten) |
 | `python tools/rendercmp.py <A> <B>` | Bildvergleich Software- gegen Hardware-Renderer auf denselben Gast-Frames (M9, siehe Szenen) |
+| `python tools/builder.py check\|build ...` | Dumppruefung + kompletter Bau in einen Ausgabeordner (Builder-Paket, siehe unten) |
+| `python tools/make_builder.py` | Builder-Paket (ZIP fuer Endnutzer) aus Repo + Artefakt-Cache bauen (siehe unten) |
 
 ## Szenen (`tools/scene.py`)
 
@@ -132,6 +134,84 @@ python tools/modkit.py make-testmod --control --mods scratch/mods/ctl  # Kontrol
 * Nachweis mit Szenen: `python tools/scene.py froenborg --tag tm --every 50
   --every-from 3000 --extra 300 --mods scratch/mods/tm` (bzw. `ctl`) und die
   Bildfolgen vergleichen (docs/MODDING.md, "Stand").
+
+## Builder-Paket (Arbeitspaket 6)
+
+Ein ZIP fuer Endnutzer: Starter `LaytonBuilder.exe`, eingebettetes Python
+mit pyctr/pycryptodomex/capstone/ziglang, die Quellen des Baupfads und die
+Lizenztexte. Kein Spielinhalt; der Nutzer waehlt seinen Dump, gebaut wird
+auf seinem Rechner.
+
+**`tools/builder.py`** (Treiber, im Paket und im Repo nutzbar):
+
+```powershell
+python tools/builder.py check "<dump>.3ds"                  # nur pruefen
+python tools/builder.py build "<dump>.3ds" --game scratch/game [--keep-build]
+```
+
+* Pruefung (`check_dump`, Reihenfolge so, dass die Meldung hilft): Datei
+  vorhanden; NCSD-Kopf (sonst Hinweis CIA/CXI/kein Dump); Partition 0 ist
+  NCCH; Produktcode/Programm-ID = `CTR-P-AL6P`/`00040000000F3000` (andere
+  `CTR-P-AL6x` = falsche Region, sonst falsches Spiel; beide Felder sind nie
+  verschluesselt); Datei nicht abgeschnitten; entschluesselt (ExeFS beginnt
+  mit `.code`, RomFS mit `IVFC` - unabhaengig vom NoCrypto-Flag); SHA-256
+  des ExeFS-`.code` = `CODE_SHA256` (der Dump, aus dem alle Adressen im
+  Repo stammen). Meldungen englisch. Selbsttest mit synthetischen Koepfen:
+  `tools/selftest_tools.py` ("Builder Dumppruefung").
+* Bau: dieselben Schritte wie im Repo (`extract.py`, `extract_romfs.py`,
+  `romfs_image.py`, `build.py`) mit `--rom`/`--out`/`--out-dir`/
+  `--build-dir`; Ergebnis im Repo-Layout `<game>/out/port.exe`,
+  `out/exefs/`, `out/romfs/`, `out/romfs_image.bin`. port.exe findet die
+  Daten auch bei Start aus `out/` (runtime/main.c `data_root_fallback`,
+  docs/FRONTEND.md). Zwischenstaende (`gen_boot.c/.o`, zig-Cache ueber
+  `ZIG_GLOBAL_CACHE_DIR`/`ZIG_LOCAL_CACHE_DIR`) in `<game>/build`, nach
+  Erfolg geloescht. Spielstaende, `port.ini`, Logs bleiben bei Neubau.
+* Ausgabe zeilenweise; `@step`, `@progress`, `@error`, `@done` sind das
+  Protokoll fuer den Starter.
+
+**Starter** `tools/starter/starter.c` (+ `starter.rc`, `starter.manifest`):
+Win32 in C, gebaut von `make_builder.py` mit dem gebuendelten zig.
+Dateidialog, Drag & Drop auf Fenster oder exe, Kommandozeile
+`LaytonBuilder.exe <dump> [--out <ordner>] [--headless]`; startet
+`python\python.exe src	oolsuilder.py build ...` in einem Job-Objekt
+(Schliessen bricht den Bau samt zig ab), zeigt Log, Schritt, Laufzeit und
+Fortschritt, schreibt `<game>/builder.log`, legt nach Erfolg die
+Verknuepfung `<game>/Play Professor Layton.lnk` an; Knopf "Play" startet
+`out/port.exe` mit Arbeitsverzeichnis `<game>`. Standardausgabe: `game\`
+neben dem Starter. `--headless` (Test/Skripte): kein Fenster, Exitcode des
+Builders.
+
+**`tools/make_builder.py`** baut das ZIP reproduzierbar (Reihenfolge fest,
+Zeitstempel = Commitzeit, Starter deterministisch) aus dem Repo und einem
+Artefakt-Cache (Standard `scratch/builder-cache/`, `--cache`), Ziel
+`scratch/builder-dist/` (`--out`). Das Skript laedt nichts; die Artefakte
+(Liste: `--print-artefacts`, Tabelle `ARTEFACTS`) muessen im Cache liegen,
+ihre SHA-256 werden geprueft. Nicht festgelegte Hashes (`None`) brechen ab,
+`--allow-unpinned` gibt die gemessenen Werte zum Eintragen aus.
+
+| Artefakt | Version | Quelle |
+|---|---|---|
+| `python-3.10.11-embed-amd64.zip` | 3.10.11 | <https://www.python.org/ftp/python/3.10.11/python-3.10.11-embed-amd64.zip> |
+| `pyctr-0.7.6-py3-none-any.whl` | 0.7.6 | PyPI (`pyctr`) |
+| `pycryptodomex-3.24.2-cp37-abi3-win_amd64.whl` | 3.24.2 | PyPI (`pycryptodomex`, Abhaengigkeit von pyctr) |
+| `capstone-5.0.9-py3-none-win_amd64.whl` | 5.0.9 | PyPI (`capstone`) |
+| `ziglang-0.17.1-py3-none-win_amd64.whl` | 0.17.1 | PyPI (`ziglang`) |
+
+Die Wheels sind versionsunabhaengig (`py3-none`, `cp37-abi3`); ein anderes
+Python 3 als Embeddable aendert nur die erste Zeile. keystone und Pillow
+braucht der Baupfad nicht (pyctr importiert Pillow nur optional).
+Paketinhalt aus dem Repo (`SRC_PATHS`): `LICENSE`, `tools/builder.py`,
+`build.py`, `extract.py`, `extract_romfs.py`, `romfs_image.py`,
+`nokeys.py`, `tools/recomp/`, `tools/workarounds/`, `runtime/`,
+`third_party/` (versionierte und neue, nicht ignorierte Dateien; Endungen
+von Spieldaten werden abgelehnt). Die `pythonXY._pth` des Pakets setzt den
+Suchpfad (`Lib\site-packages`, `..\src	ools`), denn eingebettetes Python
+ignoriert `PYTHONPATH` und den Skriptordner.
+
+`--standin` (nur Test ohne Downloads): baut die Embeddable-Struktur aus der
+laufenden CPython-Installation (Stdlib als `pythonXY.zip`, DLLs, `._pth`)
+und kopiert die installierten Pakete per RECORD; Ergebnis
+`*-STANDIN.zip`, `BUILDINFO.txt` markiert es. Nicht veroeffentlichen.
 
 ## Recompiler (`tools/recomp`)
 

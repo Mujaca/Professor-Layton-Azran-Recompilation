@@ -3,6 +3,8 @@
   python tools/build.py              # komplett: Patches -> Recompiler -> C -> exe
   python tools/build.py --no-gen     # nur Runtime neu kompilieren (gen_boot.o bleibt)
   python tools/build.py --pristine   # ohne Code-Patches (zeigt, was die Workarounds verdecken)
+  python tools/build.py --out-dir O --build-dir B   # Builder-Paket (tools/builder.py):
+                                     # O statt out/, B statt build/
 
 Schritte:
  1. tools/workarounds/apply.py      code.bin -> out/exefs/code_decomp.bin (+ Patches)
@@ -120,14 +122,21 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-gen", action="store_true")
     ap.add_argument("--pristine", action="store_true")
+    ap.add_argument("--out-dir", default=os.path.join(ROOT, "out"),
+                    help="erwartet exefs/code.bin, schreibt exefs/code_decomp.bin + port.exe")
+    ap.add_argument("--build-dir", default=BUILD)
     a = ap.parse_args()
-    os.makedirs(BUILD, exist_ok=True)
-    os.makedirs(os.path.join(ROOT, "out"), exist_ok=True)
-    gen_c = os.path.join(BUILD, "gen_boot.c")
-    gen_o = os.path.join(BUILD, "gen_boot.o")
+    out_dir = os.path.abspath(a.out_dir)
+    build_dir = os.path.abspath(a.build_dir)
+    os.makedirs(build_dir, exist_ok=True)
+    os.makedirs(out_dir, exist_ok=True)
+    gen_c = os.path.join(build_dir, "gen_boot.c")
+    gen_o = os.path.join(build_dir, "gen_boot.o")
 
     if not a.no_gen:
-        apply_cmd = [sys.executable, os.path.join(TOOLS, "workarounds", "apply.py")]
+        apply_cmd = [sys.executable, os.path.join(TOOLS, "workarounds", "apply.py"),
+                     "--code", os.path.join(out_dir, "exefs", "code.bin"),
+                     "--out", os.path.join(out_dir, "exefs", "code_decomp.bin")]
         if a.pristine:
             apply_cmd.append("--none")
         print(run(apply_cmd).stdout.strip())
@@ -139,7 +148,7 @@ def main():
         # OSError EINVAL (beobachtet bei parallelen Laeufen im selben Baum).
         with gen_lock():
             run([sys.executable, "-m", "recomp.cli", "gen",
-                 "--in", os.path.join(ROOT, "out", "exefs", "code_decomp.bin"),
+                 "--in", os.path.join(out_dir, "exefs", "code_decomp.bin"),
                  "--out", gen_c, "--prologues", "--seed-pointers", "--trace",
                  "--seed-file", os.path.join(TOOLS, "recomp", "seeds.txt")],
                 cwd=ROOT, env=env)
@@ -161,13 +170,13 @@ def main():
                 print("gen_boot.o aktuell")
 
     srcs = [os.path.join(RUNTIME, s) for s in SOURCES] + lua_sources()
-    run([zig(), "cc"] + cflags() + lua_flags() + srcs + [gen_o, "-o", os.path.join(ROOT, "out", "port.exe"),
+    run([zig(), "cc"] + cflags() + lua_flags() + srcs + [gen_o, "-o", os.path.join(out_dir, "port.exe"),
                                            "-luser32", "-lgdi32", "-lwinmm",
                                            # Arbeitspaket 7: Windows-Programm ohne
                                            # Konsole (--console zeigt sie; Pipes
                                            # der Tools funktionieren weiter).
                                            "-Wl,--subsystem,windows"])
-    print("gebaut: out/port.exe")
+    print("gebaut: %s" % os.path.join(out_dir, "port.exe"))
 
 
 if __name__ == "__main__":

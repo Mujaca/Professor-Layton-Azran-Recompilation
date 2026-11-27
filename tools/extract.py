@@ -1,5 +1,9 @@
-"""Entpackt ExeFS + erstellt ein RomFS-Inventar fuer Professor Layton (Azran Legacy)."""
-import sys, os, json, collections
+"""Entpackt ExeFS + erstellt ein RomFS-Inventar fuer Professor Layton (Azran Legacy).
+
+  python tools/extract.py                                 # Repo-Layout
+  python tools/extract.py --rom D.3ds --out O --reports R # Builder (tools/builder.py)
+"""
+import sys, os, json, collections, argparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import nokeys
 nokeys.install()
@@ -22,19 +26,25 @@ def walk(node, prefix, files, dirs):
 
 
 def main():
-    os.makedirs(os.path.join(OUT, "exefs"), exist_ok=True)
-    os.makedirs(REP, exist_ok=True)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--rom", default=ROM)
+    ap.add_argument("--out", default=OUT, help="Zielordner (exefs/ darunter)")
+    ap.add_argument("--reports", default=REP)
+    a = ap.parse_args()
+    out, rep = a.out, a.reports
+    os.makedirs(os.path.join(out, "exefs"), exist_ok=True)
+    os.makedirs(rep, exist_ok=True)
 
-    with CCIReader(ROM, assume_decrypted=True) as cci:
+    with CCIReader(a.rom, assume_decrypted=True) as cci:
         ncch = cci.contents[0]
         ex = ncch.exefs
         print("ExeFS Eintraege:")
         for name, entry in ex.entries.items():
             data = ex.get_data(entry, 0, entry.size)
-            fn = os.path.join(OUT, "exefs", name.lstrip(".") + ".bin")
+            fn = os.path.join(out, "exefs", name.lstrip(".") + ".bin")
             with open(fn, "wb") as fh:
                 fh.write(data)
-            print(f"  {name:8s} {entry.size:>9,} bytes -> {os.path.relpath(fn, ROOT)}  first={data[:4].hex()}")
+            print(f"  {name:8s} {entry.size:>9,} bytes -> {os.path.relpath(fn, ROOT) if out == OUT else fn}  first={data[:4].hex()}")
 
         rf = ncch.romfs
         files, dirs = [], []
@@ -43,7 +53,7 @@ def main():
               f"{sum(s for _, s, _ in files)/2**20:,.1f} MiB")
 
         lay = sorted(files, key=lambda t: -t[1])
-        with open(os.path.join(REP, "romfs_listing.tsv"), "w", encoding="utf-8") as fh:
+        with open(os.path.join(rep, "romfs_listing.tsv"), "w", encoding="utf-8") as fh:
             fh.write("path\tsize\toffset\n")
             for p, s, o in lay:
                 fh.write(f"{p}\t{s}\t{o}\n")
@@ -76,7 +86,7 @@ def main():
             "files": len(files), "dirs": len(dirs),
             "bytes": sum(s for _, s, _ in files),
             "ext_count": dict(exts), "ext_bytes": dict(size_by_ext),
-        }, open(os.path.join(REP, "romfs_summary.json"), "w"), indent=2)
+        }, open(os.path.join(rep, "romfs_summary.json"), "w"), indent=2)
 
 
 if __name__ == "__main__":
