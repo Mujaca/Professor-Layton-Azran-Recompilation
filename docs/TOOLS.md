@@ -173,7 +173,7 @@ python tools/builder.py build "<dump>.3ds" --game scratch/game [--keep-build]
 Win32 in C, gebaut von `make_builder.py` mit dem gebuendelten zig.
 Dateidialog, Drag & Drop auf Fenster oder exe, Kommandozeile
 `LaytonBuilder.exe <dump> [--out <ordner>] [--headless]`; startet
-`python\python.exe src	oolsuilder.py build ...` in einem Job-Objekt
+`python\python.exe src\tools\builder.py build ...` in einem Job-Objekt
 (Schliessen bricht den Bau samt zig ab), zeigt Log, Schritt, Laufzeit und
 Fortschritt, schreibt `<game>/builder.log`, legt nach Erfolg die
 Verknuepfung `<game>/Play Professor Layton.lnk` an; Knopf "Play" startet
@@ -205,7 +205,7 @@ Paketinhalt aus dem Repo (`SRC_PATHS`): `LICENSE`, `tools/builder.py`,
 `nokeys.py`, `tools/recomp/`, `tools/workarounds/`, `runtime/`,
 `third_party/` (versionierte und neue, nicht ignorierte Dateien; Endungen
 von Spieldaten werden abgelehnt). Die `pythonXY._pth` des Pakets setzt den
-Suchpfad (`Lib\site-packages`, `..\src	ools`), denn eingebettetes Python
+Suchpfad (`Lib\site-packages`, `..\src\tools`), denn eingebettetes Python
 ignoriert `PYTHONPATH` und den Skriptordner.
 
 `--standin` (nur Test ohne Downloads): baut die Embeddable-Struktur aus der

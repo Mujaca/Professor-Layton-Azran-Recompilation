@@ -225,17 +225,42 @@ def stage_installed(st, sp, project, version):
     return n
 
 
+def head_blobs(files):
+    """Inhalt aus HEAD (wie im Repo gespeichert, LF) fuer unveraenderte
+    Dateien - unabhaengig von core.autocrlf des Arbeitsbaums."""
+    changed = set(git("diff", "--name-only", "HEAD", "--").splitlines())
+    tracked = [f for f in files if f not in changed]
+    known = set(git("ls-tree", "-r", "--name-only", "HEAD", "--", *SRC_PATHS).splitlines())
+    tracked = [f for f in tracked if f in known]
+    if not tracked:
+        return {}
+    req = "".join("HEAD:%s\n" % f for f in tracked).encode("utf-8")
+    out = subprocess.run(["git", "cat-file", "--batch"], cwd=ROOT, input=req,
+                         capture_output=True, check=True).stdout
+    blobs, pos = {}, 0
+    for f in tracked:
+        nl = out.index(b"\n", pos)
+        size = int(out[pos:nl].split()[2])
+        blobs[f] = out[nl + 1:nl + 1 + size]
+        pos = nl + 1 + size + 1
+    return blobs
+
+
 def stage_sources(st):
-    # versionierte + neue, nicht ignorierte Dateien (Test vor dem Commit)
+    # versionierte + neue, nicht ignorierte Dateien (Test vor dem Commit);
+    # unveraenderte aus HEAD, geaenderte/neue aus dem Arbeitsbaum
     files = git("ls-files", "--cached", "--others", "--exclude-standard", "--",
                 *SRC_PATHS).splitlines()
+    blobs = head_blobs(files)
     for rel in sorted(files):
         ext = os.path.splitext(rel)[1].lower()
         if ext in FORBIDDEN_EXT:
             raise SystemExit("FEHLER: %s darf nicht ins Paket (Spielinhalt?)" % rel)
-        src = os.path.join(ROOT, rel)
-        with open(src, "rb") as f:
-            data = f.read()
+        if rel in blobs:
+            data = blobs[rel]
+        else:
+            with open(os.path.join(ROOT, rel), "rb") as f:
+                data = f.read()
         if len(data) > 4 << 20:
             raise SystemExit("FEHLER: %s ist unerwartet gross" % rel)
         st.add_bytes("src/" + rel, data)

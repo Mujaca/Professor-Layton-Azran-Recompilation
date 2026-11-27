@@ -62,7 +62,7 @@ Your dump is only read, never copied or changed. Save games
 (`game\out\savedata`), `game\out\port.ini` and the logs
 (`game\out\logs`) are kept when you build again. Command line:
 `LaytonBuilder.exe <dump.3ds> [--out <folder>] [--headless]`; the build log
-is written to `<folder>uilder.log`.
+is written to `<folder>\builder.log`.
 
 Maintainers build the package with `python tools/make_builder.py` from the
 repository and a local cache of the bundled downloads (exact files, versions
