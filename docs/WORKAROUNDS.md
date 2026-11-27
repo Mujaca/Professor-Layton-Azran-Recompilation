@@ -291,10 +291,10 @@ ein nicht fortschreitender DSP-Status steuert den Lesevorlauf falsch.
 * Gast-/Host-Takt: 57-58 Gast-Frames/s gegen 60 Hz VBlank (Fenster-/VBlank-
   Takt 268111856/4481136 = 59,83 Hz), d. h. die Zeitbasis laeuft nicht
   auseinander; `svcGetSystemTick` (268,111856 MHz, QPC) ist monoton.
-* **Reproduzierbarkeit:** Auf HEAD 59dbf5b erreicht der natuerliche Boot in
+* **Reproduzierbarkeit:** Auf HEAD f8f75ec erreicht der natuerliche Boot in
   60 s **und** 120 s Vollspeed (ohne `HLE_LOG`) **keine** Y2R-Konvertierung
   (`HLE_Y2R_LOG=1`: 0 Zeilen, Block am Ende 0x0016E4A8), die in
-  bb5fe4c dokumentierten 41 `StartConversion` sind hier also nicht
+  ee099fa dokumentierten 41 `StartConversion` sind hier also nicht
   reproduzierbar. Der Haenger ist der Koeffizienten-/Huffman-Loop
   `fn_0016E4A0`, der aus einem Bitpuffer ohne Nutzdaten (Nullen) endlos
   Symbole erzeugt; der Bit-Refill `0x16C568` (`ldrh [r1],#2`) hat keine
@@ -433,7 +433,7 @@ Speichervergleich an der ersten Abweichung. Reines Testwerkzeug, kein
 Produktcode.
 
 **Messung:** Schnappschuss am Decoder-Einstieg `0x0016A500` im natuerlichen
-Boot (Stand `b9b2932`), Co-Simulation:
+Boot (Stand `efd9c15`), Co-Simulation:
 
 ```
 unicorn: 177609 Instruktionen
@@ -676,7 +676,7 @@ die Listen sind Setup fuer die spaetere Szene.
 nahm dort den Gast-Lock. Der Gastcode läuft aber im `game_thread`; dessen
 `hle_pump()`/`guest_yield()` sahen `t_lock_owned == 0` und gaben den Lock nie
 ab. Jeder per `svcCreateThread` gestartete Gast-Thread blockierte dauerhaft
-in `guest_lock_enter()`. Belege (Commit 60a3682): `HLE_PERFMAP` zeigte Blöcke
+in `guest_lock_enter()`. Belege (Commit b45dca9): `HLE_PERFMAP` zeigte Blöcke
 nur für Thread 2, Threads 3–6 exakt 0; `[thrlock]` erschien nie.
 
 **Korrektur (dieses Paket):** `hle_guest_enter()`/`hle_guest_leave()` in
@@ -985,7 +985,7 @@ aus zwei Gast-Threads (TLS-Kennung `F82`/`F88`), der GSP-Interrupt-Handler
   14 Listen/Frame und 40-41 Trigger/Frame; kein Retry, kein Fehler-/Abbruch-
   pfad, keine doppelten oder fehlenden Listen. Nur die Frame-Zahl differiert.
 * `repeat.py` (8x12 s, ohne Last): 7.573-7.701 Listen/12 s (~45 fps) mit dem
-  aus HEAD `282dd7d` gebauten `out/port.exe`. Mit der vorherigen (aelteren)
+  aus HEAD `9e3be56` gebauten `out/port.exe`. Mit der vorherigen (aelteren)
   Binary waren es 268-317/12 s – die Beobachtung stammt also aus einem
   anderen Build/Hostzustand, nicht aus einem Gastpfad.
 * `realload.py`: 12 s ohne Last **7.654** Listen; mit 8 CPU-Lastprozessen
@@ -1062,9 +1062,9 @@ auf `/gamecoin.dat` ab.
 
 **Messstand (Erfolgsmetrik):** `y2r cmd=0x0026 StartConversion` = **0** in
 1800 Host-Frames (30 s), Screenshot 400x480 mit **1** Farbe (000000). Der
-Stand mit 41 StartConversion gehoert zum Branch-Stand von `c60cf43`
+Stand mit 41 StartConversion gehoert zum Branch-Stand von `1a82ad6`
 (scan.py-Dekodierung der Decoder-Handler); dieser Arbeitsbaum (Baseline
-`fb31a41`) erreicht den Y2R-Framepfad noch nicht. Frontier vorher/nachher
+`30dd40b`) erreicht den Y2R-Framepfad noch nicht. Frontier vorher/nachher
 unveraendert: services 10/10, Divergenz None, M1/M2 ja, M3 nein, 0 Patches.
 ### 41-Frame-Stall: Videodaten sind vollstaendig geladen, Decoder liest ueber das Paketende – Befund 2026-11-24
 

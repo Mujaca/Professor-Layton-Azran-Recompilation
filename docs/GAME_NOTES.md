@@ -242,7 +242,7 @@ Struktur je Draw statt Registerlesen je Pixel.
   Luecken 0/0/1 statt 10/8/12 je ~40 s Titelmusik (A/B je 3 Laeufe).
 * Musik-Stream: je Kanal ein Ring aus 5 ADPCM-Puffern a 8 KB (14336 Samples,
   0,438 s) an festen Adressen um 0x2031xxxx; ein Umlauf dauert 2,19 s. Die
-  verbleibenden Null-Luecken der Titelmusik (master 08b773d: 6..13 Luecken je
+  verbleibenden Null-Luecken der Titelmusik (master 70b9f7a: 6..13 Luecken je
   ~40 s, 20..110 ms) kommen genau in diesem Takt -> das Nachfuellen kommt
   zu spaet, nicht der DSP-HLE (Filmton ist sample-genau, DSP gegen Azahar
   abgeglichen). Messung: `HLE_AUDIO_WAV` + Lueckensuche; Streuung zwischen
@@ -282,7 +282,7 @@ Struktur je Draw statt Registerlesen je Pixel.
   `HLE_YSTAT` am Titel (HW): Render-Thread 6 (Prio 26) ~640 ms/s in
   GPU-Arbeit, Hauptthread ~920 ms/s im Arbiter, Leerlauf ~85 %, ~4000
   Thread-Wechsel/s -> Engpass ist die GPU-Emulation, nicht der Scheduler.
-* DSP-Frame beim Stabhalter (2026-11-25 nachts, gegen master b8a22b6, HW,
+* DSP-Frame beim Stabhalter (2026-11-25 nachts, gegen master d5de998, HW,
   `HLE_LOG=1 HLE_AUDIO_WAV`, `--shot-every 100`): Der Takt-Thread meldet
   nur "Frame faellig", der Stabhalter fuehrt ihn zwischen Gast-Bloecken aus
   (Haenger 2: Status nie mehr halb aus Frame N, halb aus N+1). Stillstand bis
@@ -378,7 +378,7 @@ Struktur je Draw statt Registerlesen je Pixel.
 
   | Variante | Lauf 1 | Lauf 2 | Lauf 3 |
   |---|---|---|---|
-  | vorher (e902a54) | 939 / 100 | 921 / 100 | 933 / 99 |
+  | vorher (f8d4367) | 939 / 100 | 921 / 100 | 933 / 99 |
   | nur CPU-Posten (ohne Flush) | 973 / 100 | 974 / 100 | 972 / 100 |
   | dito, Vergleichslauf | 974 / 100 | 973 / 100 | 973 / 100 |
   | mit Flush alle 32 Draws | 1327 / 149 | 1344 / 150 | 1346 / 150 |

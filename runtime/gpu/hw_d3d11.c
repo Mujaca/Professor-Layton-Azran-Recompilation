@@ -2747,22 +2747,116 @@ static HANDLE g_filt_thread;
 static int g_filt_sync;              /* hw_texture_filter_sync: warten statt ungefiltert */
 static ID3DBlob *g_filt_blob[2], *g_filt_err;
 static HRESULT g_filt_hr;
+/* Bytecode der Filter-Variante (PS, GS): aus dem Plattencache oder aus
+ * g_filt_blob kopiert. */
+static unsigned char *g_filt_code[2];
+static size_t g_filt_size[2];
+
+/* Plattencache: <exe-Ordner>\shadercache\texfilter-<hash>-{ps,gs}.bin. Der
+ * Schluessel haengt am HLSL-Quelltext, den Makros und dem Shadermodell; ein
+ * geaenderter Shader legt neue Dateien an. Nur Host-Daten (unser eigener
+ * Shader), kein Gastzustand; die Bytecodes sind dieselben wie frisch
+ * uebersetzt. Spart die ~13 s Uebersetzung bei jedem Start. */
+static void filt_cache_path(char *out, size_t n, const char *kind)
+{
+    char exe[MAX_PATH];
+    char *slash;
+    uint64_t h = fnv1a((const unsigned char *)k_hlsl, (uint32_t)strlen(k_hlsl));
+    h ^= 0x54455846494C5431ULL;          /* "TEXFILT1": Makros/Modell ps_5_0/gs_5_0 */
+    DWORD len = GetModuleFileNameA(NULL, exe, sizeof(exe));
+    if (len == 0 || len >= sizeof(exe) || (slash = strrchr(exe, '\\')) == NULL) {
+        snprintf(out, n, "shadercache\\texfilter-%016llx-%s.bin", (unsigned long long)h, kind);
+        return;
+    }
+    *slash = '\0';
+    snprintf(out, n, "%s\\shadercache\\texfilter-%016llx-%s.bin", exe,
+             (unsigned long long)h, kind);
+}
+
+static int filt_cache_load(int i, const char *kind)
+{
+    char p[MAX_PATH + 96];
+    FILE *f;
+    long sz;
+    filt_cache_path(p, sizeof(p), kind);
+    f = fopen(p, "rb");
+    if (!f) return 0;
+    if (fseek(f, 0, SEEK_END) != 0 || (sz = ftell(f)) <= 0 || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return 0;
+    }
+    g_filt_code[i] = (unsigned char *)malloc((size_t)sz);
+    if (!g_filt_code[i] || fread(g_filt_code[i], 1, (size_t)sz, f) != (size_t)sz) {
+        free(g_filt_code[i]);
+        g_filt_code[i] = NULL;
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+    g_filt_size[i] = (size_t)sz;
+    return 1;
+}
+
+static void filt_cache_store(int i, const char *kind)
+{
+    char p[MAX_PATH + 96], tmp[MAX_PATH + 112], *slash;
+    FILE *f;
+    filt_cache_path(p, sizeof(p), kind);
+    snprintf(tmp, sizeof(tmp), "%s", p);
+    slash = strrchr(tmp, '\\');
+    if (slash) { *slash = '\0'; CreateDirectoryA(tmp, NULL); }
+    /* erst in eine Temporaerdatei, dann umbenennen: kein halber Cache */
+    snprintf(tmp, sizeof(tmp), "%s.%lu.tmp", p, (unsigned long)GetCurrentProcessId());
+    f = fopen(tmp, "wb");
+    if (!f) return;
+    if (fwrite(g_filt_code[i], 1, g_filt_size[i], f) != g_filt_size[i]) {
+        fclose(f);
+        DeleteFileA(tmp);
+        return;
+    }
+    fclose(f);
+    if (!MoveFileExA(tmp, p, MOVEFILE_REPLACE_EXISTING)) DeleteFileA(tmp);
+}
+
+static void filt_code_from_blob(int i)
+{
+    size_t n = ID3D10Blob_GetBufferSize(g_filt_blob[i]);
+    g_filt_code[i] = (unsigned char *)malloc(n);
+    if (!g_filt_code[i]) return;
+    memcpy(g_filt_code[i], ID3D10Blob_GetBufferPointer(g_filt_blob[i]), n);
+    g_filt_size[i] = n;
+}
 
 static DWORD WINAPI filt_compile_thread(LPVOID arg)
 {
     static const D3D_SHADER_MACRO defs[2] = { { "HW_TEXFILTER", "1" }, { NULL, NULL } };
     (void)arg;
+    if (filt_cache_load(0, "ps") && filt_cache_load(1, "gs")) {
+        g_filt_hr = S_OK;
+        return 0;
+    }
+    free(g_filt_code[0]); g_filt_code[0] = NULL;
+    free(g_filt_code[1]); g_filt_code[1] = NULL;
+    if (!g_pfn_d3d_compile) { g_filt_hr = E_FAIL; return 0; }
     g_filt_hr = g_pfn_d3d_compile(k_hlsl, strlen(k_hlsl), "pica_hw_filt", defs, NULL,
                                   "PSMain", "ps_5_0", 0, 0, &g_filt_blob[0], &g_filt_err);
     if (SUCCEEDED(g_filt_hr))
         g_filt_hr = g_pfn_d3d_compile(k_hlsl, strlen(k_hlsl), "pica_hw_filt", defs, NULL,
                                       "GSMain", "gs_5_0", 0, 0, &g_filt_blob[1], &g_filt_err);
+    if (SUCCEEDED(g_filt_hr) && g_filt_blob[0] && g_filt_blob[1]) {
+        filt_code_from_blob(0);
+        filt_code_from_blob(1);
+        if (g_filt_code[0] && g_filt_code[1]) {
+            filt_cache_store(0, "ps");
+            filt_cache_store(1, "gs");
+        }
+    }
     return 0;
 }
 
 static void filt_start_compile(void)
 {
-    if (g_filt_thread || g_filt_state != 0 || !g_pfn_d3d_compile) return;
+    if (g_filt_thread || g_filt_state != 0) return;
     g_filt_thread = CreateThread(NULL, 0, filt_compile_thread, NULL, 0, NULL);
 }
 
@@ -2778,8 +2872,12 @@ static void filt_release(void)
 {
     int i;
     filt_join();
-    for (i = 0; i < 2; i++)
+    for (i = 0; i < 2; i++) {
         if (g_filt_blob[i]) { ID3D10Blob_Release(g_filt_blob[i]); g_filt_blob[i] = NULL; }
+        free(g_filt_code[i]);
+        g_filt_code[i] = NULL;
+        g_filt_size[i] = 0;
+    }
     if (g_filt_err) { ID3D10Blob_Release(g_filt_err); g_filt_err = NULL; }
     if (g_ps_filt) { ID3D11PixelShader_Release(g_ps_filt); g_ps_filt = NULL; }
     if (g_gs_filt) { ID3D11GeometryShader_Release(g_gs_filt); g_gs_filt = NULL; }
@@ -2798,10 +2896,7 @@ static int filt_active(void)
     if (g_filt_state == 0) {
         g_filt_state = -1;
         tw = hw_now_us();
-        if (!g_filt_thread && !g_filt_blob[0]) {
-            if (!g_pfn_d3d_compile) goto fail;
-            filt_compile_thread(NULL);
-        }
+        if (!g_filt_thread && !g_filt_code[0]) filt_compile_thread(NULL);
         /* Uebersetzung laeuft noch: bis dahin ungefiltert anzeigen statt
            das Spiel anzuhalten (gemessen ~13 s nach dem Start). */
         if (g_filt_thread && !g_filt_sync &&
@@ -2810,17 +2905,15 @@ static int filt_active(void)
             return 0;
         }
         filt_join();
-        if (FAILED(g_filt_hr) || !g_filt_blob[0] || !g_filt_blob[1]) {
+        if (FAILED(g_filt_hr) || !g_filt_code[0] || !g_filt_code[1]) {
             fprintf(stderr, "[hw] Texturfilter-Shader: %s\n",
                     g_filt_err ? (char *)ID3D10Blob_GetBufferPointer(g_filt_err) : "?");
             goto fail;
         }
         if (FAILED(ID3D11Device_CreatePixelShader(
-                g_dev, ID3D10Blob_GetBufferPointer(g_filt_blob[0]),
-                ID3D10Blob_GetBufferSize(g_filt_blob[0]), NULL, &g_ps_filt)) ||
+                g_dev, g_filt_code[0], g_filt_size[0], NULL, &g_ps_filt)) ||
             FAILED(ID3D11Device_CreateGeometryShader(
-                g_dev, ID3D10Blob_GetBufferPointer(g_filt_blob[1]),
-                ID3D10Blob_GetBufferSize(g_filt_blob[1]), NULL, &g_gs_filt)))
+                g_dev, g_filt_code[1], g_filt_size[1], NULL, &g_gs_filt)))
             goto fail;
         memset(&bd, 0, sizeof(bd));
         bd.ByteWidth = 16;

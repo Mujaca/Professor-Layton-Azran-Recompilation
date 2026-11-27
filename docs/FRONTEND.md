@@ -373,10 +373,13 @@ Texturfilter glaettet das **nur in der Anzeige**.
   Transfers und `--shot` bleiben nativ. Nachweis: froenborg `--every 50`
   native Bilder 89/89 gleich zu master bei Skala 1 und bei Skala 3 mit
   `xbrz`; Skala 3 `none` auch die `hd_`-Bilder 89/89 gleich.
-* **Kosten:** Die Filter-Variante wird beim Start im Hintergrund
+* **Kosten:** Die Filter-Variante wird beim ersten Start im Hintergrund
   uebersetzt (~13 s CPU, parallel zum Spielstart); bis dahin zeigt die
   Anzeige ungefiltert, das Spiel laeuft ohne Halt weiter (Log `[hw]
-  Texturfilter ... bereit`). Mit `--deterministic` wartet der erste
+  Texturfilter ... bereit`). Der Bytecode landet in
+  `shadercache\texfilter-<hash>-{ps,gs}.bin` neben `port.exe`; spaetere
+  Starts laden ihn sofort (Schluessel = HLSL-Quelltext, ein geaenderter
+  Shader wird neu uebersetzt). Mit `--deterministic` wartet der erste
   gefilterte Durchgang stattdessen (hd-Bilder reproduzierbar, Start ~13 s
   laenger). GPU-Zeit und fps siehe docs/GAME_NOTES.md "Texturfilter".
 * Selbsttest: `tests/hw_selftest.c` (`test_texture_filter`, WARP):

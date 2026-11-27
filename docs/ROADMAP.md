@@ -79,7 +79,7 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
    Overlay-Zeichnen); C. Funktions-Hooks ueber Recompiler-Einstiegspruefung.
    Mods standardmaessig aus; Gate, Frontier und Vergleiche laufen ohne Mods;
    Schnittstelle generisch, keine Spieladressen in der Runtime.
-   Stand 2026-11-26 (Branch mods-overlay): Stufe A umgesetzt (RomFS-Overlay,
+   Stand 2026-11-26 (in master): Stufe A umgesetzt (RomFS-Overlay,
    Archiv-Overlay mit unkomprimierter Dateitabelle, `tools/modkit.py`,
    Test-Mod aendert die erste Dialogzeile sichtbar; Nachweis in
    docs/MODDING.md, "Stand Stufe A"). Stufe B (Lua ohne `draw`) umgesetzt:
@@ -90,6 +90,9 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
    QoL-Ideen (als Beispiel-Mods, nicht in der Runtime):
    - Lupenmodus: Lupe folgt dem Mauszeiger, Klick untersucht; eigener
      Cursor nur in diesem Modus (braucht Spielzustand -> Lua, Stufe B).
+   - Scharfe Schrift: Texturersatz (Textur am Inhalt erkennen, durch
+     hochaufgeloeste ersetzen) als Mod-Stufe; die Dialogschrift wird direkt
+     auf den Bildschirm gezeichnet (kein Zwischenbild), Ersatz greift also.
 6. **Builder-Paket fuer Endnutzer** (vom Nutzer aufgenommen 2026-11-26):
    ein Download (ZIP mit kleinem Starter), der Python (Embeddable), die
    Build-Abhaengigkeiten (pyctr, capstone, ziglang) und die Quellen buendelt;
@@ -114,12 +117,13 @@ Ab M4 sind Bildvergleiche zulässig, vorher nicht.
    Vorgehen: erst profilieren (`[hwtime]`, Host-Profiler), dann je Ursache
    ein Experiment; Bildvergleich (M9-Werte) darf sich nicht verschlechtern.
    Zielwerte legt der Mensch fest.
-9. **Texturfilter der internen Aufloesung** (Branch texture-filter,
-   2026-11-26): `--texture-filter none|linear|xbrz` / `[display]
+9. **Texturfilter der internen Aufloesung** (in master, 2026-11-27): `--texture-filter none|linear|xbrz` / `[display]
    texture_filter`, Standard `none`; nur Anzeige, native Bilder bitgleich
    (froenborg 89/89 bei Skala 1 und Skala 3 mit xbrz). Details und
    Kosten: docs/FRONTEND.md "Texturfilter", docs/GAME_NOTES.md
-   "Texturfilter". Sichttest durch den Nutzer offen.
+   "Texturfilter". Sichttest Nutzer 2026-11-27: gemergt, Standard bleibt
+   `none`; xbrz glaettet Pixelgrafik gut, wirkt auf der (schon geglaetteten)
+   Schrift unruhig.
 
 ## Frontier-Verlauf
 

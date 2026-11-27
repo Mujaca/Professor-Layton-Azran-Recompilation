@@ -4973,7 +4973,7 @@ void hle_init(ArmCpu *c, const char *romfs_dir) {
 /* Der Stab gehoert dem Thread, der Gastcode ausfuehrt: game_thread
  * (runtime/main.c) meldet sich hier als Hauptthread (Index 0) an, nicht der
  * Host-Hauptthread, der hle_init() ausfuehrt (Befund 2026-11-24, Commit
- * 60a3682). */
+ * b45dca9). */
 void hle_guest_enter(void) {
     SchedThread *s;
     sched_init_once();
