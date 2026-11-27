@@ -33,6 +33,7 @@
 #define FS_UNLINK(p) unlink(p)
 #endif
 
+#define ARCHIVE_SELFNCCH 0x00000003u
 #define ARCHIVE_SAVEDATA 0x00000004u
 #define ARCHIVE_EXTDATA  0x00000006u
 #define ARCHIVE_SHARED   0x00000007u
@@ -385,6 +386,12 @@ int64_t fs_archive_open(uint32_t archive_id, const uint8_t *raw, uint32_t raw_le
 
     if (result) *result = FS_RESULT_SUCCESS;
     switch (archive_id) {
+        case ARCHIVE_SELFNCCH:
+            /* Azahar ArchiveFactory_SelfNCCH::Open: das laufende Programm
+             * selbst (RomFS + ExeFS-Abschnitte), kein Host-Verzeichnis. Dateien
+             * oeffnet hle.c ueber binaere SelfNCCH-Pfade; alle anderen
+             * Operationen lehnt resolve() ab. */
+            return register_archive(archive_id, "");
         case ARCHIVE_SAVEDATA:
             savedata_paths(program_id, root, sizeof(root), meta, sizeof(meta));
             if (!path_is_dir(root)) {
@@ -440,6 +447,11 @@ uint32_t fs_archive_close(uint64_t handle) {
     return FS_RESULT_SUCCESS;
 }
 
+uint32_t fs_archive_id(uint64_t handle) {
+    FsArchive *a = archive_by_handle(handle);
+    return (a != NULL) ? a->id : 0u;
+}
+
 int fs_archive_root(uint64_t handle, char *out, size_t out_size) {
     FsArchive *a = archive_by_handle(handle);
     if (a == NULL) return 0;
@@ -466,6 +478,9 @@ static uint32_t resolve(uint64_t handle, const char *guest, char *host, size_t h
                         size_t rel_n) {
     FsArchive *a = archive_by_handle(handle);
     if (a == NULL) return FS_RESULT_INVALID_ARCHIVE_HANDLE;
+    /* Azahar SelfNCCHArchive: Delete/Rename/Create/OpenDirectory ->
+     * UnsupportedOpenFlags; OpenFile mit Textpfad -> InvalidPath. */
+    if (a->id == ARCHIVE_SELFNCCH) return FS_RESULT_UNSUPPORTED_OPEN_FLAGS;
     if (!guest_rel(guest, rel, rel_n)) return FS_RESULT_INVALID_PATH;
     build_host(a->root, rel, host, host_n);
     return FS_RESULT_SUCCESS;
@@ -601,7 +616,9 @@ uint32_t fs_archive_get_free_bytes(uint64_t handle, uint64_t *bytes) {
         if (bytes) *bytes = 0;
         return FS_RESULT_INVALID_ARCHIVE_HANDLE;
     }
-    if (bytes) *bytes = 32ull * 1024ull * 1024ull;
+    /* SelfNCCHArchive::GetFreeBytes: 0. */
+    if (bytes) *bytes = (fs_archive_id(handle) == ARCHIVE_SELFNCCH) ? 0ull
+                                                                     : 32ull * 1024ull * 1024ull;
     return FS_RESULT_SUCCESS;
 }
 

@@ -535,3 +535,18 @@ Compilers (zig cc nativ: 147 vfmadd in gpu.c).
   Funktionsparameter kopiert: Titel 75 -> 27 Host-fps deterministisch),
   ungefiltertes Sampling vorab mit konstanten Einheiten (kein Gewinn,
   Uebersetzen 14 s).
+
+## Daily Puzzle / SpotPass-Download (2026-11-27, Branch boss-service)
+
+Weg: Titel -> Bonuses (Slot waehlen) -> Daily Puzzle -> Begruessung
+weitertippen -> Download -> OK! (Szene `daily-puzzle`). Ablauf des Spiels:
+SMDH-Icon aus dem eigenen ExeFS lesen (`OpenArchive(3)` + binaerer Pfad
+`{2,"icon"}`, 0x36C0 Byte; die Funktion `fn_00211CEC` ruft bei fehlgeschlagenem
+OpenArchive `err:f E0A046DA` an `0x212FD0` - das war der gemeldete Absturz),
+BOSS-ExtData `0xA86` anlegen, boss:U `InitializeSession`,
+`GetNsDataIdList(0x00010008)`, 21 x `SendProperty`, `RegisterImmediateTask`,
+dann ac:u `ConnectAsync`. Ohne Netz: `GetConnectResult` Fehler, ac
+`GetLastErrorCode`, Fehler-Applet 0x406 (Request/Response, Start, WakeupByExit),
+danach DSP-Komponente neu laden und die eigene Meldung "An error has
+occurred." mit OK!. Das Datum oben (01/01/1900) zeigt das Spiel schon vor dem
+Download (keine Daten vorhanden).

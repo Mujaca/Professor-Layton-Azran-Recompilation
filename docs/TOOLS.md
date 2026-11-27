@@ -31,6 +31,7 @@ python tools/scene.py raetsel1-neu               # neues Spiel bis Titelkarte Ra
 python tools/scene.py froenborg --renderer soft  # Continue Slot 1: 3D-Dialog Froenborg (~2 min)
 python tools/scene.py raetsel1 --wav --profile   # Continue Slot 2 (Spielstand nach Raetsel 001)
 python tools/scene.py fixture-raetsel1           # erzeugt den Slot-2-Spielstand neu (~3 min)
+python tools/scene.py daily-puzzle               # Bonuses -> Daily Puzzle -> Download ohne Netz (~5 min)
 python tools/scene.py froenborg --every 150 --extra 600   # Bildfolge, 600 Gast-Frames laenger
 python tools/scene.py titel --press touch@g2550:20:160:64 --target 2850   # eigene Eingaben
 python tools/scene.py froenborg --renderer soft --tag soft --every 50      # -> scratch/scene/froenborg-soft/
@@ -82,7 +83,10 @@ python tools/scene.py froenborg --renderer soft --tag soft --every 50      # -> 
   aufloesen), `spielstand/` (Spielstand nach dem Lauf, z. B. Quelle fuer eine
   neue Fixture).
 * Touch-Ziele mit vorhandenem Spielstand: New Game (160,64), Continue
-  (160,118); Tastatur-"OK!" (160,225); Slots 1/2/3 (160,35/106/175).
+  (160,118), Bonuses (160,172); Tastatur-"OK!" (160,225); Slots 1/2/3
+  (160,35/106/175). `daily-puzzle`: Bonuses g2550, Slot 1 g2850, Daily
+  Puzzle g3300, Dialog bis g5600, Download g5800, OK! g6000, Fehler-OK!
+  g6300 (Konstanten `DAILY_*`).
   Zeitpunkte stehen in `SCENES` und sind an Bildfolgen ausgemessen
   (`--every N` in Gast-, `--every-host N` in Host-Frames).
 * Fixtures: `froenborg` = Kopie der Nutzer-Spielstaende (Slot 1 "abc",
