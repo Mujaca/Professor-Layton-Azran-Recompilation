@@ -52,26 +52,26 @@ NAME = "LaytonBuilder"
 ARTEFACTS = [
     {"kind": "python", "name": "python-3.10.11-embed-amd64.zip", "version": "3.10.11",
      "url": "https://www.python.org/ftp/python/3.10.11/python-3.10.11-embed-amd64.zip",
-     "sha256": None, "license": "PSF-2.0 (LICENSE.txt im Archiv)"},
+     "sha256": "608619f8619075629c9c69f361352a0da6ed7e62f83a0e19c63e0ea32eb7629d", "license": "PSF-2.0 (LICENSE.txt im Archiv)"},
     {"kind": "wheel", "name": "pyctr-0.7.6-py3-none-any.whl", "project": "pyctr",
      "version": "0.7.6",
      "url": "https://files.pythonhosted.org/packages/py3/p/pyctr/pyctr-0.7.6-py3-none-any.whl",
-     "sha256": None, "license": "MIT"},
+     "sha256": "60fe1dfa2af9fc518a2e4b38e39f42e48eae1f27c594e677836fd04726bb2323", "license": "MIT"},
     {"kind": "wheel", "name": "pycryptodomex-3.24.2-cp37-abi3-win_amd64.whl",
      "project": "pycryptodomex", "version": "3.24.2",
      "url": "https://files.pythonhosted.org/packages/cp37/p/pycryptodomex/"
             "pycryptodomex-3.24.2-cp37-abi3-win_amd64.whl",
-     "sha256": None, "license": "BSD-2-Clause / Public Domain"},
+     "sha256": "6e912e3a21061bf8f4ce89223cb46f5e98a6b32420d08d770605891a2be266c6", "license": "BSD-2-Clause / Public Domain"},
     {"kind": "wheel", "name": "capstone-5.0.9-py3-none-win_amd64.whl", "project": "capstone",
      "version": "5.0.9",
      "url": "https://files.pythonhosted.org/packages/py3/c/capstone/"
             "capstone-5.0.9-py3-none-win_amd64.whl",
-     "sha256": None, "license": "BSD-3-Clause"},
+     "sha256": "732cedbbb56d42e723f14d7af6387f1454194a820b4b96b56d1e53f865ef85d0", "license": "BSD-3-Clause"},
     {"kind": "wheel", "name": "ziglang-0.17.1-py3-none-win_amd64.whl", "project": "ziglang",
      "version": "0.17.1",
      "url": "https://files.pythonhosted.org/packages/py3/z/ziglang/"
             "ziglang-0.17.1-py3-none-win_amd64.whl",
-     "sha256": None, "license": "MIT (+ Lizenzen der mitgelieferten libc/libc++)"},
+     "sha256": "69c3dfc3aff6a297ec4017aa904782c0e450eb988982d7f675d83edce27526fb", "license": "MIT (+ Lizenzen der mitgelieferten libc/libc++)"},
 ]
 
 # Quellen im Paket (git ls-files unter diesen Pfaden). Nur der Baupfad:
