@@ -419,6 +419,23 @@ def write_zip(st, path, top, epoch):
     os.replace(tmp, path)
 
 
+def fetch_artefacts(cache):
+    """Nur auf ausdruecklichen Wunsch (--fetch): fehlende Artefakte laden.
+    Die Pruefung gegen die festgelegten SHA-256 bleibt beim Paketbau; eine
+    veraenderte Datei bricht dort ab."""
+    import urllib.request
+    os.makedirs(cache, exist_ok=True)
+    for art in ARTEFACTS:
+        p = os.path.join(cache, art["name"])
+        if os.path.isfile(p):
+            continue
+        print("lade %s" % art["url"])
+        tmp = p + ".part"
+        with urllib.request.urlopen(art["url"], timeout=300) as r, open(tmp, "wb") as f:
+            shutil.copyfileobj(r, f, 1 << 20)
+        os.replace(tmp, p)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--cache", default=os.path.join(ROOT, "scratch", "builder-cache"))
@@ -429,10 +446,15 @@ def main():
     ap.add_argument("--standin", action="store_true",
                     help="lokale Python-Installation statt Artefakten (nur Test)")
     ap.add_argument("--standin-python", default=sys.base_prefix)
+    ap.add_argument("--fetch", action="store_true",
+                    help="fehlende Artefakte von ihrer URL in --cache laden (danach wie "
+                         "immer per SHA-256 geprueft; fuer CI und einen leeren Cache)")
     a = ap.parse_args()
     if a.print_artefacts:
         print_artefacts()
         return 0
+    if a.fetch:
+        fetch_artefacts(a.cache)
 
     t0 = time.time()
     st = Stage()

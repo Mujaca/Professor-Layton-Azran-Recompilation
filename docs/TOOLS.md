@@ -188,10 +188,19 @@ Builders.
 **`tools/make_builder.py`** baut das ZIP reproduzierbar (Reihenfolge fest,
 Zeitstempel = Commitzeit, Starter deterministisch) aus dem Repo und einem
 Artefakt-Cache (Standard `scratch/builder-cache/`, `--cache`), Ziel
-`scratch/builder-dist/` (`--out`). Das Skript laedt nichts; die Artefakte
-(Liste: `--print-artefacts`, Tabelle `ARTEFACTS`) muessen im Cache liegen,
-ihre SHA-256 werden geprueft. Nicht festgelegte Hashes (`None`) brechen ab,
-`--allow-unpinned` gibt die gemessenen Werte zum Eintragen aus.
+`scratch/builder-dist/` (`--out`). Ohne `--fetch` laedt das Skript nichts;
+die Artefakte (Liste: `--print-artefacts`, Tabelle `ARTEFACTS`) muessen im
+Cache liegen. `--fetch` laedt fehlende Artefakte von ihrer URL nach. In
+jedem Fall werden die SHA-256 geprueft; nicht festgelegte Hashes (`None`)
+brechen ab, `--allow-unpinned` gibt die gemessenen Werte zum Eintragen aus.
+
+**Release per GitHub Actions:** `.github/workflows/release-builder.yml`
+laeuft bei einem Tag `v*` (z. B. `git tag v0.1.0`, `git push origin
+v0.1.0`) oder manuell ("Run workflow"): Windows-Runner, Python 3.12,
+`python tools/make_builder.py --fetch --cache builder-cache --out dist`,
+ZIP als Workflow-Artefakt; bei einem Tag zusaetzlich `gh release create`
+mit dem ZIP und seiner SHA-256 in den Release-Notizen. Kein ROM noetig, das
+Gate (`check.py`) laeuft dort nicht (braucht den Dump).
 
 | Artefakt | Version | Quelle |
 |---|---|---|

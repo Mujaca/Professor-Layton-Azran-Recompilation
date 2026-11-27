@@ -46,7 +46,9 @@ installs or downloads nothing. It contains no game content.
 1. You need Windows 10/11 (x64) with a Direct3D 11 GPU, about 3 GB of free
    disk space and a **decrypted** dump of the European cartridge
    (`CTR-P-AL6P`, `.3ds`, e.g. made with GodMode9 on your own console).
-2. Extract the ZIP to a folder you can write to and start
+2. Download `LaytonBuilder-<version>.zip` from the
+   [Releases](https://github.com/Mujaca/Professor-Layton-Azran-Recompilation/releases)
+   page, extract it to a folder you can write to and start
    `LaytonBuilder.exe`.
 3. Click **Choose dump...** (or drop the `.3ds` onto the window or onto
    `LaytonBuilder.exe`). The builder checks the dump first - it must be a
@@ -67,7 +69,10 @@ is written to `<folder>\builder.log`.
 Maintainers build the package with `python tools/make_builder.py` from the
 repository and a local cache of the bundled downloads (exact files, versions
 and checksums: `python tools/make_builder.py --print-artefacts`,
-[`docs/TOOLS.md`](docs/TOOLS.md)).
+[`docs/TOOLS.md`](docs/TOOLS.md); `--fetch` downloads missing files, which
+are always checked against the pinned SHA-256). Pushing a tag `v*` runs the
+GitHub workflow `.github/workflows/release-builder.yml`, which builds the
+package the same way and attaches it to a new release.
 
 ## Requirements (building from source)
 

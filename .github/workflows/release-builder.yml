@@ -1,0 +1,67 @@
+# Builds the end-user builder package (LaytonBuilder-*.zip, work package 6)
+# and attaches it to a GitHub release.
+#
+# Trigger: pushing a tag like v0.1.0 (git tag v0.1.0 && git push origin v0.1.0),
+# or manually via "Run workflow" (then the ZIP is only kept as a workflow
+# artifact, no release is created).
+#
+# The package contains no game data: the build runs without the ROM. The
+# Python embeddable distribution and the wheels are downloaded from python.org
+# and PyPI and checked against the SHA-256 values pinned in
+# tools/make_builder.py; a changed file stops the build.
+name: Release builder package
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false   # tools/azahar is reference only, not packaged
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build package (downloads and verifies pinned artefacts)
+        shell: pwsh
+        run: python tools/make_builder.py --fetch --cache builder-cache --out dist
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LaytonBuilder
+          path: dist/*.zip
+          if-no-files-found: error
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $zip = Get-ChildItem dist/*.zip | Select-Object -First 1
+          $hash = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
+          $notes = @"
+          Builder package for the static recompilation of Professor Layton and the Azran Legacy (EUR).
+
+          It contains **no game data**. You need your own decrypted dump of the EUR cartridge (.3ds).
+          Extract the ZIP, start ``LaytonBuilder.exe`` and pick your dump; see "Using the builder" in the README.
+
+          SHA-256 of ``$($zip.Name)``: ``$hash``
+
+          ``LaytonBuilder.exe`` is not signed; Windows SmartScreen may warn on first start.
+          "@
+          gh release create "$env:GITHUB_REF_NAME" $zip.FullName --title "$env:GITHUB_REF_NAME" --notes $notes
