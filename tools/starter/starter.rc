@@ -1,0 +1,27 @@
+// Ressourcen des Starters (tools/starter/starter.c): nur Manifest
+// (Common Controls 6, DPI-Bewusstsein, asInvoker) und Versionsinfo.
+#include <windows.h>
+
+1 RT_MANIFEST "starter.manifest"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION 1,0,0,0
+PRODUCTVERSION 1,0,0,0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "FileDescription", "Professor Layton and the Azran Legacy - Port Builder"
+      VALUE "ProductName", "Layton port builder (GPL-3.0)"
+      VALUE "OriginalFilename", "LaytonBuilder.exe"
+      VALUE "FileVersion", "1.0.0.0"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END

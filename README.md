@@ -36,14 +36,47 @@ the hardware renderer. This is a work-in-progress research project: expect
 bugs, slow scenes and occasional hangs. Progress and milestones are tracked in
 [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-## Requirements
+## Using the builder
+
+The builder package (`LaytonBuilder-<version>.zip`) is the easiest way to
+build the port: it bundles everything needed (an embedded Python, the Zig C
+compiler, the recompiler and runtime sources and their license texts) and
+installs or downloads nothing. It contains no game content.
+
+1. You need Windows 10/11 (x64) with a Direct3D 11 GPU, about 3 GB of free
+   disk space and a **decrypted** dump of the European cartridge
+   (`CTR-P-AL6P`, `.3ds`, e.g. made with GodMode9 on your own console).
+2. Extract the ZIP to a folder you can write to and start
+   `LaytonBuilder.exe`.
+3. Click **Choose dump...** (or drop the `.3ds` onto the window or onto
+   `LaytonBuilder.exe`). The builder checks the dump first - it must be a
+   full cartridge dump of the European release, decrypted and unmodified -
+   and explains what is wrong otherwise (wrong region, encrypted dump, CIA
+   file, other game, incomplete or modified dump).
+4. The build runs with a progress display; the first build takes several
+   minutes. The result goes to the `game` folder next to the builder.
+5. Click **Play**, or use the shortcut `game\Play Professor Layton`
+   (or start `game\out\port.exe`).
+
+Your dump is only read, never copied or changed. Save games
+(`game\out\savedata`), `game\out\port.ini` and the logs
+(`game\out\logs`) are kept when you build again. Command line:
+`LaytonBuilder.exe <dump.3ds> [--out <folder>] [--headless]`; the build log
+is written to `<folder>\builder.log`.
+
+Maintainers build the package with `python tools/make_builder.py` from the
+repository and a local cache of the bundled downloads (exact files, versions
+and checksums: `python tools/make_builder.py --print-artefacts`,
+[`docs/TOOLS.md`](docs/TOOLS.md)).
+
+## Requirements (building from source)
 
 * Windows 10/11 (x64), a GPU with Direct3D 11
 * Python 3.10+
 * A **decrypted** dump of the EUR cartridge (`.3ds`, e.g. made with
   GodMode9 on your own console)
 
-## Building
+## Building from source
 
 1. Place your dump in the repository root under exactly this name:
    `Professor Layton and the Azran Legacy (Europe).3ds`
@@ -67,6 +100,9 @@ bugs, slow scenes and occasional hangs. Progress and milestones are tracked in
    ```powershell
    .\out\port.exe
    ```
+
+   (Double-clicking `out\port.exe` works too: it finds its data in the
+   parent folder.)
 
    The Direct3D 11 renderer is the default. `--scale 2` (or `3`, `4`)
    renders at a higher internal resolution; with it, `--texture-filter
@@ -101,6 +137,7 @@ default; start with `--mods`. See the
 ```
 tools/recomp/      ARM11 -> C recompiler (game-agnostic)
 tools/workarounds/ game-specific deviations (debt list, currently empty)
+tools/starter/     LaytonBuilder.exe (builder package starter, Win32 C)
 tools/g3ds/        analysis tools (trace diff, guest refs, ...)
 runtime/cpu/       CPU state, instruction semantics
 runtime/kernel/    SVCs, threads, IPC, 3DS services

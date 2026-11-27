@@ -503,6 +503,87 @@ def test_dynamic_pc_resume():
     need("case 0x0016A600u: goto L_0016A590_0016A600;" in tail,
          "Ruecksprung in die Funktionsmitte fehlt:\n%s" % code)
     need("default: return;" in tail, "kein Rueckfall aus dem Resume-Switch:\n%s" % code)
+def _fake_cci(product=b"CTR-P-AL6P", program_id=0x00040000000F3000, code=b"A" * 100,
+              encrypted=False, truncate=0):
+    """Synthetischer NCSD-Dump (kein Spielinhalt): Partition 0 = NCCH mit
+    ExeFS (.code) und RomFS (IVFC-Magic)."""
+    import struct
+    mu = 0x200
+    p0 = 0x4000
+    exefs = bytearray(0x200)
+    struct.pack_into("<8sII", exefs, 0, b".code", 0, len(code))
+    exefs += code + bytes((-len(code)) % mu)
+    romfs = b"IVFC" + bytes(mu - 4)
+    ncch = bytearray(0x200)
+    ncch[0x100:0x104] = b"NCCH"
+    struct.pack_into("<Q", ncch, 0x108, program_id)
+    struct.pack_into("<Q", ncch, 0x118, program_id)
+    ncch[0x150:0x150 + len(product)] = product
+    ncch[0x188 + 7] = 0 if encrypted else 0x04
+    exefs_off = 1
+    romfs_off = exefs_off + len(exefs) // mu
+    struct.pack_into("<II", ncch, 0x1A0, exefs_off, len(exefs) // mu)
+    struct.pack_into("<II", ncch, 0x1B0, romfs_off, len(romfs) // mu)
+    if encrypted:
+        exefs = bytes(b ^ 0x5A for b in exefs)
+        romfs = bytes(b ^ 0x5A for b in romfs)
+    part = bytes(ncch) + bytes(exefs) + romfs
+    head = bytearray(p0)
+    head[0x100:0x104] = b"NCSD"
+    struct.pack_into("<II", head, 0x120, p0 // mu, len(part) // mu)
+    data = bytes(head) + part
+    return data[:len(data) - truncate] if truncate else data
+
+
+def test_builder_dumpcheck():
+    """Builder-Dumppruefung (tools/builder.py) mit synthetischen Koepfen:
+    richtiger Dump, falsches Format/Region/Spiel, verschluesselt, unvollstaendig,
+    abweichender Code."""
+    import hashlib
+    import struct
+    import builder
+    d = OUT / "dumpcheck"
+    d.mkdir(parents=True, exist_ok=True)
+    code = b"A" * 100
+    good_hash = hashlib.sha256(code).hexdigest()
+
+    def expect(name, data, want, **kw):
+        f = d / (name + ".3ds")
+        f.write_bytes(data)
+        try:
+            builder.check_dump(str(f), code_sha256=kw.get("h", good_hash))
+            got = "ok"
+        except builder.DumpError as e:
+            got = e.code
+            need(e.message and e.message.isascii(), "%s: Meldung englisch/ASCII" % name)
+        need(got == want, "%s: erwartet %s, bekommen %s" % (name, want, got))
+
+    expect("ok", _fake_cci(), "ok")
+    expect("klein", b"x" * 100, "not_3ds")
+    expect("zufall", bytes(0x400), "not_3ds")
+    cia = bytearray(0x400)
+    struct.pack_into("<I", cia, 0, 0x2020)
+    expect("cia", bytes(cia), "cia")
+    ncch = bytearray(0x400)
+    ncch[0x100:0x104] = b"NCCH"
+    expect("cxi", bytes(ncch), "ncch")
+    expect("usa", _fake_cci(product=b"CTR-P-AL6E", program_id=0x00040000000F2F00), "wrong_region")
+    expect("jpn", _fake_cci(product=b"CTR-P-AL6J", program_id=0x0004000000000001), "wrong_region")
+    expect("anderes", _fake_cci(product=b"CTR-P-ABCD", program_id=0x0004000000001234), "wrong_game")
+    expect("falsche_id", _fake_cci(program_id=0x0004000000001234), "wrong_game")
+    expect("verschluesselt", _fake_cci(encrypted=True), "encrypted")
+    expect("abgeschnitten", _fake_cci(truncate=0x100), "truncated")
+    expect("anderer_code", _fake_cci(code=b"B" * 100), "code_mismatch")
+    try:
+        builder.check_dump(str(d / "gibt_es_nicht.3ds"))
+        need(False, "fehlende Datei akzeptiert")
+    except builder.DumpError as e:
+        need(e.code == "not_found", "fehlende Datei: " + e.code)
+    # Standardwert: Hash des echten EUR-.code, nicht der synthetische
+    need(builder.CODE_SHA256 != good_hash and len(builder.CODE_SHA256) == 64,
+         "CODE_SHA256 gesetzt")
+
+
 def test_ldr_pc_stack_return():
     """`ldr pc,[sp],#imm` ist ein Epilog (Rueckkehr), kein indirekter Aufruf.
 
@@ -582,6 +663,7 @@ TESTS = [
     ("Ruecksprung in Funktionsmitte", test_dynamic_pc_resume),
     ("ldr pc aus SP = Rueckkehr", test_ldr_pc_stack_return),
     ("pc-relative LR = Fortsetzung", test_pc_relative_lr_continuation),
+    ("Builder Dumppruefung (synthetisch)", test_builder_dumpcheck),
 ]
 
 

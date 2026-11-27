@@ -41,6 +41,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 #include <windows.h>
 
 #define MEM_SIZE 0x30000000u
@@ -224,6 +225,35 @@ static int mods_key_det(const char *name) {
     return v < 0 ? -1 : 0;
 }
 
+/* Arbeitspaket 6 (Builder-Paket): Alle Spieldaten liegen relativ zum
+ * Arbeitsverzeichnis unter out/ (Repo-Layout: <wurzel>/out/port.exe). Fehlt
+ * out/exefs/code_decomp.bin dort, liegt es aber relativ zum Elternordner
+ * des exe-Ordners, wird dieser zum Arbeitsverzeichnis - so startet ein
+ * Doppelklick auf <wurzel>/out/port.exe (Explorer: Arbeitsverzeichnis =
+ * exe-Ordner) wie ein Start aus <wurzel>. Aus der Repo-Wurzel gestartet
+ * (Tools, scene.py, Gate) aendert sich nichts. */
+static void data_root_fallback(void) {
+    wchar_t exe[MAX_PATH], probe[MAX_PATH + 64];
+    FILE *f = fopen("out/exefs/code_decomp.bin", "rb");
+    DWORD len;
+    if (f) {
+        fclose(f);
+        return;
+    }
+    len = GetModuleFileNameW(NULL, exe, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) return;
+    for (int k = 0; k < 2; k++) {                 /* Dateiname, dann exe-Ordner */
+        wchar_t *s = wcsrchr(exe, L'\\');
+        if (s == NULL) return;
+        *s = 0;
+    }
+    if (exe[0] == 0) return;
+    _snwprintf(probe, sizeof(probe) / sizeof(probe[0]), L"%ls\\out\\exefs\\code_decomp.bin", exe);
+    probe[sizeof(probe) / sizeof(probe[0]) - 1] = 0;
+    if (GetFileAttributesW(probe) == INVALID_FILE_ATTRIBUTES) return;
+    if (SetCurrentDirectoryW(exe)) printf("[port] Arbeitsverzeichnis: %ls\n", exe);
+}
+
 int main(int argc, char **argv) {
     const char *romfs = "out/romfs";
     const char *shot = NULL;
@@ -257,6 +287,7 @@ int main(int argc, char **argv) {
         if (on) log_open_console();
     }
     if (log_path()[0]) printf("[port] Log: %s\n", log_path());
+    data_root_fallback();
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--console") == 0 || strcmp(argv[i], "--no-console") == 0) continue;
         if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) shot = argv[++i];
